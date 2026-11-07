@@ -137,7 +137,7 @@ for (const { format, alpha } of formats) test(`retains freshly compiled and warm
       };
       const before = PM.serialize(), time = PM.time, quality = PM.quality;
       try {
-        const result = await PM.Export.run({ format, alpha, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false });
+        const result = await (PM.agentFrameCapture=false,PM.Export.run({ format, alpha, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false }));
         const videoFrames = await Promise.all(copies);
         return { result, ...state, targets: targets.size, videoFrames, prepared: PM.preparedVideoFrames,
           preserved: before === PM.serialize() && time === PM.time && quality === PM.quality };
@@ -254,8 +254,8 @@ for (const change of ['vertex', 'program'] as const) test(`static masks recaptur
       (window as any).__restoreStaticMaskCapture = () => { PM.renderFrameTo = render; };
       const project = PM.proj, time = PM.time, quality = PM.quality;
       (window as any).__staticMaskHeldResult = null;
-      (window as any).__staticMaskHeldJob = PM.Export.run({ format: 'png', alpha: false, scale: 1, fps: 4,
-        range: 'all', quality: 'draft', audio: false, mblur: false }).then((result: any) => {
+      (window as any).__staticMaskHeldJob = (PM.agentFrameCapture=false,PM.Export.run({ format: 'png', alpha: false, scale: 1, fps: 4,
+        range: 'all', quality: 'draft', audio: false, mblur: false })).then((result: any) => {
           const value = { result, source: PM.serialize(), preserved: project === PM.proj && time === PM.time && quality === PM.quality,
             prepared: PM.preparedVideoFrames }; (window as any).__staticMaskHeldResult = value; return value;
         });

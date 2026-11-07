@@ -144,8 +144,8 @@ for (const fixture of cases) test(`opaque asynchronous export preserves every pi
       } : undefined;
       const before = PM.serialize(), time = PM.time, quality = PM.quality;
       try {
-        const result = await PM.Export.run({ format: 'mp4', alpha: false, scale: 1, fps: 4,
-          range: 'all', quality: 'draft', audio: false, mblur: false });
+        const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: 'mp4', alpha: false, scale: 1, fps: 4,
+          range: 'all', quality: 'draft', audio: false, mblur: false }));
         return { result, ...state, targets: targets.size, buffers: buffers.size,
           preserved: before === PM.serialize() && time === PM.time && quality === PM.quality };
       } finally { PM.GL.createOpaqueReadback = factory; PM.GL.renderToPixels = pixels; }
@@ -258,8 +258,8 @@ for (const change of ['custom', 'builtin', 'default', 'revision', 'historical'] 
         };
       };
       (window as any).__restoreOpaqueFactory = () => { PM.GL.createOpaqueReadback = factory; };
-      (window as any).__opaqueEffectJob = PM.Export.run({ format: 'mp4', alpha: false, scale: 1, fps: 4,
-        range: 'all', quality: 'draft', audio: false, mblur: false });
+      (window as any).__opaqueEffectJob = (PM.agentFrameCapture=false,PM.Export.run({ format: 'mp4', alpha: false, scale: 1, fps: 4,
+        range: 'all', quality: 'draft', audio: false, mblur: false }));
     });
     await expect.poll(() => session.app.evaluate(() => (globalThis as any).__heldOpaqueEffect.held)).toBe(true);
     await expect.poll(() => session.page.evaluate(() => (window as any).__queuedOpaqueEffect.begins)).toEqual([0, .25]);

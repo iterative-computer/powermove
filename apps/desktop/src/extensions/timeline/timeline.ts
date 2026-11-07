@@ -818,7 +818,9 @@ function buildHead(head: any) {
   const moveHandles = [...head.children].filter((node: any) => node.classList?.contains('panel-move-handle'));
   head.replaceChildren(...moveHandles);
   const btn = (icon: any, fn: any, title: any) => {
-    const button = h('button.iconbtn', { type: 'button', title }, iconNode(api, icon));
+    // The shared tooltip temporarily removes title on hover. Keep the control's
+    // accessible name stable while the pointer remains over Play / Pause.
+    const button = h('button.iconbtn', { type: 'button', title, 'aria-label': title }, iconNode(api, icon));
     listen(button, 'click', fn, undefined, headCleanups);
     return button;
   };
@@ -1182,8 +1184,8 @@ const refreshTheme = () => {
     accent: css('--accent') || '#F0580A', tx: css('--tx') || '#1C1C1F',
     tx2: css('--tx-2') || '#5D5D65', tx3: css('--tx-3') || '#8B8B93',
     tx4: css('--tx-4') || '#A9A9AE',
-    /* Both timeline surfaces stay in the panel family: chrome (gutter/ruler)
-       on --bg-panel, tracks one step down on --bg-panel-2. Never --bg-sunken:
+    /* Gutter and tracks share the same panel material; selected rows carry
+       their own tone across both. Never --bg-sunken:
        in dark themes it sits below the window color, so the gutter would
        dissolve into the app background instead of reading as a panel. */
     panel: css(reversed ? '--bg-panel-2' : '--bg-panel') || '#FCFCFD',

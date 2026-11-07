@@ -33,7 +33,7 @@ async function fixture() {
   const staged = spool as unknown as { handle: FileHandle; directory: string };
   const choice = call(IPC.exportChoose, { name: 'concurrent.png' });
   await vi.waitFor(() => expect(choosing).toBe(true));
-  return { folder, destination, sender, call, token, staged, choice, finishChoice };
+  return { folder, destination, sender, call, token, staged, choice, finishChoice, showSave };
 }
 
 it('leaves a completed upload retryable when a pending destination choice rejects its save', async () => {
@@ -66,6 +66,26 @@ it('still expires and removes the real idle upload after rejecting a contending 
     f.finishChoice(); await f.choice;
     await f.call(IPC.fileSaveAbort, f.token);
     f.sender.emit('destroyed');
+    await rm(f.folder, { recursive: true, force: true });
+  }
+});
+
+it('lets an export distinguish a pending file save from an existing export destination', async () => {
+  const f = await fixture();
+  let release!: () => void;
+  try {
+    f.finishChoice(); await f.choice;
+    f.showSave.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve({ canceled: true, filePath: '' }); }));
+    const saving = f.call(IPC.fileSave, { name: 'result.bin', uploadId: f.token });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    try { await expect(f.call(IPC.exportChoose, { name: 'frame.png' })).rejects.toThrow('A save is already in progress.'); }
+    finally { release(); await saving; }
+    const destination = await f.call(IPC.exportChoose, { name: 'frame.png' });
+    await expect(f.call(IPC.exportChoose, { name: 'another.png' })).rejects.toThrow('An export is already in progress.');
+    await f.call(IPC.exportRelease, destination);
+  } finally {
+    release?.(); f.sender.emit('destroyed');
+    await f.call(IPC.fileSaveAbort, f.token);
     await rm(f.folder, { recursive: true, force: true });
   }
 });

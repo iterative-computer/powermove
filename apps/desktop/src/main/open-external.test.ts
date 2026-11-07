@@ -34,7 +34,8 @@ describe('external project open', () => {
     expect(result).toEqual({ ok: true, path: opened.path, projectId: opened.projectId, token: opened.token,
       size: opened.size, media: [], documentRange });
     expect(opened.document).toBe(document);
-    expect(projects.open).toHaveBeenCalledWith(opened.path, { allowDocumentRange: true });
+    // bf26d9b3e distinguishes ordinary opens from importing a copy.
+    expect(projects.open).toHaveBeenCalledWith(opened.path, { allowDocumentRange: true, copy: false });
     owner.destroy();
   });
 

@@ -100,9 +100,9 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
     await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
     await expect(page.locator('#agent-popover')).toBeHidden();
     await expect(docked.locator('.agent-inline-prompt')).toBeFocused();
-    // The projects home has no docks, so the launcher returns there.
+    // bf26d9b3e removed the agent from Home, including its launcher.
     await page.evaluate(() => (window as any).PM.ProjectsScreen.show());
-    await expect(launcher).toBeVisible();
+    await expect(launcher).toHaveCount(0);
     await page.evaluate(() => (window as any).PM.ProjectsScreen.hide());
     await expect(launcher).toHaveCount(0);
     await page.evaluate(() => { const PM = (window as any).PM; PM.WS.mutate((ws: any) => PM.Layout.closePanel(ws, 'agent')); });

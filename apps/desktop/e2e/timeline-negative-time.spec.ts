@@ -111,6 +111,11 @@ for (const mode of ['layers', 'tracks']) test(`${mode}: strips move before zero 
     dialog.showSaveDialog = async () => ({ canceled: false, filePath });
   }, path.join(session.userData, 'Negative timeline.pmv'));
   expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+  // The local recovery used on restart must agree with the explicit file save.
+  expect(await page.evaluate(async ids => {
+    const project = await (window as any).PM.Projects.getAsync(ids.project);
+    return project.layers.find((layer: any) => layer.id === ids.solid).p.opacity.kf.map((key: any) => [key.t, key.v]);
+  }, ids)).toEqual([[1, 50]]);
   await session.relaunch();
   await session.openEditor();
   expect(await session.page.evaluate(async (id) => (window as any).PM.openProjectHere(id), ids.project)).toBe(true);

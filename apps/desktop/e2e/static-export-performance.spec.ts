@@ -17,7 +17,7 @@ test('exports a solid background without recapturing every frame', async ({ sess
     PM.GL.renderToPixels = (...args: any[]) => { captures++; return original(...args); };
     try {
       const start = performance.now();
-      const result = await PM.Export.run({ format: 'mp4', scale: 1, fps: 30, range: 'all', quality: 'draft', alpha: false, audio: false, mblur: false });
+      const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: 'mp4', scale: 1, fps: 30, range: 'all', quality: 'draft', alpha: false, audio: false, mblur: false }));
       return { captures, ms: performance.now() - start, result };
     } finally { PM.GL.renderToPixels = original; }
   });
@@ -50,7 +50,7 @@ for (const alpha of [false, true]) test(`retains static frames across layer entr
     const original = PM.GL.renderToPixels;
     PM.GL.renderToPixels = (...args: any[]) => { captures++; return original(...args); };
     try {
-      const result = await PM.Export.run({ format: alpha ? 'prores' : 'mp4', alpha, scale: 1, fps: 10, range: 'all', quality: 'draft', audio: false, mblur: false });
+      const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: alpha ? 'prores' : 'mp4', alpha, scale: 1, fps: 10, range: 'all', quality: 'draft', audio: false, mblur: false }));
       return { result, captures };
     } finally { PM.GL.renderToPixels = original; }
   }, alpha);

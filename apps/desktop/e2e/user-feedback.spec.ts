@@ -104,15 +104,19 @@ test('titlebar layout and explicit effect actions keep legacy hidden layers acce
     expect(title.x + title.width).toBeLessThanOrEqual(settings.x);
   }
   await expect(page.locator('.project-strip-divider')).toHaveCount(0);
-  const effect = page.locator('.fxb-row[data-id="blur"]');
-  await effect.locator('.fxb-pick').click();
-  await effect.locator('.fxb-pick').dblclick();
+  // bf26d9b3e also lists applied effects under Recently Used. Keep the
+  // category row as the target throughout all four application gestures.
+  const effect = page.locator('button.fxb-sec:has-text("Blur & Sharpen") + .fxb-row[data-id="blur"]');
   const count = () => page.evaluate(() => (window as any).PM.firstSel().fx.length);
+  await effect.locator('.fxb-pick').click();
   expect(await count()).toBe(0);
-  await effect.getByRole('button', { name: 'Add Gaussian Blur', exact: true }).click();
+  // bf26d9b3e adds After Effects-style double-click application.
+  await effect.locator('.fxb-pick').dblclick();
   expect(await count()).toBe(1);
-  await effect.getByRole('button', { name: 'Add Gaussian Blur', exact: true }).press('Enter');
+  await effect.getByRole('button', { name: 'Add Gaussian Blur', exact: true }).click();
   expect(await count()).toBe(2);
+  await effect.getByRole('button', { name: 'Add Gaussian Blur', exact: true }).press('Enter');
+  expect(await count()).toBe(3);
   const timelineState = () => page.evaluate(() => {
     const PM = (window as any).PM, layer = PM.firstSel();
     const timeline = PM.Kernel.services.get('timeline');

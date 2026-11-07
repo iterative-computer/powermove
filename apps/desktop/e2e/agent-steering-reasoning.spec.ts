@@ -1,4 +1,4 @@
-import { expect, test } from './helpers/app';
+import { expect, test, expandAgentWork } from './helpers/app';
 
 for (const accepted of [true, false]) {
   test(`steering keeps reasoning visible with ${accepted ? 'live transport' : 'replacement runs'}`, async ({ session }) => {
@@ -49,6 +49,7 @@ for (const accepted of [true, false]) {
       });
     });
     await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.legacyPhase)).toBe('result');
+    await expandAgentWork(page);
     for (let index = 0; index < 2; index++) {
       await expect(page.locator('.agent-trace.is-archived .agent-trace-text').filter({ hasText: `Inspecting timing ${index}.` })).toBeVisible();
     }

@@ -43,7 +43,7 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob | Streamed
   if (!media?.beginPreview || (!legacyCutout && smallSequence)) return Promise.resolve();
   // Derivatives have their own versioned key; never replace the portable source.
   const cacheKey = asset.storageKey
-    ? `${asset.storageKey}:preview:intra-1280-v1:${asset.playbackProxyVersion || 0}:${source.size}` : null;
+    ? `${asset.storageKey}:preview:intra-1280-v2:${asset.playbackProxyVersion || 0}:${source.size}` : null;
   // A stored derivative plays straight from the library file; only a freshly
   // converted one is a Blob until it has been saved.
   const installPreview = async (blob: Blob | StreamedMedia) => {

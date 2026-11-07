@@ -830,21 +830,27 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   PM.layerDefinition = (id: string) => kernel.layerTypes.get(id);
   const layerTypesChanged = kernel.layerTypes.onChange((change) => {
     const definition = kernel.layerTypes.get(change.id);
+    let documentChanged = false;
     if (definition) {
       const containers = [PM?.proj, ...Object.values(PM?.proj?.comps ?? {})] as Array<Record<string, any> | undefined>;
       for (const container of containers) for (const layer of container?.layers ?? []) {
         if (layer?.type !== 'extension' || layer?.d?.definition !== change.id) continue;
-        layer.d.params = layer.d.params && typeof layer.d.params === 'object' ? layer.d.params : {};
+        if (!layer.d.params || typeof layer.d.params !== 'object') {
+          layer.d.params = {}; documentChanged = true;
+        }
         for (const param of definition.params) {
           if (!layer.d.params[param.k] || typeof layer.d.params[param.k] !== 'object') {
             layer.d.params[param.k] = PM?.P?.(param.def) ?? { v: param.def, kf: [], expr: null };
+            documentChanged = true;
           }
         }
       }
       PM?.ProjectIndex?.invalidateKeyframes?.();
     }
     PM?.GL?.dropPrograms?.(`extension:${change.id}:`);
-    PM?.bus?.emit?.('layers');
+    // Loading/reloading a renderer definition is not an edit. Only added
+    // parameter defaults change the document and require autosave.
+    PM?.bus?.emit?.('layers', { runtimeOnly: !documentChanged });
     PM?.invalidate?.('render');
     PM?.Inspector?.refresh?.();
   });

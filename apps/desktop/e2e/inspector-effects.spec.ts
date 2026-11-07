@@ -19,7 +19,8 @@ test('a copied effect pastes onto the layer selected after copying', async ({ se
     return { source: source.id, destination: destination.id, effect: effect.id };
   });
 
-  const effect = page.locator(`[data-effect-id="${ids.effect}"]`);
+  // 4f5cf623d added the same effects to Properties and Effect Controls.
+  const effect = page.locator(`#panel-inspector [data-effect-id="${ids.effect}"]`);
   await effect.click();
   await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('contextCopy')?.click());
   await expect(page.getByText('Copied 1 effect', { exact: true })).toBeVisible();
@@ -56,8 +57,8 @@ test('effect rows select, copy, paste, delete, and undo as editable source trans
     return { layer: layer.id, first: first.id, second: second.id, firstKey: first.p.amount.kf[0].i };
   });
 
-  const first = page.locator(`[data-effect-id="${ids.first}"]`);
-  const second = page.locator(`[data-effect-id="${ids.second}"]`);
+  const first = page.locator(`#panel-inspector [data-effect-id="${ids.first}"]`);
+  const second = page.locator(`#panel-inspector [data-effect-id="${ids.second}"]`);
   await expect(first).toBeVisible();
   await first.click();
   await second.click({ modifiers: ['Meta'] });
@@ -66,7 +67,7 @@ test('effect rows select, copy, paste, delete, and undo as editable source trans
 
   await page.keyboard.press('Meta+c');
   await page.keyboard.press('Meta+v');
-  await expect(page.locator('[data-effect-id]')).toHaveCount(4);
+  await expect(page.locator('#panel-inspector [data-effect-id]')).toHaveCount(4);
   const copiedState = await page.evaluate(({ layer }) => {
     const effects = (window as any).PM.L(layer).fx;
     return effects.map((effect: any) => [effect.on, effect.open, effect.p.amount.v, effect.p.amount.expr]);
@@ -84,13 +85,13 @@ test('effect rows select, copy, paste, delete, and undo as editable source trans
   expect(identity.keys[0]).toBe(identity.keys[1]);
 
   await page.keyboard.press('Meta+z');
-  await expect(page.locator('[data-effect-id]')).toHaveCount(2);
+  await expect(page.locator('#panel-inspector [data-effect-id]')).toHaveCount(2);
   await first.click();
   await second.click({ modifiers: ['Meta'] });
   await page.keyboard.press('Delete');
-  await expect(page.locator('[data-effect-id]')).toHaveCount(0);
+  await expect(page.locator('#panel-inspector [data-effect-id]')).toHaveCount(0);
   await page.keyboard.press('Meta+z');
-  await expect(page.locator('[data-effect-id]')).toHaveCount(2);
+  await expect(page.locator('#panel-inspector [data-effect-id]')).toHaveCount(2);
 
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
@@ -169,33 +170,25 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('panel context menus reach the native menu at the pointer position', async ({ session }) => {
+// Panel menus use the shared overlay (06d25cf64). Assert the visible menu and its pointer anchor directly.
+test('panel context menus open at the pointer position', async ({ session }) => {
   const { page } = session;
-  await session.app.evaluate(({ Menu }) => {
-    (globalThis as any).__panelMenus = [];
-    (globalThis as any).__panelMenuPopup = Menu.prototype.popup;
-    Menu.prototype.popup = function (options) {
-      (globalThis as any).__panelMenus.push({ x: options?.x, y: options?.y, items: this.items.length });
-      options?.callback?.();
-    };
-  });
-  try {
-    // Project shares its slot with Effect Controls, which is the tab shown by default.
-    await page.evaluate(() => (window as any).PM.Layout.activateTab?.('assets'));
-    for (const [index, selector] of ['#panel-assets > header', '#panel-timeline .panel-move-handle'].entries()) {
-      const box = await page.locator(selector).boundingBox();
-      if (!box) throw new Error('context-menu trigger is not visible');
-      const cursor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-      await page.mouse.click(cursor.x, cursor.y, { button: 'right' });
-      await expect.poll(() => session.app.evaluate(() => (globalThis as any).__panelMenus.length)).toBe(index + 1);
-      const request = await session.app.evaluate((_, i) => (globalThis as any).__panelMenus[i], index);
-      expect(request.items).toBeGreaterThan(0);
-      expect(Math.abs(request.x - cursor.x)).toBeLessThanOrEqual(1);
-      expect(Math.abs(request.y - cursor.y)).toBeLessThanOrEqual(1);
-      await expect(page.locator('.drop[role="menu"]')).toHaveCount(0);
-    }
-  } finally {
-    await session.app.evaluate(({ Menu }) => { Menu.prototype.popup = (globalThis as any).__panelMenuPopup; });
+  await page.evaluate(() => (window as any).PM.Layout.activateTab?.('assets'));
+  for (const selector of ['#panel-assets > header', '#panel-timeline .panel-move-handle']) {
+    const box = await page.locator(selector).boundingBox();
+    if (!box) throw new Error('context-menu trigger is not visible');
+    const cursor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await page.mouse.click(cursor.x, cursor.y, { button: 'right' });
+    const menu = page.locator('[data-svelte-overlay-menu] .menu-panel[data-level="0"]');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Maximize Panel `', exact: true })).toBeVisible();
+    const bounds = (await menu.boundingBox())!;
+    // The overlay clamps within the window when the pointer is near an edge.
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    expect(Math.abs(bounds.x - Math.min(cursor.x, viewport.width - bounds.width - 6))).toBeLessThanOrEqual(1);
+    expect(Math.abs(bounds.y - (cursor.y + bounds.height + 2 <= viewport.height - 6 ? cursor.y + 2 : cursor.y - bounds.height - 2))).toBeLessThanOrEqual(1);
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

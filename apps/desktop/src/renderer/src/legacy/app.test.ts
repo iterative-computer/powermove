@@ -27,12 +27,14 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   listeners: Map<string, any[]>;
   timers: Map<number, any>;
   clearedTimers: number[];
+  animationFrames: FrameRequestCallback[];
   toasts: string[];
 } {
   const memory = new Map<string, any>();
   const listeners = new Map<string, any[]>();
   const timers = new Map<number, any>();
   const clearedTimers: number[] = [];
+  const animationFrames: FrameRequestCallback[] = [];
   const toasts: string[] = [];
   const elements = new Map<string, any>();
   let timerId = 0;
@@ -89,7 +91,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
       listeners.set(name, bucket);
     },
     removeEventListener() {},
-    requestAnimationFrame() { return 1; },
+    requestAnimationFrame(callback: FrameRequestCallback) { animationFrames.push(callback); return animationFrames.length; },
     setTimeout(callback: any) {
       const id = ++timerId;
       timers.set(id, callback);
@@ -212,7 +214,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   }
 
   install(PM);
-  return { PM, memory, listeners, timers, clearedTimers, toasts };
+  return { PM, memory, listeners, timers, clearedTimers, toasts, animationFrames };
 }
 
 async function reopenWithPendingMedia() {
@@ -741,6 +743,105 @@ describe('legacy app install', () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
     expect(setSnapshotAsync).toHaveBeenCalledOnce();
     expect(put).not.toHaveBeenCalled();
+  });
+
+  it('checkpoints recovery without rewriting an unchanged native file on Close', async () => {
+    const { PM } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => current());
+    PM.Projects.upsertMeta = vi.fn();
+    const begin = vi.fn(async () => { throw new Error('An unchanged document was rewritten'); });
+    installBridgeForTests({ projectSave: { begin } } as any);
+    expect(await PM.prepareToClose({ id: 'close', flush: true })).toBe(true);
+    expect(PM.store.setSnapshotAsync).toHaveBeenCalledOnce();
+    expect(begin).not.toHaveBeenCalled();
+    expect(PM.commitClosePreparation()).toBe(true);
+  });
+
+  it('does not count the initial layout paint as a document edit during native Close', async () => {
+    const { PM, animationFrames } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    PM.Kernel.services.get('timeline').frameView = vi.fn();
+    PM.bus.emit = (name: string, ...args: any[]) => {
+      for (const handler of PM.__busHandlers.get(name) || []) handler(...args);
+    };
+    PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => current());
+    PM.Projects.upsertMeta = vi.fn();
+    PM.Projects.recoverAsync = vi.fn(async (_project, _thumb, current) => {
+      animationFrames.shift()!(0); animationFrames.shift()!(0);
+      return current();
+    });
+    expect(await PM.prepareToClose({ id: 'close', flush: true })).toBe(true);
+    expect(PM.commitClosePreparation()).toBe(true);
+  });
+
+  it('captures the first card preview without superseding a native Close checkpoint', async () => {
+    const { PM, animationFrames } = appRegistry();
+    PM.Kernel.services.get('timeline').frameView = vi.fn();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    // The initial layout has painted; the card preview runs on its next frame.
+    animationFrames.shift()!(0); animationFrames.shift()!(0);
+    expect(animationFrames).toHaveLength(1);
+    PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => current());
+    PM.Projects.upsertMeta = vi.fn();
+    let superseded = false;
+    PM.Projects.recover = vi.fn(() => { superseded = true; });
+    PM.Projects.recoverAsync = vi.fn(async (_project, _thumb, current) => {
+      animationFrames.shift()!(0);
+      return current() && !superseded;
+    });
+    expect(await PM.prepareToClose({ id: 'close', flush: true })).toBe(true);
+    expect(PM.commitClosePreparation()).toBe(true);
+    expect(PM.Projects.recover).not.toHaveBeenCalled();
+  });
+
+  it('waits for pending media restoration before preparing a native close checkpoint', async () => {
+    const { PM } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    let release!: () => void, observed!: () => void;
+    const restoring = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { observed = resolve; });
+    Object.defineProperty(PM, 'projectAssetsReady', { get: () => { observed(); return restoring; } });
+    const snapshot = PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => current());
+    PM.Projects.upsertMeta = vi.fn();
+    const closing = PM.prepareToClose({ id: 'close', flush: true });
+    try {
+      expect(await Promise.race([waiting.then(() => 'restoring'), closing.then(() => 'closed')])).toBe('restoring');
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally { release(); }
+    expect(await closing).toBe(true);
+    expect(PM.commitClosePreparation()).toBe(true);
+  });
+
+  it('allows native Close when a concurrent dirty check reads the same document', async () => {
+    const { PM } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => current());
+    PM.Projects.upsertMeta = vi.fn();
+    PM.Projects.recoverAsync = vi.fn(async () => {
+      // Asset restoration can compare the file while a close checkpoint yields.
+      // Reading unchanged content must not count as a new document edit.
+      expect(await PM.confirmCloseProject(PM.proj.id)).toBe(true);
+      return true;
+    });
+    expect(await PM.prepareToClose({ id: 'close', flush: true })).toBe(true);
+    expect(PM.commitClosePreparation()).toBe(true);
+  });
+
+  it('still vetoes native Close when a concurrent comparison finds changed content', async () => {
+    const { PM } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    installBridgeForTests({ confirmProjectClose: async () => 'discard' } as any);
+    PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => current());
+    PM.Projects.upsertMeta = vi.fn();
+    PM.Projects.recoverAsync = vi.fn(async () => {
+      PM.proj.name = 'New metadata';
+      expect(await PM.confirmCloseProject(PM.proj.id)).toBe(true);
+      return true;
+    });
+    await expect(PM.prepareToClose({ id: 'close', flush: true })).rejects.toThrow('changed while closing');
+    expect(PM.proj.name).toBe('New metadata');
+    expect(PM.commitClosePreparation()).toBe(false);
   });
 
   it('keeps deferred discards and the editor intact after a failed native recovery flush', async () => {

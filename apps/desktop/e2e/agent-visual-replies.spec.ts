@@ -60,6 +60,15 @@ async function screenshot(session: any, name: string) {
   if(directory) { mkdirSync(directory,{recursive:true}); await session.page.screenshot({path:path.join(directory,name+'.png')}); }
 }
 
+// A frame's button can be stable in its own coordinates while its parent
+// modal is still moving. Wait on the actual opening animation before clicking.
+async function expandVisualReply(session: any, title: string) {
+  await session.page.getByRole('button', { name: `Expand ${title}`, exact: true }).click();
+  const dialog = session.page.getByRole('dialog', { name: `Expanded ${title}`, exact: true });
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => dialog.evaluate((element: HTMLElement) => element.getAnimations().every(animation => animation.playState === 'finished'))).toBe(true);
+}
+
 test('visual replies publish, interact, expand, replay and reopen in their durable thread', async ({ session }) => {
   await startRun(session);
   expect((await publish(session,fixtures('easing'))).ok).toBe(true);
@@ -68,7 +77,7 @@ test('visual replies publish, interact, expand, replay and reopen in their durab
   await chart.getByLabel('Duration').evaluate((input: HTMLInputElement) => { input.value = '1200'; input.dispatchEvent(new Event('input', {bubbles:true})); });
   await expect(chart.locator('output')).toHaveText('1200 ms');
   await screenshot(session,'01-timing-dark');
-  await session.page.getByRole('button',{name:'Expand Timing & easing',exact:true}).click();
+  await expandVisualReply(session,'Timing & easing');
   await expect(session.page.locator('dialog[open]')).toBeVisible();
   await chart.getByRole('button',{name:'Play motion'}).click();
   await expect(chart.locator('output')).toHaveText('1200 ms');
@@ -84,13 +93,14 @@ test('visual replies publish, interact, expand, replay and reopen in their durab
   await expect(session.page.getByRole('button',{name:'Zoom in Timing & easing',exact:true})).toHaveCount(0);
   expect((await publish(session,fixtures('storyboard'))).ok).toBe(true);
   const storyboard = session.page.frameLocator('iframe[title="Launch storyboard"]');
-  await session.page.getByRole('button',{name:'Expand Launch storyboard',exact:true}).click();
+  await expandVisualReply(session,'Launch storyboard');
   await storyboard.getByRole('button',{name:'Next shot'}).click();
+  await screenshot(session,'storyboard-after-click');
   await expect(storyboard.locator('output')).toContainText('Reveal');
   await session.page.getByRole('button',{name:'Close visualization',exact:true}).click();
   expect((await publish(session,fixtures('palette'))).ok).toBe(true);
   const palette = session.page.frameLocator('iframe[title="Dusk palette"]');
-  await session.page.getByRole('button',{name:'Expand Dusk palette',exact:true}).click();
+  await expandVisualReply(session,'Dusk palette');
   await palette.getByRole('button',{name:'Pink',exact:true}).click();
   await expect(palette.locator('output')).toHaveText('Pink · #EC4899');
   await session.page.getByRole('button',{name:'Close visualization',exact:true}).click();
@@ -191,6 +201,8 @@ test('the real provider run publishes through its authenticated MCP session', as
     await expect(session.page.locator('[data-visual-reply]')).toHaveCount(3);
     expect((await session.page.locator('.agent-visual-attachments').boundingBox())!.height).toBeLessThan(250);
     await expect(session.page.locator('dialog[open]')).toHaveCount(0);
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.AgentUI.state.phase)).not.toBe('running');
+    await session.openAgent();
     await expect(session.page.getByText('Published an interactive timing chart through the native agent tool.', { exact: true })).toBeVisible();
     await expect(chart.locator('output')).toHaveText('800 ms');
     await screenshot(session, '07-actual-provider-publication');
@@ -215,7 +227,7 @@ test('attachments preserve interaction while the response adds pages and remain 
   await rail.evaluate(el=>{(el as HTMLElement).style.width='240px';});
   expect((await rail.boundingBox())!.height).toBeLessThan(250);
   expect(await rail.evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);
-  await session.page.getByRole('button',{name:'Expand Timing & easing',exact:true}).click();
+  await expandVisualReply(session,'Timing & easing');
   await expect(chart.locator('output')).toHaveText('1200 ms');
   await session.page.keyboard.press('Escape');
   await expect(session.page.locator('dialog[open]')).toHaveCount(0);
@@ -225,7 +237,10 @@ test('attachments preserve interaction while the response adds pages and remain 
   await session.page.evaluate(summary=>(window as any).__finishVisualProvider(summary),summary);
   await expect(session.page.getByText('Reasoning paragraph 12: this explanation remains complete beside the attached visuals.',{exact:true})).toBeVisible();
   await expect(session.page.locator('.agent-reply .agent-md-p')).toHaveCount(12);
+  await screenshot(session,'completion-attachments');
   await expect(rail).toHaveCount(1);
+  await rail.scrollIntoViewIfNeeded();
+  await expect(rail).toBeVisible();
   await screenshot(session,'08-compact-attachments');
 });
 
@@ -248,12 +263,13 @@ test('visual attachment chrome matches native modal tokens in light and dark and
     });
     await page.evaluate(()=>(window as any).__nativeVisualReference.close());
     await expect(native).toHaveCount(0);
-    await page.getByRole('button',{name:'Expand Timing & easing',exact:true}).click();
+    await expandVisualReply(session,'Timing & easing');
     const viewer=page.getByRole('dialog',{name:'Expanded Timing & easing',exact:true});
     const actual=await viewer.evaluate(el=>{
       const surface=getComputedStyle(el),title=getComputedStyle(el.querySelector('.visual-title')!),button=getComputedStyle(el.querySelector('.visual-zoom')!);
       return {background:surface.backgroundColor,radius:surface.borderRadius,shadow:surface.boxShadow,titleSize:title.fontSize,controlSize:button.fontSize,controlRadius:button.borderRadius};
     });
+    await screenshot(session, `modal-appearance-${mode}`);
     expect(actual).toEqual(reference);
     await expect(chart.locator('output')).toHaveText('800 ms');
     await expect(viewer.locator('[data-icon="x"]')).toHaveAttribute('data-icon-set','phosphor');

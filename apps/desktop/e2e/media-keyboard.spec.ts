@@ -9,6 +9,7 @@ test('media action buttons retain native Enter and Space activation', async ({ s
     const blob = await new Promise<Blob>(resolve => canvas.toBlob(value => resolve(value!), 'image/png'));
     await (window as any).PM.importFiles([new File([blob], 'Keyboard.png', { type: 'image/png' })], { placement: null });
   });
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   const card = page.locator('.asset-card').filter({ hasText: 'Keyboard.png' });
   await expect(card).toBeVisible();
   await card.getByRole('button', { name: 'Add Keyboard.png to timeline', exact: true }).focus();

@@ -96,6 +96,14 @@ function foldTurn(conversation: AgentMessage[], body: number[]): { work: Convers
 
   const earlier = body.slice(0, workEnd).map(index => item(index, conversation[index]!));
   work.unshift(...earlier);
+  // Published artifacts are deliverables, even when a later assistant message
+  // supplies the final prose. Keep their original top-level keys so finishing
+  // the run neither hides nor remounts their interactive frames.
+  const artifacts = work.filter(entry => entry.message.visualReplies?.length);
+  for (let index = work.length - 1; index >= 0; index--) {
+    if (work[index]!.message.visualReplies?.length) work.splice(index, 1);
+  }
+  reply.unshift(...artifacts);
   if (!work.length) return null;
   const durations = body.map(index => conversation[index]!)
     .filter(message => message.role === 'trace' && typeof message.durationMs === 'number')

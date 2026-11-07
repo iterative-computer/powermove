@@ -49,6 +49,7 @@ test('private video snapshots match direct video uploads for cropped color and a
     layer.p['anchor.x'].v = 0; layer.p['anchor.y'].v = 0;
     PM.touch(); PM.bus.emit('layers'); PM.WS?.activate?.('design', true);
   });
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   await expect(page.locator('.asset-card.is-comp img.comp-thumb').first()).toBeVisible({ timeout: 15_000 });
   await page.evaluate(async () => {
     const PM = (window as any).PM;
@@ -174,6 +175,7 @@ test(`${variant.name} composition video thumbnails capture the poster frame with
     }
     PM.WS?.activate?.('design', true);
   }, variant.nested);
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   const thumbnail = page.locator('.asset-card.is-comp img.comp-thumb').first();
   await expect(thumbnail).toBeVisible({ timeout: 15_000 });
   const previous = await thumbnail.getAttribute('src');

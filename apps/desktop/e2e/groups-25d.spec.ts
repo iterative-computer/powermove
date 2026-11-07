@@ -11,7 +11,10 @@ test('3D groups transform flat children together, including nested groups, with 
   PM.Edit.apply({type:'group_layers',targets:[a.id,b.id],name:'Cards'});const inner=PM.firstSel();
   PM.Edit.apply({type:'group_layers',targets:[inner.id],name:'3D rig'});PM.invalidate();
  });
- await page.getByRole('radiogroup',{name:'3D layer',exact:true}).getByRole('radio',{name:'On',exact:true}).click();
+ // 4f5cf623d moved 3D to the timeline's cube switch.
+ const cube=await page.evaluate(()=>{const PM=(window as any).PM,T=PM.Kernel.services.get('timeline'),r=T.cv.getBoundingClientRect(),i=T.rows.findIndex((row:any)=>row.kind==='layer'&&row.L.id===PM.firstSel().id);return{x:r.left+T.gut-137,y:r.top+T.ruler+i*T.row-T.scrollY+T.row/2};});
+ await page.mouse.click(cube.x,cube.y);
+ await expect.poll(()=>page.evaluate(()=>!!(window as any).PM.firstSel().threeD)).toBe(true);
  const result=await page.evaluate(()=>{
   const PM=(window as any).PM,g=PM.firstSel();
   const pixels=(time:number)=>{const cv=PM.renderFrameTo(time,640,360);return Array.from(cv.getContext('2d').getImageData(0,0,640,360).data);};

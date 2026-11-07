@@ -67,8 +67,8 @@ test('old/new Shadow and Ramp coexist with native controls and source-sized rese
  });for(const r of result){expect(r.same).toBe(true);expect(r.versions).toEqual([1,2]);}
  for(const type of ['shadow','gradient']){
   const id=await session.page.evaluate(type=>{const PM=(window as any).PM,p=PM.mkProject({name:'Shadow and Ramp controls',w:640,h:360,dur:2}),l=PM.mkLayer('shape',{d:{w:180,h:100,color:'#E95A2B'},p:{'position.x':320,'position.y':180}},p);p.layers=[l];PM.replaceProject(p);const fx=PM.mkEffect(type,undefined,l);l.fx=[fx];PM.selectLayers(l.id);PM.UIState.setFxOpen(fx,true);PM.touch();PM.bus.emit('layers');PM.invalidate();return fx.id;},type);
-  await expect(session.page.locator(`[data-effect-id="${id}"]`)).toBeVisible();
-  if(type==='gradient')await expect(session.page.getByRole('button',{name:'Swap Colors',exact:true})).toBeVisible();
+  await expect(session.page.locator(`#panel-inspector [data-effect-id="${id}"]`)).toBeVisible();
+  if(type==='gradient')await expect(session.page.locator('#panel-inspector').getByRole('button',{name:'Swap Colors',exact:true})).toBeVisible();
   for(const theme of ['light','dark']){await session.page.evaluate(theme=>{const PM=(window as any).PM;PM.theme.apply(theme);PM.invalidate('render');},theme);await session.page.waitForFunction(()=>{const PM=(window as any).PM;return !PM.GL.compiling&&PM.GL.errors.size===0;});await session.page.screenshot({path:testInfo.outputPath(`refinement-${type}-${theme}.png`)});}
  }expect(session.diagnostics.pageErrors).toEqual([]);
 });

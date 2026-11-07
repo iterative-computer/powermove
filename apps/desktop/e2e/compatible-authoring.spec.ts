@@ -49,11 +49,12 @@ test('an API connection creates a keyframeable effect and verifies it through li
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await settings.getByRole('button', { name: 'Accounts', exact: true }).click();
-    await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${port}/v1`);
-    await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('test-author');
+    // 25d92afc5 renamed the fields; Model now offers datalist suggestions.
+    await settings.getByRole('textbox', { name: 'API address', exact: true }).fill(`http://127.0.0.1:${port}/v1`);
+    await settings.getByRole('combobox', { name: 'Model', exact: true }).fill('test-author');
     await settings.getByRole('checkbox', { name: 'This model supports images', exact: true }).check();
     await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
-    await expect(settings).toContainText('Connected model: test-author');
+    await expect(settings).toContainText('Connected: test-author');
     await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
     await session.page.evaluate(() => {
       const w = window as any;

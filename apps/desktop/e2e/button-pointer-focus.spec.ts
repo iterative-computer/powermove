@@ -7,10 +7,11 @@ test('clicking a button does not leave focus or assign Space to its action', asy
     const PM = (window as any).PM;
     PM.__buttonClicks = 0;
     PM.__playPresses = 0;
-    PM.newProject = () => { PM.__buttonClicks++; };
+    // bf26d9b3e removed the titlebar New project button; use its Export action.
+    PM.Export.dialog = () => { PM.__buttonClicks++; };
     PM.toggle = () => { PM.__playPresses++; };
   });
-  const button = page.getByRole('button', { name: 'New project', exact: true });
+  const button = page.getByRole('button', { name: 'Export…', exact: true });
   await button.click();
   await expect(button).not.toBeFocused();
   await page.keyboard.press('Space');

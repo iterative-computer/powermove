@@ -361,7 +361,7 @@ async function run(opts: any) {
       const name = opts.format === 'json' ? base + '.pmv'
         : opts.format === 'still' ? `${p.name}_${PM.tc(PM.time, p.fps).replace(/:/g, '-')}.png`
         : base + (opts.format === 'mp4' ? '.mp4' : opts.format === 'png' ? '.png' : '.webm');
-      destinationToken = await bridge.exportDestination.choose(name, opts.format === 'png');
+      destinationToken = await whenSaveSlotFree(() => bridge.exportDestination.choose(name, opts.format === 'png'));
       if (!destinationToken) return { cancelled: true };
     } else if (opts.format === 'png' && (window as any).showDirectoryPicker) {
       try { sequenceDirectory = await (window as any).showDirectoryPicker({ mode: 'readwrite' }); }

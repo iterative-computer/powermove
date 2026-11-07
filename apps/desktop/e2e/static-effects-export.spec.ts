@@ -115,7 +115,7 @@ for (const { format, alpha } of formats) test(`retains freshly compiled and warm
       };
       const before = PM.serialize(), time = PM.time, quality = PM.quality;
       try {
-        const result = await PM.Export.run({ format, alpha, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false });
+        const result = await (PM.agentFrameCapture=false,PM.Export.run({ format, alpha, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false }));
         const videoFrames = await Promise.all(copies);
         return { result, ...state, videoFrames, prepared: PM.preparedVideoFrames,
           preserved: before === PM.serialize() && time === PM.time && quality === PM.quality };
@@ -254,8 +254,8 @@ for (const change of ['default', 'registration', 'program', 'revision'] as const
       (window as any).__restoreStaticCapture = () => { PM.GL.renderToPixels = pixels; PM.renderFrameTo = render; };
       const before = PM.serialize(), time = PM.time, quality = PM.quality;
       (window as any).__staticEffectHeldResult = null;
-      (window as any).__staticEffectHeldJob = PM.Export.run({ format, alpha: false, scale: 1, fps: 4,
-        range: 'all', quality: 'draft', audio: false, mblur: false }).then((result: any) => {
+      (window as any).__staticEffectHeldJob = (PM.agentFrameCapture=false,PM.Export.run({ format, alpha: false, scale: 1, fps: 4,
+        range: 'all', quality: 'draft', audio: false, mblur: false })).then((result: any) => {
           const value = { result, preserved: before === PM.serialize() && time === PM.time && quality === PM.quality,
             prepared: PM.preparedVideoFrames }; (window as any).__staticEffectHeldResult = value; return value;
         });
@@ -315,7 +315,7 @@ for (const effect of ['grain', 'displace', 'same-owner-time'] as const) test(`do
     };
     const before = PM.serialize(), time = PM.time, quality = PM.quality;
     try {
-      const result = await PM.Export.run({ format: 'mp4', alpha: false, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false });
+      const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: 'mp4', alpha: false, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false }));
       return { result, ...state, preserved: before === PM.serialize() && time === PM.time && quality === PM.quality };
     } finally { PM.GL.renderToPixels = pixels; PM.GL.createOpaqueReadback = factory; registration?.dispose(); }
   }, effect);

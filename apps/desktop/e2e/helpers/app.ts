@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { watchCompletedExit } from './completed-exit';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -53,7 +55,7 @@ export type LaunchedApp = {
    * editor panels open an empty composition first, the way a user would. */
   openEditor(): Promise<void>;
   /** Opens the agent popover under its titlebar launcher. */
-  openAgent(): Promise<void>;
+  openAgent(options?: { context?: 'app' | 'project' }): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -85,7 +87,7 @@ async function startElectron(
   env: Record<string, string>,
   diagnostics: RendererDiagnostics,
   normalWindow = false,
-): Promise<{ app: ElectronApplication; page: Page }> {
+): Promise<{ app: ElectronApplication; page: Page; completedExit: Promise<boolean> }> {
   await ensureBuilt();
   const launchEnv = {
     ...process.env,
@@ -109,6 +111,34 @@ async function startElectron(
     cwd: repoRoot,
     env: launchEnv
   });
+  let finishExit!: (success: boolean) => void;
+  const completedExit = new Promise<boolean>(resolve => { finishExit = resolve; });
+  app.process().once('exit', code => finishExit(code === 0));
+  // Close/save failures are reported by main, outside renderer console events.
+  app.on('console', message => {
+    diagnostics.console.push({ type: `main:${message.type()}`, text: message.text(), location: 'main' });
+  });
+  // Native shutdown failures can occur after the debugger disconnects.
+  app.process().stderr?.on('data', chunk => {
+    diagnostics.console.push({ type: 'process:stderr', text: String(chunk).slice(-4000), location: 'main' });
+  });
+  const exitMarker = `PM_E2E_COMPLETED_EXIT_${randomUUID()}`;
+  const affectedExit = await app.evaluate((_electron, marker) => {
+    if (process.platform !== 'darwin' || !process.versions.electron?.startsWith('44.')) return false;
+    process.once('exit', code => {
+      if (code === 0) process.getBuiltinModule('node:fs').writeSync(2, marker + '\n');
+    });
+    return true;
+  }, exitMarker);
+  if (affectedExit) {
+    const stop = watchCompletedExit(app.process(), exitMarker, () => {
+      finishExit(true);
+      diagnostics.console.push({
+        type: 'test:cleanup', text: 'Reaped Electron after its successful Node exit event (macOS native teardown stall).', location: 'main'
+      });
+    });
+    app.once('close', stop);
+  }
   // Native dialogs are substituted in the hidden harness, never shown on the user's desktop.
   // Individual tests can supply chosen paths or decisions while retaining real file IPC.
   await app.evaluate(({ dialog }) => {
@@ -143,7 +173,7 @@ async function startElectron(
   await page.waitForFunction(() => Boolean((window as any).PM));
   await page.waitForFunction(() => Boolean((window as any).PM?.app));
   await page.evaluate(async () => { await (window as any).PM.projectReady; });
-  return { app, page };
+  return { app, page, completedExit };
 }
 
 export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedApp> {
@@ -167,6 +197,17 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
   const diagnostics: RendererDiagnostics = { console: [], pageErrors: [] };
   let active = await startElectron(userData, env, diagnostics, options.normalWindow);
   let closed = false;
+  // Playwright closes its main-process debugger immediately after app.quit(),
+  // before an asynchronous before-quit barrier settles. Prepare through the
+  // normal guarded app API while that connection can still report failures.
+  const prepareClose = () => active.app.evaluate(async ({ BrowserWindow }) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed() || window.webContents.isCrashed()) continue;
+      // A recovered renderer can work while Playwright's old Page stays crashed.
+      const prepared = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.({ flush: true }) ?? true');
+      if (!prepared) throw new Error('Test app Close was cancelled');
+    }
+  });
 
   const session: LaunchedApp = {
     app: active.app,
@@ -174,6 +215,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     userData,
     diagnostics,
     async relaunch() {
+      await prepareClose();
       await active.app.close();
       active = await startElectron(userData, env, diagnostics, options.normalWindow);
       session.app = active.app;
@@ -196,10 +238,17 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
         return Boolean(PM.GL?.gl && PM.Kernel.services.get('viewer')?.stage?.isConnected);
       });
     },
-    async openAgent() {
+    async openAgent(options = {}) {
+      // bf26d9b3e removed the agent from Home. App conversations open over
+      // the editor through the supported global entry point.
+      if (options.context === 'app' && await session.page.evaluate(() => (window as any).PM.ProjectsScreen.isOpen)) await session.openEditor();
       const { page } = session;
       await page.waitForFunction(() => Boolean((window as any).PM?.AgentShell));
-      await page.evaluate(() => { const PM = (window as any).PM; if (!PM.AgentShell.isOpen()) PM.SpatialAssistant?.open?.() ?? PM.AgentShell.open(); });
+      await page.evaluate((context) => {
+        const PM = (window as any).PM;
+        if (context === 'app') PM.AgentUI.openGlobal();
+        else if (!PM.AgentShell.isOpen()) PM.SpatialAssistant?.open?.() ?? PM.AgentShell.open();
+      }, options.context);
       await page.locator('#agent-popover #panel-agent').waitFor({ state: 'visible' });
       // Measure the settled popover, not its opening scale.
       await page.waitForFunction(() => document.getElementById('agent-popover')!.getAnimations().length === 0);
@@ -209,7 +258,25 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       closed = true;
       // A failed close-decision assertion must not leave its Cancel mock
       // preventing cleanup of this disposable test process.
-      await active.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
+      const running = await active.app.evaluate(({ dialog }) => {
+        dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
+        return true;
+      }).catch(() => false);
+      // Some lifecycle/performance specs already exited their own process.
+      if (running) {
+        try { await prepareClose(); }
+        catch (error) {
+          // app.exit(0) can return to a spec just before destroying its main
+          // context. Accept that race only with independently verified success;
+          // a live editor, failed save, cancelled Close or crash still fails.
+          if (!/Execution context was destroyed|Target.*closed/.test(String(error))) throw error;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const exited = await Promise.race([active.completedExit,
+            new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 5000); })
+          ]).finally(() => clearTimeout(timer));
+          if (!exited) throw error;
+        }
+      }
       await active.app.close().catch(() => undefined);
       if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
@@ -238,8 +305,8 @@ export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: La
     try {
       await use(session);
     } finally {
-      await session.close();
-      await attachDiagnostics(testInfo, session.diagnostics);
+      try { await session.close(); }
+      finally { await attachDiagnostics(testInfo, session.diagnostics); }
     }
   }
 });
@@ -286,4 +353,10 @@ export async function inspectNativeMenu(session: LaunchedApp, trigger: () => Pro
   } finally {
     await page.evaluate(() => (window as any).PM?.closeMenus?.());
   }
+}
+
+/** 7cb061739 folds completed work; expand it before asserting its details. */
+export async function expandAgentWork(page: Page): Promise<void> {
+  await expect(page.locator('.agent-work-toggle').first()).toBeVisible();
+  for (const button of await page.locator('.agent-work-toggle[aria-expanded="false"]').all()) await button.click();
 }

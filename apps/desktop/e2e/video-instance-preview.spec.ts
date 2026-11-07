@@ -72,6 +72,7 @@ test('double-click opens the file preview and leaves the timeline intact', async
   await session.openEditor();
   const { page } = session;
   await importFixture(page, 'h264-aac.mp4');
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   const card = page.locator('.asset-card').filter({ hasText: 'h264-aac.mp4' });
   await expect(card).toBeVisible();
   const before = await page.evaluate(() => JSON.stringify((window as any).PM.proj.layers));

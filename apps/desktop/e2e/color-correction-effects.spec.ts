@@ -127,10 +127,10 @@ test('tint animation and ordered color stacks survive serialization in the nativ
   expect(result.before[0]).not.toEqual(result.before[1]);
   expect(result.types).toEqual(['tint', 'channelMixer']);
   expect(result.keyCount).toBe(2);
-  const tint = session.page.locator(`[data-effect-id="${result.id}"]`);
+  const tint = session.page.locator(`#panel-inspector [data-effect-id="${result.id}"]`);
   await expect(tint).toBeVisible();
-  await expect(session.page.getByText('Map Black To', { exact: true })).toBeVisible();
-  await expect(session.page.getByText('Monochrome', { exact: true })).toBeVisible();
+  await expect(session.page.locator('#panel-inspector').getByText('Map Black To', { exact: true })).toBeVisible();
+  await expect(session.page.locator('#panel-inspector').getByText('Monochrome', { exact: true })).toBeVisible();
   // Captures suppress the normal paint loop. Resume it and wait for actual
   // colored viewer pixels before recording UI evidence.
   await session.page.waitForFunction(() => {
@@ -151,7 +151,7 @@ test('tint animation and ordered color stacks survive serialization in the nativ
     });
     await tint.scrollIntoViewIfNeeded();
     await session.page.screenshot({ path: testInfo.outputPath(`color-correction-tint-${theme}.png`) });
-    await session.page.getByText('Monochrome', { exact: true }).scrollIntoViewIfNeeded();
+    await session.page.locator('#panel-inspector').getByText('Monochrome', { exact: true }).scrollIntoViewIfNeeded();
     await session.page.screenshot({ path: testInfo.outputPath(`color-correction-mixer-${theme}.png`) });
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
@@ -212,11 +212,11 @@ test('Tint Swap Colors is one undoable native action and channel controls use di
   const colors = () => session.page.evaluate(id => {
     const effect = (window as any).PM.L(id).fx[0]; return [effect.p.mapBlackTo.v, effect.p.mapWhiteTo.v];
   }, id);
-  await session.page.getByRole('button', { name: 'Swap Colors', exact: true }).click();
+  await session.page.locator('#panel-inspector').getByRole('button', { name: 'Swap Colors', exact: true }).click();
   expect(await colors()).toEqual(['#FFE0A0', '#142A5C']);
   await session.page.keyboard.press('Meta+z');
   expect(await colors()).toEqual(['#142A5C', '#FFE0A0']);
-  const group = session.page.locator('details.control-disclosure').filter({ has: session.page.locator('summary', { hasText: /^Red/ }) });
+  const group = session.page.locator('#panel-inspector details.control-disclosure').filter({ has: session.page.locator('summary', { hasText: /^Red/ }) });
   await group.locator('summary').click();
   await expect(group.getByText('Red-Const', { exact: true })).toBeVisible();
   expect(session.diagnostics.pageErrors).toEqual([]);
@@ -285,9 +285,9 @@ test('tonal controls keep native layout and animated ordered stacks survive hydr
   expect(result.before).toEqual(result.after);expect(result.before[0]).not.toEqual(result.before[1]);expect(result.keys).toBe(2);
   for(const type of ['tritone','colorBalanceHLS','brightnessContrast','blackWhite']){
     const id=await session.page.evaluate(type=>{const PM=(window as any).PM,layer=PM.proj.layers[0],fx=PM.mkEffect(type);layer.fx=[fx];PM.UIState.setFxOpen(fx,true);PM.touch();PM.bus.emit('layers');PM.invalidate();return fx.id;},type);
-    const section=session.page.locator(`[data-effect-id="${id}"]`);await expect(section).toBeVisible();
+    const section=session.page.locator(`#panel-inspector [data-effect-id="${id}"]`);await expect(section).toBeVisible();
     if(type==='blackWhite'){
-      const group=session.page.locator('details.control-disclosure').filter({has:session.page.locator('summary',{hasText:/^Color Weights/})});
+      const group=session.page.locator('#panel-inspector details.control-disclosure').filter({has:session.page.locator('summary',{hasText:/^Color Weights/})});
       await group.locator('summary').click();await expect(group.getByText('Reds',{exact:true})).toBeVisible();
     }
     for(const theme of ['light','dark']){

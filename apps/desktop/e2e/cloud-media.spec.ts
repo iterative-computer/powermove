@@ -29,6 +29,8 @@ test('cloud media can be deferred, downloaded in place, and automatically restor
     await PM.assets.restoreProject(PM.proj);
     return { id: meta.id, layers: JSON.stringify(PM.proj.layers) };
   });
+  // 4f5cf623d put Project and Effect Controls in a shared tab stack.
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   const card = page.locator(`[data-asset-id="${before.id}"]`);
   await expect(card).toHaveClass(/is-cloud/);
   await expect(card).toContainText('In cloud');

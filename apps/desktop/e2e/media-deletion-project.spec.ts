@@ -9,6 +9,7 @@ test('a stale media deletion dialog cannot delete media after switching projects
     const blob = await new Promise<Blob>(resolve => canvas.toBlob(value => resolve(value!), 'image/png'));
     await (window as any).PM.importFiles([new File([blob], 'Shared.png', { type: 'image/png' })]);
   });
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   await session.app.evaluate(({ dialog }) => {
     dialog.showMessageBox = async (_window, options) => new Promise(resolve => {
       (globalThis as any).__mediaConfirmation = { options, resolve };

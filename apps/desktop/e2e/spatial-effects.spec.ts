@@ -172,6 +172,9 @@ test('spatial effects keep cropped high-zoom pixels aligned with full-frame rend
       if(type==='blur')fx.p.amount.v=4;
       if(type==='unsharpMask')fx.p.radius.v=2;
       if(type==='shadow'){fx.p.softness.v=4;fx.p.distance.v=12;}
+      // 82ae50385 bounds padded crops by working memory. Keep the 4×
+      // crop fixture at half preview resolution; precision and pixel checks stay unchanged.
+      viewer.zoom=4;PM.quality=.5;
       PM.touch();viewer.layout();PM.GL.render(0,{mblur:false,exporting:true});
       const gl=PM.GL.gl,cv=PM.GL.canvas,v=PM.GL.previewViewport;
       const cropped=new Uint8Array(cv.width*cv.height*4);gl.readPixels(0,0,cv.width,cv.height,gl.RGBA,gl.UNSIGNED_BYTE,cropped);
@@ -194,8 +197,8 @@ test('spatial effects keep cropped high-zoom pixels aligned with full-frame rend
     return{results};
   });
   for(const r of result.results){if(r.type==='pixelate')expect(r.cropped).toBe(false);else{expect(r.cropped).toBe(true);expect(r.samples).toBeGreaterThan(100);expect(r.max,JSON.stringify(r)).toBeLessThanOrEqual(3);}}
-  await expect(session.page.getByText('Blur Dimensions',{exact:true})).toBeVisible();
-  await expect(session.page.getByText('Repeat Edge Pixels',{exact:true})).toBeVisible();
+  await expect(session.page.locator('#panel-inspector').getByText('Blur Dimensions',{exact:true})).toBeVisible();
+  await expect(session.page.locator('#panel-inspector').getByText('Repeat Edge Pixels',{exact:true})).toBeVisible();
   for(const type of ['blur','pixelate','unsharpMask','findEdges']){
     const id=await session.page.evaluate(type=>{
       const PM=(window as any).PM,layer=PM.proj.layers[0],fx=PM.mkEffect(type),viewer=PM.Kernel.services.get('viewer');
@@ -203,7 +206,7 @@ test('spatial effects keep cropped high-zoom pixels aligned with full-frame rend
       layer.fx=[fx];PM.UIState.setFxOpen(fx,true);PM.touch();PM.bus.emit('layers');
       viewer.fit=true;viewer.layout();PM.invalidate();return fx.id;
     },type);
-    await expect(session.page.locator(`[data-effect-id="${id}"]`)).toBeVisible();
+    await expect(session.page.locator(`#panel-inspector [data-effect-id="${id}"]`)).toBeVisible();
     for(const theme of ['light','dark']){
       await session.page.evaluate(theme=>{const PM=(window as any).PM;PM.theme.apply(theme);PM.invalidate('render');},theme);
       await session.page.waitForFunction(()=>{const PM=(window as any).PM;return !PM.GL.compiling&&PM.GL.errors.size===0;});

@@ -406,8 +406,9 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .panel > header .ptabs{display:flex;align-self:stretch;gap:2px;min-width:0}
 .panel > header .ptab{
   position:relative;display:flex;align-items:center;height:100%;padding:0 10px;border:0;background:transparent;
-  color:var(--tx-3);font:inherit;font-weight:var(--fw-regular);white-space:nowrap;cursor:pointer;
+  color:var(--tx-3);font:inherit;font-weight:var(--fw-regular);white-space:nowrap;cursor:pointer;min-width:0;
 }
+.panel > header .ptab-sub{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .panel > header .ptab:hover{color:var(--tx-2)}
 .panel > header .ptab.on{color:var(--tx);font-weight:var(--fw-semibold)}
 .panel > header .ptab.on::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--accent)}

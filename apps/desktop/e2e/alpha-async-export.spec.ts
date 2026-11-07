@@ -7,7 +7,7 @@ type AlphaFixture = { depth: number; width: number; height: number; frames: numb
 async function alphaScene(session: LaunchedApp, fixture: AlphaFixture) {
   return session.page.evaluate(async fixture => {
     const PM = (window as any).PM;
-    PM.pause(); PM.agentFrameCapture = true; PM.AutomaticPreview?.cancel(); PM.quality = fixture.quality;
+    PM.pause(); PM.agentFrameCapture = true; PM.AutomaticPreview?.cancel(); PM.setPreviewResolution(String(fixture.quality));
     const project = PM.mkProject({ name: 'Deferred transparent delivery', w: fixture.width, h: fixture.height, dur: 1, fps: fixture.frames });
     project.colorDepth = fixture.depth; project.backgroundFill = { type: 'none', stops: [], angle: 0 };
     project.layers = Array.from({ length: 24 }, (_, index) => PM.mkLayer('shape', {
@@ -103,6 +103,7 @@ async function alphaOutput(session: LaunchedApp, output: string, hold: 'none' | 
       ipcMain.handle(channel, async (...args: any[]) => {
         state.maxActive = Math.max(state.maxActive, ++state.active);
         try {
+          let holdFrame = false;
           if (channel === 'render:start') frameSize = args[1].width * args[1].height * 4;
           if (channel === 'render:write') {
             state.writes++;
@@ -116,15 +117,18 @@ async function alphaOutput(session: LaunchedApp, output: string, hold: 'none' | 
                 if (frameOffset === frameSize) { state.frames.push(frameHash.digest('hex')); frameHash = crypto.createHash('sha256'); frameOffset = 0; }
               }
             }
-            if (state.writes === 1 && hold !== 'none') {
-              state.held = true;
-              await new Promise<void>(resolve => { (globalThis as any).__releaseAlphaAsync = () => { state.held = false; resolve(); }; });
-              if (hold === 'failure') throw new Error('Synthetic earlier alpha write failure');
-            }
+            // cdab66cb4 sends a frame's bounded chunks concurrently. Deliver
+            // them in arrival order, then hold the complete frame's ACK.
+            holdFrame = state.frames.length === 1 && frameOffset === 0 && hold !== 'none';
           }
           if (channel === 'render:finish') state.finishes++;
           if (channel === 'render:cancel') state.cancels++;
           const result = await original(...args);
+          if (holdFrame) {
+            state.held = true;
+            await new Promise<void>(resolve => { (globalThis as any).__releaseAlphaAsync = () => { state.held = false; resolve(); }; });
+            if (hold === 'failure') throw new Error('Synthetic earlier alpha write failure');
+          }
           if (channel === 'render:finish') state.rawHash = hash.digest('hex');
           return result;
         } finally { state.active--; }
@@ -145,7 +149,7 @@ async function runAlpha(session: LaunchedApp, fixture: AlphaFixture, enabled: bo
     let renderDepth = 0;
     const stats = { factories: 0, sessions: 0, begins: [] as number[], reads: [] as number[], disposals: 0, ticketDisposals: 0,
       pboAllocations: 0, pboDeletes: 0, pboBytes: 0, maxFences: 0, maxTickets: 0, activeTickets: 0,
-      puts: 0, gets: 0, previews: 0, firstColors: 0, partial: false, corrupted: false,
+      puts: 0, gets: 0, previews: 0, previewFrames: [] as number[], firstColors: 0, partial: false, corrupted: false,
       captures: [] as Array<{ quality: number; transparent: boolean; samples: number; shutter: number; mblur: boolean }> };
     (window as any).__alphaAsyncStats = stats;
     gl.bufferData = function (...args: any[]) {
@@ -199,7 +203,7 @@ async function runAlpha(session: LaunchedApp, fixture: AlphaFixture, enabled: bo
       return data;
     };
     CanvasRenderingContext2D.prototype.drawImage = function (...args: any[]) {
-      if (surfaces.has(args[0]) && this.canvas.width < fixture.width) stats.previews++;
+      if (surfaces.has(args[0]) && this.canvas.width < fixture.width) { stats.previews++; stats.previewFrames.push(stats.gets); }
       return (originals.draw as any).apply(this, args);
     };
     PM.GL.createAlphaReadback = enabled ? (...args: any[]) => {
@@ -232,6 +236,8 @@ async function runAlpha(session: LaunchedApp, fixture: AlphaFixture, enabled: bo
           if (PM.GL.progs.has(program)) throw new Error('The mask program must be cold before export');
         }
       }
+      // Setup capture is finished; the exporter correctly rejects an active capture.
+      PM.agentFrameCapture = false;
       const result = await PM.Export.run({ format: 'prores', alpha: true, scale: 1, fps: fixture.frames,
         range: 'all', audio: false, mblur: !!fixture.grouped });
       return { result, ...stats, targets: targets.size, activeBuffers: buffers.size, activeFences: fences.size, surfaces: surfaces.size,
@@ -268,8 +274,11 @@ for (const depth of [16, 32]) for (const fixture of [
     await alphaOutput(session, output);
     const result = await runAlpha(session, fixture, enabled);
     expect(result.result).toEqual({ cancelled: false }); expect(result.preserved).toBe(true);
-    expect(result).toMatchObject({ puts: fixture.frames, gets: fixture.frames, previews: fixture.frames,
+    expect(result).toMatchObject({ puts: fixture.frames, gets: fixture.frames,
       surfaces: 1, released: true, activeBuffers: 0, activeFences: 0, activeTickets: 0, busy: false });
+    // cdab66cb4 throttles progress previews to 250ms, always showing the final frame.
+    expect(result.previews).toBeGreaterThan(0); expect(result.previews).toBeLessThanOrEqual(fixture.frames);
+    expect(result.previewFrames.at(-1)).toBe(fixture.frames);
     expect(result.partial).toBe(true); expect(result.firstColors).toBeGreaterThan(32);
     expect(result.captures).toEqual(Array.from({ length: fixture.frames }, () => ({ quality: fixture.quality,
       transparent: true, samples: 20, shutter: fixture.grouped ? -.75 : .5, mblur: !!fixture.grouped })));
@@ -280,7 +289,10 @@ for (const depth of [16, 32]) for (const fixture of [
       expect(result.reads).toEqual(result.begins);
     } else expect(result).toMatchObject({ sessions: 0, disposals: 0, targets: 0, pboAllocations: 0 });
     const main = await session.app.evaluate(() => (globalThis as any).__alphaAsyncWrites);
-    expect(main).toMatchObject({ active: 0, maxActive: 1, bytes: fixture.width * fixture.height * 4 * fixture.frames,
+    // At most one frame's concurrent chunks; the next frame awaits its ACK.
+    expect(main.maxActive).toBeGreaterThan(0);
+    expect(main.maxActive).toBeLessThanOrEqual(Math.ceil(fixture.width * fixture.height * 4 / (4 * 1024 * 1024)));
+    expect(main).toMatchObject({ active: 0, bytes: fixture.width * fixture.height * 4 * fixture.frames,
       finishes: 1, cancels: 0, repeats: 0 });
     const frames = decoded(output), records = frames.split('\n').filter(line => line && !line.startsWith('#'));
     expect(records).toHaveLength(fixture.frames);
@@ -379,14 +391,14 @@ for (const failure of [false, true]) test(`native alpha drains the previous writ
     await expect.poll(() => session.page.evaluate(() => (window as any).__alphaAsyncStats.begins.length)).toBe(2);
     await session.page.evaluate(() => { (window as any).PM.Export.cancel = true; });
     await session.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    expect(await session.app.evaluate(() => (globalThis as any).__alphaAsyncWrites)).toMatchObject({ held: true, writes: 1, finishes: 0, cancels: 0 });
+    expect(await session.app.evaluate(() => (globalThis as any).__alphaAsyncWrites)).toMatchObject({ held: true, writes: Math.ceil(fixture.width * fixture.height * 4 / (4 * 1024 * 1024)), finishes: 0, cancels: 0 });
     await session.app.evaluate(() => (globalThis as any).__releaseAlphaAsync());
     const result = await running;
     if (failure) expect(result.result.error).toContain('Synthetic earlier alpha write failure');
     else expect(result.result).toEqual({ cancelled: true });
     expect(result).toMatchObject({ activeBuffers: 0, activeFences: 0, activeTickets: 0, busy: false });
     expect(result.reads).toEqual([0]);
-    expect(await session.app.evaluate(() => (globalThis as any).__alphaAsyncWrites)).toMatchObject({ held: false, writes: failure ? 1 : 2, finishes: 0, cancels: 1 });
+    expect(await session.app.evaluate(() => (globalThis as any).__alphaAsyncWrites)).toMatchObject({ held: false, writes: Math.ceil(fixture.width * fixture.height * 4 / (4 * 1024 * 1024)), finishes: 0, cancels: 1 });
   } finally {
     await session.app.evaluate(() => (globalThis as any).__releaseAlphaAsync?.());
     await running;

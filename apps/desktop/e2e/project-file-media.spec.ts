@@ -9,6 +9,16 @@ test.beforeEach(async ({ session }) => { await session.openEditor(); });
 test('saved project files restore imported video without the original session media', async ({ session }) => {
   await importFixture(session.page, 'h264-aac.mp4');
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'h264-aac.mp4'));
+  // bf26d9b3e links selected originals. This persistence/reuse fixture
+  // deliberately owns its media, as a portable project import does.
+  await session.page.evaluate(async () => {
+    const PM = (window as any).PM;
+    for (const meta of Object.values<any>(PM.proj.assets)) {
+      const blob = await PM.MediaStore.get(meta.storageKey);
+      if (!blob || !await PM.MediaStore.put(meta.storageKey, blob)) throw new Error('Could not retain fixture media');
+      delete meta.sourcePath;
+    }
+  });
   const destination = path.join(session.userData, 'Media.pmv');
   await session.app.evaluate(({ dialog }, filePath) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath });
@@ -19,8 +29,11 @@ test('saved project files restore imported video without the original session me
   expect(document.binary).toBe(true);
   expect(document.media).toHaveLength(1);
   await session.page.evaluate(async () => {
-    const PM = (window as any).PM;
-    for (const asset of Object.values(PM.proj.assets)) await PM.MediaStore.remove(asset);
+    const PM = (window as any).PM, assets = Object.values(PM.proj.assets);
+    // bf26d9b3e focuses an already-open file instead of reloading it. Close
+    // the document before clearing its cache so Open really restores the PMV.
+    if (!await PM.Tabs.close(PM.proj.id)) throw new Error('Could not close saved media fixture');
+    for (const asset of assets) await PM.MediaStore.remove(asset);
   });
   await session.relaunch();
   await session.app.evaluate(({ dialog }, filePath) => {
@@ -56,8 +69,9 @@ test('saved project files restore imported video without the original session me
     PM.MediaStore.getForSave = async (asset: any) => {
       const saved = await original(asset);
       if (saved) {
-        records.push({ id: asset.id, storageKey: asset.storageKey, revision: saved.revision, size: saved.blob.size, type: saved.blob.type });
-        Object.defineProperty(saved.blob, 'slice', { value: () => { uploaded.push(asset.id); throw new Error('Reopened media was uploaded again'); } });
+        const source = saved.source ?? saved.blob;
+        records.push({ id: asset.id, storageKey: asset.storageKey, revision: saved.revision, size: source.size, type: source.type });
+        Object.defineProperty(source, saved.source ? 'read' : 'slice', { value: () => { uploaded.push(asset.id); throw new Error('Reopened media was uploaded again'); } });
       }
       return saved;
     };
@@ -77,6 +91,16 @@ test('saved project files restore imported video without the original session me
 test('saved project files restore imported audio without the original session media', async ({ session }) => {
   await importFixture(session.page, 'tone.wav');
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((layer: any) => layer.type === 'audio' && layer.name === 'tone.wav'));
+  // bf26d9b3e links selected originals. This persistence/reuse fixture
+  // deliberately owns its media, as a portable project import does.
+  await session.page.evaluate(async () => {
+    const PM = (window as any).PM;
+    for (const meta of Object.values<any>(PM.proj.assets)) {
+      const blob = await PM.MediaStore.get(meta.storageKey);
+      if (!blob || !await PM.MediaStore.put(meta.storageKey, blob)) throw new Error('Could not retain fixture media');
+      delete meta.sourcePath;
+    }
+  });
   const destination = path.join(session.userData, 'Audio.pmv');
   await session.app.evaluate(({ dialog }, filePath) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath });
@@ -89,8 +113,11 @@ test('saved project files restore imported audio without the original session me
   expect(document.media).toHaveLength(1);
 
   await session.page.evaluate(async () => {
-    const PM = (window as any).PM;
-    for (const asset of Object.values(PM.proj.assets)) await PM.MediaStore.remove(asset);
+    const PM = (window as any).PM, assets = Object.values(PM.proj.assets);
+    // bf26d9b3e focuses an already-open file instead of reloading it. Close
+    // the document before clearing its cache so Open really restores the PMV.
+    if (!await PM.Tabs.close(PM.proj.id)) throw new Error('Could not close saved media fixture');
+    for (const asset of assets) await PM.MediaStore.remove(asset);
   });
   await session.relaunch();
   await session.app.evaluate(({ dialog }, filePath) => {
@@ -201,6 +228,7 @@ test('media library items reveal their original file in Finder', async ({ sessio
   });
   await importFixture(session.page, 'tone.wav');
 
+  await session.page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   const card = session.page.locator('.asset-card').filter({ hasText: 'tone.wav' });
   await card.hover();
   await card.getByRole('button', { name: 'Reveal tone.wav in Finder' }).click();

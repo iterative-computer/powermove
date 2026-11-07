@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { test, expect } from './helpers/app';
+import { test, expect, expandAgentWork } from './helpers/app';
 
 test('subagents update in place, expose results and Stop, and fit native light and dark panels', async ({ session }) => {
   await session.openEditor(); await session.openAgent();
@@ -53,6 +53,7 @@ test('subagents update in place, expose results and Stop, and fit native light a
   expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.evaluate(() => (window as any).__finishSubagents({ text: JSON.stringify({ summary: 'Review received.', commands: [], artifacts: [], notes: [], extensions: [], externalActions: [] }) }));
   await expect(panel.getByText('Review received.', { exact: true })).toBeVisible();
+  await expandAgentWork(page);
   await expect(panel.getByText('Claude · Sonnet 5.5', { exact: true })).toBeVisible();
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

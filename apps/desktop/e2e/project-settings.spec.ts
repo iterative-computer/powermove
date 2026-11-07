@@ -12,9 +12,9 @@ test('Settings › Project edits the live composition and its export settings', 
     const projectTab = settings.getByRole('button', { name: 'Project', exact: true });
     await expect(projectTab).toHaveAttribute('aria-current', 'location');
     expect(await settings.locator('[data-settings-tab]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-settings-tab'))))
-      .toEqual(['project', 'memory', 'general', 'accounts', 'transcription', 'extensions']);
+      .toEqual(['project', 'memory', 'general', 'accounts', 'transcription', 'extensions', 'storage']);
     expect(await settings.locator('[data-settings-page]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-settings-page'))))
-      .toEqual(['project', 'memory', 'general', 'accounts', 'transcription', 'extensions']);
+      .toEqual(['project', 'memory', 'general', 'accounts', 'transcription', 'extensions', 'storage']);
     await settings.screenshot({ path: info.outputPath('project-settings-first.png') });
 
     const panel = settings.getByRole('region', { name: 'Project', exact: true });

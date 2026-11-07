@@ -11,17 +11,22 @@ for (const cloud of [false, true]) test(`a native ${cloud ? 'cloud' : 'local'} f
   await copyFile(fixturePath('still-alpha.png'), path.join(folder, 'Nested', 'Nested.png'));
   if (cloud) await session.app.evaluate(({ ipcMain }, folder) => {
     (globalThis as any).folderDownloads = [];
+    const downloaded = new Set<string>();
+    const download = (ipcMain as any)._invokeHandlers.get('cloud:download');
     ipcMain.removeHandler('cloud:status');
-    ipcMain.handle('cloud:status', (_event, paths: string[]) => Object.fromEntries(paths.map(source => [source, source.startsWith(folder) ? 'icloud' : 'local'])));
+    ipcMain.handle('cloud:status', (_event, paths: string[]) => Object.fromEntries(paths.map(source => [source, source.startsWith(folder) && !downloaded.has(source) ? 'icloud' : 'local'])));
     ipcMain.removeHandler('cloud:download');
-    ipcMain.handle('cloud:download', (_event, source: string) => {
+    ipcMain.handle('cloud:download', async (event, source: string) => {
       (globalThis as any).folderDownloads.push(source);
-      return { token: 'test-cloud-file', size: 0 };
+      // bf26d9b3e reads downloaded originals too. Keep real source bytes/handles.
+      const result = await download(event, source);
+      downloaded.add(source);
+      return result;
     });
-    ipcMain.removeHandler('cloud:release');
-    ipcMain.handle('cloud:release', () => undefined);
   }, folder);
-  const panel = session.page.getByRole('region', { name: 'Media', exact: true });
+  // 4f5cf623d renamed Media to Project and put it in a shared tab stack.
+  await session.page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
+  const panel = session.page.locator('#panel-assets');
   const box = await panel.boundingBox();
   expect(box).toBeTruthy();
   const cdp = await session.page.context().newCDPSession(session.page);

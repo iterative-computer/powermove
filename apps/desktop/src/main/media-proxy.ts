@@ -150,6 +150,12 @@ export function previewArgs(source: string, output: string, stream: ProbedVideoS
     // The preview stands in for the element it is built from, which Chromium
     // color-manages itself. Its tags carry through unchanged.
     '-vf', `${PREVIEW_SCALE},format=${proxyPixelFormat(stream)}`,
+    // Untagged SD H.264 uses 601, while an untagged VP9 derivative can be
+    // interpreted as 709. Preserve that matrix explicitly through the change
+    // of container; tagged footage keeps its own color metadata.
+    ...(stream?.codec === 'h264' && !stream.color?.matrix && !stream.color?.primaries && !stream.color?.transfer
+      && stream?.width && stream.width <= 720 && stream.height && stream.height <= 576
+      ? ['-colorspace', 'smpte170m'] : []),
     '-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '18',
     '-g', '1', '-deadline', 'realtime', '-cpu-used', '6', '-row-mt', '1', '-threads', '4',
     '-f', 'webm', '-y', output,

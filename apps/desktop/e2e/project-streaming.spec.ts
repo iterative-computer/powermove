@@ -63,7 +63,7 @@ test('opens and saves media beyond 1 GiB with bounded main-process memory', asyn
     const PM = (window as any).PM, original = PM.MediaStore.getForSave;
     PM.MediaStore.getForSave = async (asset: any) => {
       const record = await original(asset);
-      if (record) Object.defineProperty(record.blob, 'slice', { value: () => { throw new Error('Unchanged media was uploaded again'); } });
+      if (record) Object.defineProperty(record.source ?? record.blob, record.source ? 'read' : 'slice', { value: () => { throw new Error('Unchanged media was uploaded again'); } });
       return record;
     };
     try {

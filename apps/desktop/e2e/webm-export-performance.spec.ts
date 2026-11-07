@@ -24,7 +24,7 @@ test('retains static WebM pictures while preserving timestamps and every encoded
       PM.GL.render = (...args: any[]) => { renders++; return render(...args); };
       try {
         const start = performance.now();
-        const result = await PM.Export.run({ format: 'webm', scale: 1, fps: 30, range: 'all', quality: 'draft', audio: false, mblur: false });
+        const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: 'webm', scale: 1, fps: 30, range: 'all', quality: 'draft', audio: false, mblur: false }));
         results.push({ result, renders, ms: performance.now() - start });
       } finally { PM.GL.render = render; }
     }
@@ -54,7 +54,7 @@ test('WebM reuse refreshes its picture at fractional layer entrances and exits',
     const project = PM.mkProject({ name: 'Cuts', w: 64, h: 64, fps: 10, dur: 2, bg: '#21344a' });
     project.layers = [PM.mkLayer('solid', { from: .5 + .5e-6, dur: 1, d: { color: '#ff0000' } }, project)];
     PM.proj = project; PM.touch();
-    return PM.Export.run({ format: 'webm', scale: 1, fps: 10, range: 'all', audio: false, mblur: false, quality: 'high' });
+    return (PM.agentFrameCapture=false,PM.Export.run({ format: 'webm', scale: 1, fps: 10, range: 'all', audio: false, mblur: false, quality: 'high' }));
   })).toEqual({ cancelled: false });
   const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
     ['-v', 'error', '-i', output, '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']);

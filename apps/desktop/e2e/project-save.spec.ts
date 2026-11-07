@@ -1,6 +1,6 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { expect, test, type LaunchedApp } from './helpers/app';
+import { chooseNativeMenu, expect, test, type LaunchedApp } from './helpers/app';
 import { decodeProjectContainer } from '../src/shared/project-container';
 import { fixturePath } from './helpers/media';
 
@@ -103,29 +103,11 @@ test('Projects screen exposes file state and saves active, duplicated, and opene
   const saveAs = path.join(session.userData, 'Projects Save As.pmv');
   const duplicate = path.join(session.userData, 'Independent Copy.pmv');
   const page = session.page;
-  // Exercise the native menu bridge without opening an OS popup in the hidden window.
-  await session.app.evaluate(({ Menu }) => {
-    const build = Menu.buildFromTemplate.bind(Menu);
-    Menu.buildFromTemplate = items => {
-      const menu = build(items);
-      menu.popup = options => {
-        (globalThis as any).__projectActionMenu = { menu, close: options?.callback };
-      };
-      return menu;
-    };
-  });
+  // 06d25cf64 moved project actions into the shared overlay.
   const card = (name: string) => page.locator('.ps-card').filter({ has: page.locator('.ps-name', { hasText: name }) });
   const runAction = async (name: string, action: string) => {
-    await session.app.evaluate(() => { (globalThis as any).__projectActionMenu = null; });
     const project = card(name);
-    await project.getByRole('button', { name: 'Project actions' }).click();
-    await expect.poll(() => session.app.evaluate((_electron, label) =>
-      (globalThis as any).__projectActionMenu?.menu.items.some((item: any) => item.label === label && item.enabled), action)).toBe(true);
-    await session.app.evaluate((_electron, label) => {
-      const { menu, close } = (globalThis as any).__projectActionMenu;
-      menu.items.find((item: any) => item.label === label).click();
-      close?.();
-    }, action);
+    await chooseNativeMenu(session, action, () => project.getByRole('button', { name: 'Project actions' }).click());
   };
 
   await session.openEditor();

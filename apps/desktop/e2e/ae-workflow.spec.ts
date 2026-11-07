@@ -234,10 +234,11 @@ test.describe('@ae-workflow After Effects workflow', () => {
     await page.locator('#panel-layer-effects .fx-matte .fx-reset').click();
     expect(await page.evaluate((id) => (window as any).PM.L(id).matteSource ?? null, ids.card)).toBeNull();
 
-    // Zoom and quality sit along the bottom of the viewer; nothing sits above it.
+    // Zoom and quality sit below the viewer, with the composition path above it.
     await expect(page.locator('#viewer-foot #composition-zoom')).toHaveCount(1);
     await expect(page.locator('#viewer-foot #viewer-time')).toHaveCount(0);
-    await expect(page.locator('#viewer-head')).toHaveCount(0);
+    // 21dd50aca restored the composition path above the viewer.
+    await expect(page.locator('#viewer-head')).toBeVisible();
 
     // Inside a pre-comp, Tab maps the nesting and leads back out.
     await page.evaluate((id) => {

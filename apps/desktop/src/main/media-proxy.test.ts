@@ -10,7 +10,7 @@ import { IPC } from '../shared/ipc';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
 import { execFileSync } from 'node:child_process';
 import {
-  MAX_PROXY_CHUNK_BYTES, MediaProxyService, hdrProxyHelper, imageSequenceConverter, playbackConverter, playbackProxyArgs, previewArgs,
+  MAX_PROXY_CHUNK_BYTES, MediaProxyService, hdrProxyHelper, imageSequenceConverter, playbackConverter, playbackProxyArgs, previewArgs, previewConverter,
   probeVideoStream, registerMediaProxyIpc, sequenceProgressReader
 } from './media-proxy';
 
@@ -330,6 +330,23 @@ describe('graded footage proxies', () => {
     expect(option(playbackProxyArgs('in.mov', 'out.webm', undefined), '-pix_fmt')).toBe('yuva420p');
     expect(option(previewArgs('in.mov', 'out.webm', opaque), '-vf')).toMatch(/,format=yuv420p$/);
     expect(previewArgs('in.webm', 'out.webm', { ...opaque, codec: 'vp9', alpha: true }).slice(4, 6)).toEqual(['-c:v', 'libvpx-vp9']);
+  });
+
+  it('keeps untagged SD preview colors stable by retaining their 601 matrix', async () => {
+    const { root } = await fixture();
+    const source = path.join(root, 'untagged.mp4'), output = path.join(root, 'preview.webm');
+    execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=0x00ff00:s=160x90:r=30:d=0.1',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', source]);
+    expect((await probeVideoStream(ffmpeg, source))?.color?.matrix).toBeUndefined();
+    await previewConverter(ffmpeg)(source, output);
+    expect((await probeVideoStream(ffmpeg, output))?.color?.matrix).toBe('smpte170m');
+    const pixel = (file: string) => execFileSync(ffmpeg, ['-v', 'error', '-i', file, '-frames:v', '1',
+      '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-']).subarray(0, 3);
+    const original = pixel(source), preview = pixel(output);
+    for (let channel = 0; channel < 3; channel++) expect(Math.abs(preview[channel]! - original[channel]!)).toBeLessThanOrEqual(3);
+    expect(preview[1]).toBeGreaterThan(250);
+    expect(previewArgs('in.webm', 'out.webm', { index: 0, codec: 'vp9', width: 160, height: 90, alpha: false })).not.toContain('-colorspace');
+    expect(previewArgs('in.mp4', 'out.webm', { index: 0, codec: 'h264', width: 160, height: 90, alpha: false, color: { matrix: 'bt709' } })).not.toContain('-colorspace');
   });
 
   it('tone maps HDR, preserves log code values and leaves Rec.709 untouched', () => {

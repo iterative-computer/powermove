@@ -308,7 +308,8 @@ describe('save IPC', () => {
     registerProjectOpenPathIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
     const call = (payload: unknown) => invokes.get(IPC.projectOpenPath)!(invokeEvent(sender), payload);
     expect(await call('/chosen.pmv')).toMatchObject({ ok: true, token: 'read-token' });
-    expect(projects.open).toHaveBeenCalledWith('/chosen.pmv', { allowDocumentRange: true });
+    // bf26d9b3e added an explicit copy flag; opening a picked file keeps its association.
+    expect(projects.open).toHaveBeenCalledWith('/chosen.pmv', { allowDocumentRange: true, copy: false });
     await expect(call('relative.pmv')).rejects.toThrow('invalid project path');
     await expect(call('/etc/passwd')).rejects.toThrow('invalid project path');
     await expect(call(42)).rejects.toThrow('invalid project path');

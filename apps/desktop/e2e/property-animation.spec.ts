@@ -94,14 +94,13 @@ test('text, shader, extension, blend, and mask stopwatches animate their real va
         : ['l.blend', 'l.mblur', `m.${layer.masks[0].id}.on`, `m.${layer.masks[0].id}.shape`, `m.${layer.masks[0].id}.mode`];
     }, type);
     if (type === 'extension') {
-      const more = page.locator('[data-parameter-prefix="x"] .control-disclosure');
-      await expect(more).toBeVisible();
-      if (!await more.evaluate(element => (element as HTMLDetailsElement).open)) await more.locator('summary').click();
+      // 4f5cf623d exposes secondary extension controls directly.
+      await expect(page.locator('[data-parameter-prefix="x"] .control-disclosure')).toHaveCount(0);
     }
     for (const path of paths) {
       if (path.endsWith('.$enabled')) {
         const effectId = path.split('.')[0];
-        const expand = page.locator(`[data-effect-id="${effectId}"] .fx-expand`);
+        const expand = page.locator(`#panel-inspector [data-effect-id="${effectId}"] .fx-expand`);
         if (await expand.getAttribute('aria-expanded') !== 'true') await expand.click();
       }
       // Numeric channel rows use their channel wrapper and the same leading stopwatch.
