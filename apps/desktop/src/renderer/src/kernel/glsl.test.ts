@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { EffectDefinition, EffectParamDefinition, TransitionDefinition } from './api';
-import { paramAliases, paramDeclarations, paramFloat, toLegacyFx, toLegacyTransition, validateEffect } from './glsl';
+import { paramAliases, paramDeclarations, paramFloat, toLegacyFx, toLegacyTransition, validateEffect, effectValidationWarnings } from './glsl';
 
 /** Stand-in for the real gl/shaders.ts preamble — it already declares u_prog. */
 const PRE = ['#version 300 es', 'precision highp float;', 'uniform float u_time;', 'uniform float u_prog;', 'out vec4 o;'].join('\n');
@@ -117,5 +117,26 @@ describe('toLegacyTransition', () => {
   it('honours group overrides and rawShader', () => {
     expect(toLegacyTransition(transition({ group: 'Custom' }), PRE).group).toBe('Custom');
     expect(toLegacyTransition(transition({ rawShader: true, frag: 'RAW' }), PRE).frag).toBe('RAW');
+  });
+});
+
+describe('effect pixel-scale hints', () => {
+  it.each([
+    'o = vec4(gl_FragCoord.xy, 0., 1.);',
+    'o = src(v_st + vec2(4.) * u_texel);',
+    'o = src(v_st + vec2(4.) / u_resolution);',
+    'float radius = 12.; o = src(v_st);',
+    'o = src(v_st + vec2(u_amount));',
+  ])('warns without rejecting unscaled pixel math: %s', frag => {
+    const warning=vi.fn(),def=effect({frag});
+    expect(validateEffect(def,warning)).toBe(def);
+    expect(warning).toHaveBeenCalledWith(expect.objectContaining({code:'effect-pixel-scale',fix:expect.stringContaining('u_effectScale')}));
+  });
+  it('ignores comments/declarations and accepts the scale contract', () => {
+    expect(effectValidationWarnings(effect({params:[],frag:'// gl_FragCoord u_texel\n o = src(v_st);'}))).toEqual([]);
+    expect(effectValidationWarnings(effect({frag:'uniform vec2 u_effectScale; o = src(v_st + u_texel);'}))).toHaveLength(1);
+    expect(effectValidationWarnings(effect({frag:'o = src(v_st + vec2(u_amount) * u_effectScale * u_texel);'}))).toEqual([]);
+    expect(effectValidationWarnings(effect({frag:'vec2 p = gl_FragCoord.xy / u_pixelScale; o = vec4(p,0.,1.);'}))).toEqual([]);
+    expect(effectValidationWarnings(effect({frag:'vec2 p = effectPixel(); o = vec4(p,0.,1.);'}))).toEqual([]);
   });
 });

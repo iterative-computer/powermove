@@ -13,7 +13,7 @@ export { propertyShortcuts } from './property-shortcuts';
 export { CAPTION_PRESETS, MIN_CUE_DURATION, cueIndexAt, cueRange, moveLimits, normalizeCaptionStyle, presetStyle } from '../captions/model';
 export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from '../captions/model';
 export { mountOverlayOnBody, anchorPicker } from '../controls/overlay';
-export { TEXT_ANIMATOR_PROPERTIES, TEXT_ANIMATOR_TIMING_VERSION, animatorMode, animatorAnchor, textAnimatorLabel, countTextUnits, staggerLength, staggerWindow, staggerEndOffset, staggerDelayForOffset } from '../legacy/core/text-animation';
+export { TEXT_ANIMATOR_PROPERTIES, TEXT_ANIMATOR_TIMING_VERSION, animatorMode, animatorAnchor, textAnimatorLabel, countTextUnits, staggerLength, staggerWindow, staggerEndOffset, staggerDelayForOffset, staggerTimingControl } from '../legacy/core/text-animation';
 export type { TextAnimatorMode, TextAnimatorOrder, TextAnimatorProperty, TextAnimatorUnit } from '../legacy/core/text-animation';
 /* Parametric shape geometry: commands are applied by the caller's edit transaction. */
 export { resizeParametricShape } from '../legacy/core/parametric-shapes';

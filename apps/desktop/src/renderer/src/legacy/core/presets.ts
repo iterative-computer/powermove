@@ -123,13 +123,29 @@ export function install(PM: PMRegistry): void {
     list, capture,
     get: (id: string) => list().find(p => p.id === id) || null,
     save(options: CapturePresetOptions) { const preset = capture(options); write([...list(), preset]); return clone(preset); },
-    rename(id: string, name: string) {
+    // expectedName lets Undo avoid overwriting a later rename from another window.
+    rename(id: string, name: string, expectedName?: string) {
       const next = list(), preset = next.find(p => p.id === id); if (!preset) return false;
+      if (expectedName !== undefined && preset.name !== expectedName) return false;
       preset.name = validName(name); write(next); return true;
     },
-    remove(id: string) {
-      const current = list(), next = current.filter(p => p.id !== id); if (next.length === current.length) return false;
-      write(next); return true;
+    remove(id: string) { return PM.Presets.removeWithUndo(id) !== null; },
+    /** Keep this detached receipt in the delete toast; remove() remains boolean-compatible. */
+    removeWithUndo(id: string): {preset: AnimationPreset; index: number} | null {
+      const current = list(), index = current.findIndex(p => p.id === id);
+      if (index < 0) return null;
+      const [preset] = current.splice(index, 1); write(current);
+      return {preset: clone(preset!), index};
+    },
+    /** Read the latest library, preserving other windows' additions and refusing ID collisions. */
+    restore(preset: AnimationPreset, index: number): boolean {
+      if (!preset || preset.schemaVersion !== 1 || typeof preset.id !== 'string' || !preset.id
+          || !Array.isArray(preset.effects) || !Array.isArray(preset.properties)
+          || !Number.isInteger(index) || index < 0) return false;
+      const restored = clone(preset); restored.name = validName(restored.name);
+      const current = list();
+      if (current.some(p => p.id === restored.id)) return false;
+      current.splice(Math.min(index, current.length), 0, restored); write(current); return true;
     },
     apply(id: string, layerId?: string, time?: number) {
       return PM.Edit.apply({type: 'apply_preset', preset: id, target: layerId, time}, {label: 'Apply preset', origin: 'effects-panel'});

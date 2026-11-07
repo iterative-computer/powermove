@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { makePM } from '../__tests__/make-pm';
 import { pasteLayers, splitLayers } from '../ui/shortcuts';
-import { migrateProjectTextTiming, staggerEndOffset, staggerWindow, textAnimationState, unitWeights } from './text-animation';
+import { migrateProjectTextTiming, staggerTimingControl, staggerEndOffset, staggerWindow, textAnimationState, unitWeights } from './text-animation';
 import { packProjectFile, unpackProjectFile } from './project-file';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -133,5 +133,26 @@ describe('end-anchored text timing', () => {
     const reopened = PM.deserialize(PM.serialize()).layers[0];
     expect(reopened.d.animators[0].legacyStartDuration).toBeUndefined();
     expect(weights(reopened, reopened.d.animators[0], 4)).toEqual([1, 1, 1, 1]);
+  });
+});
+
+describe('inspector stagger timing adapter', () => {
+  it('shows migrated exits as End offset and edits the original animated channel with undo', () => {
+    const {PM,layer,exit}=editor();exit.legacyStartDuration=6;
+    exit.p.delay.kf=[PM.KF(0,1),PM.KF(2,2)];exit.p.delay.expr='value';
+    PM.time=layer.from+2;PM.touch();
+    const prop=exit.p.delay;
+    const evaluated=()=>Object.fromEntries(Object.entries(exit.p).map(([k,p])=>[k,PM.evP(layer,p,PM.time,`ta.${exit.id}.${k}`)]));
+    const control=staggerTimingControl(exit,evaluated(),4),before=JSON.parse(JSON.stringify(prop));
+    expect(control.label).toBe('End offset');
+    expect(control.value).toBeCloseTo(staggerEndOffset(exit,evaluated(),4));
+    const value=control.toChannelValue(.5),path=`ta.${exit.id}.delay`;
+    expect(PM.Edit.apply({type:'set_property',target:layer.id,path,value,time:PM.time}).ok).toBe(true);
+    expect(exit.p.delay).toBe(prop);expect(prop.expr).toBe('value');
+    expect(prop.kf.map((k:any)=>k.i)).toEqual(before.kf.map((k:any)=>k.i));
+    expect(prop.kf[0]).toEqual(before.kf[0]);expect(prop.kf[1].v).toBeCloseTo(value);
+    expect(staggerTimingControl(exit,evaluated(),4).value).toBeCloseTo(.5);
+    PM.hist.undo();expect(PM.L(layer.id).d.animators[1].p.delay).toEqual(before);
+    PM.hist.redo();expect(PM.L(layer.id).d.animators[1].p.delay.expr).toBe('value');
   });
 });

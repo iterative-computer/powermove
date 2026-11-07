@@ -139,3 +139,30 @@ export function listModelMaterials(PM:any,layerId:string):SourceMaterialInfo[] {
   return (asset?.materials || (!object.source?.assetId?[{index:0,name:'Material'}]:[])).map((material:any)=>({index:material.index,name:material.name,
     slots:[...MATERIAL_SLOTS],maps:{...(object.sourceMaterials?.[material.index] || {})}}));
 }
+
+export type MaterialAssignmentCheck = {ok:true;reason?:never} | {ok:false;reason:string};
+/** Read-only drag-over validation. The setter runs the same checks again at drop time. */
+export function canAssignMaterialMap(PM:any,receiverId:string,materialIndex:number|null,slot:MaterialSlot,source:MaterialMap|null):MaterialAssignmentCheck {
+  const fail=(reason:string):MaterialAssignmentCheck=>({ok:false,reason});
+  const owner=materialOwner(PM.proj,receiverId),receiver=owner?.layers?.find((l:any)=>l.id===receiverId);
+  if(!receiver?.d?.data?.object)return fail('Choose a model layer');
+  if(receiver.lock || (PM.groupAncestors?.(receiver) || []).some((l:any)=>l.lock))return fail('This layer is locked');
+  if(!MATERIAL_SLOTS.includes(slot))return fail('Choose a material map slot');
+  if(materialIndex!=null && (!Number.isInteger(materialIndex) || materialIndex<0))return fail('Invalid source material index');
+  if(source!==null && materialIndex!=null && !listModelMaterials(PM,receiverId).some(m=>m.index===materialIndex))return fail('Source material is unavailable');
+  if(source===null)return {ok:true};
+  if(typeof source==='string')return source.length?{ok:true}:fail('Choose an image asset');
+  if(!source || typeof source!=='object' || Object.keys(source).length!==1)return fail('Choose a material source');
+  if(slot!=='color' && slot!=='emissive')return fail('Composition and layer textures support base color and emissive slots');
+  if('layerId' in source){
+    const status=materialLayerStatus(PM.proj,receiverId,source.layerId);
+    if(status==='cycle')return fail('Layer material reference would create a cycle');
+    if(status!=='ready')return fail('Choose an eligible source layer in the same composition');
+  }else if('compositionId' in source){
+    if(!compositionById(PM.proj,source.compositionId))return fail('Composition is unavailable');
+    if(reaches(materialGraph(PM.proj),JSON.stringify(['comp',source.compositionId]),JSON.stringify(['layer',owner.id,receiverId])))
+      return fail('Composition material reference would create a cycle');
+  }else return fail('Choose a material source');
+  if(!materialReceiverHasUVs(PM,receiver))return fail('This mesh needs UV coordinates to receive a layer material');
+  return {ok:true};
+}

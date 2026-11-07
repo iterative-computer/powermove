@@ -1,8 +1,9 @@
 import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-data';
 import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
+import { createMaterialThumbnails } from './material-thumbnails';
 import { readMaterialProperties } from './material-properties';
 import {lightViewerState,lightPositionFromViewer,lightViewerGuides} from './light-view';
-import {listModelMaterials,listValidMaterialCompositions,listEligibleMaterialLayers,materialLayerLinks} from './material-maps';
+import {canAssignMaterialMap,listModelMaterials,listValidMaterialCompositions,listEligibleMaterialLayers,materialLayerLinks} from './material-maps';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
@@ -16,6 +17,7 @@ import {navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMo
 
 export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:materials',payload:any)=>void):Scene3DAPI {
   let navigation:SceneNavigation|null=null;
+  const thumbnails=createMaterialThumbnails(PM);
   const materialListeners=new Set<()=>void>();
   // All mutation paths, reopen, composition rotation and history replay publish
   // these events. UI consumers never need to intercept individual commands.
@@ -45,6 +47,9 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     setSurfaceMaterialMap:(layerId,surface,slot,map,meta)=>editScene(PM,{operation:'set_surface_material_map',target:layerId,surface,slot,map},{origin:'interface',...meta}),
     listMaterials:layerId=>listModelMaterials(PM,layerId),listValidCompositions:layerId=>listValidMaterialCompositions(PM,layerId),
     listEligibleSourceLayers:layerId=>listEligibleMaterialLayers(PM,layerId),
+    getMaterialThumbnail:(layerId,source,options)=>thumbnails.get(layerId,source,options),
+    clearMaterialThumbnails:()=>thumbnails.clear(),
+    canAssignMaterialMap:(layerId,index,slot,source)=>canAssignMaterialMap(PM,layerId,index,slot,source),
     materialLinks:layerId=>materialLayerLinks(PM,layerId),
     getMaterialProperties:(layerId,index,time)=>readMaterialProperties(PM,layerId,index,time),
     setMaterialProperties:(layerId,materialIndex,patch,meta)=>editScene(PM,{operation:'set_material_properties',target:layerId,materialIndex,patch},{origin:'interface',...meta}),
