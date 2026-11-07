@@ -18,6 +18,7 @@ export function createSceneUiState(api: PowermoveAPI): SceneUiState {
   const subscriptions: Disposable[] = [
     api.events.on('project:changed', bump),
     api.events.on('selection', bump),
+    ...(api.scene3d?.onMaterialsChange ? [api.scene3d.onMaterialsChange(bump)] : []),
     api.events.on('invalidate', (what) => { if (what === 'ui') bump(); }),
     api.events.on('transport', () => { time = api.transport.time(); }),
     api.events.on('time', (next) => {

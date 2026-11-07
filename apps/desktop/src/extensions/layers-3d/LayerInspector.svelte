@@ -2,7 +2,8 @@
   import { untrack } from 'svelte';
   import type { ControlEditBinding, Layer, PowermoveAPI } from 'powermove';
   import SceneField from './SceneField.svelte';
-  import { MATERIAL_FIELDS, MAP_SLOTS, LIGHT_TYPES, lightFields, cameraFields, ENVIRONMENT_FIELDS } from './scene-model';
+  import MaterialsSection from './MaterialsSection.svelte';
+  import { MATERIAL_FIELDS, LIGHT_TYPES, lightFields, cameraFields, ENVIRONMENT_FIELDS } from './scene-model';
   import type { SceneUiState } from './scene-state.svelte';
   let { api,ui,layerId }:{api:PowermoveAPI;ui:SceneUiState;layerId:string}=$props();
   const {Row,Section,ToggleField,SelectField,ColorField}=untrack(()=>api.ui.controls);
@@ -13,29 +14,22 @@
   const assetName=(id:string)=>(api.project.get().assets[id] as any)?.name;
   function edit(operation:any,patch:any,label:string){const result=api.scene3d.edit({operation,target:layerId,patch},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});api.transport.invalidate();}
   const structural=(operation:any,key:string,label:string):ControlEditBinding=>({mode:'set',label,set:v=>edit(operation,{[key]:v},label)});
-  function map(slot:string){if(!object)return;const maps={...object.material.maps};
-    const items:any[]=[{label:'Choose Image…',icon:'image',run:async()=>{const [file]=await api.assets.pick({accept:'image/*'});if(!file)return;const asset=await api.assets.import(file);edit('update_object',{useSourceMaterials:false,material:{maps:{...maps,[slot]:asset.id}}},'Set texture');}}];
-    if(maps[slot])items.push({label:'Remove',icon:'x',run:()=>{delete maps[slot];edit('update_object',{material:{maps}},'Remove texture');}});
-    return items;
-  }
+  /* Base fields the Materials options now cover show here only while they
+     carry animation, so existing keyframes stay reachable. */
+  const baseFields=$derived((ui.version,MATERIAL_FIELDS.filter(field=>field.key==='color' || value(object?.material,field.key)?.kf?.length || value(object?.material,field.key)?.expr)));
 </script>
 {#if layer && data}
   {#if object}
     <Section {api} title="Model" />
     <Row {api} label="Source"><span class="k">{object.source.assetId?assetName(object.source.assetId) ?? 'Model':object.source.primitive ?? (object.source.lathe?'Lathe':object.source.extrude?'Extrusion':'Mesh')}</span></Row>
-    {#if object.source.assetId}<Row {api} label="Model materials"><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Model materials" /></Row>{/if}
+    {#if object.source.assetId}<Row {api} label="From file"><span class="from-file" title="Use the materials stored in the model file. Turn off to give the whole model one simple material."><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Use the model file’s materials" /></span></Row>{/if}
     {#if !object.useSourceMaterials}
       <Section {api} title="Material" />
-      {#each MATERIAL_FIELDS.filter(field=>!['emissive','emissiveIntensity'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
+      {#each baseFields as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}
-    {#if !object.useSourceMaterials}
-      {#each MATERIAL_FIELDS.filter(field=>['emissive','emissiveIntensity'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
-    {/if}
-    {#each MAP_SLOTS as slot (slot.id)}
-      <Row {api} label={slot.label}><button type="button" class="chip" onclick={(event)=>api.ui.menu(event.currentTarget as HTMLElement,map(slot.id) ?? [])}>{object.material.maps[slot.id]?assetName(object.material.maps[slot.id]) ?? 'Texture':'Choose…'}</button></Row>
-    {/each}
     <Row {api} label="Cast shadows"><ToggleField {api} get={()=>object.castShadow} edit={structural('update_object','castShadow','Cast shadows')} label="Cast shadows" /></Row>
     <Row {api} label="Receive shadows"><ToggleField {api} get={()=>object.receiveShadow} edit={structural('update_object','receiveShadow','Receive shadows')} label="Receive shadows" /></Row>
+    <MaterialsSection {api} {ui} {layer} />
   {:else if light}
     <Section {api} title="Light" />
     <Row {api} label="Type"><SelectField {api} get={()=>light.type} options={LIGHT_TYPES.map(t=>({v:t.id,label:t.label}))} edit={structural('update_light','type','Light type')} label="Light type" /></Row>
@@ -51,3 +45,6 @@
     <Row {api} label="Background"><ToggleField {api} get={()=>!!environment.background} edit={{mode:'set',label:'Background',set:(v:unknown)=>edit('set_environment',{background:v?'#161616':null},'Background')}} label="Background" />{#if environment.background}<ColorField {api} get={()=>environment.background} edit={structural('set_environment','background','Background color')} label="Background color" />{/if}</Row>
   {/if}
 {/if}
+<style>
+  .from-file { display: contents; }
+</style>

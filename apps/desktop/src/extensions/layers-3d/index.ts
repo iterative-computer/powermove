@@ -6,6 +6,24 @@ import LayerInspector from './LayerInspector.svelte';
 import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems,is3DLayer,addMenuItems} from './scene-actions';
 import {PRIMITIVES,LIGHT_TYPES} from './scene-model';
 import {createSceneUiState} from './scene-state.svelte';
+import {openMaterialPicker,closeMaterialPicker} from './material-picker';
+import {materialEntries,describeMap,materialUsage,usageTitle,installProperty,propertyChannel,propertyPath,MATERIAL_PROPERTY_SPECS,MATERIAL_SLOT_SPECS,type MaterialEntry} from './materials';
+
+/** Shared with the Timeline so its Materials rows match the inspector. */
+export interface MaterialsService {
+  entries:(layerId:string)=>MaterialEntry[];
+  describe:(layerId:string,index:number|null,slot:any,map:any)=>ReturnType<typeof describeMap>;
+  usage:(sourceId:string)=>ReturnType<typeof materialUsage>;
+  usageTitle:typeof usageTitle;
+  openPicker:(anchor:HTMLElement|{left:number;top:number;bottom:number;width:number},request:{layerId:string;materialIndex:number|null;slot:any})=>void;
+  closePicker:()=>void;
+  properties:typeof MATERIAL_PROPERTY_SPECS;
+  slots:typeof MATERIAL_SLOT_SPECS;
+  propertyPath:typeof propertyPath;
+  propertyChannel:typeof propertyChannel;
+  propertyValues:(layerId:string,index:number|null,time:number)=>Record<string,unknown>|null;
+  installProperty:(layerId:string,index:number|null,key:any,value:unknown,keyAt?:number)=>unknown;
+}
 
 export default function activate(api:PowermoveAPI):void {
   api.layers.register(STUDIO_CUBE);api.layers.register(OBJ_MODEL);
@@ -36,6 +54,17 @@ export default function activate(api:PowermoveAPI):void {
   for(const c of commands)api.commands.register({...c,category:'Layer'});
   api.inspector.registerSection({id:'3d-model',title:'3D',after:'content',when:({layerIds})=>layerIds.length===1&&is3DLayer(api.model.layer(layerIds[0]!)),
     build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(LayerInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
+  const materials:MaterialsService={
+    entries:layerId=>materialEntries(api,layerId),
+    describe:(layerId,index,slot,map)=>describeMap(api,layerId,index,slot,map),
+    usage:sourceId=>materialUsage(api,sourceId),usageTitle,
+    openPicker:(anchor,request)=>openMaterialPicker(api,anchor,request),closePicker:closeMaterialPicker,
+    properties:MATERIAL_PROPERTY_SPECS,slots:MATERIAL_SLOT_SPECS,propertyPath,propertyChannel,
+    propertyValues:(layerId,index,time)=>(api.scene3d.getMaterialProperties(layerId,index,time)?.values as any) ?? null,
+    installProperty:(layerId,index,key,value,keyAt)=>installProperty(api,layerId,index,key,value,keyAt)
+  };
+  const service=api.services?.register?.('materials',materials);
+  if(service)api.onDispose?.(()=>{closeMaterialPicker();service.dispose();});
   // A submenu at the pointer, rather than a second menu opened elsewhere.
   // Empty canvas and empty timeline only.
   api.menus.contribute('timeline:context',(ctx:any)=>ctx?.kind&&ctx.kind!=='empty'?[]:[{label:'Add 3D Layer',icon:'cube',submenu:addMenuItems(api)}]);
