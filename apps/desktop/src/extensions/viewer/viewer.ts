@@ -867,7 +867,7 @@ let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
 let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
 let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null,gizmoView:any=null,gizmoViewHost:HTMLElement|null=null;
 const freeView=()=>api.scene3d?.getView?.()==='editor';
-const isExtrudedArtwork=(layer:any)=>(layer?.type==='text'||layer?.type==='shape')&&layer.threeD===true&&layer.d?.extrusion?.enabled===true;
+const isExtrudedArtwork=(layer:any)=>(layer?.type==='text'||layer?.type==='shape')&&layer.d?.extrusion?.enabled===true&&layer.threeD===true;
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
@@ -1284,7 +1284,7 @@ function drawOverlayContent(): boolean | void {
   const gizmoVisible=V.showControls!==false && !!sceneGizmo?.covers(gizmoSelection);
   sceneGizmo?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},gizmoVisible?gizmoSelection:[]);
   sceneNavigation?.update({width:p.w*V.shown,height:p.h*V.shown},gizmoSelection);
-  const has3D=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object');
+  const has3D=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object' || isExtrudedArtwork(l));
   for(const host of [gizmoToolbarHost,gizmoViewHost])if(host)host.style.display=has3D?'flex':'none';
 
   c.setTransform(1, 0, 0, 1, 0, 0);
