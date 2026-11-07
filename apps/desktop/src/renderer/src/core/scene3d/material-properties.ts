@@ -1,3 +1,5 @@
+import { extrusionEligible, EXTRUSION_SURFACES } from './extrusion-data';
+import { readSurfaceProperties } from './extrusion-operations';
 import * as THREE from 'three';
 import { materialOwner } from './material-maps';
 export const MATERIAL_PROPERTIES=['opacity','roughness','metallic','emissionColor','emissionIntensity','ambientResponse'] as const;
@@ -9,6 +11,7 @@ export interface MaterialPropertyState {properties:MaterialPropertyChannels;valu
 export const materialPropertyPath=(index:number|null,key:MaterialProperty)=>`mi.${index==null?'':`${index}.`}${key}`;
 export function readMaterialProperties(PM:any,layerId:string,index:number|null=null,time=PM.time || 0):MaterialPropertyState|null {
   const layer=materialOwner(PM.proj,layerId)?.layers.find((l:any)=>l.id===layerId),object=layer?.d?.data?.object;
+  if(extrusionEligible(layer))return readSurfaceProperties(PM,layerId,EXTRUSION_SURFACES[index ?? 0]!,time);
   if(!object)return null;
   const asset=object.source?.assetId && PM.assets?.get?.(object.source.assetId);
   let original:any;

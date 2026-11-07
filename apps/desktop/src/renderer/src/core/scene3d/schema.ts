@@ -1,3 +1,4 @@
+import { validateExtrusionChannel } from './extrusion-data';
 import { z } from 'zod';
 import { layer3DProperties } from './layers';
 import { MATERIAL_SLOTS, objectMapSets, mapImageId } from './material-maps';
@@ -167,6 +168,7 @@ export function sceneProperties(layer: any): any[] {
 }
 
 export function validateSceneChannel(path:string,property:unknown):void {
+  if(validateExtrusionChannel(path,property))return;
   const intrinsic=/^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?([^.]+)$/.exec(path);
   if(intrinsic){const field=intrinsicPropertiesSchema.shape[intrinsic[1]! as keyof typeof intrinsicPropertiesSchema.shape];if(!field)throw new Error(`Unknown material property: ${path}`);field.unwrap().parse(property);return;}
   if(/^m\.[^.]+$/.test(path)) { const field=materialSchema.shape.p.unwrap().shape[path.slice(2)]; if(!field)throw new Error(`Unknown 3D channel: ${path}`); field.parse(property); return; }

@@ -1,3 +1,4 @@
+import { extrusionEligible, parseExtrusion } from '../../core/scene3d/extrusion-data';
 import { layerInputPlan, hasLayerInputs, validateEffectInputs } from '../../core/effect-inputs';
 import { allPropertyRefs, simplificationLayer, simplifyProperties, snapshotKeyframes, noticeDenseKeyframes, keyframeWrites } from './keyframe-simplification';
 import { parseEditCommand, ValidationError } from '../../core/validate/commands';
@@ -286,7 +287,7 @@ function setProperty(command: any, presets?: KeyPresets) {
   const current: any = PM.evP(layer, prop, command.time == null ? PM.time : command.time, channel);
   let value: any = command.value;
   if (typeof current === 'number') value = finite(value, channel);
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,{...prop,v:value});
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer)))validate3DChannel(layer,channel,{...prop,v:value});
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
@@ -332,7 +333,7 @@ function replaceKeyframes(command: any) {
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
     return { time, value, ease: key.ease || 'linear', hold: !!key.hold, id: key.id, temporal: key.temporal, spring: key.spring, handles: key.handles };
   });
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer))){
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer))){
     const candidate={...prop,kf:[...(command.replace===false?prop.kf:[]),...next.map((k:any)=>({t:k.time,v:k.value}))]};
     if(command.expression!==undefined){const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);candidate.expr=command.expression || null;}
     validate3DChannel(layer,channel,candidate);
@@ -369,7 +370,7 @@ function replaceKeyframes(command: any) {
     PM.setKeysOn(prop, next.map((key: any) => ({ t: key.time, v: key.value, ease: key.ease, hold: key.hold })), PM.proj.fps);
   }
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,prop);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer)))validate3DChannel(layer,channel,prop);
   PM.touch();
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
@@ -445,6 +446,14 @@ function setContent(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  if(patch.extrusion!==undefined){
+    if(!extrusionEligible(layer))throw new Error('Only text and shape layers can be extruded');
+    patch.extrusion=parseExtrusion(patch.extrusion);
+    if(isGeneratedOrigin(meta.origin)){
+      const future=new Map(sceneProperties({...layer,d:{...layer.d,extrusion:patch.extrusion}}).map(p=>[p.key,p.prop]));
+      for(const {key,prop} of sceneProperties(layer))if(lockedIntent(layer,key) && JSON.stringify(prop)!==JSON.stringify(future.get(key)))throw new Error(`Preserved hand-edited ${key}`);
+    }
+  }
   const role3d=layer3DRole(layer);
   if(role3d && patch.data){
     patch.data=parseLayer3DData(role3d,{...layer.d.data,...patch.data});

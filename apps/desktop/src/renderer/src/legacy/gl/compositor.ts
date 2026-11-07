@@ -1,3 +1,4 @@
+import { isExtrudedLayer, isShared3DPlane } from '../../core/scene3d/extrusion-data';
 import {brushGeometry,brushBounds,rasterBrush} from './effect-path';
 import { createAutomaticPreviewVideos } from '../core/automatic-preview-video';
 import { motionBlurTimes } from '../../core/render-samples';
@@ -1091,6 +1092,15 @@ function viewportPathQuad(L: any, T: any, W: number, H: number, maxSourceBytes: 
 function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, maxSourceBytes = Infinity) {
   /* returns {tex, w, h, ax, ay, uv:[ox,oy,sx,sy], fromFbo, solid, tmp} */
   const d = resolveContent(PM, L, T);
+  if((isExtrudedLayer(L) || isShared3DPlane(PM._renderComposition3D || PM.proj,L)) && activeSourceRaster()?.layer!==L){
+    try{
+      const runtime=compositionRuntime(PM,T),depthIds=compositionDepthIds(PM,L,T);
+      const bottom=(PM._renderComposition3DPass || compositionOrderedLayers(PM,(PM._renderComposition3D || PM.proj).layers.filter((l:any)=>l.type!=='group'),T)).filter((l:any)=>depthIds.has(l.id)).at(-1)?.id;
+      const canvas=runtime.render(W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera);
+      const tex=texFor(`layer3d:${L.id}`,canvas,{version:`${runtime.revision}:${W}:${H}:${PM._renderCamera3D?.matrixWorld.elements}:${PM._renderCamera3D?.projectionMatrix.elements}`});
+      return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
+    }catch(error){frameFailed=true;PM.UIState?.setShaderMeta?.(L,{missing:true,sceneError:String(error)});return null;}
+  }
   if (L.type === 'solid') {
     return { solid: PM.hex2rgb(d.color), solidAlpha: PM.hexAlpha(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
   }
@@ -2223,8 +2233,9 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     if (alpha <= .001) continue;
 
     try {
-      const hasFx = (!opt.inputLayer || opt.inputStage === 'effects') && hasRenderableEffects(opt.inputPrefix===undefined?L.fx:L.fx.slice(0,opt.inputPrefix), PM, L, T);
-      const hasMasks = (!opt.inputLayer || opt.inputStage !== 'source') && (L.masks || []).some((m: any) => evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false);
+      const bakedPlane=isShared3DPlane(proj,L);
+      const hasFx = !bakedPlane && (!opt.inputLayer || opt.inputStage === 'effects') && hasRenderableEffects(opt.inputPrefix===undefined?L.fx:L.fx.slice(0,opt.inputPrefix), PM, L, T);
+      const hasMasks = !bakedPlane && (!opt.inputLayer || opt.inputStage !== 'source') && (L.masks || []).some((m: any) => evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false);
       const blend = opt.inputLayer ? 0 : (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
       const mb = (isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur) && opt.mblur !== false;
       const transition = opt.inputLayer ? null : activeTransition(L, T);
@@ -2738,12 +2749,12 @@ GL.createAlphaReadback = (W: number, H: number) => {
 /* Hit test: which layer is under a comp-space point (top-most first). */
 GL.pick = (x: any, y: any, T: any, options: { includeLocked?: boolean } = {}) => {
   pruneSceneRuntimes(PM);
-  const pickCamera=PM.proj.layers.some(layer3DRole)?viewportCamera(PM,compositionRuntime(PM,T).camera):undefined;
+  const pickCamera=PM.proj.layers.some((layer:any)=>layer3DRole(layer) || isExtrudedLayer(layer))?viewportCamera(PM,compositionRuntime(PM,T).camera):undefined;
   const layers = compositionOrderedLayers(PM, PM.proj.layers, T,pickCamera);
   for (const L of layers) {
     if (!PM.active(L, T) || !options.includeLocked && (L.lock || (PM.groupAncestors?.(L) || []).some((group: any) => group.lock)) || (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].pickable === false)) continue;
-    if(layer3DRole(L)){
-      if(layer3DRole(L)!=='object')continue;
+    if(layer3DRole(L) || isExtrudedLayer(L) || isShared3DPlane(PM.proj,L)){
+      if(layer3DRole(L)!=='object' && !isExtrudedLayer(L) && !isShared3DPlane(PM.proj,L))continue;
       const runtime=compositionRuntime(PM,T),depthIds=compositionDepthIds(PM,L,T);
       const picked=runtime.pick(x/PM.proj.w*2-1,1-y/PM.proj.h*2,depthIds,pickCamera);
       if(picked===L.id)return L;

@@ -232,7 +232,7 @@ function referenceCount(project: any, assetId: any) {
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
     if (layerAssetId(layer) === assetId) count++;
     for(const fx of layer.fx??[])for(const ref of Object.values<any>(fx.inputs??{}))if(ref?.kind==='asset'&&ref.assetId===assetId)count++;
-    for(const texture of objectMapSets(layer?.d?.data?.object).flatMap(maps=>Object.values(maps)))if(texture===assetId)count++;
+    for(const texture of [...objectMapSets(layer?.d?.data?.object),...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).map(surface=>surface.maps || {})].flatMap(maps=>Object.values(maps)))if(texture===assetId)count++;
     for(const object of layer?.d?.data?.scene?.objects || []) {
       if(object.source?.assetId===assetId)count++;
       for(const texture of objectMapSets(object).flatMap(maps=>Object.values(maps)))if(texture===assetId)count++;
@@ -247,7 +247,7 @@ function removeAsset(project: any, assetId: any, { preserveRuntime = false }: { 
   layerLists(project).forEach((layers: any) => {
     for (let index: any = layers.length - 1; index >= 0; index--) {
       const layer: any = layers[index];
-      for(const maps of objectMapSets(layer?.d?.data?.object))for(const [slot,id] of Object.entries(maps))if(id===assetId)delete maps[slot as MaterialSlot];
+      for(const maps of [...objectMapSets(layer?.d?.data?.object),...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).map(surface=>surface.maps || {})])for(const [slot,id] of Object.entries(maps))if(id===assetId)delete maps[slot as MaterialSlot];
       const scene=layer?.d?.data?.scene;
       if(scene) {
         const removedObjects=new Set(scene.objects.filter((o:any)=>o.source?.assetId===assetId).map((o:any)=>o.id));
