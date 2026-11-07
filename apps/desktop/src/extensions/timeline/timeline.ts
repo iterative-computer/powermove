@@ -4446,6 +4446,9 @@ function onDbl(e: any) {
     const hr = hitRow(y);
     if (hr?.row.kind === 'prop' && editKeyAt(hr.row, x)) return;
     if (hr?.row.kind === 'layer' && hr.row.L.type === 'captions' && captionTrack.doubleClick(hr.row.L, x, rowY(hr.i), T.row)) return;
+    /* AE: double-clicking a precomp layer's bar opens its composition, as
+       its name does. */
+    if (hr?.row.kind === 'layer' && openPrecomp(hr.row.L)) return;
   }
   const workHit: any = x > T.gut && workAreaHit(x, y);
   if (workHit?.kind === 'bar') {
@@ -4455,10 +4458,20 @@ function onDbl(e: any) {
   if (x < T.gut && y > T.ruler) {
     const hr = hitRow(y);
     if (hr?.row.kind === 'prop' && x >= T.propertyValueX - 4) { editPropertyValue(hr.row, hr.i, axisValueIndex(hr.row, x)); return; }
-    /* AE: double-clicking a precomp layer opens its source composition. */
-    if (hr && hr.row.kind === 'layer' && hr.row.L.type === 'precomp' && hr.row.L.d?.comp) { api.commands.run('openComposition', hr.row.L.d.comp); return; }
-    if (hr && hr.row.kind === 'layer' && x > 90) renameLayer(hr.row.L, hr.i);
+    /* Double-click opens what is inside a layer: a precomp's composition
+       (AE). Any other layer's name renames in place. Enter renames any
+       selected layer, precomps included (AE), as does Rename… in its menu.
+       The switches left of the name keep their own clicks. */
+    if (hr && hr.row.kind === 'layer' && x > 90) {
+      if (openPrecomp(hr.row.L)) return;
+      renameLayer(hr.row.L, hr.i);
+    }
   }
+}
+function openPrecomp(L: any): boolean {
+  if (L?.type !== 'precomp' || !L.d?.comp) return false;
+  api.commands.run('openComposition', L.d.comp);
+  return true;
 }
 /* Double-clicking a key opens the value editor, for the whole selection when
    the key is part of it. Shared by layer rows and unfolded tracks. */

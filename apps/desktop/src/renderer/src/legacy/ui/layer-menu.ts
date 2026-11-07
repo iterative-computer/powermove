@@ -48,6 +48,18 @@ function renameLayerPrompt(PM: PMRegistry, layer: any, origin: string): void {
 }
 
 export function installLayerMenu(PM: PMRegistry): void {
+  /* Enter renames the one selected layer, as in After Effects. A text layer
+     declines so Enter keeps editing its text; so does anything while a menu,
+     sheet or text edit owns the keyboard. */
+  PM.renameSelectedLayer = (): boolean => {
+    const selected = PM.selLayers?.() ?? [];
+    const layer = selected.length === 1 ? selected[0] : null;
+    if (!layer || layer.type === 'text' || layer.lock) return false;
+    if ((PM.groupAncestors?.(layer) || []).some((group: any) => group.lock)) return false;
+    if (document.querySelector('.menu-panel, .modal')) return false;
+    renameLayerPrompt(PM, layer, 'timeline');
+    return true;
+  };
   PM.showParentMenu = (ids: string[], event: {clientX: number; clientY: number}) => PM.menu(document.body, [{header:'Link Layers'}, ...parentMenuItems(PM, ids)], {x:event.clientX,y:event.clientY});
   PM.showLayerMenu = (layer: any, event: { clientX: number; clientY: number }, origin = 'timeline') => {
     if (!PM.sel.layers.includes(layer.id)) PM.selectLayers(layer.id);
@@ -64,7 +76,7 @@ export function installLayerMenu(PM: PMRegistry): void {
        say how many layers the commands act on. */
     const items: any[] = [];
     if (selected.length > 1) items.push({ header: `${selected.length} Layers` });
-    if (selected.length === 1) items.push({ label: 'Rename…', disabled: !editable, run: () => renameLayerPrompt(PM, layer, editOrigin) });
+    if (selected.length === 1) items.push({ label: 'Rename…', kb: layer.type === 'text' ? undefined : '↩', disabled: !editable, run: () => renameLayerPrompt(PM, layer, editOrigin) });
     items.push(
       { label: 'Duplicate', icon: 'copy', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
       { label: 'Group Layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },

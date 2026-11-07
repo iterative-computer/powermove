@@ -1,24 +1,42 @@
 <script lang="ts">
   import {onDestroy,untrack} from 'svelte';
   import type {PowermoveAPI} from 'powermove';
-  let {api}:{api:PowermoveAPI}=$props();
+  /* `transform`: the 3D Move / Rotate / Scale tools and their axes, in the
+     viewer header. `view`: which view you look through, in the viewer footer
+     beside zoom, as After Effects puts its 3D View menu. */
+  let {api,part='transform'}:{api:PowermoveAPI;part?:'transform'|'view'}=$props();
   const {Segmented,SelectField}=untrack(()=>api.ui.controls);
   let mode=$state(untrack(()=>api.scene3d.getMode())),space=$state(untrack(()=>api.scene3d.getSpace()));
-  const subscription=untrack(()=>api.scene3d.onGizmoChange(state=>{mode=state.mode;space=state.space;}));
+  const subscription=untrack(()=>api.scene3d.onGizmoChange(next=>{mode=next.mode;space=next.space;}));
   let navigation=$state(untrack(()=>api.scene3d.getNavigationMode()));
   const navigationSubscription=untrack(()=>api.scene3d.onNavigationChange(next=>navigation=next));
   let view=$state(untrack(()=>api.scene3d.getView()));
   const viewSubscription=untrack(()=>api.scene3d.onViewChange(next=>view=next));
+  /* Two views a newcomer can tell apart. The internal ids stay camera/editor. */
+  const views=[
+    {id:'camera',label:'Active Camera',title:'Active Camera — See the shot exactly as it renders and exports'},
+    {id:'editor',label:'Free View',title:'Free View — Look around the 3D scene without moving the camera. Middle-drag or Option-drag to orbit; your render doesn’t change'},
+  ];
   const viewOptions=[{v:'select',label:'Select'},{v:'orbit',label:'Orbit'},{v:'pan',label:'Pan'},{v:'dolly',label:'Dolly'},
-    {v:'frame-selection',label:'Frame selection'},{v:'frame-all',label:'Frame all'}];
+    {v:'frame-selection',label:'Frame Selection'},{v:'frame-all',label:'Frame All'}];
+  /* Navigating always happens in the Free View. Picking a navigation tool
+     switches to it visibly, rather than a gesture doing it by surprise. */
+  const navigate=(next:unknown)=>{
+    if(next==='frame-selection'||next==='frame-all'){api.scene3d.setView('editor');api.scene3d.frame(next==='frame-selection');return false;}
+    if(next!=='select'&&api.scene3d.getView()!=='editor')api.scene3d.setView('editor');
+    return true;
+  };
   onDestroy(()=>subscription.dispose());
   onDestroy(()=>navigationSubscription.dispose());
   onDestroy(()=>viewSubscription.dispose());
 </script>
+{#if part==='transform'}
 <Segmented label="3D transform" options={[{id:'translate',label:'Move'},{id:'rotate',label:'Rotate'},{id:'scale',label:'Scale'}]} value={mode} onChange={next=>{api.scene3d.setNavigationMode('select');api.scene3d.setMode(next as typeof mode);}} />
 <Segmented label="3D axes" options={[{id:'world',label:'Global'},{id:'local',label:'Local'}]} value={space} onChange={next=>api.scene3d.setSpace(next as typeof space)} />
-<Segmented label="3D viewpoint" options={[{id:'camera',label:'Camera'},{id:'editor',label:'Editor'}]} value={view} onChange={next=>api.scene3d.setView(next as typeof view)} />
-<div style="width:100px" title="3D view: middle-drag or Alt-drag to orbit; Shift to pan. In a navigation tool, scroll to dolly, F to frame selection, Home to frame all. Navigation changes only the editor view. Camera returns to the rendered shot.">
-  <SelectField {api} label="3D view" get={()=>navigation} edit={{mode:'local',label:'3D view',set:(next:unknown)=>api.scene3d.setNavigationMode(next as typeof navigation)}} options={viewOptions}
-    onChange={(next:unknown)=>{if(next==='frame-selection'||next==='frame-all'){api.scene3d.frame(next==='frame-selection');return false;}return true;}} />
+{:else}
+<Segmented label="3D view" options={views} value={view} onChange={next=>api.scene3d.setView(next as typeof view)} />
+<div style="width:96px" title="3D navigation — Orbit, pan or dolly the Free View, or frame the scene. F frames the selection, Home frames everything. Your camera and render don’t change">
+  <SelectField {api} label="3D navigation" get={()=>navigation} edit={{mode:'local',label:'3D navigation',set:(next:unknown)=>api.scene3d.setNavigationMode(next as typeof navigation)}} options={viewOptions}
+    onChange={navigate} />
 </div>
+{/if}

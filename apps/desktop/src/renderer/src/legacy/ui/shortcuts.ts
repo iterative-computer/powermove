@@ -473,6 +473,7 @@ def('toggle3DLayer', '3D Layer', null, () => toggleLayerSwitch('threeD', '3D lay
   (layer: any) => PM.TYPE_META[layer.type]?.transform !== false && layer.type !== 'audio' && layer.type !== 'adjustment'), 'Layer');
 def('toggleContinuousRaster', 'Continuously Rasterize', null, () => toggleLayerSwitch('continuousRaster', 'Continuously rasterize',
   (layer: any) => layer.type === 'precomp'), 'Layer');
+def('renameLayer', 'Rename Layer', '↩', () => PM.renameSelectedLayer?.() ?? false, 'Layer', preserveFalse);
 def('openComposition', 'Open composition', null, (id?: any) => PM.Comps.open(id), 'Composition', hidden);
 def('closeComposition', 'Close composition', null, (id?: any) => PM.Comps.close(id ?? PM.Comps.active()), 'Composition', hidden);
 def('addCompositionToTimeline', 'Add composition to timeline', null, (id?: any, options?: any) => PM.Comps.addToTimeline(id, options), 'Composition', hidden);

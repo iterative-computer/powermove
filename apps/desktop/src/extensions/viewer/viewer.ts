@@ -21,7 +21,7 @@ import { beginTextEdit, type TextEditOptions, type TextEditSession } from './tex
 import { drawEditablePaths, startPathEdit } from './path-editing';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
-  title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
+  title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false, moveSlot: '#viewer-head',
   library: { width: 640, height: 480 },
 } as const;
 
@@ -793,13 +793,14 @@ let layoutFrame = 0;
 
 let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
 let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
-let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null;
+let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null,gizmoView:any=null,gizmoViewHost:HTMLElement|null=null;
+const freeView=()=>api.scene3d?.getView?.()==='editor';
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
   window.cancelAnimationFrame(layoutFrame); layoutFrame = 0;
-  sceneGizmo?.dispose();sceneGizmo=null;if(gizmoToolbar)void unmount(gizmoToolbar);gizmoToolbarHost?.remove();
+  sceneGizmo?.dispose();sceneGizmo=null;if(gizmoToolbar)void unmount(gizmoToolbar);gizmoToolbarHost?.remove();if(gizmoView)void unmount(gizmoView);gizmoViewHost?.remove();
   sceneNavigation?.dispose();sceneNavigation=null;
   activeDrag?.cancel(); activeDrag = null;
   unbindStage?.(); unbindStage = null;
@@ -880,9 +881,18 @@ V.attach = (stage: HTMLElement) => {
     zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
     if(api.scene3d){
+      /* The 3D transform tools sit in the panel header and the 3D view picker
+         in the footer beside zoom (as in After Effects); neither covers the
+         canvas. The viewer chrome moves both hosts into place. */
+      if(gizmoToolbar)void unmount(gizmoToolbar);gizmoToolbarHost?.remove();
+      if(gizmoView)void unmount(gizmoView);gizmoViewHost?.remove();
       gizmoToolbarHost=document.createElement('div');gizmoToolbarHost.id='composition-3d-controls';
-      gizmoToolbarHost.style.cssText='position:absolute;right:8px;top:7px;z-index:6;display:none;align-items:center;gap:6px';
-      zoomHost.append(gizmoToolbarHost);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
+      gizmoToolbarHost.style.cssText='display:none;align-items:center;gap:6px';
+      zoomHost.append(gizmoToolbarHost);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api,part:'transform'}});
+      gizmoViewHost=document.createElement('div');gizmoViewHost.id='composition-3d-view';
+      gizmoViewHost.style.cssText='display:none;align-items:center;gap:6px';
+      zoomHost.append(gizmoViewHost);gizmoView=mount(GizmoToolbar,{target:gizmoViewHost,props:{api,part:'view'}});
+      V.transform3dControls=gizmoToolbarHost;V.view3dControls=gizmoViewHost;
     }
 
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
@@ -1141,7 +1151,8 @@ function drawOverlay() {
   const gizmoVisible=V.showControls!==false && !!sceneGizmo?.covers(gizmoSelection);
   sceneGizmo?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},gizmoVisible?gizmoSelection:[]);
   sceneNavigation?.update({width:p.w*V.shown,height:p.h*V.shown},gizmoSelection);
-  if(gizmoToolbarHost)gizmoToolbarHost.style.display=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object')?'flex':'none';
+  const has3D=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object');
+  for(const host of [gizmoToolbarHost,gizmoViewHost])if(host)host.style.display=has3D?'flex':'none';
 
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
@@ -1580,7 +1591,10 @@ function bindStage(stage: any, inner: any): () => void {
   };
   listen(stage,'pointerdown',guarded((event:any)=>{
     if(sceneGizmo?.active())return;
-    if(sceneNavigation?.pointerDown(event))return;
+    /* Orbit, pan and dolly move only the Free View. In the Active Camera
+       view a middle-drag pans and the wheel scrolls exactly as in a 2D
+       composition, so no gesture ever switches the view by itself. */
+    if(freeView()&&sceneNavigation?.pointerDown(event))return;
     if(sceneGizmo?.pointerDown(event))return;
   }),true);
   listen(stage, 'pointerdown', guarded(onDown), capture);
@@ -1599,7 +1613,7 @@ function bindStage(stage: any, inner: any): () => void {
   listen(stage, 'wheel', guarded((e: any) => {
     e.preventDefault();
     if(sceneGizmo?.active())return;
-    if(sceneNavigation?.wheel(e))return;
+    if(freeView()&&sceneNavigation?.wheel(e))return;
     if (viewerWheelMode(e) === 'zoom') {
       zoomGestureUntil = window.performance.now() + 80;
       navigationUntil = window.performance.now() + 250;
@@ -1651,7 +1665,11 @@ function bindStage(stage: any, inner: any): () => void {
     V.temporaryTool = null;
     setStageCursor('default');
   }) as EventListener, true);
-  listen(inner, 'dblclick', guarded((e: any) => {
+  /* On the stage, not the canvas: the first click of a double-click starts a
+     move gesture that captures the pointer on the stage, so the dblclick is
+     delivered there. */
+  listen(stage, 'dblclick', guarded((e: any) => {
+    if (e.target?.closest?.('button')) return;
     if(toolService()?.tool==='pen'){
       const L=api.selection.first();
       const paths=L ? (L.d as any).paths as any[] | undefined : undefined;
@@ -1676,8 +1694,15 @@ function bindStage(stage: any, inner: any): () => void {
       openTextEditor(L, { selectAll: true });
       return;
     }
-    /* AE: double-clicking a precomp layer in the viewer opens its composition. */
-    const hit: any = api.render.gl.pick(x, y, api.transport.time());
+    /* AE: double-clicking a precomp layer in the viewer opens its composition,
+       anywhere inside its bounds. The pixel pick misses its transparent
+       areas, which the first click still selected, so fall back to that. */
+    let hit: any = api.render.gl.pick(x, y, api.transport.time());
+    if (!hit) {
+      const selected: any = api.selection.layers().length === 1 ? api.selection.first() : null;
+      if (selected?.type === 'precomp' && api.anim.active(selected, api.transport.time()) !== false
+        && layerContainsPoint(api, selected, x, y, api.transport.time(), space3d)) hit = selected;
+    }
     if (hit?.type === 'precomp' && hit.d?.comp) {
       e.preventDefault();
       e.stopPropagation();

@@ -938,7 +938,7 @@ export interface ControlBindingOptions {
 }
 
 export interface ControlsAPI {
-  readonly Segmented: Component<{options:{id:string;label:string}[];value:string;onChange:(id:string)=>void;label?:string}>;
+  readonly Segmented: Component<{options:{id:string;label:string;title?:string}[];value:string;onChange:(id:string)=>void;label?:string}>;
   /** Kernel-provided control components; props match src/renderer/src/controls — stable within apiVersion 1. */
   readonly NumField: ControlComponent;
   readonly ColorField: ControlComponent;

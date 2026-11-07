@@ -306,8 +306,9 @@ describe('viewer extension', () => {
     const removeListener = vi.spyOn(stage, 'removeEventListener');
     first.dispose();
 
-    // The runtime's eight; the chrome under the viewer subscribes to nothing.
-    expect(first.eventDisposers).toHaveLength(8);
+    // The runtime's eight, plus the chrome's composition path, which follows
+    // project changes; every one is disposed.
+    expect(first.eventDisposers).toHaveLength(9);
     expect(first.eventDisposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true);
     expect(removeListener.mock.calls.some(([event]) => event === 'pointerdown')).toBe(true);
 
@@ -316,6 +317,6 @@ describe('viewer extension', () => {
     const replacementBody = document.createElement('div');
     replacement.panel?.build?.(replacementBody, { spec: {} });
     expect(replacement.viewer()?.stage).toBe(stage);
-    expect(replacement.eventDisposers).toHaveLength(8);
+    expect(replacement.eventDisposers).toHaveLength(9);
   });
 });
