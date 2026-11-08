@@ -7,6 +7,8 @@ import { BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from 'el
 import { cloudFileState } from '@powermove/macos-haptics';
 import { IPC, type CloudFileState } from '../shared/ipc';
 import { isRendererUnavailable } from './renderer-recovery';
+import { inspectFileCloudState } from './file-cloud-state';
+import { readWithRetry } from './read-retry';
 
 const DOWNLOAD_TIMEOUT = 5 * 60_000;
 const CHUNK_BYTES = 4 * 1024 * 1024;
@@ -58,7 +60,7 @@ export class CloudMediaService {
     private inspect: typeof cloudFileState = cloudFileState,
     private materialize: (source: string, signal?: AbortSignal) => Promise<void> = materializeFile,
   ) {}
-  async status(source: string): Promise<CloudFileState> { return this.inspect(source); }
+  async status(source: string): Promise<CloudFileState> { return inspectFileCloudState(source, this.inspect); }
   async download(source: string): Promise<void> {
     const pending = this.downloads.get(source);
     if (pending) return pending;
@@ -211,7 +213,7 @@ export function registerCloudMediaIpc(ipc: Pick<IpcMain, 'handle'>, ctx: {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > CHUNK_BYTES || offset + length > file.size) throw new Error('Invalid media read');
     file.timer.refresh();
     const buffer = new Uint8Array(length);
-    const { bytesRead } = await file.handle.read(buffer, 0, length, offset);
+    const { bytesRead } = await readWithRetry(() => file.handle.read(buffer, 0, length, offset));
     return bytesRead === length ? buffer : buffer.slice(0, bytesRead);
   });
   ipc.handle(IPC.cloudRelease, async (event, token: string) => {

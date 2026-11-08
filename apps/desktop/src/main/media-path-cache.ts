@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, realpath, rename, rm, stat, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
+import { requireLocalMedia } from './file-cloud-state';
+import { sameFile } from './durable-file';
+import { readWithRetry } from './read-retry';
 
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 
@@ -40,19 +43,27 @@ const EXTENSIONS: Record<string, string> = {
 
 /** The renderer's import fingerprint (legacy/core/media.ts), computed from disk. */
 export async function mediaFingerprint(file: string): Promise<string> {
-  const handle = await open(file, 'r');
-  try {
-    const size = (await handle.stat()).size;
-    const sample = Math.min(SAMPLE_BYTES, size);
-    const offsets = [...new Set([0, Math.max(0, Math.floor((size - sample) / 2)), Math.max(0, size - sample)])];
-    const hash = createHash('sha256').update(`powermove-media-v2\n${size}\n`);
-    for (const offset of offsets) {
-      const buffer = Buffer.alloc(sample);
-      const { bytesRead } = await handle.read(buffer, 0, sample, offset);
-      hash.update(buffer.subarray(0, bytesRead));
-    }
-    return `v2:${size}:${hash.digest('hex')}`;
-  } finally { await handle.close(); }
+  await requireLocalMedia(file);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const handle = await readWithRetry(() => open(file, 'r'));
+    try {
+      const before = await handle.stat(), size = before.size;
+      const sample = Math.min(SAMPLE_BYTES, size);
+      const offsets = [...new Set([0, Math.max(0, Math.floor((size - sample) / 2)), Math.max(0, size - sample)])];
+      const hash = createHash('sha256').update(`powermove-media-v2\n${size}\n`);
+      for (const offset of offsets) {
+        const buffer = Buffer.alloc(sample);
+        for (let received = 0; received < sample;) {
+          const { bytesRead } = await readWithRetry(() => handle.read(buffer, received, sample - received, offset + received));
+          if (!bytesRead) throw new Error('This media file is not fully available. Download it in Finder, then try again.');
+          received += bytesRead;
+        }
+        hash.update(buffer);
+      }
+      if (sameFile(before, await handle.stat()) && sameFile(before, await stat(file))) return `v2:${size}:${hash.digest('hex')}`;
+    } finally { await handle.close(); }
+  }
+  throw new Error('This media file changed while it was being read. Try again when syncing has finished.');
 }
 
 function extensionFor(name: string, type?: string): string {

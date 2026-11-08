@@ -86,6 +86,19 @@ it('streams only bounded chunks to the window that owns the token', async () => 
   expect(sender.listenerCount('destroyed')).toBe(0);
   await expect(call(IPC.cloudRead, { token: result.token, offset: 0, length: 1 })).rejects.toThrow('Unknown');
 });
+
+it('retries transient cloud chunk reads without changing the requested offset', async () => {
+  const source = await file();
+  const { call } = ipc(new CloudMediaService(vi.fn().mockResolvedValue('local'), vi.fn()));
+  const result = await call(IPC.cloudDownload, source);
+  const handle = await mocks.open.mock.results.at(-1)!.value as FileHandle;
+  const read = vi.spyOn(handle, 'read').mockRejectedValueOnce(Object.assign(new Error('provider unavailable'), { code: 'EAGAIN' }));
+  try {
+    expect(new TextDecoder().decode(await call(IPC.cloudRead, { token: result.token, offset: 6, length: 5 }))).toBe('bytes');
+    expect(read).toHaveBeenCalledTimes(2);
+    for (const args of read.mock.calls) expect(args.slice(1)).toEqual([0, 5, 6]);
+  } finally { await call(IPC.cloudRelease, result.token); }
+});
 it('returns the owned read allocation directly, with independent bytes and exact short reads', async () => {
   const source = await file();
   const { call } = ipc(new CloudMediaService(vi.fn().mockResolvedValue('local'), vi.fn()));
