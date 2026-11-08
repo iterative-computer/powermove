@@ -418,7 +418,133 @@ fn apply_spacing(result: &mut ShapeResult, text: &[u16], item_start: usize, lett
 
 /// Measures `text` (UTF-16, as JavaScript holds it) like
 /// `CanvasRenderingContext2D.measureText(text).width`.
+/// `measure` remembered per font setup and text. A layout engine's face,
+/// fallback and prepared-face answers only ever stick within a session, so
+/// a repeated measurement equals the first (Blink keeps shaped words in the
+/// font's `ShapeCache` the same way). Text drawn every frame is shaped once.
 pub fn measure(
+    resolver: &mut dyn FontResolver,
+    cache: &mut PreparedCache,
+    setup: &FontSetup,
+    text: &[u16],
+) -> Measured {
+    let key = (setup_key(setup), text.to_vec());
+    if let Some(measured) = cache.measured.get(&key) {
+        return measured;
+    }
+    let measured = measure_uncached(resolver, cache, setup, text);
+    cache.measured.insert(key, measured.clone());
+    measured
+}
+
+/// Every field of `setup`, as bits.
+fn setup_key(setup: &FontSetup) -> Vec<u64> {
+    let FontSetup {
+        group,
+        desc,
+        specified,
+        seeded_opsz,
+        letter_spacing,
+        primary,
+    } = setup;
+    let FontDesc {
+        weight,
+        italic,
+        size,
+    } = desc;
+    let mut key = vec![
+        u64::from(weight.to_bits()),
+        u64::from(*italic),
+        u64::from(size.to_bits()),
+        u64::from(specified.to_bits()),
+        u64::from(letter_spacing.to_bits()),
+        primary.map_or(u64::MAX, u64::from),
+        group.len() as u64,
+    ];
+    for font in group {
+        match font {
+            GroupFont::Installed(face) => key.extend([0, u64::from(*face)]),
+            GroupFont::Custom { face, settings } => {
+                key.extend([1, u64::from(*face), settings.len() as u64]);
+                key.extend(
+                    settings
+                        .iter()
+                        .map(|(tag, value)| (u64::from(*tag) << 32) | u64::from(value.to_bits())),
+                );
+            }
+        }
+    }
+    key.extend(
+        seeded_opsz
+            .iter()
+            .map(|(face, size)| (u64::from(*face) << 32) | u64::from(size.to_bits())),
+    );
+    key
+}
+
+/// A measurement's font setup bits and text.
+type MeasureKey = (Vec<u64>, Vec<u16>);
+
+/// Bounded LRU of measurements (see [`measure`]).
+#[derive(Default)]
+pub struct MeasureMemo {
+    /// The measurement, when it was last used, and its retained bytes.
+    entries: std::collections::HashMap<MeasureKey, (Measured, u64, usize)>,
+    order: std::collections::BTreeMap<u64, MeasureKey>,
+    tick: u64,
+    bytes: usize,
+}
+
+/// Measurements kept per session.
+const MEASURE_MEMO_BYTES: usize = 8 * 1024 * 1024;
+
+impl MeasureMemo {
+    fn get(&mut self, key: &MeasureKey) -> Option<Measured> {
+        let (measured, used, _) = self.entries.get_mut(key)?;
+        self.tick += 1;
+        let key = self.order.remove(used).expect("ordered entry");
+        *used = self.tick;
+        let measured = measured.clone();
+        self.order.insert(self.tick, key);
+        Some(measured)
+    }
+
+    fn insert(&mut self, key: MeasureKey, measured: Measured) {
+        let bytes = (key.0.len() * 8 + key.1.len() * 2) * 2
+            + measured
+                .items
+                .iter()
+                .flat_map(|item| &item.runs)
+                .map(|run| {
+                    std::mem::size_of_val(run)
+                        + run.glyphs.len() * std::mem::size_of::<super::shaper::GlyphData>()
+                        + run.coords.len() * 8
+                })
+                .sum::<usize>()
+            + std::mem::size_of::<Measured>();
+        if bytes > MEASURE_MEMO_BYTES {
+            return;
+        }
+        while self.bytes + bytes > MEASURE_MEMO_BYTES {
+            let Some((_, oldest)) = self.order.pop_first() else {
+                break;
+            };
+            if let Some((_, _, freed)) = self.entries.remove(&oldest) {
+                self.bytes -= freed;
+            }
+        }
+        self.tick += 1;
+        self.order.insert(self.tick, key.clone());
+        self.entries.insert(key, (measured, self.tick, bytes));
+        self.bytes += bytes;
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn measure_uncached(
     resolver: &mut dyn FontResolver,
     cache: &mut PreparedCache,
     setup: &FontSetup,
