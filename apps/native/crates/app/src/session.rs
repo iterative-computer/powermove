@@ -1383,6 +1383,12 @@ impl Controller {
         }
         match cmd.name.as_str() {
             "v4.platform" => self.builtin_platform(window, cx),
+            "text.editSelected" => {
+                let Some(gizmos) = self.builtins.gizmos.clone() else {
+                    return false;
+                };
+                return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+            }
             "toggleLayerControls" => {
                 if let Some(gizmos) = self.builtins.gizmos.clone() {
                     gizmos.update(cx, |g, cx| g.toggle_controls(cx));

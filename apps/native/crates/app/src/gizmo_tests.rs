@@ -1,6 +1,6 @@
 //! Viewer gizmos: real pointer input through the mounted viewer panel into kernel
 //! gestures. The scene is real; the engine overlay is observed at its entry point.
-use crate::gizmo::{GizmoSurface, Host, Navigate, Tool, ViewFrame};
+use crate::gizmo::{GizmoSurface, Host, Navigate, Tool, ViewFrame, text::TextInput};
 use crate::v4_view::{Natives, SurfaceView};
 use crate::v4_view_tests::{
     PROJECT, Rig, bounds, publication, rig, rig_project, settle, tokens, window,
@@ -9,6 +9,7 @@ use gpui::{
     App, AppContext, Bounds, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
     VisualTestContext, point, px,
 };
+use gpui_macos::native_text::TextEvent;
 use pm_engine_service::OverlayLine;
 use pm_kernel::{Call, Caller, HistoryCall, Request, SelectionCall};
 use std::{
@@ -23,6 +24,75 @@ struct Recorder {
     tool: Cell<Option<Tool>>,
     navigation: RefCell<Vec<Navigate>>,
     menus: Cell<usize>,
+    commands: RefCell<Vec<String>>,
+    input: RefCell<Option<Rc<FakeInput>>>,
+}
+/// The canvas editor without AppKit: typing is an event, as from NSTextView.
+#[derive(Default)]
+pub(crate) struct FakeInput {
+    value: RefCell<String>,
+    selection: Cell<(usize, usize)>,
+    events: RefCell<Vec<TextEvent>>,
+    wake: RefCell<Option<Rc<dyn Fn()>>>,
+    focused: Cell<bool>,
+}
+impl FakeInput {
+    fn send(&self, event: TextEvent) {
+        self.events.borrow_mut().push(event);
+        let wake = self.wake.borrow().clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+    fn type_text(&self, text: &str) {
+        self.value.borrow_mut().push_str(text);
+        let n = self.value.borrow().encode_utf16().count();
+        self.selection.set((n, n));
+        self.send(TextEvent::Changed(self.value.borrow().clone()));
+    }
+    fn key(&self, key: &'static str) {
+        self.send(TextEvent::Key(key));
+    }
+}
+impl TextInput for FakeInput {
+    fn value(&self) -> String {
+        self.value.borrow().clone()
+    }
+    fn selection(&self) -> (usize, usize) {
+        self.selection.get()
+    }
+    fn set_selection(&self, start: usize, end: usize) {
+        let n = self.value.borrow().encode_utf16().count();
+        self.selection.set((start.min(n), end.min(n)));
+    }
+    fn replace_value(&self, value: &str) {
+        *self.value.borrow_mut() = value.into();
+    }
+    fn composing(&self) -> bool {
+        false
+    }
+    fn focused(&self) -> bool {
+        self.focused.get()
+    }
+    fn focus(&self) {
+        self.focused.set(true);
+    }
+    fn set_font(&self, _: &str, _: f64) {}
+    fn misspelled(&self) -> Vec<(usize, usize)> {
+        vec![]
+    }
+    fn context_menu(&self, _: (usize, usize)) {}
+    fn place(&self, _: Bounds<Pixels>, _: Bounds<Pixels>) {}
+    fn stage_caret(&self, _: Option<(Bounds<Pixels>, Bounds<Pixels>)>) {}
+    fn marked_range(&self) -> Option<(usize, usize)> {
+        None
+    }
+    fn take_events(&self) -> Vec<TextEvent> {
+        std::mem::take(&mut *self.events.borrow_mut())
+    }
+    fn on_event(&self, wake: Rc<dyn Fn()>) {
+        *self.wake.borrow_mut() = Some(wake);
+    }
 }
 struct Recording(Rc<Recorder>);
 impl Host for Recording {
@@ -53,6 +123,20 @@ impl Host for Recording {
     }
     fn report(&self, message: String, _: &mut App) {
         self.0.reports.borrow_mut().push(message);
+    }
+    fn command(&self, name: &str, _: &mut App) {
+        self.0.commands.borrow_mut().push(name.into());
+    }
+    fn text_input(
+        &self,
+        initial: &str,
+        _: &mut gpui::Window,
+        _: &mut App,
+    ) -> Option<Rc<dyn TextInput>> {
+        let input = Rc::new(FakeInput::default());
+        *input.value.borrow_mut() = initial.into();
+        *self.0.input.borrow_mut() = Some(input.clone());
+        Some(input)
     }
 }
 struct Stage {
@@ -112,6 +196,12 @@ fn stage(cx: &mut TestAppContext) -> Stage {
     stage_on(cx, &project())
 }
 fn stage_on(cx: &mut TestAppContext, project: &str) -> Stage {
+    let mut stage = unposed(cx, project);
+    stage.refresh(cx);
+    stage
+}
+/// A stage that does not wait for a box (headless text has no fonts).
+fn unposed(cx: &mut TestAppContext, project: &str) -> Stage {
     let rig = rig_project("viewer", project);
     rig.kernel
         .call(
@@ -138,15 +228,13 @@ fn stage_on(cx: &mut TestAppContext, project: &str) -> Stage {
         .borrow_mut()
         .insert("viewer.gizmos".into(), surface.clone().into());
     let (view, vcx) = window(cx, &rig, first, natives);
-    let mut stage = Stage {
+    Stage {
         rig,
         surface,
         recorder,
         vcx,
         _view: view,
-    };
-    stage.refresh(cx);
-    stage
+    }
 }
 impl Stage {
     fn refresh(&mut self, cx: &mut TestAppContext) {
@@ -749,4 +837,144 @@ fn the_shape_tool_draws_a_mask_on_a_selected_image(cx: &mut TestAppContext) {
     assert_eq!(channel(&layer, true, "h"), Some(40.));
     let p = s.rig.kernel.published(PROJECT).unwrap();
     assert_eq!(p.selection.layers(), ["l0".to_string()]);
+}
+
+fn text_of(layer: &pm_model::Value) -> Option<String> {
+    layer.get("d")?.get("text")?.as_str().map(str::to_owned)
+}
+/// The Text tool's click makes a layer inside one gesture: typing writes it,
+/// Command-Return commits, the layer is named after its text, the tool goes
+/// back to Select and one Undo removes it all.
+#[gpui::test]
+fn the_text_tool_types_a_new_layer_in_one_undo_step(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Text));
+    let at = s.point_of([400., 300.]);
+    s.vcx.simulate_click(at, Modifiers::none());
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.input.borrow().is_some());
+    let input = s.recorder.input.borrow().clone().unwrap();
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+    });
+    let id = s.rig.kernel.published(PROJECT).unwrap().selection.layers()[0].clone();
+    for part in ["Hel", "lo", " there"] {
+        input.type_text(part);
+        cx.run_until_parked();
+    }
+    let kernel = s.rig.kernel.clone();
+    let probe = id.clone();
+    settle(cx, move |_| {
+        layer_value(&kernel, &probe)
+            .and_then(|l| text_of(&l))
+            .as_deref()
+            == Some("Hello there")
+    });
+    input.key("commit");
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.text_open().is_none())
+    });
+    let layer = layer_value(&s.rig.kernel, &id).unwrap();
+    assert_eq!(
+        layer.get("type").and_then(pm_model::Value::as_str),
+        Some("text")
+    );
+    assert_eq!(
+        layer.get("name").and_then(pm_model::Value::as_str),
+        Some("Hello there")
+    );
+    assert_eq!(channel(&layer, false, "position.x"), Some(400.));
+    assert_eq!(s.recorder.commands.borrow().as_slice(), ["toolSelect"]);
+    let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
+    s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
+    assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
+    assert!(layer_value(&s.rig.kernel, "l0").is_some());
+}
+/// Leaving a fresh layer empty leaves no layer and no history entry.
+#[gpui::test]
+fn an_empty_new_text_leaves_nothing_behind(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Text));
+    let at = s.point_of([400., 300.]);
+    s.vcx.simulate_click(at, Modifiers::none());
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.input.borrow().is_some());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+    });
+    let id = s.rig.kernel.published(PROJECT).unwrap().selection.layers()[0].clone();
+    let input = s.recorder.input.borrow().clone().unwrap();
+    input.focused.set(false);
+    input.send(TextEvent::Blurred);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.text_open().is_none())
+    });
+    assert!(layer_value(&s.rig.kernel, &id).is_none());
+    let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
+    let reply = s
+        .rig
+        .kernel
+        .call(PROJECT, undo)
+        .wait()
+        .unwrap()
+        .unwrap()
+        .reply;
+    assert!(layer_value(&s.rig.kernel, "l0").is_some(), "{reply:?}");
+    assert!(
+        !matches!(reply, pm_kernel::Reply::Bool(true)),
+        "nothing to undo: {reply:?}"
+    );
+}
+/// Return edits the selected text layer; Escape (a blur) commits the change
+/// as one "Edit Text" step that Undo reverts.
+#[gpui::test]
+fn return_edits_the_selected_text_and_undo_reverts_it(cx: &mut TestAppContext) {
+    let mut s = unposed(
+        cx,
+        &project_of("text").replace(r#""d":{"w":100,"h":100}"#, r#""d":{"text":"Hi"}"#),
+    );
+    let surface = s.surface.clone();
+    surface.update_in(&mut s.vcx, |g, window, cx| {
+        assert!(g.edit_selected_text(window, cx))
+    });
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.input.borrow().is_some());
+    let input = s.recorder.input.borrow().clone().unwrap();
+    assert_eq!(input.value(), "Hi");
+    input.type_text(" all");
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        layer_value(&kernel, "l0")
+            .and_then(|l| text_of(&l))
+            .as_deref()
+            == Some("Hi all")
+    });
+    input.focused.set(false);
+    input.send(TextEvent::Blurred);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.text_open().is_none())
+    });
+    assert_eq!(
+        layer_value(&s.rig.kernel, "l0")
+            .and_then(|l| text_of(&l))
+            .as_deref(),
+        Some("Hi all")
+    );
+    assert!(
+        s.recorder.commands.borrow().is_empty(),
+        "the Select tool stays"
+    );
+    let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
+    s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
+    assert_eq!(
+        layer_value(&s.rig.kernel, "l0")
+            .and_then(|l| text_of(&l))
+            .as_deref(),
+        Some("Hi")
+    );
 }

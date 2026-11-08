@@ -10,6 +10,8 @@ use pm_kernel::{
 use pm_model::Value;
 use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
 use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
+#[path = "text_edit.rs"]
+pub mod text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -19,6 +21,7 @@ pub enum Tool {
     Rotate,
     Anchor,
     Shape,
+    Text,
     Other,
 }
 /// Viewer navigation the pointer asks for.
@@ -134,6 +137,14 @@ pub trait Host: 'static {
     /// The shared layer menu, on the selection the press made.
     fn layer_menu(&self, window: &mut Window, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
+    /// Editing tools stop playback first.
+    fn pause(&self, _: &mut App) {}
+    /// A shell command (the tool returning to Select).
+    fn command(&self, _: &str, _: &mut App) {}
+    /// The native editor an on-canvas text session types into.
+    fn text_input(&self, _: &str, _: &mut Window, _: &mut App) -> Option<Rc<dyn text::TextInput>> {
+        None
+    }
 }
 /// One selected layer's pose at the current time, in composition pixels.
 #[derive(Clone, Debug)]
@@ -216,6 +227,10 @@ pub struct GizmoSurface {
     refreshing: bool,
     /// A Shape tool drag: where it started and the box drawn so far.
     sketch: Option<Sketch>,
+    /// A Text tool press, until its release decides what it makes.
+    text_sketch: Option<text::TextSketch>,
+    /// The on-canvas text edit.
+    text: Option<text::TextSession>,
 }
 struct Sketch {
     origin: Point<Pixels>,
@@ -423,6 +438,8 @@ impl GizmoSurface {
             cursor: CursorStyle::Arrow,
             refreshing: false,
             sketch: None,
+            text_sketch: None,
+            text: None,
         }
     }
     /// Selection, document or playhead moved. The Controller calls in during its
@@ -437,6 +454,7 @@ impl GizmoSurface {
             this.update(cx, |s, cx| {
                 s.refreshing = false;
                 s.reread(cx);
+                s.text_reread(cx);
             });
         });
     }
@@ -481,9 +499,15 @@ impl GizmoSurface {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
-        let poses: &[Pose] = if self.controls { &self.poses } else { &[] };
+        let editing = self.text_session().is_some();
+        let poses: &[Pose] = if self.controls && !editing {
+            &self.poses
+        } else {
+            &[]
+        };
         let mut lines = overlay(poses, frame, &self.tokens);
-        if let Some(shape) = self.sketch.as_ref().and_then(|s| s.shape) {
+        let drawn = self.sketch.as_ref().and_then(|s| s.shape);
+        if let Some(shape) = drawn.or(self.text_sketch.as_ref().and_then(|s| s.shape)) {
             let [w, h] = frame.size;
             let c = shape.corners();
             for i in 0..4 {
@@ -512,8 +536,15 @@ impl GizmoSurface {
             return;
         };
         let at = self.to_comp(position, frame);
-        let cursor = match self.host.tool(cx) {
+        let tool = self.host.tool(cx);
+        let in_text = !matches!(tool, Tool::Hand | Tool::Zoom)
+            && self
+                .text_session()
+                .is_some_and(|s| s.contains(at, frame.scale));
+        let cursor = match tool {
+            _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
+            Tool::Text => CursorStyle::IBeam,
             Tool::Anchor | Tool::Zoom | Tool::Shape => CursorStyle::Crosshair,
             _ => match self.handle_at(at, frame.scale) {
                 Some(Hit::Handle(index)) => self.poses[0].cursor(index),
@@ -548,12 +579,23 @@ impl GizmoSurface {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| Hit::Handle(i))
     }
-    fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+    fn on_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
         let at = self.to_comp(event.position, frame);
         let time = self.host.time(cx);
+        let mut tool = self.host.tool(cx);
+        // An open text edit owns presses on its text; any other press commits
+        // it and then acts as a Select-tool click.
+        if self.text_session().is_some() && !matches!(tool, Tool::Hand | Tool::Zoom) {
+            if self.text_press(event, at, frame.scale) {
+                cx.notify();
+                return;
+            }
+            self.finish_text(false, cx);
+            tool = Tool::Select;
+        }
         let start = |hit, click| Drag {
             hit,
             origin: event.position,
@@ -569,8 +611,17 @@ impl GizmoSurface {
             deep,
             time,
         };
-        let drag = match self.host.tool(cx) {
+        let drag = match tool {
             Tool::Other => return,
+            Tool::Text => {
+                self.text_sketch = Some(text::TextSketch {
+                    origin: event.position,
+                    start: at,
+                    shift: event.modifiers.shift,
+                    shape: None,
+                });
+                return;
+            }
             Tool::Hand => {
                 self.panning = Some(event.position);
                 return;
@@ -603,6 +654,10 @@ impl GizmoSurface {
                 }
                 _ => None,
             },
+            Tool::Select if event.click_count == 2 => {
+                self.text_double_click(at, window, cx);
+                None
+            }
             Tool::Select => {
                 let inside_selection = self.poses.iter().any(|p| inside(&p.corners, at));
                 if let Some(hit) = self.handle_at(at, frame.scale) {
@@ -627,13 +682,17 @@ impl GizmoSurface {
             return;
         };
         let at = self.to_comp(event.position, frame);
+        cx.stop_propagation();
+        if self.text_context(at, frame.scale) {
+            return;
+        }
+        self.finish_text(false, cx);
         let press = Press {
             at,
             shift: false,
             deep: false,
             time: self.host.time(cx),
         };
-        cx.stop_propagation();
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
         let handle = window.window_handle();
         self.picks += 1;
@@ -753,8 +812,14 @@ impl GizmoSurface {
             self.host.navigate(Navigate::Pan(event.position - last), cx);
             return;
         }
-        if self.sketch.is_some() {
+        if self.sketch.is_some() || self.text_sketch.is_some() {
             self.sketch_move(event, cx);
+            return;
+        }
+        if let Some(frame) = self.host.frame(self.bounds, cx)
+            && self.text_drag(self.to_comp(event.position, frame))
+        {
+            cx.notify();
             return;
         }
         if self.drag.is_none() {
@@ -795,9 +860,19 @@ impl GizmoSurface {
         self.queue.push_back(Job::Step(commands));
         self.pump(cx);
     }
-    fn on_up(&mut self, commit: bool, cx: &mut Context<Self>) {
+    fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         self.panning = None;
+        if self.text_release() {
+            return;
+        }
+        if let Some(sketch) = self.text_sketch.take() {
+            self.draw(cx);
+            if let (true, Some(window)) = (commit, window) {
+                self.text_tool_release(sketch, window, cx);
+            }
+            return;
+        }
         if let Some(sketch) = self.sketch.take() {
             if let Some(shape) = sketch.shape.filter(|_| commit) {
                 self.create_shape(shape, cx);
@@ -816,10 +891,13 @@ impl GizmoSurface {
         }
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.drag.is_none() && self.sketch.is_none() {
+        if self.finish_text(false, cx) {
+            return true;
+        }
+        if self.drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
             return false;
         }
-        self.on_up(false, cx);
+        self.on_up(false, None, cx);
         true
     }
     /// The box follows the pointer once it passes the drag threshold;
@@ -830,19 +908,21 @@ impl GizmoSurface {
         };
         let at = self.to_comp(event.position, frame);
         let threshold = self.tokens.metrics.drag_threshold;
-        let Some(sketch) = self.sketch.as_mut() else {
+        let m = event.modifiers;
+        let (origin, start, shape, square) = if let Some(s) = self.sketch.as_mut() {
+            (s.origin, s.start, &mut s.shape, m.shift)
+        } else if let Some(s) = self.text_sketch.as_mut() {
+            // A text box keeps its proportions free.
+            (s.origin, s.start, &mut s.shape, false)
+        } else {
             return;
         };
-        let moved = event.position - sketch.origin;
-        if sketch.shape.is_none() && f32::from(moved.x).hypot(f32::from(moved.y)) < threshold {
+        let moved = event.position - origin;
+        if shape.is_none() && f32::from(moved.x).hypot(f32::from(moved.y)) < threshold {
             return;
         }
-        let m = event.modifiers;
-        sketch.shape = Some(crate::shape_tool::ShapeBox::from_drag(
-            sketch.start,
-            at,
-            m.alt,
-            m.shift,
+        *shape = Some(crate::shape_tool::ShapeBox::from_drag(
+            start, at, m.alt, square,
         ));
         self.draw(cx);
     }
@@ -961,6 +1041,10 @@ impl GizmoSurface {
             });
         })
         .detach();
+    }
+    #[cfg(test)]
+    pub fn text_open(&self) -> Option<&text::TextSession> {
+        self.text.as_ref()
     }
     #[cfg(test)]
     pub fn idle(&self) -> bool {
@@ -1323,7 +1407,7 @@ impl Render for GizmoSurface {
             .cursor(self.cursor)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
+                cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),
             )
             .on_mouse_down(
                 MouseButton::Right,
@@ -1347,7 +1431,12 @@ impl Render for GizmoSurface {
                             let _ = this.update(cx, |s, _| s.bounds = bounds);
                         }
                     },
-                    move |_, _, window, _| {
+                    move |_, _, window, cx| {
+                        let _ = this.update(cx, |s, cx| {
+                            if let Some(frame) = s.host.frame(s.bounds, cx) {
+                                s.text_paint(frame, window);
+                            }
+                        });
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -1355,9 +1444,10 @@ impl Render for GizmoSurface {
                             }
                         });
                         let released = this.clone();
-                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
-                                let _ = released.update(cx, |s, cx| s.on_up(true, cx));
+                                let _ =
+                                    released.update(cx, |s, cx| s.on_up(true, Some(window), cx));
                             }
                         });
                     },

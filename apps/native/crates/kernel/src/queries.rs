@@ -363,6 +363,18 @@ impl QueryContext {
         matrix6(self.layer_query("worldMatrix", comp_id, layer_id, t, &[])?)
     }
 
+    /// A text layer's caret geometry at `t` (`PM.textLayout` / raster.ts
+    /// `textCaretLayout`): lines with UTF-16 caret boundaries in layer
+    /// space. May answer *needs fonts*.
+    pub fn text_layout(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+    ) -> Result<Value, QueryError> {
+        self.layer_query("textLayout", comp_id, layer_id, t, &[])
+    }
+
     // ── geometry ───────────────────────────────────────────────────────────
 
     /// The layer's bounds, or `None` when it has none at `t` (inactive or

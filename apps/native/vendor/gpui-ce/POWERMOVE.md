@@ -200,3 +200,10 @@ identical rendered pixels, and a child notification invalidates its cache.
 Reproduction and open gates: `docs/native/s2-gpui-ce.md`. Upstream intent is an
 optional native text-slot facility and idempotent frame-source start; no submission
 has been made. No measurements from a locked or occluded session certify pacing.
+- **P-TEXT / canvas kind:** `TextKind::Canvas` is an invisible `NSTextView`
+  (alpha 0, inside a hit-test-transparent host) that owns typing, IME, dictation,
+  emoji and spelling while the app draws the text from its engine. It reports
+  `Selection`, editing chords (`Key`) and `Blurred` instead of committing, keeps
+  its last placement when a frame skips its host's paint (so it stays first
+  responder), and shows the system insertion point (`NSTextInsertionIndicator`)
+  at a caret rectangle the host stages.

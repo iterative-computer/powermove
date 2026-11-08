@@ -249,14 +249,7 @@ pub const PLANNED: [&str; 24] = [
     "splitTextLines",
 ];
 /// Menu rows with no working path yet. They stay visible and disabled.
-pub const UNAVAILABLE: [&str; 6] = [
-    "help",
-    "text.editSelected",
-    "toolPen",
-    "toolText",
-    "importSequence",
-    "importFolder",
-];
+pub const UNAVAILABLE: [&str; 4] = ["help", "toolPen", "importSequence", "importFolder"];
 fn selection_plan(ids: Vec<String>) -> Plan {
     Plan {
         label: "Select".into(),

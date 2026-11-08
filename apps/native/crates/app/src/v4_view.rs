@@ -494,6 +494,8 @@ impl SurfaceView {
                             this.change(id, json!(""), cx);
                         }
                     }
+                    // Canvas editors only.
+                    TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
                 }
             },
         ));
