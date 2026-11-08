@@ -619,6 +619,39 @@ fn an_external_file_opens_in_place_and_its_library_entry_keeps_its_name() {
     assert!(saved.contains("Fixture"), "saved in place");
 }
 #[test]
+fn a_clean_close_leaves_no_journal_for_quit_or_the_next_open() {
+    let dir = common::TempDir::new("clean-close");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let open = |k: &mut Kernel| {
+        let ShellReply::Opened {
+            session, recovery, ..
+        } = k
+            .shell(ShellCall::PrepareOpen {
+                id: "F".into(),
+                source: SessionSource::File(file.clone()),
+                electron_profile: None,
+            })
+            .unwrap()
+        else {
+            panic!("a saved project opens without a recovery question")
+        };
+        assert_eq!(recovery, RecoveryResult::None);
+        session
+    };
+    let session = open(&mut k);
+    edit(&mut k, "F", 20.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+    // Quit compacts only work that is not already saved.
+    let ShellReply::Compacted { projects, .. } = k.shell(ShellCall::CompactAll).unwrap() else {
+        panic!()
+    };
+    assert_eq!(projects, 0);
+    let session = open(&mut k);
+    k.shell(ShellCall::Close(session)).unwrap();
+}
+#[test]
 fn foreign_electron_library_is_readonly_and_copy_identity_is_new() {
     let dir = common::TempDir::new("foreign-copy");
     let source = dir.path("electron");

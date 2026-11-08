@@ -382,7 +382,18 @@ impl Kernel {
                 };
                 self.flush_project(&handle.project)?;
                 self.durability_barrier()?;
+                let journals = self.project_dir(&handle.project);
                 self.remove_closed_project(&handle.project);
+                // Saved where it belongs and durable: the journal holds nothing
+                // more. Left behind, every quit reopened the project to compact
+                // it, and a later open asked to recover work that was saved.
+                if recovery_copy.is_none()
+                    && let Some(dir) = journals
+                {
+                    for session in crate::journal::sessions(&dir) {
+                        std::fs::remove_dir_all(session).map_err(failure)?;
+                    }
+                }
                 Ok(ShellReply::Closed { recovery_copy })
             }
             ShellCall::CompactAll => {

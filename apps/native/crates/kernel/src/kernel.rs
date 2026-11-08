@@ -164,7 +164,7 @@ impl Kernel {
         self.durability.as_ref()
     }
 
-    fn project_dir(&self, id: &str) -> Option<PathBuf> {
+    pub(crate) fn project_dir(&self, id: &str) -> Option<PathBuf> {
         let durable_id = self
             .sessions
             .get(id)
