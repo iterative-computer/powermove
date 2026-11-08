@@ -753,7 +753,7 @@ impl<R: FontResolver> TextMeasure for CompatMeasure<R> {
     }
     fn measure_lines(&mut self, d: &TextContent) -> Vec<MeasuredLine> {
         let lines = self.compat.source_lines(d);
-        let shaped: Vec<(String, pm_text::blink::measure::Measured)> = {
+        let shaped: Vec<(String, std::sync::Arc<pm_text::blink::measure::Measured>)> = {
             let mut m = self.compat.measurer(d);
             lines
                 .iter()

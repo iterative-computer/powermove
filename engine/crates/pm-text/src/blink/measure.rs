@@ -427,18 +427,17 @@ pub fn measure(
     cache: &mut PreparedCache,
     setup: &FontSetup,
     text: &[u16],
-) -> Measured {
-    let key = (setup_key(setup), text.to_vec());
-    if let Some(measured) = cache.measured.get(&key) {
+) -> std::sync::Arc<Measured> {
+    if let Some(measured) = cache.measured.get(setup, text) {
         return measured;
     }
-    let measured = measure_uncached(resolver, cache, setup, text);
-    cache.measured.insert(key, measured.clone());
+    let measured = std::sync::Arc::new(measure_uncached(resolver, cache, setup, text));
+    cache.measured.insert(setup, text, measured.clone());
     measured
 }
 
-/// Every field of `setup`, as bits.
-fn setup_key(setup: &FontSetup) -> Vec<u64> {
+/// Every field of `setup`, as bits, in a fixed order.
+fn setup_bits(setup: &FontSetup, mut out: impl FnMut(u64)) {
     let FontSetup {
         group,
         desc,
@@ -452,7 +451,7 @@ fn setup_key(setup: &FontSetup) -> Vec<u64> {
         italic,
         size,
     } = desc;
-    let mut key = vec![
+    for bits in [
         u64::from(weight.to_bits()),
         u64::from(*italic),
         u64::from(size.to_bits()),
@@ -460,37 +459,59 @@ fn setup_key(setup: &FontSetup) -> Vec<u64> {
         u64::from(letter_spacing.to_bits()),
         primary.map_or(u64::MAX, u64::from),
         group.len() as u64,
-    ];
+    ] {
+        out(bits);
+    }
     for font in group {
         match font {
-            GroupFont::Installed(face) => key.extend([0, u64::from(*face)]),
+            GroupFont::Installed(face) => {
+                out(0);
+                out(u64::from(*face));
+            }
             GroupFont::Custom { face, settings } => {
-                key.extend([1, u64::from(*face), settings.len() as u64]);
-                key.extend(
-                    settings
-                        .iter()
-                        .map(|(tag, value)| (u64::from(*tag) << 32) | u64::from(value.to_bits())),
-                );
+                out(1);
+                out(u64::from(*face));
+                out(settings.len() as u64);
+                for (tag, value) in settings {
+                    out((u64::from(*tag) << 32) | u64::from(value.to_bits()));
+                }
             }
         }
     }
-    key.extend(
-        seeded_opsz
-            .iter()
-            .map(|(face, size)| (u64::from(*face) << 32) | u64::from(size.to_bits())),
-    );
-    key
+    for (face, size) in seeded_opsz {
+        out((u64::from(*face) << 32) | u64::from(size.to_bits()));
+    }
 }
 
-/// A measurement's font setup bits and text.
-type MeasureKey = (Vec<u64>, Vec<u16>);
+struct MemoEntry {
+    setup: Box<[u64]>,
+    text: Box<[u16]>,
+    measured: std::sync::Arc<Measured>,
+    used: u64,
+    bytes: usize,
+}
 
-/// Bounded LRU of measurements (see [`measure`]).
+impl MemoEntry {
+    fn is(&self, setup: &FontSetup, text: &[u16]) -> bool {
+        if *self.text != *text {
+            return false;
+        }
+        let (mut at, mut same) = (0, true);
+        setup_bits(setup, |bits| {
+            same &= self.setup.get(at) == Some(&bits);
+            at += 1;
+        });
+        same && at == self.setup.len()
+    }
+}
+
+/// Bounded LRU of measurements (see [`measure`]). Lookups allocate nothing.
 #[derive(Default)]
 pub struct MeasureMemo {
-    /// The measurement, when it was last used, and its retained bytes.
-    entries: std::collections::HashMap<MeasureKey, (Measured, u64, usize)>,
-    order: std::collections::BTreeMap<u64, MeasureKey>,
+    /// By hash of the setup and text; entries confirm the key.
+    entries: std::collections::HashMap<u64, Vec<MemoEntry>>,
+    /// Least recently used first: `used` tick to hash.
+    order: std::collections::BTreeMap<u64, u64>,
     tick: u64,
     bytes: usize,
 }
@@ -498,19 +519,34 @@ pub struct MeasureMemo {
 /// Measurements kept per session.
 const MEASURE_MEMO_BYTES: usize = 8 * 1024 * 1024;
 
+fn memo_hash(setup: &FontSetup, text: &[u16]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    setup_bits(setup, |bits| bits.hash(&mut h));
+    text.hash(&mut h);
+    h.finish()
+}
+
 impl MeasureMemo {
-    fn get(&mut self, key: &MeasureKey) -> Option<Measured> {
-        let (measured, used, _) = self.entries.get_mut(key)?;
+    fn get(&mut self, setup: &FontSetup, text: &[u16]) -> Option<std::sync::Arc<Measured>> {
+        let hash = memo_hash(setup, text);
+        let entry = self
+            .entries
+            .get_mut(&hash)?
+            .iter_mut()
+            .find(|e| e.is(setup, text))?;
         self.tick += 1;
-        let key = self.order.remove(used).expect("ordered entry");
-        *used = self.tick;
-        let measured = measured.clone();
-        self.order.insert(self.tick, key);
-        Some(measured)
+        self.order.remove(&entry.used);
+        entry.used = self.tick;
+        self.order.insert(self.tick, hash);
+        Some(entry.measured.clone())
     }
 
-    fn insert(&mut self, key: MeasureKey, measured: Measured) {
-        let bytes = (key.0.len() * 8 + key.1.len() * 2) * 2
+    fn insert(&mut self, setup: &FontSetup, text: &[u16], measured: std::sync::Arc<Measured>) {
+        let mut bits = Vec::new();
+        setup_bits(setup, |b| bits.push(b));
+        let bytes = bits.len() * 8
+            + text.len() * 2
             + measured
                 .items
                 .iter()
@@ -521,21 +557,33 @@ impl MeasureMemo {
                         + run.coords.len() * 8
                 })
                 .sum::<usize>()
-            + std::mem::size_of::<Measured>();
+            + std::mem::size_of::<MemoEntry>();
         if bytes > MEASURE_MEMO_BYTES {
             return;
         }
         while self.bytes + bytes > MEASURE_MEMO_BYTES {
-            let Some((_, oldest)) = self.order.pop_first() else {
+            let Some((used, hash)) = self.order.pop_first() else {
                 break;
             };
-            if let Some((_, _, freed)) = self.entries.remove(&oldest) {
-                self.bytes -= freed;
+            if let Some(bucket) = self.entries.get_mut(&hash)
+                && let Some(at) = bucket.iter().position(|e| e.used == used)
+            {
+                self.bytes -= bucket.swap_remove(at).bytes;
+                if bucket.is_empty() {
+                    self.entries.remove(&hash);
+                }
             }
         }
+        let hash = memo_hash(setup, text);
         self.tick += 1;
-        self.order.insert(self.tick, key.clone());
-        self.entries.insert(key, (measured, self.tick, bytes));
+        self.order.insert(self.tick, hash);
+        self.entries.entry(hash).or_default().push(MemoEntry {
+            setup: bits.into_boxed_slice(),
+            text: text.into(),
+            measured,
+            used: self.tick,
+            bytes,
+        });
         self.bytes += bytes;
     }
 
