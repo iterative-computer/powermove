@@ -683,6 +683,28 @@ mod tests {
         assert_eq!(*producing.lock().unwrap(), vec![true, false, true, false]);
     }
     #[test]
+    fn tool_and_viewer_services_follow_the_shell() {
+        let runner = dom_runner();
+        let value = runner
+            .json("(()=>{const s=__compat.realm.services;const t=s.get('tool'),v=s.get('viewer');let heard=null;__compat.realm.PM.bus.on('tool',x=>heard=x);
+                const before=[t.tool,v.zoom,v.fit,v.stage];__compat.shellState({tool:'hand'});__compat.shellState({zoom:2,fit:false,pan:[3,4]});
+                return [before,t.tool,heard,v.zoom,v.fit,v.pan,v.setZoom(1),typeof v.layout]})()")
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                ["select", 1, true, null],
+                "hand",
+                "hand",
+                2,
+                false,
+                [3, 4],
+                false,
+                "function"
+            ])
+        );
+    }
+    #[test]
     fn ui_modal_keeps_main_semantics_with_native_frame_data() {
         let runner = dom_runner();
         let value = runner

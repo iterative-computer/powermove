@@ -458,6 +458,16 @@ impl Controller {
                     }
                 }
             },
+            // The `tool` service's setTool: only the shell's tool commands.
+            Some("command") => {
+                if let Some(name) = request["name"].as_str().filter(|n| {
+                    n.starts_with("tool")
+                        && n.len() > 4
+                        && n.chars().all(|c| c.is_ascii_alphabetic())
+                }) {
+                    self.host.borrow().send_command(name, vec![]);
+                }
+            }
             Some("download") => {
                 let url = request["url"].as_str().unwrap_or_default().to_owned();
                 self.download_for_extension(token, url, cx);

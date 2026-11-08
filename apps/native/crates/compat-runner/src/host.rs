@@ -93,6 +93,8 @@ enum Input {
     Answer(u64, Value),
     /// A batch of layers the viewer needs override answers for.
     Rasters(u64, Value),
+    /// The shell's tool and the viewer's navigation, for built-in services.
+    Shell(Value),
     Menu(String, Value, u64),
     StorePage(String, u64, Value),
     StoreDom(String),
@@ -482,6 +484,11 @@ impl ExtensionHost {
     pub fn rasters(&self, batch: u64, needs: Value) {
         let _ = self.inbox.send(Input::Rasters(batch, needs));
     }
+    /// The shell's current tool (`{tool}`) or viewer navigation
+    /// (`{zoom, pan, fit}`), which the `tool` and `viewer` services report.
+    pub fn shell_state(&self, state: Value) {
+        let _ = self.inbox.send(Input::Shell(state));
+    }
     /// `rasters` for another thread (the engine's).
     pub fn raster_inbox(&self) -> Arc<dyn Fn(u64, Value) + Send + Sync> {
         let inbox = std::sync::Mutex::new(self.inbox.clone());
@@ -774,6 +781,9 @@ impl Owner {
             }
             Input::Answer(token, value) => {
                 self.eval(&format!("__compat.answer({token},{value})"));
+            }
+            Input::Shell(state) => {
+                self.eval(&format!("__compat.shellState({state})"));
             }
             Input::Rasters(batch, needs) => {
                 self.eval(&format!("__compat.answerRasters({batch},{needs})"));

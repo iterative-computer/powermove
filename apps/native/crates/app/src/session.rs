@@ -1368,6 +1368,12 @@ impl Controller {
     ) -> bool {
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
             self.tool = cmd.name.clone();
+            // The `tool` service names it as v1 did: toolSelect is "select".
+            if let Some(host) = &self.extensions.host {
+                let name = &cmd.name[4..];
+                let tool = name[..1].to_lowercase() + &name[1..];
+                host.shell_state(serde_json::json!({ "tool": tool }));
+            }
             return false;
         }
         if self.extension_command(cmd, cx) {

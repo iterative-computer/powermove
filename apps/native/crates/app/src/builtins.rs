@@ -920,6 +920,13 @@ impl Controller {
         after: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(host) = &self.extensions.host {
+            host.shell_state(serde_json::json!({
+                "zoom": self.view.zoom.unwrap_or(1.),
+                "fit": self.view.zoom.is_none(),
+                "pan": self.view.pan,
+            }));
+        }
         self.view_write = Some(cx.spawn(async move |this, cx| {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;

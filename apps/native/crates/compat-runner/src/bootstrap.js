@@ -463,6 +463,53 @@ globalThis.__compat = {
     };
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
+    // Built-in services v1 registered for extensions: `tool` (the shell's tool)
+    // and `viewer` (its navigation; the native viewer has no DOM stage).
+    const shell = { tool: "select", toolShape: "rect", zoom: 1, pan: [0, 0], fit: true };
+    this.shellState = (state) => {
+      const tool = state.tool !== undefined && state.tool !== shell.tool;
+      Object.assign(shell, state);
+      if (tool) this.realm.PM.bus.emit("tool", shell.tool);
+    };
+    this.realm.services.register("tool", {
+      get tool() {
+        return shell.tool;
+      },
+      get toolShape() {
+        return shell.toolShape;
+      },
+      setTool: (tool, detail) => {
+        const name = String(tool ?? "");
+        if (!/^[a-z]+$/.test(name)) return;
+        if (detail !== undefined) shell.toolShape = String(detail);
+        call("ui.request", {
+          kind: "command",
+          name: "tool" + name[0].toUpperCase() + name.slice(1),
+        });
+      },
+    });
+    this.realm.services.register("viewer", {
+      get pan() {
+        return [...shell.pan];
+      },
+      get zoom() {
+        return shell.zoom;
+      },
+      get fit() {
+        return shell.fit;
+      },
+      shown: 1,
+      showControls: true,
+      stage: null,
+      ov: null,
+      layout: () => undefined,
+      attach: () => undefined,
+      worldBounds: (layer, time) => this.realm.PM.GL?.bounds?.(layer, time) ?? null,
+      snapshotSnapCandidates: () => ({ x: [], y: [] }),
+      isNavigating: () => false,
+      deferNavigationRender: () => false,
+      setZoom: () => false,
+    });
     this.realm.installGlobals(globalThis);
     __installNativeCanvas(this);
     if (globalThis.__extcheckClock)

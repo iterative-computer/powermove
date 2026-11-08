@@ -162,8 +162,13 @@ window is open is shown in it.
   frame is still a one-frame export in the engine process (`mcp_services::frame_renderer`);
   the last four are cached by revision, and a stopped task or the 30 s host deadline
   cancels it. `mbSamples` is not honoured: the engine picks its own sample count.
-- `api.services` holds only what extensions register; the built-in `viewer`,
-  `timeline`, `inspector`, `tool` and `shaderHooks` services do not exist natively.
+- Built-in services: `tool` follows the shell's tool (`toolSelect` is `select`; a
+  `tool` bus event on change; `setTool` runs the shell's tool command), and `viewer`
+  reports the viewer's zoom, pan and fit plus `worldBounds`. The native viewer is
+  Metal under no DOM, so `viewer.stage` and `ov` are `null` and `setZoom` returns
+  `false`: an extension drawing a DOM overlay on the viewer (displacement-origin-guide)
+  finds no stage and draws nothing. `timeline`, `inspector` and `shaderHooks` are not
+  registered.
 - `ui.modal` is a native sheet on the window: AppKit title and buttons (primary last,
   on Return), the extension's body DOM in a child web view the page moves it into; a
   button clicks a hidden twin in the realm, so actions run there with main's rules
