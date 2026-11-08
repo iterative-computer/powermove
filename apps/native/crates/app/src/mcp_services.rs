@@ -47,6 +47,12 @@ pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()>
     automation.media_registry = Some(jobs.clone());
     automation.threads = Some(jobs.clone());
     automation.engine = Some(jobs);
+    let extensions = crate::extension_authoring::AppExtensions::new(tools.host.profile.clone());
+    // Before any window scans: finish or undo a promotion a crash interrupted.
+    if let Err(error) = pm_mcp::extensions::recover_all(&extensions) {
+        eprintln!("Extension change recovery failed: {error}");
+    }
+    automation.extensions = Some(Arc::new(extensions));
     Ok(())
 }
 pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {

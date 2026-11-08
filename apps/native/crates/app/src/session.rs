@@ -1229,7 +1229,7 @@ impl Controller {
             self.tool = cmd.name.clone();
             return false;
         }
-        if self.extension_command(cmd) {
+        if self.extension_command(cmd, cx) {
             return true;
         }
         // Edit menu items reach a focused text field before the document.
