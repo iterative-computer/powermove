@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -38,6 +38,42 @@ it('preserves the old media unless a migration source matches its full checksum'
   const date = new Date('2026-01-01'); await utimes(source, date, date);
   await media.collectUnused(Date.parse('2026-10-14'));
   expect(await readFile(source, 'utf8')).toBe('original video');
+});
+
+it.each(['replace', 'edit'])('rejects a source %s that preserves its size and modification time', async change => {
+  const source = path.join(root, 'source.mp4');
+  await writeFile(source, 'original video');
+  const timestamp = new Date('2026-01-01T00:00:00Z');
+  await utimes(source, timestamp, timestamp);
+  const linked = await media.link(1, { key: 'clip', sourcePath: source, size: 14, type: 'video/mp4' });
+  const before = await stat(source);
+  // Warm playback's validation cache before a sync client changes the file.
+  const token = linked.url.split('/').at(-1)!;
+  await (await media.serve(token, new Request(linked.url))).arrayBuffer();
+  if (change === 'replace') {
+    await writeFile(source + '.incoming', 'different data');
+    await utimes(source + '.incoming', before.atime, before.mtime);
+    await rename(source + '.incoming', source);
+  } else {
+    await writeFile(source, 'different data');
+    await utimes(source, before.atime, before.mtime);
+  }
+  await expect(media.get(2, 'clip')).rejects.toThrow('Locate File');
+  expect((await media.serve(token, new Request(linked.url))).status).toBe(404);
+  const reopened = new LibraryMedia(root);
+  await expect(reopened.fileFor('clip')).rejects.toThrow('Locate File');
+});
+
+it('accepts identical bytes replaced by a sync client, including after a restart', async () => {
+  const source = path.join(root, 'source.mp4');
+  await writeFile(source, 'original video');
+  const linked = await media.link(1, { key: 'clip', sourcePath: source, size: 14, type: 'video/mp4' });
+  const token = linked.url.split('/').at(-1)!;
+  await (await media.serve(token, new Request(linked.url))).arrayBuffer();
+  await writeFile(source + '.incoming', 'original video');
+  await rename(source + '.incoming', source);
+  expect(await (await media.serve(token, new Request(linked.url))).text()).toBe('original video');
+  expect(await new LibraryMedia(root).fileFor('clip')).toBe(source);
 });
 
 it('reports moved sources for relinking without serving a different or symlinked file', async () => {
