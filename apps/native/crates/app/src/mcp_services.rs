@@ -261,8 +261,23 @@ pub(crate) fn frame_renderer(
         Arc::new(AtomicBool::new(false)),
         profile,
     );
-    Ok(Arc::new(move |time, width, height| {
+    // The last few frames by document revision: a panel that asks for the same
+    // frame again (thumbnails, a check on every redraw) gets it without a render.
+    let cache: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>> = Mutex::default();
+    Ok(Arc::new(move |request: &pm_compat_runner::FrameRequest| {
         let published = kernel.published(&project).ok_or("No open project")?;
+        let key = format!(
+            "{}:{}:{}:{}x{}:{}",
+            published.snapshot.doc_id,
+            published.revision(),
+            request.time.to_bits(),
+            request.width,
+            request.height,
+            request.motion_blur
+        );
+        if let Some((_, png)) = cache.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return Ok(png.as_ref().clone());
+        }
         let root = published.snapshot.root().ok_or("No open project")?;
         let open = published.snapshot.open_comp();
         let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
@@ -271,15 +286,51 @@ pub(crate) fn frame_renderer(
             .and_then(|n| n.to_value().as_f64())
             .unwrap_or(30.);
         std::fs::create_dir_all(&jobs.cache).map_err(|e| e.to_string())?;
-        frame(&jobs, &published, fps, time, Size::new(width, height)).map_err(|e| e.to_string())
+        let look = Look {
+            alpha: AlphaOutput::None,
+            motion_blur: request.motion_blur,
+        };
+        let png = frame(
+            &jobs,
+            &published,
+            fps,
+            request.time,
+            Size::new(request.width, request.height),
+            look,
+            request.stop,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut cache = cache.lock().unwrap();
+        if cache.len() >= 4 {
+            cache.pop_front();
+        }
+        cache.push_back((key, Arc::new(png.clone())));
+        Ok(png)
     }))
 }
+/// How a captured frame looks: MCP captures keep alpha; an extension's
+/// `renderFrameTo` is opaque over black with motion blur, as main draws it.
+#[derive(Clone, Copy)]
+pub(crate) struct Look {
+    alpha: AlphaOutput,
+    motion_blur: bool,
+}
+const MCP_LOOK: Look = Look {
+    alpha: AlphaOutput::Straight,
+    motion_blur: false,
+};
+fn never() -> bool {
+    false
+}
+/// Renders one frame; `stop` cancels the export (a stopped task, a deadline).
 fn frame(
     jobs: &EngineJobs,
     published: &Published,
     fps: f64,
     time: f64,
     size: Size,
+    look: Look,
+    stop: &(dyn Fn() -> bool + Sync),
 ) -> AnyResult<Vec<u8>> {
     let rate = pm_time::rate_from_document(None, fps)?.rate;
     let start = pm_time::ticks_from_seconds(time)?;
@@ -289,7 +340,7 @@ fn frame(
     let destination = output.path().join("frame");
     let settings = ExportSettings {
         format: ExportFormat::PngSequence { sixteen_bit: false },
-        alpha: AlphaOutput::Straight,
+        alpha: look.alpha,
         quality: QualityTier::High,
         size,
         frame_rate: FrameRate::new(u32::try_from(rate.num())?, u32::try_from(rate.den())?),
@@ -299,14 +350,26 @@ fn frame(
         },
         audio: false,
         audio_index_playhead: None,
-        motion_blur: false,
+        motion_blur: look.motion_blur,
         color: OutputColor::SrgbImage,
         precision: Precision::Float16,
         dither: false,
         draft_from_proxies: false,
         delivery: Default::default(),
     };
-    let directory = finish(jobs.start(published, settings, destination)?)?;
+    let mut handle = jobs.start(published, settings, destination)?;
+    while matches!(
+        handle.status().state,
+        JobState::Queued | JobState::Running | JobState::WaitingForMedia
+    ) {
+        if stop() {
+            let _ = handle.cancel();
+            let _ = handle.wait();
+            anyhow::bail!("The frame capture was stopped");
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let directory = finish(handle)?;
     first_png(&directory)
 }
 fn first_png(directory: &Path) -> AnyResult<Vec<u8>> {
@@ -634,7 +697,8 @@ impl EngineHook for EngineJobs {
         let mut images = vec![];
         for time in &request.times {
             let size = Size::new(width, height);
-            let bytes = frame(self, &published, fps, *time, size).map_err(failed)?;
+            let bytes =
+                frame(self, &published, fps, *time, size, MCP_LOOK, &never).map_err(failed)?;
             images.push(format!("data:image/png;base64,{}", base64(&bytes)));
         }
         Ok(json!({"times":request.times,"images":images}))
@@ -729,7 +793,8 @@ impl EngineHook for EngineJobs {
             if !cells.is_empty() && started.elapsed() > Duration::from_secs(45) {
                 break;
             }
-            let bytes = frame(self, &published, fps, cell.source, size).map_err(failed)?;
+            let bytes = frame(self, &published, fps, cell.source, size, MCP_LOOK, &never)
+                .map_err(failed)?;
             cells.push(decode_png(&bytes).map_err(failed)?);
         }
         let aspect = request.plan.cell_width as f64 / request.plan.cell_height as f64;

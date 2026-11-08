@@ -123,9 +123,19 @@ pub(crate) fn boot_realm(realm: &Realm, host: &NativeHost, prelude: &str) -> Res
     Ok(())
 }
 
-/// Renders the open composition at `(time, width, height)` to PNG bytes.
+/// One frame of the open composition, opaque over black as the shipped
+/// `renderOpaqueFrame` draws it.
+pub struct FrameRequest<'a> {
+    pub time: f64,
+    pub width: u32,
+    pub height: u32,
+    pub motion_blur: bool,
+    /// True once the realm's task is stopped or past its host deadline.
+    pub stop: &'a (dyn Fn() -> bool + Sync),
+}
+/// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
-    Arc<dyn Fn(f64, u32, u32) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
+    Arc<dyn Fn(&FrameRequest) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
 
 pub const PROJECT: &str = "compat";
 const COMPAT_REALM: u32 = 2;
@@ -489,21 +499,70 @@ mod tests {
         assert!(image.png.starts_with(b"\x89PNG"));
     }
     #[test]
+    fn hostile_and_edge_images_are_refused_or_drawn_right() {
+        let runner = dom_runner();
+        // 2^31 × 2^31: no arithmetic abort; drawn through a capped raster.
+        let huge = runner.json(r##"(async()=>{const i=new Image();i.src='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="2147483648" height="2147483648"/>');await i.decode();const c=document.createElement('canvas').getContext('2d');c.drawImage(i,0,0,1,1);return [i.naturalWidth,i.naturalHeight]})()"##).unwrap();
+        assert_eq!(huge, json!([2147483648u64, 2147483648u64]));
+        // A raster capped at 8192 px still maps intrinsic coordinates: a crop far
+        // to the right of a 10000-wide red SVG is red.
+        let crop = runner.json(r##"(async()=>{const i=new Image();i.src='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="10000" height="100"><rect width="10000" height="100" fill="#f00"/></svg>');await i.decode();const c=document.createElement('canvas');c.width=c.height=10;const x=c.getContext('2d');x.drawImage(i,9000,0,10,10,0,0,10,10);const p=x.getImageData(0,0,10,10).data;return [p[0],p[3],p[396],p[399]]})()"##).unwrap();
+        assert_eq!(crop, json!([255, 255, 255, 255]));
+        // createImageBitmap: crop and resize, a fresh canvas, ImageData.
+        let bitmaps = runner.json("(async()=>{const c=document.createElement('canvas');c.width=4;c.height=2;const a=await createImageBitmap(c,0,0,1,1,{resizeWidth:8,resizeHeight:8});const b=await createImageBitmap(c);const d=await createImageBitmap({width:2,height:1,data:new Uint8ClampedArray(8)});return [a.width,a.height,b.width,b.height,d.width,d.height]})()").unwrap();
+        assert_eq!(bitmaps, json!([8, 8, 4, 2, 2, 1]));
+    }
+    #[test]
+    fn file_reader_data_urls_and_atob_behave_as_the_platform() {
+        let runner = dom_runner();
+        let reader = runner.json(r#"(async()=>{const r=new FileReader();const events=[];for(const t of ['loadstart','progress','load','loadend','abort'])r.addEventListener(t,()=>events.push(t));
+            r.readAsText(new Blob(['old']));r.abort();const done=new Promise(ok=>r.onload=()=>ok(r.result));r.readAsText(new Blob(['new']));const first=await done;
+            const big=new FileReader();const binary=await new Promise(ok=>{big.onloadend=()=>ok([big.readyState,big.result.length]);big.readAsBinaryString(new Blob([new Uint8Array(300000)]))});
+            const latin=await new Promise(ok=>{const t=new FileReader();t.onload=()=>ok(t.result);t.readAsText(new Blob([new Uint8Array([0xe9])]),'iso-8859-1')});
+            return [first,events,binary,latin]})()"#).unwrap();
+        assert_eq!(
+            reader,
+            json!([
+                "new",
+                [
+                    "abort",
+                    "loadend",
+                    "loadstart",
+                    "progress",
+                    "load",
+                    "loadend"
+                ],
+                [2, 300000],
+                "é"
+            ])
+        );
+        let data = runner.json("(async()=>[...new Uint8Array(await (await fetch('data:application/octet-stream,%FF%00%80')).arrayBuffer())])()").unwrap();
+        assert_eq!(data, json!([255, 0, 128]));
+        assert_eq!(
+            runner.json("atob('YQ'.repeat(200000)).length").unwrap(),
+            json!(300000)
+        );
+    }
+    #[test]
     fn render_frame_to_and_snapshot_read_the_engine_frame() {
         let runner = dom_runner();
         let asked = Arc::new(std::sync::Mutex::new(vec![]));
         let log = asked.clone();
         runner
             .host
-            .set_frames(Some(Arc::new(move |time, width, height| {
-                log.lock().unwrap().push((time, width, height));
+            .set_frames(Some(Arc::new(move |frame: &crate::FrameRequest| {
+                let (width, height) = (frame.width, frame.height);
+                log.lock()
+                    .unwrap()
+                    .push((frame.time, width, height, frame.motion_blur));
+                // An opaque engine frame is RGB.
                 let mut png = vec![];
                 let mut encoder = png::Encoder::new(&mut png, width, height);
-                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_color(png::ColorType::Rgb);
                 encoder.set_depth(png::BitDepth::Eight);
                 let mut writer = encoder.write_header().unwrap();
                 writer
-                    .write_image_data(&[0, 128, 255, 255].repeat((width * height) as usize))
+                    .write_image_data(&[0, 128, 255].repeat((width * height) as usize))
                     .unwrap();
                 drop(writer);
                 Ok(png)
@@ -512,6 +571,11 @@ mod tests {
             .json("(()=>{const c=PM.renderFrameTo(1.5,4,2);const p=c.getContext('2d').getImageData(0,0,4,2).data;return [c.width,c.height,[p[0],p[1],p[2],p[3]]]})()")
             .unwrap();
         assert_eq!(frame, json!([4, 2, [0, 128, 255, 255]]));
+        // Options reach the renderer; a target canvas receives the frame and is returned.
+        let target = runner
+            .json("(()=>{const t=document.createElement('canvas');const r=PM.renderFrameTo(0,3,3,{mblur:false},t);return [r===t,t.width,t.height]})()")
+            .unwrap();
+        assert_eq!(target, json!([true, 3, 3]));
         let snapshot = runner.json("PM.Export.snapshot(0, 96)").unwrap();
         assert!(
             snapshot
@@ -520,11 +584,35 @@ mod tests {
                 .starts_with("data:image/jpeg;base64,/9j/")
         );
         let (w, h) = runner.host.kernel_size();
-        assert_eq!(
-            asked.lock().unwrap()[1],
-            (0., 96, (96. * h / w).round() as u32)
-        );
-        assert_eq!(asked.lock().unwrap()[0], (1.5, 4, 2));
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked[0], (1.5, 4, 2, true));
+        assert_eq!(asked[1], (0., 3, 3, false));
+        assert_eq!(asked[2], (0., 96, (96. * h / w).round() as u32, false));
+    }
+    #[test]
+    fn a_stopped_capture_reaches_the_renderer() {
+        let runner = dom_runner();
+        runner
+            .host
+            .set_frames(Some(Arc::new(|frame: &crate::FrameRequest| {
+                // The renderer polls `stop` and gives up; the realm sees an error.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !(frame.stop)() {
+                    if Instant::now() > deadline {
+                        return Err("never stopped".into());
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err("Capture cancelled".into())
+            })));
+        let ticket = runner.realm.eval("PM.renderFrameTo(0,2,2)").unwrap();
+        thread::sleep(Duration::from_millis(50));
+        runner.realm.stop(ticket.execution);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "the capture outlived Stop");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
     #[test]
     fn extension_bytes_are_staged_as_files_and_held_files_read_lazily() {
