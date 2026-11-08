@@ -150,8 +150,12 @@ window is open is shown in it.
   asking twelve frames ahead while playing; an export child asks the parent for each
   layer through its pipes, with pixels in a private file. `render.raster`'s base is
   lazy and painted by a second renderer on its own thread (`LayerRasters`), so a
-  pass-through costs one JS call and no paint. One window's realm answers for the app
-  (the last to register an override).
+  pass-through costs one JS call and no paint. Answers are per document (kernel
+  `doc_id`): each window's extensions answer its own project's frames and exports,
+  and a closed window's stop being asked. Override pixels travel premultiplied (the
+  engine's fast upload) and one texture serves every band of a frame. Release, 2 s
+  test export with four overrides: 16 s against 4.5 s without extensions (76 s before
+  the upload fixes); about 6 s of that is realm answers (480 asks, ~12 ms each).
 - `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine as
   main draws it (opaque over black, motion blur unless `{mblur:false}`, a target canvas
   filled and returned; snapshot at most `maxWidth` wide, no blur, JPEG 0.74). Each new

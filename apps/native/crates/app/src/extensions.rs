@@ -164,6 +164,8 @@ fn external_link(url: &str) -> bool {
 pub struct Extensions {
     window: u64,
     pub host: Option<ExtensionHost>,
+    /// This window's raster overrides; dropped with its host.
+    overrides: Option<crate::raster_overrides::Overrides>,
     /// One WebKit document per trust domain: the trusted realm's under the empty
     /// key, then each Store extension's own. Never shared.
     pages: BTreeMap<String, Page>,
@@ -207,6 +209,7 @@ impl Default for Extensions {
         Self {
             window: NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             host: None,
+            overrides: None,
             pages: BTreeMap::new(),
             views: Rc::default(),
             data_stores: StoreDataStores::default(),
@@ -305,6 +308,7 @@ impl Controller {
             }),
         });
         rasters.connect(host.raster_inbox());
+        self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {

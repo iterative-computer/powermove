@@ -211,6 +211,16 @@ impl Overrides {
     }
 }
 
+impl Drop for Overrides {
+    /// The window's extensions are gone: its project's frames and exports
+    /// stop asking them (and draw natively until another realm answers).
+    fn drop(&mut self) {
+        self.store.set_sink(None);
+        self.store.set_state(false, 0);
+        pm_engine_service::jobs::set_compat_answerer(self.doc_id, None);
+        *self.realm.lock().unwrap() = None;
+    }
+}
 /// A new publication: frames are drawn at its revision, and asked ahead a
 /// frame of its open composition at a time.
 pub(crate) fn published(engine: &EngineService, p: &pm_kernel::Published) {

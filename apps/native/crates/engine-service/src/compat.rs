@@ -363,3 +363,49 @@ pub fn override_raster(
         data: Arc::new(premultiplied_rgba),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_protocol::common::{CompositionId, LayerId};
+    fn need(layer: &str) -> CompatNeed {
+        CompatNeed {
+            composition: CompositionId::new("c"),
+            layer: LayerId::new(layer),
+            time: pm_render::compat::ticks_of(1.),
+            source: CompatSource::RasterOverride,
+            scale: 1.,
+            crop: None,
+        }
+    }
+    #[test]
+    fn each_document_answers_from_its_own_window() {
+        let stores = CompatStores::default();
+        let (a, b) = (stores.document(1), stores.document(2));
+        let asked = Arc::new(Mutex::new(vec![]));
+        for (doc, store) in [(1u64, &a), (2u64, &b)] {
+            let asked = asked.clone();
+            store.set_sink(Some(Arc::new(move |_, needs: Vec<CompatNeed>| {
+                asked.lock().unwrap().push((doc, needs.len()));
+            })));
+            store.set_state(true, 7);
+        }
+        a.request(vec![need("x")], false);
+        assert_eq!(*asked.lock().unwrap(), vec![(1, 1)]);
+        a.answer_all(
+            7,
+            vec![(
+                need("x"),
+                override_raster(1, 1, vec![9; 4], [1., 1.], [0., 0.]),
+            )],
+        );
+        let answer = |store: &CompatStore| {
+            store.answer("c", "x", 1., 1., CompatSource::RasterOverride, None)
+        };
+        assert!(matches!(answer(&a), CompatAnswer::Raster(_)));
+        assert!(matches!(answer(&b), CompatAnswer::Missing));
+        assert!(Arc::ptr_eq(&stores.document(1), &a));
+        stores.forget(1);
+        assert!(!Arc::ptr_eq(&stores.document(1), &a));
+    }
+}
