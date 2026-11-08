@@ -433,7 +433,7 @@ fn rendered_project(
 ) -> Vec<f32> {
     let published = kernel.published("synthetic").unwrap();
     let document = &published.snapshot.document;
-    renderer.set_main_effects_for_document(document).unwrap();
+    let _turn = install_main_effects(renderer, document);
     let mut request = pm_render::RenderRequest::sized(
         pm_protocol::common::Size::new(160, 90),
         pm_protocol::color::Precision::Float16,

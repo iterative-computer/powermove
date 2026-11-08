@@ -4,6 +4,25 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+/// Two compiler slots serve the whole test process. Render tests take turns
+/// (hold the guard until the frame is drawn), and a slot another test still
+/// holds is transient, as the engine service treats it.
+fn install_main_effects(
+    renderer: &mut pm_render::Renderer,
+    document: &pm_model::Document,
+) -> std::sync::MutexGuard<'static, ()> {
+    static RENDER: Mutex<()> = Mutex::new(());
+    let turn = RENDER.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while let Err(e) = renderer.set_main_effects_for_document(document) {
+        assert!(
+            e.contains("compiler-busy") && Instant::now() < deadline,
+            "{e}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    turn
+}
 fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -1583,6 +1602,30 @@ fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_th
     assert!(panels.mount_extension("timeline", &graph).is_err());
     let errors = panels.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// Only built-in panels' bounded queue plumbing skips the operation quota;
+/// a third-party surface sharing the broker stays metered for every operation.
+#[test]
+fn only_built_in_realms_skip_the_quota_for_queue_operations() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let realm = |id: &str| Generation {
+        realm: format!("scope:{:?}", RealmKind::V4Extension(id.into())),
+        number: 1,
+    };
+    let broker: &dyn EngineProxy = &*panels.broker;
+    for op in [
+        "host.enqueue",
+        "host.poll",
+        "platform.enqueue",
+        "platform.poll",
+    ] {
+        assert!(!broker.metered(&realm("inspector"), op), "{op}");
+        assert!(broker.metered(&realm("synthetic-surface"), op), "{op}");
+    }
+    assert!(broker.metered(&realm("inspector"), "read"));
+    actor.shutdown();
 }
 
 #[test]
