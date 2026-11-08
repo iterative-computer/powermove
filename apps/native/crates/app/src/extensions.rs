@@ -327,6 +327,36 @@ impl Controller {
                 })
                 .detach();
             }
+            Some("unresponsive") => {
+                let Some(execution) = request["execution"].as_u64() else {
+                    return;
+                };
+                let (title, body) = match request["name"].as_str() {
+                    Some(name) => (
+                        format!("“{name}” isn’t responding"),
+                        format!(
+                            "You can wait for it to finish, or stop it. A stopped extension stays off until you turn {name} back on in Extensions."
+                        ),
+                    ),
+                    None => (
+                        "An extension isn’t responding".to_owned(),
+                        "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.".to_owned(),
+                    ),
+                };
+                let shell = self.host.borrow();
+                let answer =
+                    crate::platform::choice(&shell.window, &title, &body, &["Wait", "Stop"]);
+                drop(shell);
+                cx.spawn(async move |this, cx| {
+                    let stop = answer.recv().await == Ok(1);
+                    let _ = this.update(cx, |v, _| {
+                        if let Some(host) = &v.extensions.host {
+                            host.answer_unresponsive(execution, stop);
+                        }
+                    });
+                })
+                .detach();
+            }
             Some("openExternal") => {
                 let url = request["url"].as_str().unwrap_or_default();
                 let opened = external_link(url) && crate::platform::open_url(url);

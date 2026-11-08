@@ -34,7 +34,8 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn canvases_ready(&self) {}
     fn ready(&self) {}
     fn activating(&self, _id: Option<&str>) {}
-    fn watchdog_stop(&self) {}
+    /// A task has run past the watchdog's limit; the user decides (D11).
+    fn unresponsive(&self, _execution: u64) {}
 }
 pub struct NoEvents;
 impl RealmEvents for NoEvents {}
@@ -1016,9 +1017,10 @@ impl HostProxy for NativeHost {
 }
 impl WatchdogHooks for NativeHost {
     fn notice(&self, _: &Generation, _: u64) {}
-    /// Eight seconds on one task: stop it and rebuild the realm without it.
-    fn prompt(&self, _: &Generation, _: u64) -> WatchdogDecision {
-        self.events.watchdog_stop();
-        WatchdogDecision::Stop
+    /// Eight seconds on one task: ask whether to stop it (D11). A trusted
+    /// extension is never stopped without the user saying so.
+    fn prompt(&self, _: &Generation, execution: u64) -> WatchdogDecision {
+        self.events.unresponsive(execution);
+        WatchdogDecision::Wait
     }
 }

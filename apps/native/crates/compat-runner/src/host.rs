@@ -85,6 +85,9 @@ enum Input {
     Booted(u32),
     Rescan,
     Failed(u32),
+    /// The watchdog's question about one running task, and the user's answer.
+    Unresponsive(u32, u64),
+    StopTask(u64, bool),
     Close,
 }
 
@@ -224,8 +227,10 @@ impl RealmEvents for Arc<Events> {
     fn activating(&self, id: Option<&str>) {
         *self.activating.lock().unwrap() = id.map(str::to_owned);
     }
-    fn watchdog_stop(&self) {
-        let _ = self.inbox.send(Input::Failed(self.writer.generation));
+    fn unresponsive(&self, execution: u64) {
+        let _ = self
+            .inbox
+            .send(Input::Unresponsive(self.writer.generation, execution));
     }
 }
 
@@ -333,6 +338,7 @@ impl ExtensionHost {
             transport: transport.clone(),
             moved: moved.clone(),
             restarts: 0,
+            asking: None,
             realm: None,
             router: None,
             records: vec![],
@@ -420,6 +426,11 @@ impl ExtensionHost {
     }
     pub fn answer(&self, token: u64, value: Value) {
         let _ = self.inbox.send(Input::Answer(token, value));
+    }
+    /// The answer to an `unresponsive` request: stop that task (the realm is
+    /// rebuilt without the extension that was activating), or keep waiting.
+    pub fn answer_unresponsive(&self, execution: u64, stop: bool) {
+        let _ = self.inbox.send(Input::StopTask(execution, stop));
     }
     /// The Store's listings, as a request for the main thread to show.
     pub fn browse_store(&self) {
@@ -582,6 +593,8 @@ struct Owner {
     transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
     moved: Arc<AtomicU8>,
     restarts: usize,
+    /// The task the user is being asked about, so one hang asks once at a time.
+    asking: Option<u64>,
     realm: Option<Live>,
     router: Option<RemoteDomPanel>,
     records: Vec<Value>,
@@ -646,6 +659,7 @@ impl Owner {
         drop(live);
         *self.transport.lock().unwrap() = None;
         self.router = None;
+        self.asking = None;
         self.dom_waiting.clear();
         self.canvases.clear();
         self.shared.reader.store(0, Ordering::Release);
@@ -745,10 +759,25 @@ impl Owner {
             }
             Input::Rescan => self.rescan(),
             Input::Failed(generation) if generation == self.writer.generation => self.restart(),
+            Input::Unresponsive(generation, execution)
+                if generation == self.writer.generation && self.asking != Some(execution) =>
+            {
+                self.ask_unresponsive(execution)
+            }
+            Input::StopTask(execution, stop) => {
+                if self.asking == Some(execution) {
+                    self.asking = None;
+                }
+                let stopped = stop && self.realm.as_ref().is_some_and(|l| l.realm.stop(execution));
+                if stopped {
+                    self.restart();
+                }
+            }
             Input::Realm(..)
             | Input::Page(..)
             | Input::Booted(_)
             | Input::Failed(_)
+            | Input::Unresponsive(..)
             | Input::Kernel
             | Input::Close => (),
         }
@@ -1431,6 +1460,21 @@ impl Owner {
             Value::Array(changed)
         ));
     }
+    /// D11: "not responding — Wait / Stop", named for the extension that was
+    /// activating when there is one. The task keeps running while the user decides.
+    fn ask_unresponsive(&mut self, execution: u64) {
+        let Some(live) = &self.realm else { return };
+        let activating = live.events.activating.lock().unwrap().clone();
+        let name = activating.and_then(|id| {
+            self.records
+                .iter()
+                .find(|r| r["id"] == id.as_str())
+                .map(|r| r["manifest"]["name"].as_str().unwrap_or(&id).to_owned())
+        });
+        self.asking = Some(execution);
+        let request = json!({"kind":"unresponsive","execution":execution,"name":name});
+        self.shared.update(|p| p.requests.push(request));
+    }
     /// A hung or failed realm is rebuilt without the extension that broke it. That
     /// extension stays off until someone turns it back on, here and in every other
     /// window, and the next launch does not run into it again.
@@ -1542,6 +1586,23 @@ mod tests {
                     self.host.records()
                 );
                 thread::sleep(Duration::from_millis(5));
+            }
+        }
+        /// Waits for the watchdog's question and returns the task it names.
+        fn answer_unresponsive(&self, name: Option<&str>) -> u64 {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let asked = self
+                    .host
+                    .take_requests()
+                    .into_iter()
+                    .find(|r| r["kind"] == "unresponsive");
+                if let Some(request) = asked {
+                    assert_eq!(request["name"].as_str(), name);
+                    return request["execution"].as_u64().unwrap();
+                }
+                assert!(Instant::now() < deadline, "no unresponsive prompt");
+                thread::sleep(Duration::from_millis(20));
             }
         }
         fn name(&self) -> String {
@@ -1872,17 +1933,16 @@ mod tests {
                 .unwrap();
         };
         toggle(false);
+        // The kernel's registry follows the published list through its own queue.
         fixture.until("helper stopped", |host| {
             host.store_session("synthetic-store").is_none()
                 && !command(&fixture, "synthetic-store.mark")
+                && fixture
+                    .kernel
+                    .state()
+                    .provider("commands", "synthetic-store.mark")
+                    .is_none()
         });
-        assert!(
-            fixture
-                .kernel
-                .state()
-                .provider("commands", "synthetic-store.mark")
-                .is_none()
-        );
         toggle(true);
         fixture.until("helper again", |host| {
             host.store_session("synthetic-store").is_some()
@@ -2076,6 +2136,10 @@ mod tests {
             )],
         );
         let fixture = Fixture::start(root);
+        // D11: the watchdog asks, naming the extension; nothing stops on its own.
+        let asked = fixture.answer_unresponsive(Some("synthetic-hangs"));
+        assert_eq!(fixture.host.view(), 1, "still the first realm while asking");
+        fixture.host.answer_unresponsive(asked, true);
         fixture.until("recovery", |host| {
             let stopped = host
                 .records()
@@ -2124,6 +2188,13 @@ mod tests {
         fixture.until("entry open", |_| {
             fixture.kernel.published("window").unwrap().entry.is_some()
         });
+        // Wait keeps it running; the watchdog asks again later, and Stop ends it.
+        let asked = fixture.answer_unresponsive(None);
+        fixture.host.answer_unresponsive(asked, false);
+        assert_eq!(fixture.host.view(), view);
+        let again = fixture.answer_unresponsive(None);
+        assert_eq!(again, asked, "the same task, asked again");
+        fixture.host.answer_unresponsive(again, true);
         fixture.until("second rebuild", |host| host.view() == 3 && host.is_ready());
         let published = fixture.kernel.published("window").unwrap();
         assert!(published.entry.is_none(), "the open entry was sealed");
