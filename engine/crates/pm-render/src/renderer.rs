@@ -1496,14 +1496,21 @@ impl Renderer {
     }
 
     /// Compiles the pipelines every frame of `document` draws with at its
-    /// working format ([`Pipelines::prewarm`]). They are built on first use;
-    /// the presenter calls this when the viewer rests after an open, so the
-    /// next import, or the first layer of an empty project, does not.
+    /// working format ([`Pipelines::prewarm`]) and its text pipelines. They
+    /// are built on first use; the engine service calls this before the
+    /// first frame at a format, so no later frame compiles them.
     pub fn prewarm(&self, document: &Document) {
         let request =
             RenderRequest::sized(pm_protocol::common::Size::new(1, 1), Precision::Float16);
-        self.pipelines
-            .prewarm(self.device_target_format(document, &request));
+        let format = self.device_target_format(document, &request);
+        self.pipelines.prewarm(format);
+        // Text pipelines too: a text layer first met while playing compiled
+        // its paint pipeline on that frame (about 80 ms).
+        self.text_gpu.prewarm(if format == working_format(Precision::Float32) {
+            Precision::Float32
+        } else {
+            Precision::Float16
+        });
     }
 
     /// Asks the font registry for the faces `document`'s text layers lay out

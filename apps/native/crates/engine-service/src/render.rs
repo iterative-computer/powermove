@@ -381,6 +381,10 @@ impl Engine {
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
+            // A document's first frame compiles the frame and text pipelines
+            // it draws with, so no frame met while playing does (built ones
+            // are kept: later documents pay nothing).
+            self.renderer.prewarm(&scene.doc);
             self.studio_content = Some(key);
         }
         Ok(())

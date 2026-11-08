@@ -699,6 +699,15 @@ impl TextGpu {
                 .count()
     }
 
+    /// Compiles the text pipelines frames at `precision` draw with (outline
+    /// and image paint, blur), ahead of the first text that needs them.
+    pub(crate) fn prewarm(&self, precision: Precision) {
+        let i = format_index(precision);
+        for pipeline in [&self.paint[i], &self.image_paint[i], &self.blur[i]] {
+            pipeline.get();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn probe_all(&self) -> Vec<(String, std::time::Duration)> {
         let mut times = Vec::new();
