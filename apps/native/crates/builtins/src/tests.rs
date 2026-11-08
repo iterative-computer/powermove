@@ -1652,3 +1652,59 @@ mod effect_registry;
 mod text_animators;
 
 mod precomp_delta;
+
+#[test]
+fn project_rows_follow_a_media_observation_that_lands_without_an_edit() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project=pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{"clip":{"id":"clip","name":"clip.mov","kind":"video","w":640,"h":360,"dur":5,"size":10,"sourcePath":"/synthetic/offline/clip.mov"}},"comps":{},"layers":[]}"##).unwrap();
+    actor
+        .handle()
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("assets").unwrap());
+    let shows = |panels: &Builtins, text: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            for (_, ticket) in panels.publish() {
+                finish(ticket.unwrap());
+            }
+            if panels
+                .take_publications()
+                .into_iter()
+                .filter(|p| p.panel == "assets")
+                .any(|p| format!("{:?}", p.surface.nodes()).contains(text))
+            {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        false
+    };
+    assert!(shows(&panels, "clip.mov"), "the asset row publishes");
+    // The worker's probe lands at the same revision: nothing in the document moved.
+    let published = actor.handle().published("synthetic").unwrap();
+    let stamp = pm_panel_media::Stamp {
+        project: "synthetic".into(),
+        document: published.snapshot.doc_id,
+        revision: published.revision(),
+    };
+    let offline = pm_panel_media::RuntimeState {
+        availability: pm_panel_media::Availability::Offline,
+        ..Default::default()
+    };
+    panels.update_media(
+        Default::default(),
+        pm_panel_media::readiness::ObservedRuntime::new(
+            stamp,
+            std::collections::BTreeMap::from([("clip".to_owned(), offline)]),
+        ),
+    );
+    assert!(
+        shows(&panels, "Media offline"),
+        "the row shows the observation instead of staying Loading"
+    );
+    panels.close();
+}

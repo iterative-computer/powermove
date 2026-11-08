@@ -461,6 +461,12 @@ impl DocumentStore {
         self.state_token != self.saved_token || self.outside_writes != self.saved_outside_writes
     }
 
+    /// Anything a save would write that its destination lacks: unsaved
+    /// edits, or workspace and metadata changes since the last save.
+    pub fn needs_save(&self) -> bool {
+        self.is_dirty() || self.metadata_token != self.saved_metadata_token
+    }
+
     /// Whether a save of this document is running.
     pub fn is_saving(&self) -> bool {
         self.save_ticket.strong_count() > 0

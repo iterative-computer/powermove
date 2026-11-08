@@ -135,7 +135,12 @@ impl FileLock {
                 .filter(|n| n.is_finite() && *n >= 0.0)
                 .ok_or_else(|| io::Error::other("invalid lock heartbeat"))?
                 as u64;
-            if pid != 0 && (pid_alive(pid) || now_ms().saturating_sub(heartbeat) < 30_000) {
+            // We hold the flock, so no process on this Mac holds it (the
+            // native app and the transition release both flock). A record
+            // younger than 30 s still names a live owner when its pid runs,
+            // or when the volume is shared and another Mac may hold it.
+            let young = now_ms().saturating_sub(heartbeat) < 30_000;
+            if pid != 0 && young && (pid_alive(pid) || !is_local_volume(path)) {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "lock is live or younger than 30 seconds",
@@ -181,6 +186,18 @@ impl Drop for FileLock {
     }
 }
 
+/// A volume only this Mac writes (`MNT_LOCAL`), where flock is authoritative.
+fn is_local_volume(path: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(existing(path).as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: valid path and output storage, read only on success.
+    unsafe {
+        libc::statfs(c.as_ptr(), stat.as_mut_ptr()) == 0
+            && stat.assume_init().f_flags & libc::MNT_LOCAL as u32 != 0
+    }
+}
 pub fn project_lock_path(project: &Path) -> PathBuf {
     project.with_extension("pmvlock")
 }

@@ -165,7 +165,9 @@ fn main() -> Result<()> {
         let (mcp_host, _changes) = mcp::Host::new(actor.handle(), worker_profile.clone());
         let gpu = pm_gpu::Gpu::new("powermove-native")?;
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
-            gpu, fonts,
+            gpu,
+            fonts,
+            Some(worker_profile.join("shader-cache")),
         )?);
         let tools = mcp::Tools::new(mcp_host.clone(), exports);
         mcp_services::connect_engine(&tools, engine.export_activity())?;

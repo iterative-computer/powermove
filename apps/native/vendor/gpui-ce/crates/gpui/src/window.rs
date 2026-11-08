@@ -1619,6 +1619,11 @@ impl Window {
         let accessibility_force_disabled = cx.accessibility_force_disabled;
         let accessibility_forced = cx.accessibility_forced;
         let a11y_active_flag = Arc::new(AtomicBool::new(false));
+        // Powermove: the newest tree built before assistive technology
+        // connected. A window that draws no frame after activation (idle or
+        // occluded) would otherwise expose only its empty root.
+        let a11y_before_activation =
+            Arc::new(parking_lot::Mutex::new(None::<accesskit::TreeUpdate>));
 
         #[cfg(not(target_family = "wasm"))]
         if !accessibility_force_disabled {
@@ -1640,11 +1645,12 @@ impl Window {
             platform_window.a11y_init(crate::A11yCallbacks {
                 activation: {
                     let active_flag = a11y_active_flag.clone();
+                    let built = a11y_before_activation.clone();
                     Box::new(move || {
                         log::info!("Accessibility activated");
                         active_flag.store(true, SeqCst);
                         activation_sender.send_blocking(()).log_err();
-                        Some(initial_tree.clone())
+                        Some(built.lock().clone().unwrap_or_else(|| initial_tree.clone()))
                     })
                 },
                 action: Box::new(move |request| {
@@ -2136,6 +2142,7 @@ impl Window {
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
             a11y: A11y::new(
                 a11y_active_flag,
+                a11y_before_activation,
                 accessibility_force_disabled,
                 accessibility_forced,
                 initial_window_title,
@@ -3569,7 +3576,9 @@ impl Window {
             // clear the builder state regardless
             let tree_update = self.a11y.end_frame(frame_info);
 
-            if should_send_a11y_update {
+            if should_send_a11y_update
+                && let Some(tree_update) = self.a11y.keep_until_activation(tree_update)
+            {
                 log::debug!(
                     "Sending a11y tree update: {} nodes",
                     tree_update.nodes.len()

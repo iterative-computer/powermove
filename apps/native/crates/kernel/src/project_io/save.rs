@@ -28,7 +28,7 @@
 //! # Guarantees
 //!
 //! * **Streaming.** A sibling temp file (`.<name>.<uuid>.tmp`, exclusive,
-//!   mode 0600) is written in 1 MiB steps; checksums are computed as bytes
+//!   mode 0600, published with the replaced file's mode) is written in 1 MiB steps; checksums are computed as bytes
 //!   pass. Media is copied range to range, never loaded whole.
 //! * **Durable.** `F_FULLFSYNC`, then a read-back verification
 //!   ([`VerifyLevel`]), then an atomic publication (exchange + verification
@@ -677,11 +677,11 @@ impl SavePlan {
         let compact = index.is_none() || dead > floor.max(live / 2);
 
         let mut buf = vec![0u8; CHUNK];
-        let (temp, file, out_offset, whole, cloned_mode, layout) = if !compact {
+        let (temp, file, out_offset, whole, kept_mode, layout) = if !compact {
             let prev = previous.expect("an index implies a previous file");
             let temp = TempFile::clone_of(dest, dest)?;
             #[cfg(unix)]
-            let cloned_mode = {
+            let kept_mode = {
                 use std::os::unix::fs::PermissionsExt;
                 let mode = prev.stat.mode & 0o777;
                 fs::set_permissions(&temp.path, fs::Permissions::from_mode(mode | 0o600))
@@ -689,7 +689,7 @@ impl SavePlan {
                 Some(mode)
             };
             #[cfg(not(unix))]
-            let cloned_mode: Option<u32> = None;
+            let kept_mode: Option<u32> = None;
             let file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -706,10 +706,22 @@ impl SavePlan {
             if end != prev.stat.size {
                 return Err(ProjectIoError::ChangedOnDisk);
             }
-            (temp, file, end, digest, cloned_mode, SaveLayout::Appended)
+            (temp, file, end, digest, kept_mode, SaveLayout::Appended)
         } else {
             let (temp, file) = TempFile::create(dest)?;
-            (temp, file, 0, Sha256::new(), None, SaveLayout::Compacted)
+            // A rewrite keeps the file's mode: a shared 0644 project stays shared.
+            #[cfg(unix)]
+            let kept_mode = previous.map(|p| p.stat.mode & 0o777);
+            #[cfg(not(unix))]
+            let kept_mode: Option<u32> = None;
+            (
+                temp,
+                file,
+                0,
+                Sha256::new(),
+                kept_mode,
+                SaveLayout::Compacted,
+            )
         };
         let tmp_err = |e: io::Error| io_err(&temp.path, e);
         let limit = match fault {
@@ -836,13 +848,13 @@ impl SavePlan {
         let file_hash = hex(&out.whole.clone().finalize());
         drop(out);
         #[cfg(unix)]
-        if let Some(mode) = cloned_mode {
+        if let Some(mode) = kept_mode {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(mode))
                 .map_err(tmp_err)?;
         }
         #[cfg(not(unix))]
-        let _ = cloned_mode;
+        let _ = kept_mode;
         durable::sync_file(&file).map_err(tmp_err)?;
 
         self.verify(

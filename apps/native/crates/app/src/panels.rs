@@ -8,6 +8,30 @@ pub fn scopes(v: &mut Controller, id: &str, cx: &mut Context<Controller>) -> Opt
     (id == "scopes").then(|| v.scopes_panel(cx))
 }
 
+/// While the first project is read, and until each panel has mounted for it,
+/// the panels it fills say so instead of offering to open one.
+pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
+    let name = v.opening_name.as_ref()?;
+    if !matches!(id, "assets" | "viewer" | "timeline")
+        || (v.session.is_some() && (v.settling.is_none() || v.builtins.ready.contains(id)))
+    {
+        return None;
+    }
+    let t = v.host.borrow().tokens.clone();
+    Some(
+        pm_shell::view::empty_state(
+            &t,
+            &format!("Opening “{name}”…"),
+            "It appears here when it’s ready.",
+        )
+        .id(SharedString::from(format!("opening-{id}")))
+        .role(Role::Status)
+        .aria_label(format!("Opening {name}"))
+        .h(px((bounds.h - t.metrics.header).max(0.)))
+        .into_any_element(),
+    )
+}
+
 pub fn library(
     v: &mut Controller,
     id: &str,

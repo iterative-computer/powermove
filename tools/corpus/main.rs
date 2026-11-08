@@ -53,8 +53,23 @@ fn anon(s: &str) -> String {
     blake3::hash(s.as_bytes()).to_hex()[..16].to_owned()
 }
 
+/// Lossy for lone UTF-16 surrogates, which serde strings can't hold (the
+/// runner only reads asset and extension facts from this).
 fn value(v: &pm_model::Value) -> Value {
-    serde_json::from_str(&pm_model::json::to_canonical_string(v)).unwrap()
+    use pm_model::Value as V;
+    match v {
+        V::Null => Value::Null,
+        V::Bool(b) => Value::Bool(*b),
+        V::Number(n) if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 => json!(*n as i64),
+        V::Number(n) => json!(n),
+        V::String(s) => Value::String(s.to_string_lossy()),
+        V::Array(items) => Value::Array(items.iter().map(value).collect()),
+        V::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.to_string_lossy(), value(v)))
+                .collect(),
+        ),
+    }
 }
 fn extensions(v: &Value) -> bool {
     static BUILTINS: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
@@ -441,14 +456,19 @@ fn project(
         raw.clone()
     };
     let dur = canonical["dur"].as_f64().unwrap_or(1.).max(1. / 30.);
-    let rate = canonical["fps"].as_f64().filter(|x| *x > 0.).unwrap_or(30.);
+    // The app's rule: `fpsRational`, else the stored float snapped (29.97 → 30000/1001).
+    let rational = canonical["fpsRational"]
+        .as_array()
+        .filter(|a| a.len() == 2)
+        .and_then(|a| Some([a[0].as_i64()?, a[1].as_i64()?]));
     let frame_rate =
-        pm_time::Rate::new((rate * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+        pm_model::ingest::IngestRate::from_document(rational, canonical["fps"].as_f64())
+            .map_or(pm_time::Rate::FPS_30, |r| r.rate);
     let frame_ticks = frame_rate
         .exact_frame_ticks()
         .unwrap_or(pm_protocol::common::TICKS_PER_SECOND / 30);
     let size = Size::new(320, 180);
-    let service = EngineService::start_with_fonts(pm_gpu::Gpu::new("corpus-metal")?, fonts)?;
+    let service = EngineService::start_with_fonts(pm_gpu::Gpu::new("corpus-metal")?, fonts, None)?;
     let viewer = service.viewer(ViewerConfig {
         composition: comp.clone(),
         snapshot: p.snapshot.clone(),

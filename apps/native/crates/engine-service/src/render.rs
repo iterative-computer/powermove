@@ -228,6 +228,11 @@ impl Engine {
         });
     }
     pub fn new(gpu: Gpu) -> Result<Self> {
+        Self::with_shader_cache(gpu, None)
+    }
+    /// `shader_cache` keeps translated shaders across launches, so a launch
+    /// after the first doesn't translate every built-in effect again.
+    pub fn with_shader_cache(gpu: Gpu, shader_cache: Option<std::path::PathBuf>) -> Result<Self> {
         let lost = Arc::new(AtomicBool::new(false));
         let waker = Waker::default();
         let (flag, wake) = (lost.clone(), waker.clone());
@@ -272,6 +277,7 @@ impl Engine {
             .map_err(|s| anyhow!(s))?;
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.set_draw_reuse(true);
+        renderer.set_program_cache_dir(shader_cache);
         renderer.set_definitions(&pm_render::all_builtin_definitions())?;
         Ok(Self {
             mastering: Default::default(),

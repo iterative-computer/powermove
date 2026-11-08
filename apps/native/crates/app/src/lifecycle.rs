@@ -102,14 +102,14 @@ fn next_quit(cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = host.kernel.shell(ShellCall::PrepareQuit).await;
         cx.update(|cx| match result {
-            Some(Ok(ShellReply::Compacted {
-                recovery_copies, ..
-            })) if recovery_copies.is_empty() => {
+            // Recovery copies are durable library entries; they show in the
+            // library next launch, so they never hold the quit.
+            Some(Ok(ShellReply::Compacted { .. })) => {
                 allow_quit(cx);
                 cx.quit();
             }
             other => {
-                let message = format!("Quit did not complete; work retained: {other:?}");
+                let message = format!("Couldn’t quit: {}. Your work is kept.", reason(other));
                 eprintln!("{message}");
                 let controllers = cx.global::<QuitCoordinator>().controllers.clone();
                 cancel_quit(cx);
@@ -178,7 +178,20 @@ fn expect_closed(
         Some(Ok(ShellReply::Closed {
             recovery_copy: None,
         })) => Ok(()),
-        other => Err(format!("Close did not complete: {other:?}")),
+        other => Err(format!(
+            "Couldn’t close: {}. Your work is kept.",
+            reason(other)
+        )),
+    }
+}
+/// A person-readable reason for a kernel reply that wasn't the expected one.
+fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>) -> String {
+    match reply {
+        Some(Err(e)) => e.to_string(),
+        Some(Ok(ShellReply::Closed {
+            recovery_copy: Some(_),
+        })) => "the file couldn’t be written, so a recovered copy is in the library".into(),
+        _ => "the project library didn’t answer".into(),
     }
 }
 impl Controller {
@@ -339,7 +352,8 @@ impl Controller {
                         Some(Ok(ShellReply::Durable)) => {}
                         other => {
                             return Err(format!(
-                                "Close durability did not complete; work retained: {other:?}"
+                                "Couldn’t finish closing: {}. Your work is kept.",
+                                reason(other)
                             ));
                         }
                     }

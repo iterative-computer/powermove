@@ -76,6 +76,9 @@ impl WelcomeView {
         let mut element = div()
             .id(SharedString::from(format!("welcome-{}", button.id)))
             .debug_selector(|| format!("welcome-{id}", id = id.clone()))
+            .role(Role::Button)
+            .aria_label(button.label.clone())
+            .aria_disabled(!enabled)
             .px(px(m.inset))
             .h(px(m.row))
             .flex()
@@ -136,6 +139,9 @@ impl WelcomeView {
             let mut item = div()
                 .id(SharedString::from(format!("choice-{}", choice.id)))
                 .debug_selector(|| format!("choice-{id}", id = id.clone()))
+                .role(Role::RadioButton)
+                .aria_label(choice.label.clone())
+                .aria_selected(selected)
                 .flex()
                 .flex_col()
                 .gap(px(m.gap / 2.))
@@ -225,19 +231,28 @@ impl Render for WelcomeView {
         content = content
             .child(
                 div()
+                    .id("welcome-title")
                     .debug_selector(|| "welcome-title".into())
+                    .role(Role::Heading)
+                    .aria_label(frame.title.clone())
                     .text_size(px(t.typography.display))
                     .text_color(rgb(c.text))
                     .child(frame.title.clone()),
             )
             .child(
                 div()
+                    .id("welcome-line")
+                    .role(Role::Label)
+                    .aria_label(frame.line.clone())
                     .text_size(px(t.typography.reading))
                     .text_color(rgb(c.secondary))
                     .child(frame.line.clone()),
             );
         if let Some(status) = &frame.status {
             let mut row = div()
+                .id("welcome-status")
+                .role(Role::Label)
+                .aria_label(status.clone())
                 .flex()
                 .items_center()
                 .gap(px(m.gap))
@@ -306,6 +321,9 @@ impl Render for WelcomeView {
                 div()
                     .id("welcome-details")
                     .debug_selector(|| "welcome-details".into())
+                    .role(Role::Button)
+                    .aria_label("Details")
+                    .aria_expanded(self.details_open)
                     .text_size(px(t.typography.body))
                     .text_color(rgb(c.secondary))
                     .child("Details")
@@ -317,6 +335,9 @@ impl Render for WelcomeView {
             if self.details_open {
                 content = content.child(
                     div()
+                        .id("welcome-details-text")
+                        .role(Role::Label)
+                        .aria_label(details.clone())
                         .font_family(pm_design::MONO_FONT)
                         .text_size(px(t.typography.body))
                         .text_color(rgb(c.text))
@@ -353,6 +374,8 @@ impl Render for WelcomeView {
                 div()
                     .id("welcome-back")
                     .debug_selector(|| "welcome-back".into())
+                    .role(Role::Button)
+                    .aria_label(frame.back.clone().unwrap_or_default())
                     .absolute()
                     .top(px(m.toolbar))
                     .left(px(m.sheet_inset))

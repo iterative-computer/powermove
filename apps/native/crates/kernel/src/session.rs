@@ -58,12 +58,16 @@ pub enum ShellCall {
     /// All earlier acknowledged writes and checkpoints are fsynced on success.
     DurabilityBarrier,
     /// Compaction and durability barrier; refuses any in-flight save/open entry.
+    /// External files are never written: their unsaved work stays in the
+    /// journal and the next open asks the person about it.
     PrepareQuit,
     AbortSave {
         session: SessionHandle,
         ticket: String,
     },
     Recent,
+    /// Every journal into its library slot or file (the restore build's
+    /// rollback step, plan §6).
     CompactAll,
     Trash(String),
     Restore(String),
@@ -357,7 +361,10 @@ impl Kernel {
                 for session in self.sessions.values() {
                     self.ensure_idle(&session.handle)?;
                 }
-                let result = self.shell(ShellCall::CompactAll)?;
+                self.compacting = true;
+                let result = self.compact_all(false);
+                self.compacting = false;
+                let result = result?;
                 self.durability_barrier()?;
                 Ok(result)
             }
@@ -376,18 +383,40 @@ impl Kernel {
             ShellCall::Close(handle) => {
                 self.ensure_idle(&handle)?;
                 self.flush_project(&handle.project)?;
-                let saved = self.save_session(&handle, None)?;
-                let ShellReply::Saved { recovery_copy, .. } = saved else {
-                    unreachable!()
+                // A file that already holds everything is not rewritten.
+                let unchanged = matches!(
+                    self.sessions[&handle.project].destination,
+                    Destination::File(_)
+                ) && !self.project(&handle.project).unwrap().store().needs_save();
+                let recovery_copy = if unchanged {
+                    self.save_session_meta(&handle.project)?;
+                    None
+                } else {
+                    let saved = self.save_session(&handle, None)?;
+                    let ShellReply::Saved { recovery_copy, .. } = saved else {
+                        unreachable!()
+                    };
+                    recovery_copy
                 };
                 self.flush_project(&handle.project)?;
                 self.durability_barrier()?;
+                let journals = self.project_dir(&handle.project);
                 self.remove_closed_project(&handle.project);
+                // Saved where it belongs and durable: the journal holds nothing
+                // more. Left behind, every quit reopened the project to compact
+                // it, and a later open asked to recover work that was saved.
+                if recovery_copy.is_none()
+                    && let Some(dir) = journals
+                {
+                    for session in crate::journal::sessions(&dir) {
+                        std::fs::remove_dir_all(session).map_err(failure)?;
+                    }
+                }
                 Ok(ShellReply::Closed { recovery_copy })
             }
             ShellCall::CompactAll => {
                 self.compacting = true;
-                let result = self.compact_all();
+                let result = self.compact_all(true);
                 self.compacting = false;
                 result
             }
@@ -679,8 +708,13 @@ impl Kernel {
         )
         .map_err(failure)
     }
-    fn compact_all(&mut self) -> Result<ShellReply, KernelFailure> {
-        let handles: Vec<_> = self.sessions.values().map(|s| s.handle.clone()).collect();
+    fn compact_all(&mut self, into_files: bool) -> Result<ShellReply, KernelFailure> {
+        let handles: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|s| into_files || matches!(s.destination, Destination::Library(_)))
+            .map(|s| s.handle.clone())
+            .collect();
         let mut projects = 0;
         let mut recovery_copies = Vec::new();
         for handle in handles {
@@ -718,6 +752,9 @@ impl Kernel {
                 s.handle.project == id
                     || matches!(&s.destination, Destination::Library(slot) if slot == &id)
             }) {
+                continue;
+            }
+            if !into_files && self.file_entry(&id).is_some() {
                 continue;
             }
             let p = self
@@ -817,6 +854,20 @@ impl Kernel {
             d.barrier()
                 .map_err(|e| KernelFailure::Journal(e.to_string()))?;
         }
+        // A library entry that stands for an external file is that file. The
+        // file route gives it the same journal base, lock and recovery as
+        // opening the file itself, so recents never turns a recover into a copy.
+        let source = match source {
+            SessionSource::Library { profile, project }
+                if project == id && self.owns_library(&profile) =>
+            {
+                match self.file_entry(&project).filter(|p| p.is_file()) {
+                    Some(path) => SessionSource::File(path),
+                    None => SessionSource::Library { profile, project },
+                }
+            }
+            source => source,
+        };
         let original_source = source.clone();
         let mut decision = OpenDecision::Writable;
         let mut lock = None;
@@ -952,16 +1003,23 @@ impl Kernel {
 
             SessionSource::File(path) => {
                 if let Some(s) = self.sessions.values().find(|s| matches!(&s.destination, Destination::File(p) if p.canonicalize().ok().is_some() && p.canonicalize().ok() == path.canonicalize().ok())) { return Err(KernelFailure::AlreadyOpen(s.handle.project.clone())); }
-                if let Some(w) = &self.library
-                    && let Some(existing) = w.store().load(&id).map_err(failure)?
-                {
+                if let Some(w) = &self.library {
+                    // Only the entry's metadata: its project body is the file.
+                    let existing = w
+                        .store()
+                        .read(&format!("projectMeta.{id}"))
+                        .map_err(failure)?;
                     let associated = existing
-                        .session
                         .as_ref()
                         .and_then(|m| m.get("file"))
                         .and_then(|m| m.get("path"))
                         .and_then(Value::as_str);
-                    if associated != path.to_str() {
+                    if associated.is_some_and(|a| Some(a) == path.to_str()) {
+                        // Where the person left off in it.
+                        meta = existing.unwrap_or(meta);
+                    } else if associated.is_some()
+                        || w.store().dir().join(format!("project.{id}.json")).exists()
+                    {
                         return Err(failure(
                             "Project id belongs to another library project; open with a fresh session id",
                         ));
@@ -1123,7 +1181,11 @@ impl Kernel {
                     ));
                 }
             };
+            let crashed = r.session.clone();
             let copy = self.recovery_copy(r, recovery_file)?;
+            // The copy holds that work now; left live, every later open and
+            // quit would replay it again.
+            crate::journal::archive_session(crashed).map_err(failure)?;
             let profile = self.library.as_ref().unwrap().store().dir().to_path_buf();
             return self.open_session(
                 id,
@@ -1144,7 +1206,9 @@ impl Kernel {
             Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable { reason },
             Recovery::Copy { recovered, .. } => {
                 let truncated = recovered.truncated;
+                let crashed = recovered.session.clone();
                 let copy = self.recovery_copy(recovered, recovery_file.clone())?;
+                crate::journal::archive_session(crashed).map_err(failure)?;
                 RecoveryResult::OfferCopy {
                     project: copy,
                     truncated,
@@ -1381,7 +1445,11 @@ impl Kernel {
                     .and_then(Value::as_str)
                     .unwrap_or("Project")
             ))
-        } else if value.get("id").and_then(Value::as_str) != Some(slot) {
+        } else if value.get("id").and_then(Value::as_str) != Some(slot)
+            && matches!(self.sessions[id].destination, Destination::Library(_))
+        {
+            // A copy is told apart from its source. A file's own entry is the
+            // file, under its own name (plan §6: external files open in place).
             Some(format!(
                 "{} — Native",
                 value
@@ -1441,8 +1509,25 @@ impl Kernel {
             .get(id)
             .map(|ui| ui.to_session())
             .unwrap_or_else(|| session.meta.clone());
-        if p.store().path().is_some() {
+        // Only the file's own entry, or a copy's backing file in the profile,
+        // names a file. A copy that named the original would reopen as it.
+        let backing = self
+            .library
+            .as_ref()
+            .and_then(|w| w.store().dir().parent())
+            .map(|profile| profile.join("recovery-files"));
+        let own_file = match &session.destination {
+            Destination::File(_) => true,
+            Destination::Library(_) => p
+                .store()
+                .path()
+                .zip(backing.as_deref())
+                .is_some_and(|(path, backing)| path.starts_with(backing)),
+        };
+        if own_file && p.store().path().is_some() {
             meta = file_metadata(meta, p.store());
+        } else if let Value::Object(m) = &mut meta {
+            m.remove("file");
         }
         let writer = self
             .library
@@ -1463,6 +1548,46 @@ impl Kernel {
                 .store_mut()
                 .mark_library_saved();
         }
+        Ok(())
+    }
+}
+
+impl Kernel {
+    fn owns_library(&self, profile: &std::path::Path) -> bool {
+        self.library.as_ref().is_some_and(|w| {
+            w.store().dir().canonicalize().ok()
+                == LibraryStore::open(profile).dir().canonicalize().ok()
+        })
+    }
+    /// The external file a library entry stands for (plan §6: a file opened
+    /// from disk is its own entry). A recovery copy's backing file is not one.
+    fn file_entry(&self, id: &str) -> Option<PathBuf> {
+        let w = self.library.as_ref()?;
+        let meta = w.store().read(&format!("projectMeta.{id}")).ok()??;
+        let path = PathBuf::from(meta.get("file")?.get("path")?.as_str()?);
+        let backing = w.store().dir().parent()?.join("recovery-files");
+        (!path.starts_with(backing)).then_some(path)
+    }
+    /// The library entry's view state alone, for a file closed unchanged:
+    /// where the person left off, without rewriting the project body.
+    fn save_session_meta(&mut self, id: &str) -> Result<(), KernelFailure> {
+        let Some(writer) = &self.library else {
+            return Ok(());
+        };
+        let p = self.project(id).unwrap();
+        let session = &self.sessions[id];
+        let meta = self
+            .state
+            .ui
+            .get(id)
+            .map(|ui| ui.to_session())
+            .unwrap_or_else(|| session.meta.clone());
+        let meta = file_metadata(meta, p.store());
+        writer
+            .set(&format!("projectMeta.{id}"), meta.clone())
+            .and_then(|()| writer.flush())
+            .map_err(failure)?;
+        self.sessions.get_mut(id).unwrap().meta = meta;
         Ok(())
     }
 }

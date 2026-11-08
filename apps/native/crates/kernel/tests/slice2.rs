@@ -455,31 +455,47 @@ fn file_provider_xattr_causes_copy_without_a_cloud_folder_name() {
     assert!(is_cloud_path(&dir.path("p.pmv")));
 }
 #[test]
-fn stale_lock_requires_both_dead_pid_and_thirty_seconds() {
+fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     let dir = common::TempDir::new("stale");
     let path = dir.path("p.pmvlock");
     let dead = 2_000_000_000u32;
     assert!(!pid_alive(dead));
+    // A live pid with a fresh heartbeat owns the lock (an unflocked writer).
+    fs::write(
+        &path,
+        format!(
+            "{{\"pid\":{},\"heartbeat\":{}}}",
+            std::process::id(),
+            now_ms()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        FileLock::acquire(&path).err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
+    // Killed a moment ago: the flock is free and the pid is gone. No wait.
     fs::write(
         &path,
         format!("{{\"pid\":{dead},\"heartbeat\":{}}}", now_ms()),
     )
     .unwrap();
-    assert!(FileLock::acquire(&path).is_err());
-    fs::write(
-        &path,
-        format!("{{\"pid\":{},\"heartbeat\":0}}", std::process::id()),
-    )
-    .unwrap();
-    assert!(FileLock::acquire(&path).is_err());
-    fs::write(&path, format!("{{\"pid\":{dead},\"heartbeat\":0}}")).unwrap();
     let lock = FileLock::acquire(&path).unwrap();
     let record = parse(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
         record.get("pid"),
         Some(&Value::Number(std::process::id() as f64))
     );
+    // Held: a second claim, even from this process, waits.
+    assert!(FileLock::acquire(&path).is_err());
     drop(lock);
+    // A reused pid whose heartbeat stopped 30 s ago is stale too.
+    fs::write(
+        &path,
+        format!("{{\"pid\":{},\"heartbeat\":0}}", std::process::id()),
+    )
+    .unwrap();
+    drop(FileLock::acquire(&path).unwrap());
     assert!(FileLock::acquire(&path).is_ok());
 }
 #[test]
@@ -576,6 +592,100 @@ fn a_locked_file_opens_as_a_named_copy_and_never_saves_over_the_source() {
     assert_eq!(fs::read(file).unwrap(), bytes);
     let rows = LibraryStore::open(&dir.path("native")).projects().unwrap();
     assert!(rows[0].name.ends_with("— Native"));
+}
+#[test]
+fn an_external_file_opens_in_place_and_its_library_entry_keeps_its_name() {
+    let dir = common::TempDir::new("in-place");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let ShellReply::Opened {
+        session, decision, ..
+    } = k
+        .shell(ShellCall::Open {
+            id: "F".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(decision, OpenDecision::Writable);
+    assert!(project_lock_path(&file).exists(), "held under its .pmvlock");
+    edit(&mut k, "F", 20.0);
+    k.shell(ShellCall::Save(session.clone())).unwrap();
+    k.shell(ShellCall::Close(session)).unwrap();
+    let rows = LibraryStore::open(&dir.path("native")).projects().unwrap();
+    assert_eq!(rows.len(), 1, "one entry: the file itself, not a copy");
+    assert_eq!(rows[0].name, "Fixture");
+    let saved = String::from_utf8_lossy(&fs::read(&file).unwrap()).into_owned();
+    assert!(saved.contains("Fixture"), "saved in place");
+}
+#[test]
+fn a_clean_close_leaves_no_journal_for_quit_or_the_next_open() {
+    let dir = common::TempDir::new("clean-close");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let open = |k: &mut Kernel| {
+        let ShellReply::Opened {
+            session, recovery, ..
+        } = k
+            .shell(ShellCall::PrepareOpen {
+                id: "F".into(),
+                source: SessionSource::File(file.clone()),
+                electron_profile: None,
+            })
+            .unwrap()
+        else {
+            panic!("a saved project opens without a recovery question")
+        };
+        assert_eq!(recovery, RecoveryResult::None);
+        session
+    };
+    let session = open(&mut k);
+    edit(&mut k, "F", 20.0);
+    k.shell(ShellCall::Close(session)).unwrap();
+    // Quit compacts only work that is not already saved.
+    let ShellReply::Compacted { projects, .. } = k.shell(ShellCall::CompactAll).unwrap() else {
+        panic!()
+    };
+    assert_eq!(projects, 0);
+    // Closing what is already saved leaves the file alone.
+    let saved = fs::read(&file).unwrap();
+    let modified = fs::metadata(&file).unwrap().modified().unwrap();
+    let session = open(&mut k);
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(fs::read(&file).unwrap(), saved);
+    assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), modified);
+}
+#[test]
+fn a_project_from_before_compositions_opens_with_one_stable_composition() {
+    let dir = common::TempDir::new("legacy-comp");
+    let file = dir.path("legacy.pmv");
+    // No compId or compName, as files saved before compositions have.
+    fs::write(&file, r##"{"v":"1.0.0","proj":{"id":"Plegacy1","name":"Legacy","w":200,"h":100,"fps":30,"dur":2,"bg":"#000000","assets":{},"layers":[{"id":"L1","type":"shape","name":"Layer","from":0,"dur":2,"on":true,"p":{}}]}}"##).unwrap();
+    let open = || {
+        let o = pm_kernel::project_io::open_project(&file, Default::default()).unwrap();
+        let comp = o.open_comp.clone().expect("an open composition");
+        let root = o.document.to_value().unwrap();
+        let stored = root
+            .get("comps")
+            .and_then(|c| c.get(&comp))
+            .expect("stored under its id");
+        assert_eq!(stored.get("name").and_then(Value::as_str), Some("Legacy"));
+        assert_eq!(
+            stored.get("layers").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+        comp
+    };
+    assert_eq!(
+        open(),
+        open(),
+        "the same id on every open keeps the journal base"
+    );
 }
 #[test]
 fn foreign_electron_library_is_readonly_and_copy_identity_is_new() {
@@ -1199,4 +1309,155 @@ fn rollback_compaction_does_not_resurrect_trashed_projects() {
     k.shell(ShellCall::CompactAll).unwrap();
     assert!(reader.projects().unwrap().is_empty());
     assert_eq!(reader.trash().unwrap()[0].raw, before);
+}
+/// Crashes `id`'s session for `file` with opacity `n` unsaved.
+fn crash_with_edit(profile: &Path, id: &str, file: &Path, n: f64) {
+    let mut k = kernel(profile);
+    open(&mut k, id, SessionSource::File(file.into()));
+    edit(&mut k, id, n);
+    k.sync_all();
+}
+fn prepare(k: &mut Kernel, id: &str, source: SessionSource) -> (String, RecoveryResult) {
+    match k
+        .shell(ShellCall::PrepareOpen {
+            id: id.into(),
+            source,
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::RecoveryRequired { ticket, recovery } => (ticket, recovery),
+        other => panic!("expected a recovery question: {other:?}"),
+    }
+}
+fn decide(k: &mut Kernel, ticket: String, decision: RecoveryDecision) -> SessionHandle {
+    match k
+        .shell(ShellCall::DecideRecovery { ticket, decision })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    }
+}
+fn live_sessions(profile: &Path, id: &str) -> usize {
+    pm_kernel::journal::sessions(&profile.join("journals").join(id)).len()
+}
+#[test]
+fn recovering_a_file_from_recents_recovers_it_in_place() {
+    let dir = common::TempDir::new("recents-recover");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    let library = SessionSource::Library {
+        profile: profile.clone(),
+        project: "F".into(),
+    };
+    let (ticket, recovery) = prepare(&mut k, "F", library);
+    assert!(
+        matches!(recovery, RecoveryResult::Recovered { .. }),
+        "the file is unchanged, so its journal recovers in place: {recovery:?}"
+    );
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    assert_eq!(
+        common::opacity_of(k.project("F").unwrap().store(), "layer0"),
+        Some(45.0)
+    );
+    let rows = LibraryStore::open(&profile).projects().unwrap();
+    assert_eq!(rows.len(), 1, "no recovery copy: {rows:?}");
+    let lock = parse(&fs::read_to_string(project_lock_path(&file)).unwrap()).unwrap();
+    assert_eq!(
+        lock.get("pid").and_then(Value::as_f64),
+        Some(f64::from(std::process::id())),
+        "the file stays held in place"
+    );
+    k.shell(ShellCall::Save(session.clone())).unwrap();
+    assert_eq!(
+        common::opacity_of(&common::open_store(&file), "layer0"),
+        Some(45.0)
+    );
+    assert_ne!(fs::read(&file).unwrap(), before);
+}
+#[test]
+fn recovering_as_a_copy_retires_the_crashed_session_and_quit_leaves_the_file_alone() {
+    let dir = common::TempDir::new("copy-retires");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    // Someone else saves the file: the journal's base no longer matches.
+    fs::write(&file, PROJECT.replace("Fixture", "Elsewhere")).unwrap();
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    let (ticket, recovery) = prepare(&mut k, "F", SessionSource::File(file.clone()));
+    assert!(matches!(recovery, RecoveryResult::OfferCopy { .. }));
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(live_sessions(&profile, "F"), 0, "the copy holds that work");
+    let ShellReply::Compacted {
+        recovery_copies, ..
+    } = k.shell(ShellCall::PrepareQuit).unwrap()
+    else {
+        panic!()
+    };
+    assert!(recovery_copies.is_empty(), "{recovery_copies:?}");
+    assert_eq!(fs::read(&file).unwrap(), before);
+    let copies = LibraryStore::open(&profile)
+        .projects()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.name.ends_with("— Recovered"))
+        .count();
+    assert_eq!(copies, 1);
+}
+#[test]
+fn quit_never_writes_an_unopened_file_and_its_next_open_asks() {
+    let dir = common::TempDir::new("quit-no-file-write");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    k.shell(ShellCall::PrepareQuit).unwrap();
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        before,
+        "no save without the person"
+    );
+    let (_, recovery) = prepare(&mut k, "F", SessionSource::File(file.clone()));
+    assert!(matches!(recovery, RecoveryResult::Recovered { .. }));
+}
+#[test]
+fn dont_save_after_recovering_a_file_from_before_compositions_leaves_it_alone() {
+    let dir = common::TempDir::new("legacy-dont-save");
+    let file = dir.path("legacy.pmv");
+    fs::write(&file, r##"{"v":"1.0.0","proj":{"id":"Plegacy1","name":"Legacy","w":200,"h":100,"fps":30,"dur":2,"bg":"#000000","assets":{},"layers":[{"id":"layer0","type":"shape","name":"Layer","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[],"expr":null}}}]}}"##).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    let (ticket, _) = prepare(&mut k, "F", SessionSource::File(file.clone()));
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    k.shell(ShellCall::DiscardClose(session)).unwrap();
+    k.shell(ShellCall::PrepareQuit).unwrap();
+    assert_eq!(fs::read(&file).unwrap(), before);
+}
+#[test]
+fn saving_in_place_keeps_the_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("keep-mode");
+    let file = dir.path("shared.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let session = open(&mut k, "F", SessionSource::File(file.clone()));
+    edit(&mut k, "F", 30.0);
+    k.shell(ShellCall::Save(session)).unwrap();
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
 }

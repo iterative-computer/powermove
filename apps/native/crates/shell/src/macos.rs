@@ -189,6 +189,9 @@ fn open_editor_window(
             } else {
                 0
             };
+            if let Some(s) = restore.as_ref().filter(|_| visible) {
+                host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
+            }
             if visible {
                 let h = host.borrow();
                 h.set_window_id(window_id);

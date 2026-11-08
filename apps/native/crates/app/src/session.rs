@@ -40,6 +40,11 @@ pub struct Controller {
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     pub opening: bool,
+    /// The project an open is reading, shown until it lands or fails, and
+    /// then until the panels have drawn it (`settling`).
+    pub opening_name: Option<String>,
+    /// The project whose panels haven't published since it landed.
+    pub settling: Option<String>,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
@@ -130,7 +135,8 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
-            panels::library(v, id, bounds, cx)
+            panels::opening(v, id, bounds)
+                .or_else(|| panels::library(v, id, bounds, cx))
                 .or_else(|| v.extension_panel(id, bounds, cx))
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
@@ -287,6 +293,8 @@ impl Controller {
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
             opening: false,
+            opening_name: None,
+            settling: None,
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
@@ -339,7 +347,48 @@ impl Controller {
             .detach();
         if let Some(path) = launch {
             self.open_file(path, cx);
+        } else {
+            self.reopen_restored(cx);
         }
+    }
+    /// A window restored at launch reopens its project when that project has
+    /// unsaved work from a crash (so the person is asked about it at once) or
+    /// when the system keeps documents open across quits.
+    fn reopen_restored(&mut self, cx: &mut Context<Self>) {
+        let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
+            return;
+        };
+        let profile = self.profile.clone();
+        let found = cx.background_executor().spawn(async move {
+            let unsaved =
+                !pm_kernel::journal::sessions(&profile.join("journals").join(&project)).is_empty();
+            if !(unsaved || keep) {
+                return None;
+            }
+            let row = pm_kernel::library::LibraryStore::open(&profile)
+                .projects()
+                .ok()?
+                .into_iter()
+                .find(|row| row.id == project)?;
+            Some((row.id, row.name))
+        });
+        cx.spawn(async move |this, cx| {
+            if let Some((id, name)) = found.await {
+                let _ = this.update(cx, |v, cx| {
+                    if v.session.is_none() && !v.opening {
+                        v.open_named(
+                            SessionSource::Library {
+                                profile: v.profile.clone(),
+                                project: id,
+                            },
+                            Some(name),
+                            cx,
+                        );
+                    }
+                });
+            }
+        })
+        .detach();
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let _span = crate::diag::span("refresh");
@@ -753,6 +802,9 @@ impl Controller {
         );
     }
     fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
+        self.open_named(source, None, cx);
+    }
+    fn open_named(&mut self, source: SessionSource, name: Option<String>, cx: &mut Context<Self>) {
         if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
@@ -768,7 +820,7 @@ impl Controller {
             SessionSource::File(p) => stable_id(p),
             SessionSource::New(_) => pm_kernel::new_id("app"),
         };
-        let name = match &source {
+        let name = name.unwrap_or_else(|| match &source {
             SessionSource::File(path) => path
                 .file_stem()
                 .map_or("Untitled".into(), |n| n.to_string_lossy().into_owned()),
@@ -778,7 +830,7 @@ impl Controller {
                 .find(|(id, _)| id == project)
                 .map_or("Untitled".into(), |(_, name)| name.clone()),
             SessionSource::New(_) => "Untitled".into(),
-        };
+        });
         let path = match &source {
             SessionSource::File(path) => Some(path.clone()),
             _ => None,
@@ -835,7 +887,9 @@ impl Controller {
         let kernel = self.kernel.clone();
         let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
-        self.message = "Opening…".into();
+        self.message = format!("Opening “{name}”…");
+        self.opening_name = Some(name.clone());
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let _operation = operation;
             let mut result = pending.await;
@@ -902,6 +956,14 @@ impl Controller {
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
+                // Panels say it's opening until they've mounted for the project.
+                v.settling = match &result {
+                    Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
+                    _ => None,
+                };
+                if v.settling.is_none() {
+                    v.opening_name = None;
+                }
                 match result {
                     Some(Ok(ShellReply::Opened {
                         session,
@@ -1040,9 +1102,7 @@ impl Controller {
         };
         self.duration = number("dur", 1.).max(0.001);
         self.dimensions = [number("w", 1920.), number("h", 1080.)];
-        let fps = number("fps", 30.);
-        self.rate =
-            pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+        self.rate = composition_rate(composition);
         let media = self.media.clone();
         self.background = composition
             .get("bg")
@@ -1517,6 +1577,17 @@ fn open_failure_code(error: &KernelFailure) -> &'static str {
     }
 }
 pub const SAVING: &str = "Saving…";
+/// `fpsRational`, else the stored float snapped to its exact rate: a project
+/// saved at 29.97 plays on the 30000/1001 grid the engine draws.
+fn composition_rate(composition: &pm_model::Node) -> pm_time::Rate {
+    let rational = composition.get("fpsRational").map(|n| n.to_value());
+    pm_model::ingest::IngestRate::from_document(
+        pm_model::ingest::fps_rational_of(rational.as_ref()),
+        composition.get("fps").and_then(crate::node_number),
+    )
+    .map_or(pm_time::Rate::FPS_30, |r| r.rate)
+}
+
 /// Status note for a save in flight, including saves started by MCP or the
 /// kernel. Returns a replacement message on a transition only, so other
 /// notes (refusals, errors) set during the save are kept until it ends.
@@ -1557,6 +1628,27 @@ impl Drop for Controller {
 mod save_note_tests {
     use super::*;
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn ntsc_projects_get_the_exact_rate_the_viewer_needs() {
+        let rate = |json: &str| {
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(json).unwrap()), 1);
+            composition_rate(doc.root().unwrap())
+        };
+        assert_eq!(
+            rate(r#"{"fps":29.97}"#),
+            pm_time::Rate::new(30000, 1001).unwrap()
+        );
+        assert_eq!(
+            rate(r#"{"fps":23.976}"#),
+            pm_time::Rate::new(24000, 1001).unwrap()
+        );
+        assert_eq!(
+            rate(r#"{"fps":30,"fpsRational":[60000,1001]}"#),
+            pm_time::Rate::new(60000, 1001).unwrap()
+        );
+        assert_eq!(rate(r#"{"fps":25}"#), pm_time::Rate::new(25, 1).unwrap());
+        assert!(rate(r#"{"fps":29.97}"#).exact_frame_ticks().is_some());
+    }
     #[::core::prelude::v1::test]
     fn save_note_shows_progress_keeps_refusals_and_reports_the_outcome() {
         assert_eq!(save_note(false, true, true, "Opened"), Some(SAVING));

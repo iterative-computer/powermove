@@ -81,3 +81,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **First-run animation** plays inside the Welcome window.
 - **Going back:** there is no reverse migration. The old app must refuse a native file it can't read, safely and clearly, instead of opening it wrongly.
 
+
+## Core lane decisions (2026-11-07)
+
+- **Stale locks:** holding the flock proves no local owner, so a dead pid on a local volume is taken at once; a record younger than 30 s blocks only while its pid runs or on a shared volume; any record whose heartbeat stopped 30 s ago is stale.
+- **External files:** a `.pmv` opened from disk is edited in place under its `.pmvlock`; its library entry is the file under its own name. Only copies (locked, cloud, read-only, foreign library) get " — Native".
+- **Journals:** a project that closes saved and durable retires its journal. Quit compacts only library-owned work; an external file's unsaved work stays in its journal for the next open to ask about (only the restore build's `CompactAll` writes files). A crashed session is archived once a recovery copy holds it.
+- **Recents of a file:** a library entry that stands for an external file opens through the file route (same journal base, lock and recovery as opening the file). A copy never records the original file as its own.
+- **Relaunch:** a restored window reopens its project when its journal holds unsaved work, or when the system keeps documents across quits.
+- **Accessibility before activation:** with forced accessibility, the newest tree built before an AX client connects is handed to the adapter on activation (vendored GPUI), so idle or occluded windows aren't empty.
+- **Projects from before compositions:** a missing `compId` is filled at open, derived from the project id so every open of an unsaved file has one journal base; nested comps are left as stored.
+- **Shader cache:** translated built-in shaders live in `<profile>/shader-cache` (keys carry pipeline revision, translator versions and device).

@@ -91,7 +91,9 @@ pub struct MenuState {
     pub disabled: std::collections::BTreeSet<String>,
 }
 /// The editor window commands should go to: the key window, else the main window
-/// (a key palette/field-menu child panel is not an editor window).
+/// (a key palette/field-menu child panel is not an editor window), else the
+/// frontmost editor (the app is inactive, e.g. a menu item invoked through
+/// accessibility while another app is frontmost).
 fn editor_window_number() -> Option<isize> {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
@@ -100,6 +102,7 @@ fn editor_window_number() -> Option<isize> {
         [app.keyWindow(), app.mainWindow()]
             .into_iter()
             .flatten()
+            .chain(app.orderedWindows().to_vec())
             .map(|w| w.windowNumber())
             .find(|n| r.contains_key(n))
     })
@@ -914,6 +917,9 @@ pub struct Host {
     pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
     /// Native views to expose in reading order after GPUI's.
     pub native_accessibility: Vec<Retained<NSView>>,
+    /// The project this window showed when the app last ran, and whether the
+    /// system keeps documents open across quits (NSQuitAlwaysKeepsWindows).
+    pub restored_project: Option<(String, bool)>,
     menu_state: RefCell<Option<MenuState>>,
     /// The open Save Workspace sheet (kept alive while attached).
     sheet: RefCell<Option<Sheet>>,
@@ -1091,6 +1097,7 @@ impl Host {
             native_panels: Rc::default(),
             native_present: None,
             native_accessibility: vec![],
+            restored_project: None,
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
             title,
