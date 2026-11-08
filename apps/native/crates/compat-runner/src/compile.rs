@@ -180,7 +180,11 @@ impl Sources<'_> {
             return self.svelte(source, file, SvelteUnit::Module);
         }
         if name.ends_with(".ts") || name.ends_with(".tsx") {
-            return strip_typescript(source, &name).map_err(|e| e.to_string());
+            // Diagnostics name the file as the author wrote it.
+            return strip_typescript(source, &self.module_id(file)).map_err(|e| match e {
+                pm_runtime_v8::Error::JavaScript(message) => message,
+                other => other.to_string(),
+            });
         }
         Ok(source.to_owned())
     }

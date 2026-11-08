@@ -208,6 +208,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "thread_read",
     "validate_effect",
     "fork_builtin_extension",
+    "stage_fork_rebase",
+    "publish_extensions",
     "store_search",
     "store_extension",
     "store_source",
@@ -220,6 +222,8 @@ pub const HOST_BACKED: &[&str] = &[
     "replace_media",
     "import_media_to_timeline",
     "fork_builtin_extension",
+    "stage_fork_rebase",
+    "publish_extensions",
     "render_frames",
     "probe_media",
     "sample_media_frames",
@@ -289,11 +293,8 @@ pub fn backing(name: &str) -> &'static str {
         "replace_media" | "import_media" | "import_media_to_timeline" => {
             "durable media import/version service: verified bytes, fingerprints, retained versions and native Undo"
         }
-        "fork_builtin_extension" => {
-            "native shipped source root, frozen manifest validation and isolated fork staging with pristine merge base"
-        }
-        "stage_fork_rebase" | "publish_extensions" => {
-            "extension source inventory, native compiler/scanner, complete API pack, isolated runtime validation and atomic promotion/reload host"
+        "fork_builtin_extension" | "stage_fork_rebase" | "publish_extensions" => {
+            "the app's extension host: shipped built-in sources, native compiler, isolated activation and reload"
         }
         "inspect_creative_workspace" | "inspect_creative_extension" => {
             "creative-app inventory service"

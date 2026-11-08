@@ -188,9 +188,14 @@ impl CompatRunner {
         self.install(manifest, &json!({"sources":sources,"edges":edges}))
     }
     /// A compiled extension directory, through the production compiler.
-    pub fn compile(&self, directory: &Path, entry: &str) -> Result<compile::ModuleGraph> {
+    pub fn compile(
+        &self,
+        directory: &Path,
+        entry: &str,
+        api_version: u64,
+    ) -> Result<compile::ModuleGraph> {
         let compiler = SvelteCompiler::new(&self._pool, 256 * 1024 * 1024, 8 * 1024 * 1024)?;
-        compile::compile(directory, entry, 3, &compiler, None).map_err(Error::Host)
+        compile::compile(directory, entry, api_version, &compiler, None).map_err(Error::Host)
     }
     pub fn install(&self, manifest: &Value, graph: &Value) -> Result<Value> {
         let record = json!({"id":manifest["id"],"scope":"user","manifest":manifest,"enabled":true,

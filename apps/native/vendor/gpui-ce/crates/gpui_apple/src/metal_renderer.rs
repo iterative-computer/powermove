@@ -686,10 +686,11 @@ impl MetalRenderer {
         self.display_link_bound = bound;
     }
 
-    /// Whether the scene reached a drawable. A synchronous paint (AppKit's
-    /// `displayLayer:`, a key-window change) on a display-link layer has none:
-    /// asking for one raises `CAMetalLayerInvalidOperation` and aborts the app,
-    /// so the caller paints on the link's next update instead.
+    /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns
+    /// the layer, a draw outside its update has none, and asking the layer for
+    /// one raises `CAMetalLayerInvalidOperation` (aborting the app): the caller
+    /// paints on the link's next update instead. Synchronous presents release
+    /// the link first, so they may ask.
     pub fn draw(&mut self, scene: &Scene) -> bool {
         let layer = match &self.layer {
             Some(l) => l.clone(),

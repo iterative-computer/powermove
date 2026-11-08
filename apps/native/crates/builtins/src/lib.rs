@@ -37,6 +37,46 @@ pub const LIVE_PANELS: &[&str] = &[
     "export",
 ];
 const BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/builtins.js"));
+/// Each built-in panel's source as a v4 extension tree (`scripts/builtin-sources.ts`).
+const SOURCES: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin-sources.json"));
+
+/// The shipped built-in sources as folders under `root`, written once per build
+/// and never changed after, so forks always copy what this app runs.
+pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let stamp = {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        SOURCES.hash(&mut hash);
+        format!("{:016x}", hash.finish())
+    };
+    let dir = root.join(&stamp);
+    if dir.join(".complete").exists() {
+        return Ok(dir);
+    }
+    let trees: BTreeMap<String, BTreeMap<String, String>> =
+        serde_json::from_str(SOURCES).map_err(std::io::Error::other)?;
+    let scratch = root.join(format!(".{stamp}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    for (id, files) in trees {
+        for (path, text) in files {
+            let file = scratch.join(&id).join(path);
+            fs::create_dir_all(file.parent().unwrap())?;
+            fs::write(&file, text)?;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o444))?;
+        }
+    }
+    fs::write(scratch.join(".complete"), stamp.as_bytes())?;
+    match fs::rename(&scratch, &dir) {
+        Ok(()) => Ok(dir),
+        // Another window wrote the same build's copy first.
+        Err(_) if dir.join(".complete").exists() => {
+            let _ = fs::remove_dir_all(&scratch);
+            Ok(dir)
+        }
+        Err(error) => Err(error),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Publication {
@@ -73,7 +113,8 @@ pub struct RetainedAsset {
 pub struct Builtins {
     pool: RuntimePool,
     broker: Arc<Broker>,
-    realms: BTreeMap<String, Realm>,
+    /// Built-in panels by id; a fork that replaces one runs in its place here.
+    realms: Mutex<BTreeMap<String, Realm>>,
     extension_realms: Mutex<BTreeMap<String, Realm>>,
 }
 struct Broker {
@@ -96,6 +137,9 @@ struct Broker {
     carried: Mutex<Option<agent_host::SharedAgent>>,
     /// Set once `carry_agent` hands the runs on: closing no longer stops them.
     agent_released: std::sync::atomic::AtomicBool,
+    /// Commands each extension realm registered (`commands.register`), by panel,
+    /// with a revision that moves on every change.
+    commands: Mutex<(u64, BTreeMap<String, Value>)>,
 }
 impl Builtins {
     pub fn new(
@@ -163,6 +207,7 @@ impl Builtins {
             agent,
             carried: Mutex::new(carried),
             agent_released: Default::default(),
+            commands: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -174,32 +219,86 @@ impl Builtins {
                 watchdog_hooks: broker.clone(),
                 engine: Some(broker.clone()),
                 cache: CodeCache::new(4 * 1024 * 1024),
-                admission: Admission::new(640 * 1024 * 1024),
+                // Reserved per isolate at its heap ceiling (64 MiB), for the
+                // plan's 64-isolate budget per window: the nine built-ins and
+                // the user's v4 extensions, each in its own isolate (§3.4/§3.7).
+                admission: Admission::new(64 * 64 * 1024 * 1024),
             },
         )?;
         Ok(Self {
             pool,
             broker,
-            realms: BTreeMap::new(),
+            realms: Mutex::default(),
             extension_realms: Mutex::default(),
         })
     }
     /// Ticket is awaited off the UI handler. First publication is delivered only
     /// after Rust accepts the complete atomic surface commit.
     pub fn mount(&mut self, panel: &str) -> Result<Ticket<Evaluation>> {
+        self.mount_builtin(panel)
+    }
+    fn mount_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         if !LIVE_PANELS.contains(&panel)
-            || self.realms.contains_key(panel)
+            || self.realms.lock().unwrap().contains_key(panel)
             || (self.broker.application && !matches!(panel, "settings" | "agent"))
         {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
+        self.start(
+            panel,
+            format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)),
+        )
+    }
+    fn start(&self, panel: &str, source: String) -> Result<Ticket<Evaluation>> {
         let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
         if matches!(panel, "agent" | "settings") {
             self.broker.agent.add_realm(realm.clone());
         }
-        let ticket = realm.eval(format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)))?;
-        self.realms.insert(panel.into(), realm);
+        let ticket = realm.eval(source)?;
+        self.realms.lock().unwrap().insert(panel.into(), realm);
         Ok(ticket)
+    }
+    /// Retire a built-in panel's realm, its writer and its surface, so the next
+    /// mount of that id starts from its own first commit.
+    /// Waits (bounded) for the old isolate to go, so its heap reservation is
+    /// back before the next one starts: call off the main thread.
+    fn retire(&self, panel: &str) {
+        let realm = self.realms.lock().unwrap().remove(panel);
+        if let Some(realm) = realm {
+            realm.close();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !realm.is_disposed() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        self.broker.entries.lock().unwrap().remove(panel);
+        self.broker.publications.lock().unwrap().remove(panel);
+        self.broker.forget_commands(panel);
+    }
+    /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
+    /// it: same realm identity, routes and host operations, the fork's code.
+    /// Waits for the old isolate to close, so call it off the main thread.
+    pub fn replace(&self, panel: &str, fork: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
+        if !LIVE_PANELS.contains(&panel)
+            || (self.broker.application && !matches!(panel, "settings" | "agent"))
+        {
+            return Err(Error::Invalid("unregistered built-in"));
+        }
+        self.retire(panel);
+        self.start(
+            panel,
+            format!(
+                "{BUNDLE}\n__pmBuiltin.mountExtension({},{},{})",
+                json!(fork),
+                json!(graph.to_string()),
+                json!(panel)
+            ),
+        )
+    }
+    /// The fork went away: the shipped panel comes back.
+    pub fn restore(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        self.retire(panel);
+        self.mount_builtin(panel)
     }
     /// What agent runs may use. Without this the panel reports no connection.
     pub fn set_agent_environment(
@@ -211,7 +310,13 @@ impl Builtins {
     }
     /// A third-party v4 extension: its own isolate, the same host and native
     /// surface path as a built-in, and a module graph from the native compiler.
-    pub fn mount_extension(&self, id: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
+    /// `hot` is what the previous version left in `api.hot.data` (`hot()`).
+    pub fn mount_extension(
+        &self,
+        id: &str,
+        graph: &Value,
+        hot: Option<&str>,
+    ) -> Result<Ticket<Evaluation>> {
         let mut extensions = self.extension_realms.lock().unwrap();
         if LIVE_PANELS.contains(&id) || extensions.contains_key(id) || self.broker.application {
             return Err(Error::Invalid("extension panel id is taken"));
@@ -219,12 +324,17 @@ impl Builtins {
         self.broker.extensions.lock().unwrap().insert(id.into());
         let realm = self.pool.realm(RealmKind::V4Extension(id.into()))?;
         let ticket = realm.eval(format!(
-            "{BUNDLE}\n__pmBuiltin.mountExtension({},{})",
+            "{BUNDLE}\n__pmBuiltin.mountExtension({},{},undefined,{})",
             json!(id),
-            json!(graph.to_string())
+            json!(graph.to_string()),
+            hot.map_or(Value::Null, |h| json!(h)),
         ))?;
         extensions.insert(id.into(), realm);
         Ok(ticket)
+    }
+    /// Before a rebuilt extension reloads: its `api.hot.data` as JSON text.
+    pub fn hot(&self, id: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(id)?.eval("__pmBuiltin.hot()")
     }
     /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
     /// its writer on the isolate owner; the same id can mount again.
@@ -235,9 +345,35 @@ impl Builtins {
         self.broker.extensions.lock().unwrap().remove(id);
         // Its surface and router go too; a late call from it is a stale generation.
         self.broker.entries.lock().unwrap().remove(id);
+        self.broker.forget_commands(id);
+    }
+    /// Every extension command in this window when they changed since `seen`:
+    /// `(revision, [{panel, id, title, key}])`.
+    pub fn commands_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let commands = self.broker.commands.lock().unwrap();
+        (commands.0 != seen).then(|| {
+            let list = commands
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |c| {
+                        json!({"panel": panel, "id": c["id"], "title": c["title"], "key": c["key"]})
+                    })
+                })
+                .collect();
+            (commands.0, list)
+        })
+    }
+    /// Runs a command an extension registered, in that extension's realm.
+    pub fn run_command(&self, panel: &str, id: &str, args: &[Value]) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval(format!(
+            "__pmBuiltin.runCommand({},{})",
+            json!(id),
+            json!(args)
+        ))
     }
     fn realm_of(&self, panel: &str) -> Result<Realm> {
-        if let Some(realm) = self.realms.get(panel) {
+        if let Some(realm) = self.realms.lock().unwrap().get(panel) {
             return Ok(realm.clone());
         }
         self.extension_realms
@@ -249,7 +385,8 @@ impl Builtins {
     }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         let extensions = self.extension_realms.lock().unwrap();
-        self.realms
+        let realms = self.realms.lock().unwrap();
+        realms
             .iter()
             .chain(extensions.iter())
             .map(|(id, realm)| (id.clone(), realm.eval("__pmBuiltin.publish()")))
@@ -373,13 +510,10 @@ impl Builtins {
             .get_or_init(std::time::Instant::now)
             .elapsed()
             .as_millis() as u64;
-        self.realms
-            .get("timeline")
-            .ok_or(Error::Closed)?
-            .eval(format!(
-                "__pmBuiltin.command('panel.timeline',{})",
-                json!({"type":"keyDown","millis":millis,"event":{"key":"m","repeat":false}})
-            ))
+        self.realm_of("timeline")?.eval(format!(
+            "__pmBuiltin.command('panel.timeline',{})",
+            json!({"type":"keyDown","millis":millis,"event":{"key":"m","repeat":false}})
+        ))
     }
     pub fn timeline_key(
         &self,
@@ -394,17 +528,13 @@ impl Builtins {
     /// platform acknowledgements; the main thread only polls it. Drivers can
     /// include decimal document/revision stamps from the inspected frame.
     pub fn timeline_action(&self, intent: Value) -> Result<Ticket<Evaluation>> {
-        self.realms
-            .get("timeline")
-            .ok_or(Error::Closed)?
+        self.realm_of("timeline")?
             .eval(format!("__pmBuiltin.command('panel.timeline',{})", intent))
     }
 
     /// Inspect exact library source and CAS revision on the panel worker.
     pub fn timeline_easing_library(&self) -> Result<Ticket<Evaluation>> {
-        self.realms
-            .get("timeline")
-            .ok_or(Error::Closed)?
+        self.realm_of("timeline")?
             .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
@@ -609,7 +739,13 @@ impl Builtins {
             self.broker.agent.close();
         }
         let extensions = self.extension_realms.lock().unwrap();
-        for realm in self.realms.values().chain(extensions.values()) {
+        for realm in self
+            .realms
+            .lock()
+            .unwrap()
+            .values()
+            .chain(extensions.values())
+        {
             realm.close();
         }
     }
@@ -802,6 +938,30 @@ impl EngineProxy for Broker {
                 entry.router.retire().map_err(Error::Host)?;
                 Ok(Value::Null)
             }
+            "commands.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 64
+                        && list.iter().all(|c| {
+                            c["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && c["title"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && (c["key"].is_null()
+                                    || c["key"].as_str().is_some_and(|k| k.len() <= 64))
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("commands need an id and a title"));
+                }
+                let mut commands = self.commands.lock().unwrap();
+                commands.0 += 1;
+                commands.1.insert(panel.into(), input.clone());
+                drop(commands);
+                (self.wake)();
+                Ok(Value::Null)
+            }
             "surface.commit" => {
                 let commit = serde_json::from_value(input.clone())
                     .map_err(|e| Error::Host(e.to_string()))?;
@@ -988,6 +1148,14 @@ impl KernelHooks for Broker {
         }
     }
     fn seal_open_gestures(&self, _: &Generation) {}
+}
+impl Broker {
+    fn forget_commands(&self, panel: &str) {
+        let mut commands = self.commands.lock().unwrap();
+        if commands.1.remove(panel).is_some() {
+            commands.0 += 1;
+        }
+    }
 }
 impl HostProxy for Broker {
     fn fetch(

@@ -1,0 +1,66 @@
+/**
+ * The contract between a panel's `mount` and the window that hosts it. Built-in
+ * panels mount through it, and so does a user fork that replaces one: the fork
+ * receives exactly the environment the built-in had (`powermove/builtin`).
+ */
+import type { HostClient } from "./host-api";
+import type { Json, Transport } from "./protocol";
+import type { SurfaceRoot } from "./renderer";
+
+export interface BuiltinEnv {
+  /** The panel id this mount draws (the built-in's id for a fork). */
+  panel: string;
+  /** Synchronous host operations of this panel's realm. */
+  native(operation: string, input?: unknown): any;
+  /** An AppKit request answered on the main thread (menus, focus, sheets). */
+  platform(operation: string, input?: unknown): Promise<any>;
+  host: HostClient;
+  transport: Transport;
+  rootOptions: { generation: number };
+  /** A new surface root on this panel's transport. */
+  root(): SurfaceRoot;
+  /** A kernel command through the host client; resolves with its value. */
+  command<T = Json | undefined>(name: string, args?: unknown): Promise<T>;
+  /** Rust-owned field bindings by name. */
+  fields(names: string[]): any;
+  activatePanel(id: string): void;
+  report(error: unknown): void;
+  /** Extensions only: state handed across a reload (see `Hot`). */
+  hot?: Hot;
+  /** Extensions only: commands in the palette and keymap (see `Commands`). */
+  commands?: Commands;
+}
+
+/**
+ * Commands an extension adds to the command palette, optionally with a
+ * shortcut (`"cmd+shift+n"`). `run` executes in the extension's own runtime.
+ * `register` returns a function that removes the command again.
+ */
+export interface Commands {
+  register(
+    command: { id: string; title: string; key?: string },
+    run: (args: Json[]) => unknown,
+  ): () => void;
+}
+
+/**
+ * `hot.data` holds what the previous version of this extension left in it
+ * from its `hot.dispose` callbacks, which run just before a reload. JSON only.
+ */
+export interface Hot {
+  data: Record<string, Json>;
+  dispose(callback: (data: Record<string, Json>) => void): void;
+}
+
+export interface Mounted {
+  root: SurfaceRoot;
+  dispose(): Promise<void> | void;
+  /** Resolves when the panel's model has applied what it was sent. */
+  settle?(): Promise<unknown>;
+  /** The panel was revealed (sheets, Settings). */
+  show?(): Promise<unknown>;
+  /** A publication wake: pull host-side registries before settling. */
+  publish?(): void;
+}
+
+export type Mount = (env: BuiltinEnv) => Promise<Mounted>;

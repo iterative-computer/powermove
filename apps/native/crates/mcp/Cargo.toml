@@ -16,6 +16,7 @@ regex = "1"
 libc = "0.2"
 icu_collator = "2"
 async-channel = "2"
+sha2 = "0.10"
 
 [[bin]]
 name = "powermove-mcp"

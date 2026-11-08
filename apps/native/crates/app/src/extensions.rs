@@ -30,9 +30,15 @@ const COMMAND: &str = "extension.command:";
 const MENU: &str = "extension.menu:";
 const STORE: &str = "extension.store";
 const INSTALL: &str = "extension.install:";
+const UNDO: &str = "extension.undo";
 /// Longer than the realm's own deadline; a hung realm never holds a menu back.
+/// How long a reloading extension may take to hand over `api.hot.data`.
+const HOT_HANDOFF: std::time::Duration = std::time::Duration::from_millis(500);
 const MENU_DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
 const OWNER: &str = "extension:";
+/// Commands v4 extensions register at run time: `extension.v4:<panel>:<id>`.
+const V4_COMMAND: &str = "extension.v4:";
+const V4_OWNER: &str = "v4-extension:";
 /// Keys this window's list of contributed panels in the shell.
 static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -145,8 +151,19 @@ pub struct Extensions {
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
     commands: BTreeSet<String>,
+    /// Palette entries from v1–3 contributions and from v4 `commands.register`,
+    /// and the v4 registry revision they reflect.
+    compat_choices: Vec<Choice>,
+    v4_choices: Vec<Choice>,
+    v4_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
     surfaces: BTreeMap<String, (String, String)>,
+    /// Forks drawing a built-in panel in its place: id to (panel, source).
+    forks: BTreeMap<String, (String, String)>,
+    /// Surface ids this window has mounted, and whether the first scan is done:
+    /// a panel published while the window is open is shown, not left in a menu.
+    mounted_once: BTreeSet<String>,
+    booted: bool,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
 }
@@ -170,7 +187,13 @@ impl Default for Extensions {
             placed: BTreeMap::new(),
             seen: 0,
             commands: BTreeSet::new(),
+            compat_choices: vec![],
+            v4_choices: vec![],
+            v4_seen: 0,
             surfaces: BTreeMap::new(),
+            forks: BTreeMap::new(),
+            mounted_once: BTreeSet::new(),
+            booted: false,
             resources: Arc::default(),
         }
     }
@@ -181,19 +204,27 @@ impl Drop for Extensions {
     }
 }
 impl Extensions {
+    fn palette_choices(&self) -> Vec<Choice> {
+        self.compat_choices
+            .iter()
+            .chain(&self.v4_choices)
+            .cloned()
+            .collect()
+    }
     pub fn owns_panel(&self, id: &str) -> bool {
         self.known_panels.contains(id)
     }
-    /// The shipped app's extensions as first launch migrated them (its sealed
-    /// checkpoint, kept current by each launch's delta pass), then this profile's
-    /// own. The native folder wins when both have an id. The shipped app's live
-    /// folder is never read: an isolated profile stays isolated.
-    fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
-        vec![
-            profile.join("extensions-shared"),
-            profile.join("extensions"),
-        ]
-    }
+}
+/// The shipped app's extensions as first launch migrated them (its sealed
+/// checkpoint, kept current by each launch's delta pass), then this profile's
+/// own. The native folder wins when both have an id, and is the one agents
+/// publish into (last). The shipped app's live folder is never read: an
+/// isolated profile stays isolated.
+pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
+    vec![
+        profile.join("extensions-shared"),
+        profile.join("extensions"),
+    ]
 }
 impl Controller {
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
@@ -211,7 +242,7 @@ impl Controller {
         let host = ExtensionHost::start(HostConfig {
             kernel: self.kernel.clone(),
             project,
-            roots: Extensions::roots(&self.profile),
+            roots: roots(&self.profile),
             cache: self.profile.join("extensions-build"),
             owner: Some(Arc::new(Clock(clock_tx))),
             text: self.font_broker.clone().map(|broker| {
@@ -431,64 +462,160 @@ impl Controller {
         None
     }
     /// Each v4 extension gets its own realm and draws through the v4 panel path.
-    /// One that is disabled, removed or rebuilt loses that realm here.
+    /// One that is disabled, removed or rebuilt loses that realm here. A fork
+    /// (`replaces` a built-in) draws that built-in's panel instead, and the
+    /// built-in comes back when the fork goes.
     fn mount_surfaces(&mut self, cx: &mut Context<Self>) {
         let (Some(host), Some(runtime)) = (&self.extensions.host, self.builtins.runtime.clone())
         else {
             return;
         };
         let wanted = host.surfaces();
+        let ready = host.is_ready();
         let source = |surface: &Value| surface["graph"]["hash"].as_str().map(str::to_owned);
+        let still = |id: &str, hash: &str| {
+            wanted
+                .iter()
+                .any(|s| s["id"] == id && source(s).as_deref() == Some(hash))
+        };
         let gone: Vec<String> = self
             .extensions
             .surfaces
             .iter()
-            .filter(|(id, (_, hash))| {
-                !wanted
-                    .iter()
-                    .any(|s| s["id"] == id.as_str() && source(s).as_ref() == Some(hash))
-            })
+            .filter(|(id, (_, hash))| !still(id, hash))
             .map(|(id, _)| id.clone())
             .collect();
         for id in &gone {
-            runtime.unmount_extension(id);
-            self.builtins.forget_surface(id);
-            self.extensions.surfaces.remove(id);
-            if !wanted.iter().any(|s| s["id"] == id.as_str()) {
+            let Some(rebuilt) = wanted.iter().find(|s| s["id"] == id.as_str()) else {
+                self.builtins.forget_surface(id);
+                runtime.unmount_extension(id);
+                self.extensions.surfaces.remove(id);
                 let shell = self.host.borrow();
                 shell.send_command(&format!("panel:close:{id}"), vec![]);
+                continue;
+            };
+            // A new version: the old one hands over `api.hot.data`, then goes.
+            let title = rebuilt["manifest"]["name"]
+                .as_str()
+                .unwrap_or(id)
+                .to_owned();
+            let hash = source(rebuilt).unwrap_or_default();
+            self.extensions.surfaces.insert(id.clone(), (title, hash));
+            self.builtins.keep_surface(id);
+            let (runtime, extension, graph) =
+                (runtime.clone(), id.clone(), rebuilt["graph"].clone());
+            let ticket = cx.background_executor().spawn(async move {
+                let hot = runtime.hot(&extension).ok().and_then(|ticket| {
+                    let deadline = std::time::Instant::now() + HOT_HANDOFF;
+                    loop {
+                        if let Some(result) = ticket.try_take() {
+                            return result.ok().map(|e| e.value);
+                        }
+                        if std::time::Instant::now() > deadline {
+                            return None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                });
+                runtime.unmount_extension(&extension);
+                runtime.mount_extension(&extension, &graph, hot.as_deref())
+            });
+            self.await_panel(id.clone(), id.clone(), ticket, cx);
+        }
+        let unforked: Vec<(String, String)> = self
+            .extensions
+            .forks
+            .iter()
+            .filter(|(id, (_, hash))| !still(id, hash))
+            .map(|(id, (panel, _))| (id.clone(), panel.clone()))
+            .collect();
+        for (id, panel) in unforked {
+            self.extensions.forks.remove(&id);
+            // A rebuilt fork takes its panel straight back below.
+            let refork = wanted.iter().any(|s| {
+                s["id"] == id.as_str()
+                    && crate::extension_authoring::replaced_panel(&s["manifest"])
+                        == Some(panel.as_str())
+            });
+            if !refork {
+                self.builtins.keep_surface(&panel);
+                let (runtime, built_in) = (runtime.clone(), panel.clone());
+                let ticket = cx
+                    .background_executor()
+                    .spawn(async move { runtime.restore(&built_in) });
+                self.await_panel(panel, id, ticket, cx);
             }
         }
         for surface in wanted {
             let Some(id) = surface["id"].as_str().map(str::to_owned) else {
                 continue;
             };
-            if self.extensions.surfaces.contains_key(&id) {
+            if self.extensions.surfaces.contains_key(&id) || self.extensions.forks.contains_key(&id)
+            {
+                continue;
+            }
+            let hash = source(&surface).unwrap_or_default();
+            if let Some(panel) = crate::extension_authoring::replaced_panel(&surface["manifest"]) {
+                if let Some((other, _)) =
+                    self.extensions.forks.iter().find(|(_, (p, _))| p == panel)
+                {
+                    self.message =
+                        format!("{id} and {other} both replace {panel}; {other} is kept.");
+                    continue;
+                }
+                self.extensions
+                    .forks
+                    .insert(id.clone(), (panel.into(), hash));
+                self.builtins.keep_surface(panel);
+                let (runtime, fork, graph) =
+                    (runtime.clone(), id.clone(), surface["graph"].clone());
+                let ticket = cx
+                    .background_executor()
+                    .spawn(async move { runtime.replace(panel, &fork, &graph) });
+                self.await_panel(panel.into(), id, ticket, cx);
                 continue;
             }
             let title = surface["manifest"]["name"]
                 .as_str()
                 .unwrap_or(&id)
                 .to_owned();
-            let hash = source(&surface).unwrap_or_default();
             self.extensions.surfaces.insert(id.clone(), (title, hash));
-            let ticket = runtime.mount_extension(&id, &surface["graph"]);
-            cx.spawn(async move |this, cx| {
-                let mounted = match ticket {
-                    Ok(ticket) => ticket.await.map(|_| ()),
-                    Err(error) => Err(error),
-                };
-                let _ = this.update(cx, |v, cx| {
-                    match mounted {
-                        Ok(()) => v.surface_ready(id),
-                        Err(error) => v.message = format!("{id} could not start: {error}"),
-                    }
-                    v.drain_builtins(cx);
-                    cx.notify();
-                });
-            })
-            .detach();
+            let ticket = runtime.mount_extension(&id, &surface["graph"], None);
+            self.await_panel(id.clone(), id.clone(), Task::ready(ticket), cx);
+            if self.extensions.mounted_once.insert(id.clone()) && self.extensions.booted {
+                self.host
+                    .borrow()
+                    .send_command(&format!("panel:show:{id}"), vec![]);
+            }
         }
+        self.extensions.booted |= ready;
+    }
+    /// The panel shows once its first commit is accepted; a failure says whose.
+    fn await_panel(
+        &mut self,
+        panel: String,
+        source: String,
+        ticket: Task<pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let mounted = match ticket.await {
+                Ok(ticket) => ticket.await.map(|e| e.generation.number),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| {
+                match mounted {
+                    Ok(generation) => v.surface_ready(panel, generation),
+                    Err(error) => {
+                        v.builtins.forget_surface(&panel);
+                        v.message = format!("{source} could not start: {error}");
+                    }
+                }
+                v.drain_builtins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn apply_contributions(&mut self, value: &Value, cx: &mut Context<Self>) {
         let panels: Vec<(String, String)> = value["panels"]
@@ -558,6 +685,10 @@ impl Controller {
             label: "Install Extension from Store…".into(),
             command: STORE.into(),
         });
+        let undo = Choice {
+            label: "Undo Extension Change".into(),
+            command: UNDO.into(),
+        };
         let choices: Vec<Choice> = value["commands"]
             .as_array()
             .into_iter()
@@ -574,6 +705,7 @@ impl Controller {
                 })
             })
             .chain(store)
+            .chain([undo])
             .collect();
         self.extensions.commands = choices
             .iter()
@@ -597,8 +729,9 @@ impl Controller {
                 })
             })
             .collect();
+        self.extensions.compat_choices = choices;
         let mut shell = self.host.borrow_mut();
-        shell.contributed_choices = choices;
+        shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(OWNER, bindings);
         drop(shell);
         let definitions: Vec<_> = value["definitions"]
@@ -626,7 +759,11 @@ impl Controller {
             self.message = error.to_string();
         }
     }
-    pub fn extension_command(&mut self, cmd: &ShellCommand) -> bool {
+    pub fn extension_command(&mut self, cmd: &ShellCommand, cx: &mut Context<Self>) -> bool {
+        if cmd.name == UNDO {
+            self.undo_extension_change(cx);
+            return true;
+        }
         if cmd.name == STORE {
             if let Some(host) = &self.extensions.host {
                 host.browse_store();
@@ -650,6 +787,31 @@ impl Controller {
             }
             return true;
         }
+        if let Some(target) = cmd.name.strip_prefix(V4_COMMAND) {
+            if let (Some(runtime), Some((panel, id))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, id, args) = (panel.to_owned(), id.to_owned(), cmd.args.clone());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_command(&panel, &id, &args) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("The command failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
         let Some(id) = cmd.name.strip_prefix(COMMAND) else {
             return false;
         };
@@ -657,6 +819,92 @@ impl Controller {
             host.run_command(id, Value::Array(cmd.args.clone()));
         }
         true
+    }
+    /// Commands v4 extensions registered since the last look go into the
+    /// palette and, with a `key`, the keymap.
+    pub fn sync_v4_commands(&mut self, runtime: &pm_builtins::Builtins) {
+        let Some((revision, list)) = runtime.commands_since(self.extensions.v4_seen) else {
+            return;
+        };
+        self.extensions.v4_seen = revision;
+        let target = |c: &Value| {
+            format!(
+                "{V4_COMMAND}{}:{}",
+                c["panel"].as_str().unwrap_or_default(),
+                c["id"].as_str().unwrap_or_default()
+            )
+        };
+        self.extensions.v4_choices = list
+            .iter()
+            .map(|c| Choice {
+                label: c["title"].as_str().unwrap_or_default().to_owned(),
+                command: target(c),
+            })
+            .collect();
+        let bindings: Vec<Binding> = list
+            .iter()
+            .filter_map(|c| {
+                Some(Binding {
+                    id: format!("{V4_OWNER}{}", target(c)),
+                    chord: c["key"].as_str()?.to_owned(),
+                    command: target(c),
+                    args: vec![],
+                    priority: 300,
+                    in_fields: false,
+                    repeat: false,
+                    loose: false,
+                })
+            })
+            .collect();
+        let mut shell = self.host.borrow_mut();
+        shell.contributed_choices = self.extensions.palette_choices();
+        shell.set_contributed_bindings(V4_OWNER, bindings);
+    }
+    /// Puts back what the newest agent extension change replaced, for this
+    /// project or an app-wide run. Files move on a worker; windows reload.
+    fn undo_extension_change(&mut self, cx: &mut Context<Self>) {
+        let extensions = crate::extension_authoring::AppExtensions::new(self.profile.clone());
+        let project = self.session.as_ref().map(|s| s.project.clone());
+        let task = cx.background_executor().spawn(async move {
+            use pm_mcp::extensions::{change_sets, history_for, restore};
+            let newest = [project.as_deref(), Some("powermove-global")]
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    let set = change_sets(&history_for(&extensions, p))
+                        .into_iter()
+                        .next()?;
+                    Some((p.to_owned(), set))
+                })
+                .max_by(|a, b| a.1["createdAt"].as_str().cmp(&b.1["createdAt"].as_str()));
+            let Some((project, set)) = newest else {
+                return "No extension change to undo.".to_owned();
+            };
+            match restore(
+                &extensions,
+                &project,
+                set["id"].as_str().unwrap_or_default(),
+            ) {
+                Ok(record) => {
+                    let names: Vec<&str> = record["changes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["id"].as_str())
+                        .collect();
+                    format!("Undid the change to {}.", names.join(", "))
+                }
+                Err(error) => error.message,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let message = task.await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = message;
+                cx.notify();
+            });
+        })
+        .detach();
     }
     /// A panel body is a hole in GPUI; the shared document shows through it.
     pub fn extension_panel(

@@ -51,6 +51,17 @@ const DISK_POLL: Duration = Duration::from_secs(3);
 const TIME_MOVED: u8 = 1;
 const PLAY_MOVED: u8 = 2;
 
+/// Every running host's inbox; a closed one drops out on the next send.
+static HOSTS: Mutex<Vec<Sender<Input>>> = Mutex::new(Vec::new());
+/// Extensions changed on disk (an agent published, Undo restored): every
+/// window rescans now instead of at its next disk poll.
+pub fn rescan_all() {
+    HOSTS
+        .lock()
+        .unwrap()
+        .retain(|inbox| inbox.send(Input::Rescan).is_ok());
+}
+
 pub struct HostConfig {
     pub kernel: KernelHandle,
     pub project: String,
@@ -327,6 +338,7 @@ impl ExtensionHost {
         };
         forward_kernel(&config.kernel, inbox.clone());
         forward_mailbox(&config.kernel, writer, inbox.clone());
+        HOSTS.lock().unwrap().push(inbox.clone());
         let owner = Owner {
             writer,
             retired: false,

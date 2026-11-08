@@ -27,4 +27,15 @@ fn main() {
         status.success(),
         "native v4 panel bundle failed; install js/v4 dependencies first"
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        source.join("scripts/builtin-sources.ts").display()
+    );
+    let status = Command::new("bun")
+        .current_dir(&source)
+        .arg("scripts/builtin-sources.ts")
+        .arg(PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("builtin-sources.json"))
+        .status()
+        .expect("bun is required to build the built-in extension sources");
+    assert!(status.success(), "built-in extension sources failed");
 }

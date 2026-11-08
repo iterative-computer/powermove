@@ -212,14 +212,24 @@ impl Controller {
             self.opening_name = None;
         }
     }
-    /// A surface extension's first commit landed; its panel can render.
-    pub fn surface_ready(&mut self, id: String) {
+    /// A surface extension's first commit landed; its panel can render and its
+    /// platform requests are accepted.
+    pub fn surface_ready(&mut self, id: String, generation: u64) {
+        self.builtins.generations.insert(id.clone(), generation);
         self.builtins.ready.insert(id);
     }
 }
 impl Host {
     /// An unmounted surface: its view and anything it published go with it, so a
     /// rebuilt graph starts from its own first commit.
+    /// A panel whose realm is being replaced (a reload or a fork swap) keeps
+    /// its view: the old tree stays on screen until the new generation's first
+    /// publication installs there. A view built mid-swap missed GPUI's input
+    /// until the pane next re-rendered.
+    pub fn keep_surface(&mut self, id: &str) {
+        self.pending.remove(id);
+        self.generations.remove(id);
+    }
     pub fn forget_surface(&mut self, id: &str) {
         self.ready.remove(id);
         self.pending.remove(id);
@@ -393,6 +403,7 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
+        self.sync_v4_commands(&runtime);
         self.builtins
             .requests
             .extend(runtime.take_platform_requests());

@@ -217,6 +217,48 @@ fn press_drag_release_stays_on_the_captured_node_outside_its_bounds(cx: &mut Tes
     assert_eq!(log[1].2.buttons, Some(1));
     assert_eq!(log[2].2.buttons, Some(0));
 }
+/// A reloaded extension or a swapped fork reuses node ids under a new
+/// generation: nothing bound to the old tree (here a pointer capture) carries over.
+#[gpui::test]
+fn a_new_generation_drops_what_the_old_tree_held(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let tree = || {
+        let mut ops = node_ops(1, 0, "div", json!({"style":{"width":100,"height":40}}), &[]);
+        ops.extend(node_ops(
+            2,
+            1,
+            "div",
+            json!({"id":"target","style":{"width":60,"height":20}}),
+            &["pointerdown", "pointermove", "pointerup", "click"],
+        ));
+        ops
+    };
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, tree()), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "target").center();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    let mut next = synthetic(&rig, tree());
+    next.generation = 2;
+    view.update(&mut vcx, |v, cx| v.publish(next, cx));
+    vcx.run_until_parked();
+    vcx.simulate_mouse_move(
+        point(px(900.), px(500.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(&vcx, |v, _| v.publication.generation), 2);
+    assert_eq!(events(&view, &mut vcx), vec![(2, "pointerdown".to_owned())]);
+    // The new tree takes input at once.
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        events(&view, &mut vcx).contains(&(2, "click".to_owned())),
+        "a click after the swap reaches the new tree"
+    );
+}
 #[gpui::test]
 fn double_click_right_click_hover_wheel_and_pinch_reach_their_listeners(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);

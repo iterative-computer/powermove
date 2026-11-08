@@ -183,6 +183,40 @@ pub(crate) fn compile_expression(source: &str, filename: &str, unit: SvelteUnit)
         json!(source)
     ))
 }
+/// One line per diagnostic, as an editor shows it: `file:line:column: message`.
+/// A macro, since the diagnostic type lives in a crate this one does not name.
+macro_rules! located {
+    ($filename:expr, $source:expr, $diagnostics:expr) => {
+        $diagnostics
+            .iter()
+            .map(|d| {
+                let at = d
+                    .labels
+                    .iter()
+                    .find(|l| l.primary())
+                    .or(d.labels.first())
+                    .map(|l| line_column($source, l.offset()))
+                    .unwrap_or_default();
+                let help = d
+                    .help
+                    .as_ref()
+                    .map(|h| format!(" ({h})"))
+                    .unwrap_or_default();
+                format!("{}{at}: {}{help}", $filename, d.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+}
+fn line_column(source: &str, offset: u32) -> String {
+    let before = &source[..(offset as usize).min(source.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before[before.rfind('\n').map_or(0, |i| i + 1)..]
+        .chars()
+        .count()
+        + 1;
+    format!(":{line}:{column}")
+}
 /// Runtime imports of one JavaScript module, in the order the graph must load
 /// them. Type-only imports were already removed by `strip_typescript`.
 pub fn module_imports(source: &str) -> Result<Vec<String>> {
@@ -192,9 +226,10 @@ pub fn module_imports(source: &str) -> Result<Vec<String>> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
     if !parsed.diagnostics.is_empty() {
-        return Err(Error::JavaScript(format!(
-            "JavaScript parse: {:?}",
-            parsed.diagnostics
+        return Err(Error::JavaScript(located!(
+            "compiled module",
+            source,
+            &parsed.diagnostics
         )));
     }
     let mut imports: Vec<String> = parsed
@@ -235,9 +270,10 @@ pub fn strip_typescript(source: &str, filename: &str) -> Result<String> {
     };
     let parsed = Parser::new(&allocator, source, kind).parse();
     if !parsed.diagnostics.is_empty() {
-        return Err(Error::JavaScript(format!(
-            "TypeScript parse: {:?}",
-            parsed.diagnostics
+        return Err(Error::JavaScript(located!(
+            filename,
+            source,
+            &parsed.diagnostics
         )));
     }
     let mut program = parsed.program;
@@ -246,9 +282,10 @@ pub fn strip_typescript(source: &str, filename: &str) -> Result<String> {
         .with_enum_eval(true)
         .build(&program);
     if !semantic.diagnostics.is_empty() {
-        return Err(Error::JavaScript(format!(
-            "TypeScript semantics: {:?}",
-            semantic.diagnostics
+        return Err(Error::JavaScript(located!(
+            filename,
+            source,
+            &semantic.diagnostics
         )));
     }
     let mut options =
@@ -261,9 +298,10 @@ pub fn strip_typescript(source: &str, filename: &str) -> Result<String> {
     let transformed = Transformer::new(&allocator, std::path::Path::new(filename), &options)
         .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
     if !transformed.diagnostics.is_empty() {
-        return Err(Error::JavaScript(format!(
-            "TypeScript transform: {:?}",
-            transformed.diagnostics
+        return Err(Error::JavaScript(located!(
+            filename,
+            source,
+            &transformed.diagnostics
         )));
     }
     Ok(oxc_codegen::Codegen::new().build(&program).code)

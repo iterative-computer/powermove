@@ -200,7 +200,7 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>>
     let raw: Value = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
     let manifest = pm_compat_runner::manifest::parse(&raw)?;
     let entry = manifest["entry"].as_str().unwrap_or("index.ts");
-    let graph = runner.compile(directory, entry)?;
+    let graph = runner.compile(directory, entry, 3)?;
     let activation = runner.install(&manifest, &graph.to_json())?;
     let mut results = vec![];
     if activation["ok"] == true {

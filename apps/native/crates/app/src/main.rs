@@ -8,6 +8,7 @@ mod diag;
 pub mod dialogs;
 mod error_log;
 mod export_coordinator;
+mod extension_authoring;
 mod extensions;
 mod first_run;
 mod gizmo;

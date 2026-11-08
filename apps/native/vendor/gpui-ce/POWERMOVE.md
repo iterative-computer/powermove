@@ -181,7 +181,9 @@ The session locked before the after-patch display and OS IME checks; those are o
   invalidate the window's display link before their synchronous `nextDrawable`
   paint (`release_display_link_for_sync_present`; Core Animation raised on any
   window resize or key change, even with the link paused); the next start
-  attaches a fresh link.
+  attaches a fresh link. While a link owns the layer, `MetalRenderer::draw`
+  without a link-supplied drawable returns `false` and the window repaints on
+  the link's next update, never calling `nextDrawable` (HANDOFF P-120 rule).
 - **P-120 / headroom candidate:** S2 caches its unchanged native viewer pattern and
   clip masks, and gives the 1,000 static texture tiles a cached GPUI entity. The
   fresh 60-Hz producer is separate; texture leases/fences remain intact. This uses

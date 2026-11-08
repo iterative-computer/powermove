@@ -26,6 +26,10 @@ struct Active {
     baseline: u64,
     transaction: Option<Transaction>,
     workspace: Option<PathBuf>,
+    /// The run's extension stage; renewed after each publication.
+    stage: Option<crate::extensions::Stage>,
+    run: String,
+    publications: u32,
     committed: bool,
     external_actions: bool,
 }
@@ -156,7 +160,12 @@ impl McpSession {
         }
         if name == "publish_extensions" {
             crate::validation::extensions(args)?;
-            return Err(Error::unavailable(catalog::backing(name)));
+            let extensions = host
+                .extensions
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            drop(host);
+            return publish(session, extensions.as_ref(), args);
         }
         if name == "import_media_to_timeline"
             && (session.access == "editor" || session.context == "app")
@@ -203,26 +212,27 @@ impl McpSession {
             }
             return crate::effect::validate(&args["definition"]);
         }
-        if name == "fork_builtin_extension" {
+        if name == "fork_builtin_extension" || name == "stage_fork_rebase" {
             catalog::validate(name, args)?;
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
             }
-            let staging = session
-                .workspace
-                .as_ref()
-                .ok_or_else(|| Error::invalid("Extension staging requires project access"))?
-                .join("extensions");
-            let sources = host
-                .extension_sources
-                .as_deref()
+            let extensions = host
+                .extensions
+                .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
-            return serde_json::to_value(sources.fork_builtin(
-                args["id"].as_str().unwrap(),
-                args["forkId"].as_str(),
-                &staging,
-            )?)
-            .map_err(|_| Error::invalid("Invalid extension fork result"));
+            let staging = session
+                .stage
+                .as_ref()
+                .map(|stage| stage.staging.clone())
+                .ok_or_else(|| Error::invalid("Extension staging requires project access"))?;
+            drop(host);
+            let id = args["id"].as_str().unwrap_or_default();
+            return if name == "stage_fork_rebase" {
+                crate::extensions::rebase(extensions.as_ref(), id, &staging)
+            } else {
+                crate::extensions::fork(extensions.as_ref(), id, args["forkId"].as_str(), &staging)
+            };
         }
         if ["thread_list", "thread_read"].contains(&name) {
             catalog::validate(name, args)?;
@@ -688,10 +698,40 @@ impl McpSession {
             result["stagingDirectory"] = json!(root.join("extensions"));
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
-            result["instructions"] = json!(
-                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying. Extension staging is inert: nothing here activates."
-            );
+            let extensions = if host.extensions.is_some() {
+                " To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
+            } else {
+                " Extension staging is inert: nothing here activates."
+            };
+            result["instructions"] = json!(format!(
+                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying.{extensions}"
+            ));
             Some(root)
+        };
+        let stage = match (&workspace, host.extensions.clone()) {
+            (Some(root), Some(extensions)) => {
+                for (name, text) in extensions.api_pack() {
+                    let path = root.join("api").join(&name);
+                    if name
+                        .split('/')
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                    {
+                        continue;
+                    }
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(path, text)?;
+                }
+                let project = project.as_deref().unwrap_or("powermove-global");
+                Some(crate::extensions::prepare(
+                    extensions.as_ref(),
+                    &root.join("extensions"),
+                    project,
+                    &format!("{run_id}-1"),
+                )?)
+            }
+            _ => None,
         };
         self.active = Some(Active {
             project,
@@ -701,6 +741,9 @@ impl McpSession {
             baseline,
             transaction: None,
             workspace,
+            stage,
+            run: run_id,
+            publications: 1,
             committed: false,
             external_actions: false,
         });
@@ -931,6 +974,29 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
     tx.changed = false;
     session.baseline = tx.revision;
     Ok(())
+}
+
+/// Main's publish_extensions: validate and promote, reload the app, then
+/// continue from the promoted baseline with a new run-private stage.
+fn publish(
+    session: &mut Active,
+    extensions: &dyn crate::extensions::ExtensionHost,
+    args: &Value,
+) -> Result<Value> {
+    let stage = session
+        .stage
+        .as_ref()
+        .ok_or_else(|| Error::invalid("Extension staging requires project access"))?;
+    let declared = args["extensions"].as_array().cloned().unwrap_or_default();
+    let record = crate::extensions::publish(extensions, stage, &declared)?;
+    session.publications += 1;
+    let run = format!("{}-{}", session.run, session.publications);
+    let next = crate::extensions::prepare(extensions, &stage.staging, &stage.project, &run)?;
+    let staging = next.staging.clone();
+    session.stage = Some(next);
+    Ok(
+        json!({"changeSetId":record.map(|r| r["id"].clone()),"extensions":declared,"stagingDirectory":staging}),
+    )
 }
 
 /// N4: retiring an agent workspace must preserve its authored files. Moving
