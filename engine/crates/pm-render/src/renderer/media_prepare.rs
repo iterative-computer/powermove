@@ -126,6 +126,13 @@ impl Renderer {
             return Err(RenderError::Unsupported(build.unsupported));
         }
         let mut result = MediaPreparation::default();
+        if !request.export {
+            visit_plan(&plan, &mut |_, source| {
+                if let Source::Image { path, .. } = source {
+                    self.media.prepare_image(path);
+                }
+            });
+        }
         for v in planned_videos(&plan) {
             match self.media.prepare_video(
                 &v.path,
