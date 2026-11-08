@@ -126,9 +126,12 @@ impl MediaEntry {
                 file,
                 offset,
                 length,
-                ..
+                sha256,
             } => {
-                file.check(true)?;
+                // An entry with its own checksum is verified below; re-hashing
+                // the whole container per entry made a 51-item PMV4 file take
+                // minutes to open. PMV3 entries have only the file's content.
+                file.check(sha256.is_none())?;
                 let mut input = File::open(&file.path).map_err(|e| io_err(&file.path, e))?;
                 input
                     .seek(SeekFrom::Start(*offset))
@@ -176,8 +179,8 @@ impl MediaEntry {
                     "Media source length or checksum changed".into(),
                 ));
             }
-            if let MediaSource::Embedded { file, .. } = &self.source {
-                file.check(true)?;
+            if let MediaSource::Embedded { file, sha256, .. } = &self.source {
+                file.check(sha256.is_none())?;
             }
             output.sync_all().map_err(|e| io_err(destination, e))
         })();
