@@ -14,6 +14,8 @@ use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
 mod marquee;
 #[path = "pen_tool.rs"]
 pub mod pen;
+#[path = "snap.rs"]
+mod snap;
 #[path = "text_edit.rs"]
 pub mod text;
 
@@ -202,6 +204,8 @@ struct Drag {
     time: f64,
     /// A press on the selection that never moves is a click: it picks.
     click: Option<Press>,
+    /// What a move snaps to, once read off the main thread.
+    snaps: Option<Arc<Vec<[f64; 2]>>>,
 }
 #[derive(Clone, Copy)]
 struct Press {
@@ -254,6 +258,8 @@ pub struct GizmoSurface {
     pen_pointer: Option<[f64; 2]>,
     /// A Select-tool drag from empty canvas.
     marquee: Option<marquee::Marquee>,
+    /// Snapping guides of the move in progress, composition points.
+    guides: Vec<([f64; 2], [f64; 2])>,
 }
 struct Sketch {
     origin: Point<Pixels>,
@@ -470,6 +476,7 @@ impl GizmoSurface {
             pen_drag: None,
             pen_pointer: None,
             marquee: None,
+            guides: vec![],
         }
     }
     /// Selection, document or playhead moved. The Controller calls in during its
@@ -639,6 +646,7 @@ impl GizmoSurface {
             poses: self.poses.clone(),
             time,
             click,
+            snaps: None,
         };
         let deep = event.modifiers.platform || event.modifiers.control;
         let press = Press {
@@ -834,6 +842,7 @@ impl GizmoSurface {
                         poses: s.poses.clone(),
                         time: press.time,
                         click: None,
+                        snaps: None,
                     });
                 }
             });
@@ -905,6 +914,30 @@ impl GizmoSurface {
                 return;
             }
             drag.active = true;
+            if drag.hit == Hit::Body {
+                let ids: Vec<String> = drag.poses.iter().map(|p| p.id.clone()).collect();
+                let (kernel, project, time) =
+                    (self.kernel.clone(), self.project.clone(), drag.time);
+                let started = drag.origin;
+                self.picks += 1;
+                cx.spawn(async move |this, cx| {
+                    let points = cx
+                        .background_executor()
+                        .spawn(
+                            async move { snap::points(&*kernel.published(&project)?, &ids, time) },
+                        )
+                        .await;
+                    let _ = this.update(cx, |s, _| {
+                        s.picks -= 1;
+                        if let (Some(drag), Some(points)) = (s.drag.as_mut(), points)
+                            && drag.origin == started
+                        {
+                            drag.snaps = Some(Arc::new(points));
+                        }
+                    });
+                })
+                .detach();
+            }
             self.queue.push_back(Job::Begin(match drag.hit {
                 Hit::Body => "Move",
                 Hit::Handle(_) if drag.poses.iter().any(|p| p.shape.is_some()) => "Resize Shape",
@@ -918,13 +951,44 @@ impl GizmoSurface {
             alt: event.modifiers.alt,
             snap: event.modifiers.platform || event.modifiers.control,
         };
-        let commands = commands(drag, origin, at, mods);
+        // Moves align with the composition and other layers; Command
+        // bypasses, and a Shift-locked axis stays put.
+        let mut offset = [0., 0.];
+        let mut guides = vec![];
+        if drag.hit == Hit::Body
+            && !mods.snap
+            && let Some(points) = drag.snaps.clone()
+        {
+            let delta = locked_delta(origin, at, mods.shift);
+            let axes = [!mods.shift || delta[0] != 0., !mods.shift || delta[1] != 0.];
+            let moving = snap::box_points(&drag.poses, delta);
+            let result = snap::snap(
+                &moving,
+                &points,
+                snap::DISTANCE / frame.scale.max(0.02),
+                axes,
+            );
+            offset = result.0;
+            guides = result.1;
+        }
+        let commands = commands(drag, origin, at, mods, offset);
+        if guides != self.guides {
+            if !guides.is_empty() {
+                snap::haptic();
+            }
+            self.guides = guides;
+            cx.notify();
+        }
         self.queue.push_back(Job::Step(commands, true));
         self.pump(cx);
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         self.panning = None;
+        if !self.guides.is_empty() {
+            self.guides.clear();
+            cx.notify();
+        }
         if self.text_release() || self.pen_up(commit, cx) || self.marquee_up(commit, cx) {
             return;
         }
@@ -1193,13 +1257,28 @@ struct Mods {
     /// Command or Control.
     snap: bool,
 }
-fn commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Vec<Command> {
+/// Shift locks a move's dominant axis.
+fn locked_delta(origin: [f64; 2], at: [f64; 2], shift: bool) -> [f64; 2] {
     let mut delta = [at[0] - origin[0], at[1] - origin[1]];
-    if mods.shift && matches!(drag.hit, Hit::Body) {
-        // Shift locks the dominant axis.
+    if shift {
         let axis = usize::from(delta[0].abs() > delta[1].abs());
         delta[axis] = 0.;
     }
+    delta
+}
+fn commands(
+    drag: &Drag,
+    origin: [f64; 2],
+    at: [f64; 2],
+    mods: Mods,
+    snap: [f64; 2],
+) -> Vec<Command> {
+    let delta = if matches!(drag.hit, Hit::Body) {
+        let d = locked_delta(origin, at, mods.shift);
+        [d[0] + snap[0], d[1] + snap[1]]
+    } else {
+        [at[0] - origin[0], at[1] - origin[1]]
+    };
     let t = drag.time;
     let mut out = vec![];
     let moves_roots = matches!(drag.hit, Hit::Body);
@@ -1536,6 +1615,7 @@ impl Render for GizmoSurface {
                             if let Some(frame) = s.host.frame(s.bounds, cx) {
                                 s.pen_paint(frame, window);
                                 s.marquee_paint(frame, window);
+                                s.guides_paint(frame, window);
                                 s.text_paint(frame, window);
                             }
                         });

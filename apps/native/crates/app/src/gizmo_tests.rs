@@ -1129,3 +1129,18 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
         kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
     });
 }
+/// A move that brings the box's right edge within 8 points of the
+/// composition's centre snaps onto it; Command moves freely.
+#[gpui::test]
+fn moves_snap_to_the_composition_centre_unless_command_is_held(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    // The square spans 150..250; 250 + 66 lands 4 short of the centre at 320.
+    let (centre, _, _) = s.points();
+    let at = s.point_of(centre);
+    s.drag(cx, at, point(px(66.), px(0.)), Modifiers::none());
+    assert_eq!(s.pose().position, [270., 150.]);
+    s.undo(cx);
+    let at = s.point_of(centre);
+    s.drag(cx, at, point(px(66.), px(0.)), Modifiers::command());
+    assert_eq!(s.pose().position, [266., 150.]);
+}
