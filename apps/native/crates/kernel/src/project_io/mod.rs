@@ -592,7 +592,6 @@ pub(crate) fn from_container(
     let version_member = fields.remove("v");
     let raw_history = fields.remove("history");
     let workspace = fields.remove("ws");
-    let mut project = project;
     normalize_compositions(&mut project);
     let canonical = canonical_project(project);
     let open_comp = open_comp_id(&canonical).map(str::to_owned);

@@ -17,12 +17,16 @@ pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
     }
     let t = v.host.borrow().tokens.clone();
     Some(
-        pm_shell::view::empty_state(&t, &format!("Opening “{name}”…"), "It appears here when it’s ready.")
-            .id(SharedString::from(format!("opening-{id}")))
-            .role(Role::Status)
-            .aria_label(format!("Opening {name}"))
-            .h(px((bounds.h - t.metrics.header).max(0.)))
-            .into_any_element(),
+        pm_shell::view::empty_state(
+            &t,
+            &format!("Opening “{name}”…"),
+            "It appears here when it’s ready.",
+        )
+        .id(SharedString::from(format!("opening-{id}")))
+        .role(Role::Status)
+        .aria_label(format!("Opening {name}"))
+        .h(px((bounds.h - t.metrics.header).max(0.)))
+        .into_any_element(),
     )
 }
 
