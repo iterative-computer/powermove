@@ -67,6 +67,9 @@ pub struct TimelineModel {
     rows: Vec<Row>,
     row_positions: HashMap<RowId, usize>,
     pub rebuilds: u64,
+    /// The published timeline UI last restored. The native tracks and the
+    /// outline each hold a model; a disclosure one publishes reaches the other.
+    ui_seen: Option<pm_model::json::Value>,
 }
 
 impl TimelineModel {
@@ -83,9 +86,10 @@ impl TimelineModel {
         if changed {
             self.index = Arc::new(TimelineIndex::from_snapshot(&published.snapshot));
             self.rebuild_rows();
-            if new_document {
-                self.restore_ui(&published.ui_state);
-            }
+        }
+        if self.ui_seen.as_ref() != Some(&published.ui_state.timeline) {
+            self.ui_seen = Some(published.ui_state.timeline.clone());
+            self.restore_ui(&published.ui_state);
         }
         if selection_changed {
             let mut seen = HashSet::new();

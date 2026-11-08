@@ -890,3 +890,18 @@ fn right_click_runs_a_native_menu_action_on_the_kernel(cx: &mut TestAppContext) 
     s.undo(cx);
     assert_eq!(markers(&s), 0);
 }
+/// P from the keymap reveals Position under each selected layer, in both the
+/// native track rows and the outline beside them.
+#[gpui::test]
+fn the_reveal_shortcut_shows_property_rows(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":10,"kf":[]},"position.y":{"v":20,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    let rows = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.model().rows().len());
+    assert_eq!(rows(&s), 1);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:p", 0., None, false, cx)
+    });
+    s.idle(cx);
+    assert_eq!(rows(&s), 3, "Position X and Y rows in the native tracks");
+    bounds(&mut s.vcx, r#"timeline:row:["property","l0","position.x"]"#);
+}
