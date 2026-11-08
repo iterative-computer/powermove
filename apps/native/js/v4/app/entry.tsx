@@ -165,17 +165,10 @@ const themes = new Map<
   string,
   { title: string; tokens: Record<string, string | number> }
 >();
-/** The theme this realm asked the window to show (`themes.activate`). */
-let activeTheme: string | null = null;
 const publishThemes = () =>
   native(
     "themes.set",
-    [...themes].map(([id, t]) => ({
-      id,
-      title: t.title,
-      tokens: t.tokens,
-      active: id === activeTheme,
-    })),
+    [...themes].map(([id, t]) => ({ id, title: t.title, tokens: t.tokens })),
   );
 const themeApi: Themes = {
   register(theme) {
@@ -190,7 +183,6 @@ const themeApi: Themes = {
     return () => {
       if (themes.get(id) === entry) {
         themes.delete(id);
-        if (activeTheme === id) activeTheme = null;
         publishThemes();
       }
     };
@@ -198,8 +190,8 @@ const themeApi: Themes = {
   activate(id) {
     if (id !== null && !themes.has(id))
       throw new Error(`No theme ${String(id)} is registered`);
-    activeTheme = id;
-    publishThemes();
+    // The window shows the latest activation from any extension.
+    native("themes.activate", id);
   },
 };
 /** Context-menu items this realm adds (main's `MenusAPI.contribute`). */
@@ -280,19 +272,26 @@ function overlaysFor(env: { rootOptions: any }): Overlays {
     viewer(component) {
       if (typeof component !== "function")
         throw new Error("A viewer overlay is a component");
-      overlay?.root.dispose();
+      if (overlay) {
+        // A replacement starts from its own first commit; the old root's
+        // teardown commits are dropped so they can't land on the new one.
+        const old = overlay;
+        overlay = null;
+        void old.root.dispose().catch(() => {});
+        native("overlay.clear", null);
+      }
+      const entry: { root: any; component: any } = { root: null, component };
       const transport: Transport = async (commit) =>
-        native("overlay.commit", commit);
-      const entry = {
-        root: createRoot(transport, report, env.rootOptions),
-        component,
-      };
+        overlay === entry
+          ? native("overlay.commit", commit)
+          : { accepted: false, revision: -1, error: "overlay replaced" };
+      entry.root = createRoot(transport, report, env.rootOptions);
       overlay = entry;
       void renderOverlay().catch(report);
       return () => {
         if (overlay !== entry) return;
-        entry.root.dispose();
         overlay = null;
+        void entry.root.dispose().catch(() => {});
         native("overlay.clear", null);
       };
     },
@@ -311,11 +310,11 @@ const timelineApi: Timeline = {
     if (typeof painter !== "function")
       throw new Error("A clip painter is a function");
     clipPainter = painter as (clips: Json[]) => unknown;
-    native("timeline.painted", null);
+    native("timeline.painted", true);
     return () => {
       if (clipPainter === painter) {
         clipPainter = null;
-        native("timeline.painted", null);
+        native("timeline.painted", false);
       }
     };
   },
@@ -433,6 +432,8 @@ async function mountExtension(
   },
   /** Where the composition sits in the viewer (for the overlay). */
   viewerFrame(frame: Json) {
+    if (JSON.stringify(frame) === JSON.stringify(viewerFrame))
+      return Promise.resolve(true);
     viewerFrame = frame;
     return renderOverlay().then(() => true);
   },

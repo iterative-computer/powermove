@@ -2,6 +2,7 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+mod chrome;
 pub use agent_host::AgentCarry;
 pub use models::APPLICATION_AGENT_STORE;
 #[cfg(test)]
@@ -84,6 +85,9 @@ pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::Pat
 pub const PARKABLE: &[&str] = &["assets", "layer-effects", "inspector", "fxbrowser"];
 /// A v4 extension's viewer overlay publishes as `<panel>@viewer`.
 pub const VIEWER_OVERLAY: &str = "@viewer";
+/// A `themes.activate` request: its number, panel and theme id (`None`: the
+/// built-in look).
+pub type ThemeRequest = (u64, String, Option<String>);
 /// A deduplicated agent-tool thread request: fingerprint, thread, run.
 type ThreadRequest = (String, String, Option<String>);
 #[derive(Clone, Debug)]
@@ -126,6 +130,9 @@ pub struct Builtins {
     /// Built-in panels by id; a fork that replaces one runs in its place here.
     realms: Mutex<BTreeMap<String, Realm>>,
     extension_realms: Mutex<BTreeMap<String, Realm>>,
+    /// User forks running in place of a built-in (`replace`): the fork's id
+    /// and module graph by panel, so a parked fork starts again as itself.
+    forks: Mutex<BTreeMap<String, (String, Value)>>,
 }
 struct Broker {
     /// Third-party v4 surface extensions mounted in this window.
@@ -155,11 +162,16 @@ struct Broker {
     commands: Mutex<(u64, BTreeMap<String, Value>)>,
     /// Themes each extension realm offers (`themes.register`), by panel.
     themes: Mutex<(u64, BTreeMap<String, Value>)>,
-    /// Bumped when a clip painter (`timeline.paint`) arrives or leaves.
-    painters_changed: std::sync::atomic::AtomicU64,
-    /// The timeline chrome each extension replaced (`timeline.chrome`), put
-    /// back when it leaves, as v1's workspace ownership did.
-    timeline_owners: Mutex<BTreeMap<String, Value>>,
+    /// The latest `themes.activate` in this window: a counter, and the last
+    /// request (its number, panel and theme id, `None` for the built-in look).
+    theme_request: Mutex<(u64, Option<ThemeRequest>)>,
+    /// Realms with a clip painter (`timeline.paint`), and a revision that
+    /// moves whenever one arrives or leaves.
+    painters: Mutex<(u64, std::collections::BTreeSet<String>)>,
+    /// The `timeline.chrome` writer (`chrome.rs`), started on first use.
+    chrome: Mutex<Option<std::sync::mpsc::Sender<chrome::ChromeEdit>>>,
+    /// Set while the window closes: its realms' ends are not removals.
+    closing: std::sync::atomic::AtomicBool,
     /// Built-in panels parked while closed (`Builtins::park`).
     parked: Mutex<std::collections::BTreeSet<String>>,
     /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
@@ -639,8 +651,10 @@ impl Builtins {
             themes: Default::default(),
             overlays_cleared: Default::default(),
             parked: Default::default(),
-            timeline_owners: Default::default(),
-            painters_changed: Default::default(),
+            theme_request: Default::default(),
+            painters: Default::default(),
+            chrome: Default::default(),
+            closing: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -664,6 +678,7 @@ impl Builtins {
             broker,
             realms: Mutex::default(),
             extension_realms: Mutex::default(),
+            forks: Mutex::default(),
         })
     }
     /// Ticket is awaited off the UI handler. First publication is delivered only
@@ -682,12 +697,16 @@ impl Builtins {
         self.broker.parked.lock().unwrap().insert(panel.into());
         true
     }
-    /// A parked panel opened again.
+    /// A parked panel opened again, as the fork that replaced it if any.
     pub fn unpark(&self, panel: &str) -> Option<Result<Ticket<Evaluation>>> {
         if !self.broker.parked.lock().unwrap().remove(panel) {
             return None;
         }
-        Some(self.mount_builtin(panel))
+        let fork = self.forks.lock().unwrap().get(panel).cloned();
+        Some(match fork {
+            Some((fork, graph)) => self.start(panel, fork_source(&fork, &graph, panel)),
+            None => self.mount_builtin(panel),
+        })
     }
     pub fn is_parked(&self, panel: &str) -> bool {
         self.broker.parked.lock().unwrap().contains(panel)
@@ -731,7 +750,8 @@ impl Builtins {
         self.broker.forget_commands(panel);
         self.broker.forget_themes(panel);
         self.broker.forget_overlay(panel);
-        self.broker.forget_timeline(panel);
+        self.broker.forget_timeline(panel, None);
+        self.broker.forget_painter(panel);
     }
     /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
     /// it: same realm identity, routes and host operations, the fork's code.
@@ -743,20 +763,37 @@ impl Builtins {
             return Err(Error::Invalid("unregistered built-in"));
         }
         self.retire(panel);
-        self.start(
-            panel,
-            format!(
-                "{BUNDLE}\n__pmBuiltin.mountExtension({},{},{})",
-                json!(fork),
-                json!(graph.to_string()),
-                json!(panel)
-            ),
-        )
+        self.forks
+            .lock()
+            .unwrap()
+            .insert(panel.into(), (fork.into(), graph.clone()));
+        self.start(panel, fork_source(fork, graph, panel))
     }
     /// The fork went away: the shipped panel comes back.
     pub fn restore(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.retire(panel);
+        self.forks.lock().unwrap().remove(panel);
+        self.broker.parked.lock().unwrap().remove(panel);
         self.mount_builtin(panel)
+    }
+    /// Realms running user code: third-party extensions and forks of
+    /// built-ins. Menus, clip painters and viewer overlays come from these.
+    fn user_realms(&self) -> Vec<(String, Realm)> {
+        let forks = self.forks.lock().unwrap();
+        let realms = self.realms.lock().unwrap();
+        let mut out: Vec<(String, Realm)> = forks
+            .keys()
+            .filter_map(|panel| Some((panel.clone(), realms.get(panel)?.clone())))
+            .collect();
+        drop((realms, forks));
+        out.extend(
+            self.extension_realms
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, realm)| (id.clone(), realm.clone())),
+        );
+        out
     }
     /// What agent runs may use. Without this the panel reports no connection.
     pub fn set_agent_environment(
@@ -806,7 +843,8 @@ impl Builtins {
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
         self.broker.forget_overlay(id);
-        self.broker.forget_timeline(id);
+        self.broker.forget_timeline(id, None);
+        self.broker.forget_painter(id);
     }
     /// Every extension command in this window when they changed since `seen`:
     /// `(revision, [{panel, id, title, key}])`.
@@ -845,9 +883,14 @@ impl Builtins {
         })
     }
     /// Runs a command an extension registered, in that extension's realm.
-    /// True while any v4 extension realm runs (context menus ask them).
+    /// True while any user realm runs (context menus ask them).
     pub fn has_extensions(&self) -> bool {
-        !self.extension_realms.lock().unwrap().is_empty()
+        !self.forks.lock().unwrap().is_empty() || !self.extension_realms.lock().unwrap().is_empty()
+    }
+    /// The latest `themes.activate` in this window: `(number, panel, id)`,
+    /// with `id` `None` for the built-in look. Numbers only grow.
+    pub fn theme_request(&self) -> Option<ThemeRequest> {
+        self.broker.theme_request.lock().unwrap().1.clone()
     }
     /// Every v4 extension's items for a menu opening at `location` (each
     /// realm waits at most 100 ms on its own contributions).
@@ -857,11 +900,9 @@ impl Builtins {
         ctx: &Value,
     ) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         let script = format!("__pmBuiltin.gatherMenu({},{})", json!(location), ctx);
-        self.extension_realms
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, realm)| (id.clone(), realm.eval(script.clone())))
+        self.user_realms()
+            .into_iter()
+            .map(|(id, realm)| (id, realm.eval(script.clone())))
             .collect()
     }
     /// The person chose `key` from the items `panel` gave the last gather.
@@ -869,23 +910,21 @@ impl Builtins {
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.runMenu({})", json!(key)))
     }
-    /// Every v4 realm's clip decorations for the timeline's visible clips
-    /// (`timeline.paint`); each answers JSON text, or `null` without a painter.
+    /// Clip decorations for the timeline's visible clips from each realm
+    /// with a painter (`timeline.paint`); each answers JSON text.
     pub fn paint_clips(&self, clips: &Value) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         let script = format!("__pmBuiltin.paintClips({clips})");
-        self.extension_realms
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, realm)| (id.clone(), realm.eval(script.clone())))
+        let painters = self.broker.painters.lock().unwrap().1.clone();
+        self.user_realms()
+            .into_iter()
+            .filter(|(id, _)| painters.contains(id))
+            .map(|(id, realm)| (id, realm.eval(script.clone())))
             .collect()
     }
-    /// Moves when a clip painter arrives or leaves (and when an extension goes).
+    /// 0 with no clip painter; otherwise moves whenever one arrives or leaves.
     pub fn painters_revision(&self) -> u64 {
-        self.broker
-            .painters_changed
-            .load(std::sync::atomic::Ordering::Acquire)
-            + self.extension_realms.lock().unwrap().len() as u64 * 1_000_000
+        let painters = self.broker.painters.lock().unwrap();
+        if painters.1.is_empty() { 0 } else { painters.0 }
     }
     /// Viewer overlays whose extension took them down since the last look.
     pub fn take_cleared_overlays(&self) -> Vec<String> {
@@ -895,7 +934,7 @@ impl Builtins {
     /// `{x, y, width, height, scale}` in overlay points.
     pub fn viewer_frame(&self, frame: &Value) {
         let script = format!("__pmBuiltin.viewerFrame({frame})");
-        for realm in self.extension_realms.lock().unwrap().values() {
+        for (_, realm) in self.user_realms() {
             let _ = realm.eval(script.clone());
         }
     }
@@ -1265,6 +1304,9 @@ impl Builtins {
         }
     }
     pub fn close(&self) {
+        self.broker
+            .closing
+            .store(true, std::sync::atomic::Ordering::Release);
         if !self
             .broker
             .agent_released
@@ -1496,6 +1538,21 @@ impl EngineProxy for Broker {
                 (self.wake)();
                 Ok(Value::Null)
             }
+            // `themes.activate(id)`: the latest request in the window wins.
+            "themes.activate" => {
+                let id = match input {
+                    Value::Null => None,
+                    Value::String(id) if (1..=128).contains(&id.len()) => Some(id.clone()),
+                    _ => return Err(Error::Invalid("a theme id or null")),
+                };
+                let mut request = self.theme_request.lock().unwrap();
+                request.0 += 1;
+                request.1 = Some((request.0, panel.into(), id));
+                drop(request);
+                self.themes.lock().unwrap().0 += 1;
+                (self.wake)();
+                Ok(Value::Null)
+            }
             "commands.set" => {
                 let valid = input.as_array().is_some_and(|list| {
                     list.len() <= 64
@@ -1564,49 +1621,46 @@ impl EngineProxy for Broker {
                 }
             }
             "timeline.chrome" => {
+                // The native timeline doesn't draw these yet: refuse rather
+                // than accept a change nobody sees.
+                if ["showLayerNumbers", "showTypeBadges", "toolbarDensity"]
+                    .iter()
+                    .any(|key| input.get(key).is_some())
+                {
+                    return Err(Error::Invalid(
+                        "showLayerNumbers, showTypeBadges and toolbarDensity aren't drawn by the native timeline yet",
+                    ));
+                }
                 let patch = timeline_patch(input);
                 if patch.as_object().is_none_or(|p| p.is_empty()) {
                     return Err(Error::Invalid(
                         "timeline chrome needs at least one known field",
                     ));
                 }
-                let current = self.workspace_value();
-                self.timeline_owners
-                    .lock()
-                    .unwrap()
-                    .entry(panel.into())
-                    .or_insert_with(|| current["chrome"]["timeline"].clone());
-                let mut next = current;
-                if !next["chrome"].is_object() {
-                    next["chrome"] = json!({});
-                }
-                let mut timeline = next["chrome"]["timeline"].clone();
-                if !timeline.is_object() {
-                    timeline = json!({});
-                }
-                for (key, value) in patch.as_object().into_iter().flatten() {
-                    if key == "surfaceOrder" {
-                        next["chrome"]["timelineSurfaceOrder"] = value.clone();
-                    }
-                    timeline[key] = value.clone();
-                }
-                next["chrome"]["timeline"] = timeline;
-                self.write_workspace(next)?;
+                self.chrome_edit(chrome::ChromeEdit::Set {
+                    panel: panel.into(),
+                    generation: generation.number,
+                    patch,
+                });
                 Ok(Value::Null)
             }
             "timeline.painted" => {
-                // A painter came or went: the timeline asks again.
-                self.painters_changed
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                // A painter came (`true`) or went: the timeline asks again.
+                let mut painters = self.painters.lock().unwrap();
+                painters.0 += 1;
+                if input == &json!(true) {
+                    painters.1.insert(panel.into());
+                } else {
+                    painters.1.remove(panel);
+                }
+                drop(painters);
                 (self.wake)();
                 Ok(Value::Null)
             }
             "overlay.clear" => {
+                // A publication not yet drawn goes too, so it can't come back.
                 entry.overlay = Surface::default();
-                self.overlays_cleared
-                    .lock()
-                    .unwrap()
-                    .push(format!("{panel}{VIEWER_OVERLAY}"));
+                self.forget_overlay(panel);
                 (self.wake)();
                 Ok(Value::Null)
             }
@@ -1763,55 +1817,56 @@ impl KernelHooks for Broker {
         Err(Error::StaleGeneration)
     }
     fn revoke_generation(&self, generation: &Generation) {
-        if let Ok(panel) = self.panel(generation) {
-            let mut entries = self.entries.lock().unwrap();
-            if let Some(entry) = entries
-                .get_mut(panel)
-                .filter(|e| e.generation == generation.number)
-            {
-                let _ = entry.router.retire();
-            }
+        let Ok(panel) = self.panel(generation) else {
+            return;
+        };
+        let mut entries = self.entries.lock().unwrap();
+        let Some(entry) = entries
+            .get_mut(panel)
+            .filter(|e| e.generation == generation.number)
+        else {
+            return;
+        };
+        let _ = entry.router.retire();
+        // A generation that failed (a quota, a crash) takes down what it put
+        // up; a closing window's realms just end.
+        if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+            return;
         }
+        entry.overlay = Surface::default();
+        drop(entries);
+        let panel = panel.to_owned();
+        self.forget_overlay(&panel);
+        self.forget_timeline(&panel, Some(generation.number));
+        self.forget_painter(&panel);
+        self.forget_themes(&panel);
+        self.forget_commands(&panel);
+        (self.wake)();
     }
     fn seal_open_gestures(&self, _: &Generation) {}
 }
 impl Broker {
-    /// The project's workspace as JSON (`null` with none).
-    fn workspace_value(&self) -> Value {
-        self.kernel
-            .published(&self.project)
-            .and_then(|p| {
-                serde_json::from_str(&pm_model::json::to_canonical_string(&p.workspace)).ok()
-            })
-            .unwrap_or(Value::Null)
+    /// Queues a `timeline.chrome` edit for this window's chrome writer.
+    fn chrome_edit(&self, edit: chrome::ChromeEdit) {
+        let mut writer = self.chrome.lock().unwrap();
+        let tx = writer
+            .get_or_insert_with(|| chrome::spawn_writer(self.kernel.clone(), self.project.clone()));
+        let _ = tx.send(edit);
     }
-    /// Queues the workspace write; host ops run on the main thread, which
-    /// never waits on the kernel (the publication follows on its own).
-    fn write_workspace(&self, next: Value) -> Result<()> {
-        let next =
-            pm_model::json::parse(&next.to_string()).map_err(|e| Error::Host(e.to_string()))?;
-        let call = pm_kernel::WorkspaceCall::Mutate { next, threw: None };
-        drop(self.kernel.call(
-            &self.project,
-            pm_kernel::Request::new(pm_kernel::Caller::native(), call),
-        ));
-        Ok(())
+    /// An extension (or one failed generation of it) leaving puts back the
+    /// timeline chrome it set.
+    fn forget_timeline(&self, panel: &str, generation: Option<u64>) {
+        if self.chrome.lock().unwrap().is_some() {
+            self.chrome_edit(chrome::ChromeEdit::Forget {
+                panel: panel.into(),
+                generation,
+            });
+        }
     }
-    /// An extension leaving puts back the timeline chrome it replaced.
-    fn forget_timeline(&self, panel: &str) {
-        let Some(previous) = self.timeline_owners.lock().unwrap().remove(panel) else {
-            return;
-        };
-        let mut next = self.workspace_value();
-        if next["chrome"].is_object() {
-            if previous.is_null() {
-                if let Some(chrome) = next["chrome"].as_object_mut() {
-                    chrome.remove("timeline");
-                }
-            } else {
-                next["chrome"]["timeline"] = previous;
-            }
-            let _ = self.write_workspace(next);
+    fn forget_painter(&self, panel: &str) {
+        let mut painters = self.painters.lock().unwrap();
+        if painters.1.remove(panel) {
+            painters.0 += 1;
         }
     }
     fn forget_overlay(&self, panel: &str) {
@@ -1859,6 +1914,16 @@ impl WatchdogHooks for Broker {
 
 #[cfg(test)]
 mod tests;
+
+/// A fork's mount script: the fork's module graph drawing built-in `panel`.
+fn fork_source(fork: &str, graph: &Value, panel: &str) -> String {
+    format!(
+        "{BUNDLE}\n__pmBuiltin.mountExtension({},{},{})",
+        json!(fork),
+        json!(graph.to_string()),
+        json!(panel)
+    )
+}
 
 /// v1–3's `sanitizeInterfaceEdit` for the timeline: known fields, v1's ranges.
 fn timeline_patch(input: &Value) -> Value {
