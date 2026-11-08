@@ -45,7 +45,7 @@ use pm_protocol::{
 pub use policy::{Crop, Moment, Output, Quality, Stamp};
 pub use render::{FrameSpec, Scene, metal_device};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
     thread::JoinHandle,
     time::Duration,
@@ -231,6 +231,32 @@ pub struct ViewerStatus {
     /// Clips the viewer plays from a proxy (View › Media). Never counted as
     /// originals.
     pub proxied: usize,
+}
+impl ViewerStatus {
+    /// What the frame on screen leaves out, for the viewer's status line:
+    /// the commonest reason and how many layers it hides. `None`: nothing.
+    pub fn notice(&self) -> Option<String> {
+        let mut reasons: Vec<(&str, BTreeSet<&str>)> = Vec::new();
+        for f in &self.layer_failures {
+            match reasons.iter_mut().find(|(m, _)| *m == f.message) {
+                Some((_, layers)) => {
+                    layers.insert(&f.layer);
+                }
+                None => reasons.push((&f.message, BTreeSet::from([f.layer.as_str()]))),
+            }
+        }
+        reasons.sort_by_key(|(_, layers)| std::cmp::Reverse(layers.len()));
+        let (message, layers) = reasons.first()?;
+        let count = match layers.len() {
+            1 => "1 layer".to_owned(),
+            n => format!("{n} layers"),
+        };
+        let more = match reasons.len() - 1 {
+            0 => String::new(),
+            n => format!(" (and {n} more)"),
+        };
+        Some(format!("Not drawn, {count}: {message}{more}"))
+    }
 }
 struct View {
     config: ViewerConfig,
@@ -1786,6 +1812,27 @@ mod worker_tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(completed(), settled, "a paused viewer stays idle");
         assert_eq!(v.status().no_drawable, 0);
+    }
+
+    #[test]
+    fn the_notice_names_the_commonest_reason_a_layer_is_not_drawn() {
+        let failure = |layer: &str, message: &str| pm_render::LayerFailure {
+            composition: "c".into(),
+            layer: layer.into(),
+            message: message.into(),
+        };
+        let mut status = ViewerStatus::default();
+        assert_eq!(status.notice(), None);
+        status.layer_failures = vec![
+            failure("a", "no definition for effect deep-glow.effect"),
+            failure("b", "no definition for effect deep-glow.effect"),
+            failure("b", "no definition for effect deep-glow.effect"),
+            failure("c", "no definition for effect progressive-blur"),
+        ];
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 2 layers: no definition for effect deep-glow.effect (and 1 more)")
+        );
     }
 
     #[test]

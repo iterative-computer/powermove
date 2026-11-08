@@ -178,6 +178,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         }),
     );
     let weak = entity.downgrade();
+    // The last "not drawn" notice shown, so it is set once and cleared only
+    // while no other message replaced it.
+    let mut notice = None::<String>;
     cx.spawn(async move|cx| {
         loop {
             if rx.recv().await.is_err() { break; }
@@ -200,6 +203,14 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 if let Some(error)=status.error {
                     let error=format!("Viewer: {error}");
                     if v.message!=error {v.message=error;cx.notify();}
+                } else if status.notice()!=notice {
+                    let next=status.notice();
+                    match &next {
+                        Some(text)=>{v.message=text.clone();cx.notify();}
+                        None if notice.as_ref()==Some(&v.message)=>{v.message.clear();cx.notify();}
+                        None=>{}
+                    }
+                    notice=next;
                 }
                 v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();
