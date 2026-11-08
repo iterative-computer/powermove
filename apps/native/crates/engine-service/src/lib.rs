@@ -860,6 +860,8 @@ struct Runtime {
     auto: policy::AutoQuality,
     /// A transient refusal: draw again no earlier than this.
     not_before: f64,
+    /// When the frames started being refused as transient, while they are.
+    waiting_since: Option<f64>,
     prepared: f64,
 }
 struct Flight {
@@ -898,6 +900,8 @@ const PREPARE_AHEAD_SECONDS: f64 = 0.75;
 const PREPARE_EVERY_SECONDS: f64 = 0.25;
 /// A transient refusal (fonts, GPU watchdog) waits this long to try again.
 const RETRY_SECONDS: f64 = 0.016;
+/// A frame refused as transient this long is reported while it is retried.
+const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
@@ -1205,6 +1209,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
+                    waiting_since: None,
                     prepared: 0.,
                 }
             });
@@ -1479,6 +1484,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 match result {
                     Ok(Some(s)) => {
                         v.status.error = None;
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.waiting_since = None;
+                        }
                         // The drawable was another size than configured (a
                         // resize whose publication lagged): later frames
                         // render at the size actually shown.
@@ -1529,11 +1537,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         v.dirty = true;
                         v.input = input;
                         if let Some(r) = runtime.get_mut(&id) {
-                            r.not_before = trace::now() + RETRY_SECONDS;
+                            let now = trace::now();
+                            r.not_before = now + RETRY_SECONDS;
+                            // Retried for good, but never silently: past a few
+                            // seconds the viewer says what it waits for.
+                            let since = *r.waiting_since.get_or_insert(now);
+                            if now - since >= WAITING_SHOWN_SECONDS {
+                                v.status.error = Some(format!("Still waiting: {e}"));
+                            }
                         }
                     }
                     Err(e) => {
                         v.status.error = Some(e.to_string());
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.waiting_since = None;
+                        }
                     }
                 }
             }
