@@ -20,6 +20,7 @@ import { rememberExport } from './export-sidecar';
 import { FileUpload, FILE_CHUNK_BYTES } from './file-upload';
 import { validateSaveMedia, type ProjectSave } from './project-save';
 import { isRendererUnavailable, watchRendererDocument } from './renderer-recovery';
+import { prepareProjectFile, projectReadError } from './project-cloud-access';
 
 const MAX_SAVE_NAME_CHARS = 200;
 
@@ -87,7 +88,7 @@ function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): vo
 }
 
 export async function openProjectForWindow(
-  ctx: { projects: ProjectFiles },
+  ctx: { projects: ProjectFiles; prepareFile?: (file: string) => Promise<void> },
   webContents: WebContents,
   filePath: string, copy = false
 ): Promise<ProjectOpenResult> {
@@ -98,6 +99,8 @@ export async function openProjectForWindow(
   const stopWatching = watchRendererDocument(webContents, gone);
   try {
     if (isRendererUnavailable(webContents)) throw new Error('Project window is unavailable');
+    await (ctx.prepareFile ?? prepareProjectFile)(filePath);
+    if (rendererGone || isRendererUnavailable(webContents)) throw new Error('Project window is unavailable');
     const opened = await ctx.projects.open(filePath, { allowDocumentRange: true, copy });
     if (rendererGone || isRendererUnavailable(webContents)) {
       await ctx.projects.close(opened.token, false).catch(() => undefined);
@@ -118,7 +121,7 @@ export async function openProjectForWindow(
     }
     return { ok: true, ...opened, ...(copy ? { copy: true } : {}) };
   } catch (error: any) {
-    return { ok: false, cancelled: false, error: error.message || 'Could not open project.' };
+    return { ok: false, cancelled: false, error: projectReadError(error) };
   } finally { stopWatching(); }
 }
 

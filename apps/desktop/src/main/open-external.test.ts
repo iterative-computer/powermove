@@ -22,6 +22,28 @@ function sender() {
 }
 
 describe('external project open', () => {
+  it('does not queue project reads while a cloud download is pending', async () => {
+    const projects = { open: vi.fn(), close: vi.fn() };
+    const prepareFile = vi.fn(async () => { throw new Error('Downloading this project from iCloud. Try opening it again when the download finishes.'); });
+    const result = await openProjectForWindow({ projects: projects as any, prepareFile }, sender() as any, '/synthetic.pmv');
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('Downloading this project from iCloud') });
+    expect(prepareFile).toHaveBeenCalledWith('/synthetic.pmv');
+    expect(projects.open).not.toHaveBeenCalled();
+  });
+
+  it('does not open a project if its renderer closes during the cloud check', async () => {
+    const owner = sender(), projects = { open: vi.fn(), close: vi.fn() };
+    const result = await openProjectForWindow({ projects: projects as any, prepareFile: async () => { owner.destroy(); } }, owner as any, '/synthetic.pmv');
+    expect(result).toMatchObject({ ok: false, error: 'Project window is unavailable' });
+    expect(projects.open).not.toHaveBeenCalled();
+  });
+
+  it('reports provider I/O errors as availability failures', async () => {
+    const projects = { open: vi.fn().mockRejectedValue(Object.assign(new Error('read failed'), { code: 'ENOTCONN' })), close: vi.fn() };
+    const result = await openProjectForWindow({ projects: projects as any, prepareFile: async () => {} }, sender() as any, '/synthetic.pmv');
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('Check your connection') });
+  });
+
   it.each([FILE_CHUNK_BYTES, FILE_CHUNK_BYTES * 2])('omits the whole document from a %i-byte PMV4 bridge response', async length => {
     const document = { proj: {}, history: { note: 'synthetic'.repeat(length / 8) } };
     const documentRange = { offset: 5, length, sha256: 'a'.repeat(64) };
