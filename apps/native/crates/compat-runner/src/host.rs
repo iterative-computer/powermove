@@ -339,6 +339,7 @@ impl ExtensionHost {
             moved: moved.clone(),
             restarts: 0,
             asking: None,
+            running: None,
             realm: None,
             router: None,
             records: vec![],
@@ -595,6 +596,8 @@ struct Owner {
     restarts: usize,
     /// The task the user is being asked about, so one hang asks once at a time.
     asking: Option<u64>,
+    /// The last command's task and the extension that registered it.
+    running: Option<(u64, String)>,
     realm: Option<Live>,
     router: Option<RemoteDomPanel>,
     records: Vec<Value>,
@@ -675,23 +678,27 @@ impl Owner {
         self.config.kernel.retire_realm(self.writer);
         self.retired = true;
     }
-    fn eval(&mut self, source: &str) {
-        let Some(live) = &self.realm else { return };
+    /// The task's execution id, when it was queued.
+    fn eval(&mut self, source: &str) -> Option<u64> {
+        let live = self.realm.as_ref()?;
         match live.realm.eval(source) {
-            Ok(_) => (),
+            Ok(ticket) => Some(ticket.execution),
             Err(Error::Busy) => {
                 // The owner's queue is full: wait for room rather than drop state.
                 let realm = live.realm.clone();
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(1));
-                    if !matches!(realm.eval(source), Err(Error::Busy)) {
-                        return;
+                    match realm.eval(source) {
+                        Err(Error::Busy) => continue,
+                        result => return result.ok().map(|t| t.execution),
                     }
                 }
+                None
             }
             Err(_) => {
                 let _ = self.inbox.send(Input::Failed(self.writer.generation));
+                None
             }
         }
     }
@@ -700,7 +707,8 @@ impl Owner {
             Input::Run(id, args) => {
                 if !self.run_store(&id, &args) {
                     let source = format!("__compat.run({},{args})", json!(id));
-                    self.eval(&source);
+                    let owner = self.command_owner(&id);
+                    self.running = self.eval(&source).zip(owner);
                 }
             }
             Input::StorePage(id, view, message) => {
@@ -1465,15 +1473,37 @@ impl Owner {
     fn ask_unresponsive(&mut self, execution: u64) {
         let Some(live) = &self.realm else { return };
         let activating = live.events.activating.lock().unwrap().clone();
-        let name = activating.and_then(|id| {
+        let command = self
+            .running
+            .as_ref()
+            .filter(|(task, _)| *task == execution)
+            .map(|(_, owner)| owner.clone());
+        let disables = activating.is_some();
+        let name = activating.or(command).and_then(|id| {
             self.records
                 .iter()
                 .find(|r| r["id"] == id.as_str())
                 .map(|r| r["manifest"]["name"].as_str().unwrap_or(&id).to_owned())
         });
         self.asking = Some(execution);
-        let request = json!({"kind":"unresponsive","execution":execution,"name":name});
+        let request =
+            json!({"kind":"unresponsive","execution":execution,"name":name,"disables":disables});
         self.shared.update(|p| p.requests.push(request));
+    }
+    fn command_owner(&self, id: &str) -> Option<String> {
+        let contributions = self
+            .shared
+            .published
+            .lock()
+            .unwrap()
+            .contributions
+            .clone()?;
+        contributions["commands"]
+            .as_array()?
+            .iter()
+            .find(|c| c["id"] == id)?["owner"]
+            .as_str()
+            .map(str::to_owned)
     }
     /// A hung or failed realm is rebuilt without the extension that broke it. That
     /// extension stays off until someone turns it back on, here and in every other
@@ -2189,10 +2219,10 @@ mod tests {
             fixture.kernel.published("window").unwrap().entry.is_some()
         });
         // Wait keeps it running; the watchdog asks again later, and Stop ends it.
-        let asked = fixture.answer_unresponsive(None);
+        let asked = fixture.answer_unresponsive(Some("synthetic-stuck"));
         fixture.host.answer_unresponsive(asked, false);
         assert_eq!(fixture.host.view(), view);
-        let again = fixture.answer_unresponsive(None);
+        let again = fixture.answer_unresponsive(Some("synthetic-stuck"));
         assert_eq!(again, asked, "the same task, asked again");
         fixture.host.answer_unresponsive(again, true);
         fixture.until("second rebuild", |host| host.view() == 3 && host.is_ready());

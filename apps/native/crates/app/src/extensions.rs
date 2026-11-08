@@ -331,16 +331,18 @@ impl Controller {
                 let Some(execution) = request["execution"].as_u64() else {
                     return;
                 };
+                let restart = "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.";
                 let (title, body) = match request["name"].as_str() {
-                    Some(name) => (
+                    Some(name) if request["disables"] == true => (
                         format!("“{name}” isn’t responding"),
                         format!(
                             "You can wait for it to finish, or stop it. A stopped extension stays off until you turn {name} back on in Extensions."
                         ),
                     ),
+                    Some(name) => (format!("“{name}” isn’t responding"), restart.to_owned()),
                     None => (
                         "An extension isn’t responding".to_owned(),
-                        "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.".to_owned(),
+                        restart.to_owned(),
                     ),
                 };
                 let shell = self.host.borrow();
