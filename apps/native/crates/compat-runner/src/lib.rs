@@ -683,6 +683,24 @@ mod tests {
         assert_eq!(*producing.lock().unwrap(), vec![true, false, true, false]);
     }
     #[test]
+    fn ui_modal_keeps_main_semantics_with_native_frame_data() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(async()=>{const PM=__compat.realm.PM;const ran=[];const input=document.createElement('input');
+                const m=PM.modal({title:'Curve',body:input,width:360,actions:[{label:'Stay',run:()=>{ran.push('stay');return false}},{label:'Done',pri:true,run:async()=>{ran.push('done')}}]});
+                const frame=JSON.parse(m.el.getAttribute('data-pm-modal-frame'));const open=()=>m.el.isConnected;
+                m.el.querySelector('[data-pm-modal-action="0"]').click();const afterStay=open();
+                m.el.querySelector('[data-pm-modal-action="1"]').click();await new Promise(r=>setTimeout(r,0));
+                const n=PM.modal({title:'Fixed',body:'Text',dismissible:false});n.el.querySelector('[data-pm-modal-dismiss]').click();const fixed=n.el.isConnected;n.close();
+                return [frame,m.body.contains(input),afterStay,open(),ran,fixed,n.el.isConnected]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([{"title":"Curve","width":360,"actions":[{"label":"Stay","pri":false},{"label":"Done","pri":true}],"dismissible":true},
+                true, true, false, ["stay", "done"], true, false])
+        );
+    }
+    #[test]
     fn render_frame_to_and_snapshot_read_the_engine_frame() {
         let runner = dom_runner();
         let asked = Arc::new(std::sync::Mutex::new(vec![]));

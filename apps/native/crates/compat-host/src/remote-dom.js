@@ -8,6 +8,39 @@
     applied = 0,
     stopped = false;
   const waiting = [];
+  // ui.modal: each [data-pm-modal] root shows in a sheet the host presents (a
+  // child web view); the root moves into that document, styles and theme with
+  // it, and the sheet closes when the extension's realm removes the root.
+  const sheets = new Map();
+  const present = (root) => {
+    if (sheets.has(root)) return;
+    const frame = root.getAttribute("data-pm-modal-frame") || "{}";
+    const child = window.open("about:blank#pm-modal=" + encodeURIComponent(frame), "_blank");
+    if (!child) return;
+    sheets.set(root, child);
+    const doc = child.document;
+    doc.documentElement.setAttribute("data-pm-modal-doc", "");
+    for (const attribute of document.documentElement.attributes)
+      if (attribute.name !== "data-pm-modal-doc")
+        doc.documentElement.setAttribute(attribute.name, attribute.value);
+    for (const style of document.querySelectorAll("style"))
+      doc.head.append(doc.importNode(style, true));
+    doc.body.append(doc.adoptNode(root));
+    doc.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") root.querySelector("[data-pm-modal-dismiss]")?.click();
+    });
+    new MutationObserver(() => {
+      if (!root.isConnected || root.ownerDocument !== doc || root.parentNode !== doc.body) {
+        sheets.delete(root);
+        child.close();
+      }
+    }).observe(doc.body, { childList: true });
+  };
+  new MutationObserver((records) => {
+    for (const record of records)
+      for (const node of record.addedNodes)
+        if (node.nodeType === 1 && node.matches?.("[data-pm-modal]")) present(node);
+  }).observe(document.body, { childList: true });
   const resourceImages = new WeakMap();
   // A removed image gives back its page URL (and the bytes behind it).
   const revoke = (node) => {

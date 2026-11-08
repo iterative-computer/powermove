@@ -54,6 +54,7 @@ globalThis.__compat = {
       : undefined;
     // AppKit answers on the main thread, so the realm asks and carries on.
     const asks = new Map();
+    let modals = 0;
     let asked = 0;
     let openMenu = 0;
     const ask = (request) =>
@@ -245,6 +246,73 @@ globalThis.__compat = {
               sticky: options.sticky,
             },
           }),
+        // ui.modal: the body is DOM the extension keeps using. The page shows
+        // it in a native sheet (title and actions are the sheet's own); a sheet
+        // button clicks its hidden twin here, so actions run in this realm.
+        modal: (options = {}) => {
+          const document = this.dom?.document;
+          if (!document) throw Error("ui.modal needs the window's page");
+          const id = ++modals;
+          const el = document.createElement("div");
+          el.setAttribute("data-pm-modal", String(id));
+          const body = document.createElement("div");
+          body.className = "pm-modal-body";
+          if (typeof options.body === "string") body.textContent = options.body;
+          else if (options.body) body.append(options.body);
+          const actions = Array.isArray(options.actions) ? options.actions : [];
+          const twins = document.createElement("div");
+          twins.hidden = true;
+          let pending = false;
+          let open = true;
+          const handle = {
+            el,
+            body,
+            close: () => {
+              if (!open) return;
+              open = false;
+              el.remove();
+            },
+          };
+          actions.forEach((action, index) => {
+            const button = document.createElement("button");
+            button.setAttribute("data-pm-modal-action", String(index));
+            button.addEventListener("click", async () => {
+              if (pending) return;
+              try {
+                const result = action?.run?.();
+                if (result && typeof result.then === "function") {
+                  pending = true;
+                  const value = await result;
+                  if (value !== false) handle.close();
+                } else if (result !== false) handle.close();
+              } catch (error) {
+                this.reportFailure(error);
+              } finally {
+                pending = false;
+              }
+            });
+            twins.append(button);
+          });
+          // Escape, the close button or a click outside: as main's dismissible modal.
+          const dismiss = document.createElement("button");
+          dismiss.setAttribute("data-pm-modal-dismiss", "");
+          dismiss.addEventListener("click", () => {
+            if (options.dismissible !== false && !pending) handle.close();
+          });
+          twins.append(dismiss);
+          el.setAttribute(
+            "data-pm-modal-frame",
+            JSON.stringify({
+              title: String(options.title ?? ""),
+              width: Math.max(240, Math.min(1200, Number(options.width) || 420)),
+              actions: actions.map((a) => ({ label: String(a?.label ?? ""), pri: !!a?.pri })),
+              dismissible: options.dismissible !== false,
+            }),
+          );
+          el.append(body, twins);
+          document.body.append(el);
+          return handle;
+        },
         confirm: (title, body = "") =>
           ask({ kind: "confirm", title: String(title), body: String(body) }),
         openExternal: (url) => ask({ kind: "openExternal", url: String(url) }),

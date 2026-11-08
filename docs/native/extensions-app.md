@@ -164,7 +164,12 @@ window is open is shown in it.
   cancels it. `mbSamples` is not honoured: the engine picks its own sample count.
 - `api.services` holds only what extensions register; the built-in `viewer`,
   `timeline`, `inspector`, `tool` and `shaderHooks` services do not exist natively.
-- `ui.modal` and `PM.Fonts` throw `Unavailable`.
+- `ui.modal` is a native sheet on the window: AppKit title and buttons (primary last,
+  on Return), the extension's body DOM in a child web view the page moves it into; a
+  button clicks a hidden twin in the realm, so actions run there with main's rules
+  (run then close unless it returns `false`; Escape dismisses unless
+  `dismissible: false`). Its body is a fixed 280 pt tall and scrolls. `PM.Fonts`
+  throws `Unavailable`.
 - `titlebar:right` has no host. `layer:context`, `timeline:context` and `viewer:context`
   rows follow the native rows in the timeline's and viewer's right-click NSMenus
   (`Controller::surface_menu`, the same 150 ms deadline as tab menus), with v1's contexts:
