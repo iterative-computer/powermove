@@ -239,7 +239,13 @@ impl Intent {
         };
         planned.audio = self.audio;
         planned.motion_blur = self.motion_blur;
-        planned.draft_from_proxies = self.options.use_proxies;
+        // Only where the sheet offers the choice: a still or a project file
+        // never carries a hidden draft setting from another format.
+        planned.draft_from_proxies = self.options.use_proxies
+            && matches!(
+                self.options.format,
+                Format::Prores | Format::Mp4 | Format::Webm | Format::Png
+            );
         planned.delivery.hide_captions = !self.burn_captions;
         planned.delivery.preview = true;
         // Still-frame timing is entirely the planner's (current playhead).
