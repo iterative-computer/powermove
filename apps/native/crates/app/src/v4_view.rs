@@ -221,6 +221,9 @@ impl SurfaceView {
             let _ = cx.update_window(window, |_, window, cx| {
                 this.update(cx, |v, cx| {
                     if v.latest == ticket {
+                        if v.publication.generation != publication.generation {
+                            v.restart();
+                        }
                         v.table = table;
                         v.publication = publication;
                         v.prepared = Rc::new(prepared);
@@ -231,6 +234,22 @@ impl SurfaceView {
             });
         })
         .detach();
+    }
+    /// A new generation (an extension reloaded, a fork swapped in) reuses node
+    /// ids, so nothing bound to the old tree may carry over.
+    fn restart(&mut self) {
+        self.controls.clear();
+        self.fields.clear();
+        self.scrolls.clear();
+        self.leases.clear();
+        self.option_sets.clear();
+        self.focus.clear();
+        self.subscriptions.clear();
+        self.anchors.borrow_mut().clear();
+        self.capture = None;
+        self.scrub = None;
+        self.queued_move = None;
+        self.error = None;
     }
     fn reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prepared = self.prepared.clone();

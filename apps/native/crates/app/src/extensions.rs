@@ -427,8 +427,8 @@ impl Controller {
             .map(|(id, _)| id.clone())
             .collect();
         for id in &gone {
-            self.builtins.forget_surface(id);
             let Some(rebuilt) = wanted.iter().find(|s| s["id"] == id.as_str()) else {
+                self.builtins.forget_surface(id);
                 runtime.unmount_extension(id);
                 self.extensions.surfaces.remove(id);
                 let shell = self.host.borrow();
@@ -442,6 +442,7 @@ impl Controller {
                 .to_owned();
             let hash = source(rebuilt).unwrap_or_default();
             self.extensions.surfaces.insert(id.clone(), (title, hash));
+            self.builtins.keep_surface(id);
             let (runtime, extension, graph) =
                 (runtime.clone(), id.clone(), rebuilt["graph"].clone());
             let ticket = cx.background_executor().spawn(async move {
@@ -478,7 +479,7 @@ impl Controller {
                         == Some(panel.as_str())
             });
             if !refork {
-                self.builtins.forget_surface(&panel);
+                self.builtins.keep_surface(&panel);
                 let (runtime, built_in) = (runtime.clone(), panel.clone());
                 let ticket = cx
                     .background_executor()
@@ -506,7 +507,7 @@ impl Controller {
                 self.extensions
                     .forks
                     .insert(id.clone(), (panel.into(), hash));
-                self.builtins.forget_surface(panel);
+                self.builtins.keep_surface(panel);
                 let (runtime, fork, graph) =
                     (runtime.clone(), id.clone(), surface["graph"].clone());
                 let ticket = cx
@@ -540,13 +541,16 @@ impl Controller {
     ) {
         cx.spawn(async move |this, cx| {
             let mounted = match ticket.await {
-                Ok(ticket) => ticket.await.map(|_| ()),
+                Ok(ticket) => ticket.await.map(|e| e.generation.number),
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
                 match mounted {
-                    Ok(()) => v.surface_ready(panel),
-                    Err(error) => v.message = format!("{source} could not start: {error}"),
+                    Ok(generation) => v.surface_ready(panel, generation),
+                    Err(error) => {
+                        v.builtins.forget_surface(&panel);
+                        v.message = format!("{source} could not start: {error}");
+                    }
                 }
                 v.drain_builtins(cx);
                 cx.notify();
