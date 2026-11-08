@@ -255,20 +255,15 @@ impl Inspector {
                     Ok(value)
                 }
             }
-            Binding::Composition(field) => Ok(self
-                .composition()
-                .get(match field.as_str() {
-                    "width" => "w",
-                    "height" => "h",
-                    "duration" => "dur",
-                    _ => field,
-                })
-                .cloned()
-                .unwrap_or(Value::Null)),
+            Binding::Composition(field) => Ok(self.composition_field(match field.as_str() {
+                "width" => "w",
+                "height" => "h",
+                "duration" => "dur",
+                _ => field,
+            })),
             Binding::SceneParameter(name) => Ok(self
-                .composition()
-                .get("params")
-                .and_then(|p| p.get(name))
+                .composition_field("params")
+                .get(name)
                 .and_then(|p| p.get("value"))
                 .cloned()
                 .unwrap_or(Value::Null)),

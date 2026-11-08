@@ -45,7 +45,8 @@ impl Inspector {
                 kind: FieldType::Fill,
                 animatable: false,
             });
-            if let Some(params) = self.composition().get("params").and_then(|v| v.as_object()) {
+            let params = self.composition_field("params");
+            if let Some(params) = params.as_object() {
                 for (name, param) in params.iter() {
                     if text(param, "label").is_empty() && text(param, "name").is_empty() {
                         continue;
