@@ -101,6 +101,9 @@ pub struct KernelAdapter {
     caller: Caller,
     generation: u32,
     sent: Option<Sent>,
+    /// The first publication as JSON text, built before the realm asks for it
+    /// so that its cost is not JavaScript time.
+    staged: Option<String>,
     handles: BTreeMap<String, u64>,
     pins: BTreeSet<String>,
     replies: BTreeMap<u64, (Value, Value)>,
@@ -119,6 +122,7 @@ impl KernelAdapter {
             caller: Caller::realm(writer.realm, writer.generation, Origin::Extension),
             generation: 1,
             sent: None,
+            staged: None,
             handles: BTreeMap::new(),
             pins: BTreeSet::new(),
             replies: BTreeMap::new(),
@@ -195,6 +199,14 @@ impl KernelAdapter {
             }
         }
         (revision == p.revision()).then_some(out)
+    }
+    /// Builds the first publication now; the realm's first `publication` takes it.
+    pub fn stage(&mut self) -> Result<()> {
+        self.staged = Some(self.snapshot()?.to_string());
+        Ok(())
+    }
+    pub fn take_staged(&mut self) -> Option<String> {
+        self.staged.take()
     }
     /// Facts always; document, selection and workspace only when they moved.
     pub fn publication(&mut self) -> Result<Value> {

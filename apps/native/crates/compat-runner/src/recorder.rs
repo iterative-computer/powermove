@@ -137,8 +137,9 @@ impl NativeHost {
     pub fn set_text(&self, text: CanvasText) {
         *self.text.lock().unwrap() = Some(text);
     }
-    pub fn snapshot(&self) -> Result<Value> {
-        self.kernel.lock().unwrap().snapshot()
+    /// The realm's first publication, built outside JavaScript time.
+    pub fn stage(&self) -> Result<()> {
+        self.kernel.lock().unwrap().stage()
     }
     pub fn transport(&self) -> &crate::transport::Transport {
         &self.transport
@@ -844,6 +845,21 @@ impl NativeHost {
     }
 }
 impl EngineProxy for NativeHost {
+    fn call_text(
+        &self,
+        generation: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<String> {
+        if operation == "kernel.publication"
+            && let Some(staged) = self.kernel.lock().unwrap().take_staged()
+        {
+            return Ok(staged);
+        }
+        self.call(generation, operation, input, budget)
+            .map(|value| value.to_string())
+    }
     fn call(
         &self,
         _: &Generation,

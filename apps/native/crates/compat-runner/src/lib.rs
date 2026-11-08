@@ -44,6 +44,7 @@ pub(crate) fn limits() -> Limits {
         max_op_bytes: 256 * 1024 * 1024,
         max_ops: 4096,
         max_response_bytes: 64 * 1024 * 1024,
+        max_engine_response_bytes: 256 * 1024 * 1024,
         ..Limits::default()
     }
 }
@@ -84,7 +85,10 @@ pub(crate) fn boot_realm(realm: &Realm, host: &NativeHost, prelude: &str) -> Res
     settled(realm, COMPAT_BUNDLE, 60)?;
     settled(realm, include_str!("canvas-dom.js"), 15)?;
     settled(realm, include_str!("bootstrap.js"), 15)?;
-    settled(realm, &format!("__compat.create({})", host.snapshot()?), 60)?;
+    // A real project can be hundreds of megabytes: the realm parses it as JSON
+    // through the engine channel, never as a source literal.
+    host.stage()?;
+    settled(realm, "__compat.create()", 60)?;
     Ok(())
 }
 
