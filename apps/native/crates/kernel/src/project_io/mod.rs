@@ -111,6 +111,9 @@ impl MediaEntry {
 
     /// Stream this read capability to a new private cache file. Never writes a
     /// source project or creates a source-side lock. Checks version and digest.
+    /// The version check is the save path's: stat identity, rehashing the
+    /// container only when the stat changed. The item's own digest proves its
+    /// bytes, so a project with many items is never hashed once per item.
     pub fn copy_to(&self, destination: &Path) -> Result<(), ProjectIoError> {
         use std::io::{Read, Seek, SeekFrom, Write};
         let mut input: Box<dyn Read> = match &self.source {
@@ -128,7 +131,7 @@ impl MediaEntry {
                 length,
                 ..
             } => {
-                file.check(true)?;
+                file.check(false)?;
                 let mut input = File::open(&file.path).map_err(|e| io_err(&file.path, e))?;
                 input
                     .seek(SeekFrom::Start(*offset))
@@ -177,7 +180,7 @@ impl MediaEntry {
                 ));
             }
             if let MediaSource::Embedded { file, .. } = &self.source {
-                file.check(true)?;
+                file.check(false)?;
             }
             output.sync_all().map_err(|e| io_err(destination, e))
         })();
