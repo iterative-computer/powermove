@@ -303,7 +303,10 @@ fn compile(
         style.remove("backgroundColor");
     }
     let hidden = style.get("display").and_then(Value::as_str) == Some("none")
-        || (panel_id == "assets" && component == Some(Component::SegmentedControl));
+        // Project and Effect Controls draw their own tab switch for the web
+        // host; here the shell's tab strip already is that switch.
+        || (matches!(panel_id, "assets" | "layer-effects")
+            && component == Some(Component::SegmentedControl));
     let mut sheet = StyleRefinement::default().flex().flex_col().min_w(px(0.));
     if node.id == 0 || node.parent == Some(0) {
         sheet = sheet.size_full();

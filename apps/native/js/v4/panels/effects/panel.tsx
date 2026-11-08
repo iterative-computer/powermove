@@ -63,6 +63,9 @@ export function EffectsPanel({
       <text
         role="heading"
         style={{
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "center",
           height: token("metrics.header"),
           paddingLeft: token("metrics.inset"),
           fontSize: token("typography.title"),

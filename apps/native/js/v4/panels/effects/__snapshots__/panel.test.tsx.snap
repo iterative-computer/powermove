@@ -206,9 +206,12 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -1156,9 +1159,12 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -2457,9 +2463,12 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -3832,9 +3841,12 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -5204,9 +5216,12 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -6576,9 +6591,12 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -7800,9 +7818,12 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -8868,9 +8889,12 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -10176,9 +10200,12 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -11497,9 +11524,12 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -12348,9 +12378,12 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -12774,9 +12807,12 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -13395,9 +13431,12 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -14371,9 +14410,12 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -15448,9 +15490,12 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -16365,9 +16410,12 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
@@ -17641,9 +17689,12 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "props": {
         "role": "heading",
         "style": {
+          "alignItems": "center",
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.title",
           },
