@@ -13,7 +13,26 @@ export interface ConversationItem {
 
 export type ConversationEntry =
   | ({ kind: 'message' } & ConversationItem)
-  | { kind: 'work'; key: string; durationMs?: number; items: ConversationItem[] };
+  | { kind: 'work'; key: string; durationMs?: number; items: ConversationItem[]; subagents?: { total: number; failed: number } };
+
+/** Subagents that worked inside folded messages, by their latest state. */
+export function subagentCounts(items: ConversationItem[]): { total: number; failed: number } | undefined {
+  const latest = new Map<string, string>();
+  for (const { message } of items) for (const step of message.steps ?? []) {
+    if (step.kind === 'tool' && step.task) latest.set(step.task.taskId, step.task.status);
+  }
+  if (!latest.size) return undefined;
+  const failed = [...latest.values()].filter(status => status === 'failed' || status === 'interrupted').length;
+  return { total: latest.size, failed };
+}
+
+/** "Worked for 2m 30s · 3 subagents, 1 failed". */
+export function workLabel(entry: { durationMs?: number; subagents?: { total: number; failed: number } }): string {
+  const base = entry.durationMs === undefined ? 'Work' : `Worked for ${workDuration(entry.durationMs)}`;
+  if (!entry.subagents) return base;
+  const { total, failed } = entry.subagents;
+  return `${base} · ${total} ${total === 1 ? 'subagent' : 'subagents'}${failed ? `, ${failed} failed` : ''}`;
+}
 
 export function workDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -53,8 +72,9 @@ export function groupConversation(conversation: AgentMessage[], liveFrom: number
     const live = liveFrom !== null && liveFrom >= start && liveFrom < end;
     const grouped = live ? null : foldTurn(conversation, body);
     if (!grouped) { body.forEach(plain); continue; }
+    const subagents = subagentCounts(grouped.work);
     entries.push({ kind: 'work', key: `work-${start}`, items: grouped.work,
-      ...(grouped.durationMs === undefined ? {} : { durationMs: grouped.durationMs }) });
+      ...(grouped.durationMs === undefined ? {} : { durationMs: grouped.durationMs }), ...(subagents ? { subagents } : {}) });
     for (const reply of grouped.reply) entries.push({ kind: 'message', ...reply });
   }
   return entries;

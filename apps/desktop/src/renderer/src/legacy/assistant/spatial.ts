@@ -31,7 +31,7 @@ import { idlePreload } from './idle-preload';
 import { mediaStepLabels } from '../../panels/agent/media-activity';
 import { mediaOutcomeLabels, mediaToolOutcome } from '../../../../shared/media-tools';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { taskTrace } from '../../panels/agent/task-trace';
+import { taskResultText, taskTrace } from '../../panels/agent/task-trace';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
 const AGENT_LAYER_INDEX_CHARS = 18_000;
@@ -448,11 +448,10 @@ const RUN_FIELDS = [
   'activeRequest', 'codexRequestId', 'requestToken', 'conversation', 'regionImage', 'repairExtensionId',
 ] as const;
 
-function newRunSession(threadId: string): any {
-  const archive = threads;
+function newRunSession(threadId: string, archive: AgentThreads = threads): any {
   return {
     threadId,
-    projectId: threads.projectId,
+    projectId: archive.projectId,
     requestToken: 0,
     activeRequest: null,
     codexRequestId: null,
@@ -526,18 +525,31 @@ async function controlThread(args: any): Promise<any> {
   const previous = threadControlQueues.get(key) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(() => performThreadControl(args));
   threadControlQueues.set(key, next);
-  try { return await next; }
+  try { return linkThreadStep(args, await next); }
   finally { if (threadControlQueues.get(key) === next) threadControlQueues.delete(key); }
+}
+
+/* The caller's "Started a thread" row learns which thread it made, so the
+   person can open it from the conversation instead of hunting the picker. */
+function linkThreadStep(args: any, result: any): any {
+  if (!['thread_launch', 'thread_send'].includes(args.tool) || !args.callerThreadId || typeof result?.threadId !== 'string') return result;
+  const caller = sessions.get(`${args.projectId}/${args.callerThreadId}`);
+  const pattern = new RegExp(`(?:^|[._]|__)${args.tool}$`);
+  const step: any = caller && [...caller.trace].reverse().find((entry: any) => entry.kind === 'tool' && !entry.thread && pattern.test(String(entry.toolName || '').toLowerCase()));
+  if (step) { step.thread = { id: result.threadId, title: String(result.title || 'Thread') }; touch(caller); }
+  return result;
 }
 
 async function performThreadControl(args: any): Promise<any> {
   if (args.projectId !== threads.projectId) throw new Error('The active project changed before this thread command arrived.');
   const archive = threads;
   if (args.tool === 'thread_list') {
-    return { threads: threads.threads.slice(args.offset, args.offset + args.limit).map(thread => describeControlledThread(thread)), total: threads.threads.length, nextOffset: args.offset + args.limit < threads.threads.length ? args.offset + args.limit : null };
+    const listed = threads.threads.filter((thread: any) => !thread.subagent);
+    return { threads: listed.slice(args.offset, args.offset + args.limit).map(thread => describeControlledThread(thread)), total: listed.length, nextOffset: args.offset + args.limit < listed.length ? args.offset + args.limit : null };
   }
   let thread = args.threadId ? threads.threads.find(item => item.id === args.threadId) : undefined;
   if (args.threadId && !thread) throw new Error('This thread does not exist in the current project.');
+  if ((thread as any)?.subagent && args.tool !== 'thread_read') throw new Error('This is a subagent’s sub-thread. Use task_send, task_status or task_cancel with its task.');
   if (args.tool === 'thread_read') {
     const messages = thread!.conversation.slice(args.offset, args.offset + args.limit).map((message, index) => {
       const source = threadMessageText(message), start = args.textOffset ?? 0;
@@ -579,7 +591,10 @@ async function performThreadControl(args: any): Promise<any> {
     }
   }
   if (!thread) {
+    // A thread an agent starts is a sub-thread of the conversation that asked for it.
+    const parentId = args.callerThreadId && threads.threads.some(item => item.id === args.callerThreadId) ? args.callerThreadId : undefined;
     thread = { id: PM.uid('agent-thread-'), title: args.title, updatedAt: Date.now(), conversation: [], composerDraft: '', attachments: [], scope: 'workspace',
+      ...(parentId ? { parentId } : {}),
       ...(args.clientRequestId ? { orchestration: { callerThreadId: args.callerThreadId, clientRequestId: args.clientRequestId, fingerprint } } : {}) };
     threads.threads.unshift(thread);
   }
@@ -666,7 +681,8 @@ function sessionBusy(session: any): boolean {
 
 /** Runs still working in threads other than the one on screen. */
 function backgroundSessions(): any[] {
-  return [...sessions.values()].filter(session =>
+  // Subagents report in their parent's card, so they are not counted twice.
+  return [...sessions.values()].filter(session => !String(session.threadId).startsWith('sub-') &&
     (session.projectId !== threads.projectId || session.threadId !== threads.activeId) && sessionBusy(session));
 }
 
@@ -830,6 +846,9 @@ function switchAgentContext(next: 'app' | 'project'): boolean {
 function deleteThread(id: string) {
   ensureThreadProject();
   if (!threads.threads.some(t => t.id === id)) return;
+  // A thread takes its sub-threads with it.
+  for (const child of threads.threads.filter((t: any) => t.parentId === id)) deleteThread(child.id);
+  if ((threads.threads.find(t => t.id === id) as any)?.subagent) droppedSubthreads.add(id);
   const session = sessions.get(sessionKey(id));
   // Deleting the thread takes its history with it, so its run has nowhere to land.
   if (session && sessionBusy(session)) stopSession(session);
@@ -921,8 +940,10 @@ function agentUISnapshot(): AgentSnapshot {
   S.attachmentUI?.refresh();
   const snapshot: AgentSnapshot = {
     threadId: threads.activeId,
-    threads: threads.threads.map(({ id, title, updatedAt }) => ({
+    threads: threads.threads.map(({ id, title, updatedAt, parentId, subagent, lastRunStatus }: any) => ({
       id, title, updatedAt, busy: sessionBusy(sessions.get(sessionKey(id))),
+      ...(parentId && threads.threads.some(item => item.id === parentId) ? { parentId, kind: subagent ? 'subagent' : 'thread' } : {}),
+      ...(subagent ? { status: lastRunStatus } : {}),
     })),
     /* Switching is always allowed now; only applying a plan — which mutates the
        editor under you — still holds the thread in place. */
@@ -1764,6 +1785,12 @@ function removeAttachment(id: any) {
 function stopSession(session: any) {
   if (session.phase !== 'working') return;
   const thread = threadArchives.get(session.projectId)?.threads.find(item => item.id === session.threadId);
+  if (thread?.subagent) {
+    // Its run belongs to the parent; the cancelled task event closes the sub-thread.
+    session.activity = 'Stopping…'; touch(session);
+    void hostBridge()?.codex?.cancelTask?.(thread.subagent.requestId, thread.subagent.taskId)?.catch?.(() => {});
+    return;
+  }
   if (thread) thread.lastRunStatus = 'cancelled';
   const active: any = session.activeRequest;
   session.activeRequest = null;
@@ -1797,6 +1824,77 @@ function trimTrace(session: any = activeSession()) {
     const removable: any = session.trace.findIndex((step: any) => step.kind !== 'text' && step.kind !== 'question');
     session.trace.splice(removable >= 0 ? removable : 0, 1);
   }
+}
+
+/* A subagent works in a sub-thread of the thread that delegated to it: its own
+   conversation, nested under the parent in the picker, that fills live with
+   the brief, its thinking, its tool calls and its answer. */
+const subthreadId = (taskId: string) => `sub-${taskId}`;
+const TERMINAL_TASK = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+/** Sub-threads the person deleted stay gone while their subagent winds down. */
+const droppedSubthreads = new Set<string>();
+
+function subthreadFor(task: any, parent: any): { thread: any; session: any } | null {
+  const archive = threadArchives.get(parent.projectId);
+  if (!archive || typeof task?.taskId !== 'string') return null;
+  const id = subthreadId(task.taskId);
+  let thread: any = archive.threads.find(item => item.id === id);
+  if (!thread) {
+    // Only live work opens a sub-thread; a late report never resurrects one.
+    if (droppedSubthreads.has(id) || TERMINAL_TASK.has(task.status) || !archive.threads.some(item => item.id === parent.threadId)) return null;
+    // A nested subagent sits under its parent subagent's sub-thread.
+    const parentId = task.parentTaskId && archive.threads.some(item => item.id === subthreadId(task.parentTaskId))
+      ? subthreadId(task.parentTaskId) : parent.threadId;
+    thread = { id, title: String(task.title || 'Subagent').slice(0, 160), updatedAt: Date.now(), conversation: [], composerDraft: '', attachments: [], scope: 'workspace',
+      provider: task.providerInstanceId, model: task.model ?? undefined, parentId,
+      subagent: { taskId: task.taskId, requestId: task.requestId, status: task.status } };
+    archive.threads.push(thread);
+  }
+  const key = `${archive.projectId}/${id}`;
+  let session = sessions.get(key);
+  if (!session) { session = newRunSession(id, archive); sessions.set(key, session); }
+  return { thread, session };
+}
+
+function syncSubthread(task: any, parent: any): void {
+  const found = subthreadFor(task, parent);
+  if (!found) return;
+  const { thread, session } = found;
+  const was = thread.subagent?.status;
+  thread.subagent = { ...thread.subagent, status: task.status };
+  if (TERMINAL_TASK.has(was)) return;
+  if (!TERMINAL_TASK.has(task.status)) {
+    if (session.phase !== 'working') Object.assign(session, { phase: 'working', requestToken: ++runToken, requestStartedAt: task.startedAt || Date.now(), provider: task.providerInstanceId, model: task.model ?? '' });
+    session.activity = task.workState === 'waiting_for_children' ? 'Waiting on its subagents…' : task.progress || 'Working…';
+    thread.lastRunStatus = 'running';
+  } else {
+    // The answer it reported is the sub-thread's closing message.
+    sealTrace(session);
+    const spoke = session.trace.some((step: any) => step.kind === 'text' && String(step.text || '').trim());
+    archiveTrace(spoke, session);
+    const summary = taskResultText(task);
+    if (!spoke && summary) session.conversation.push({ role: 'assistant', text: task.status === 'completed' ? summary : `${task.status === 'failed' ? 'Failed' : 'Stopped'}: ${summary}` });
+    Object.assign(session, { phase: 'conversation', activity: '', requestStartedAt: null });
+    thread.lastRunStatus = task.status === 'completed' ? 'completed' : task.status === 'failed' ? 'failed' : 'cancelled';
+  }
+  thread.updatedAt = Date.now();
+  const archive = threadArchives.get(parent.projectId);
+  if (archive) dirtyThreadArchives.add(archive);
+  touch(session);
+}
+
+function reduceSubagentStep(event: any, parent: any): void {
+  const archive = threadArchives.get(parent.projectId);
+  const thread: any = archive?.threads.find(item => item.id === subthreadId(String(event.taskId)));
+  const session = thread && sessions.get(`${archive!.projectId}/${thread.id}`);
+  if (!session || TERMINAL_TASK.has(thread.subagent?.status)) return;
+  const step = event.step;
+  if (step?.kind === 'prompt') {
+    if (!session.conversation.length) session.conversation.push({ role: 'user', text: String(step.text || '') });
+  } else reduceTrace(step, session);
+  // Only the thread on screen may place a ghost in the editor, and a subagent never does.
+  session.uiPlacement = null;
+  touch(session);
 }
 
 // Raw fragments are transient: protocol metadata never enters saved traces.
@@ -1850,8 +1948,11 @@ function reduceTrace(step: CodexTraceEvent, session: any = activeSession()) {
   } else if (step.kind === 'question-closed') {
     const question: any = findQuestion(session, step.itemId);
     if (question?.status === 'open') question.status = 'closed';
+  } else if (step.kind === 'subagent') {
+    reduceSubagentStep(step, session);
   } else if (step.kind === 'task') {
     finishTraceThought(session);
+    syncSubthread(step.task, session);
     const next = taskTrace(step.task);
     const previous = session.trace.find((entry: any) => entry.kind === 'tool' && entry.id === next.id)
       ?? session.conversation.flatMap((message: any) => message.steps || []).find((entry: any) => entry.kind === 'tool' && entry.id === next.id);
@@ -2724,6 +2825,18 @@ async function sendRequest(input: any) {
   if (waiting) {
     S.composerDraft = '';
     void answerQuestion(waiting.id, Object.fromEntries(waiting.questions.map((item: any) => [item.id, [typedRequest]])));
+    return;
+  }
+  const subagent: any = threads.active?.subagent;
+  if (steering && subagent) {
+    if (!typedRequest) return;
+    archiveTrace(true, session, true);
+    session.conversation.push({ role: 'user', text: typedRequest, steering: true, entering: true });
+    S.composerDraft = '';
+    session.activity = 'Passing your message to the subagent…';
+    persistThreads(); touch(session, { focusComposer: true, flush: true });
+    try { await hostBridge()?.codex?.messageTask?.(subagent.requestId, subagent.taskId, typedRequest); }
+    catch (error: any) { PM.toast?.(error?.message || 'The subagent could not take this message.'); }
     return;
   }
   if (steering) {

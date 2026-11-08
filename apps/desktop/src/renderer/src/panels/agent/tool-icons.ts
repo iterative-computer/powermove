@@ -10,6 +10,8 @@ export interface ToolGlyph {
 
 const GLYPHS: Record<ToolFamily, ToolGlyph> = {
   think: { d: 'M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z', fill: true },
+  // Two overlapping speech bubbles: another conversation.
+  thread: { d: 'M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2zM18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1' },
   run: { d: 'M4 17l6-5-6-5M12 19h8' },
   edit: { d: 'M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z' },
   read: { d: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6' },

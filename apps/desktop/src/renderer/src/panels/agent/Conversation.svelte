@@ -5,7 +5,7 @@
   import WorkingTimer from './WorkingTimer.svelte';
   import Turn from './Turn.svelte';
   import ResultActions from './ResultActions.svelte';
-  import { groupConversation, workDuration } from './work-groups';
+  import { groupConversation, workLabel } from './work-groups';
   import { prefersReducedMotion } from './motion';
 
   /* `welcome` replaces the default empty state, for hosts that already know what is being changed. */
@@ -79,7 +79,7 @@
     {@const open = Boolean(opened[entry.key])}
     <button type="button" class="agent-work-toggle" aria-expanded={open}
       onclick={() => opened = { ...opened, [entry.key]: !open }}>
-      <span>{entry.durationMs === undefined ? 'Work' : `Worked for ${workDuration(entry.durationMs)}`}</span>
+      <span>{workLabel(entry)}</span>
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
     </button>
     {#if open}

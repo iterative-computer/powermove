@@ -12,6 +12,7 @@ export type { TraceStep } from './agent-state.svelte';
 import type { TraceStep } from './agent-state.svelte';
 import { splitUIPlacementText } from './ui-placement';
 import { settleMediaLabel } from '../../../../shared/media-tools';
+import type { AgentTask } from '../../../../shared/agent-orchestration';
 
 export type ToolsRowStatus = 'running' | 'partial' | 'error' | 'done';
 
@@ -19,7 +20,7 @@ export type ToolsRowStatus = 'running' | 'partial' | 'error' | 'done';
     Thoughts ride in the same list as calls (harness ToolChips idiom): label
     "Thinking", the first sentence as the chip, the full text as the output. */
 export type ToolDetail = Pick<ToolStep, 'id' | 'label' | 'status'> &
-  Partial<Pick<ToolStep, 'toolName' | 'detail' | 'output' | 'startedAt' | 'endedAt' | 'task'>> & {
+  Partial<Pick<ToolStep, 'toolName' | 'detail' | 'output' | 'startedAt' | 'endedAt' | 'task' | 'thread'>> & {
     kind: 'tool' | 'thought';
     family: ToolFamily;
   };
@@ -54,7 +55,7 @@ export interface ToolsRow {
 
 /* Icon family for a tool row. Coarser than `toolAction`: the glyph only needs
    to say "shell", "file", "search" — the label says the rest. */
-export type ToolFamily = 'run' | 'edit' | 'read' | 'search' | 'image' | 'computer' | 'panel' | 'think' | 'watch' | 'listen' | 'tool';
+export type ToolFamily = 'thread' | 'run' | 'edit' | 'read' | 'search' | 'image' | 'computer' | 'panel' | 'think' | 'watch' | 'listen' | 'tool';
 
 const FAMILY_RULES: Array<[RegExp, ToolFamily]> = [
   // Watching and listening to footage: frames and probes vs. sound and speech.
@@ -62,7 +63,8 @@ const FAMILY_RULES: Array<[RegExp, ToolFamily]> = [
   [/^(media_waveform|transcribe_media|generate_captions)$/, 'listen'],
   [/^export_captions$/, 'panel'],
   [/^check_project$/, 'panel'],
-  [/^(delegate_task|orchestrator_capabilities|task_status|task_cancel)$/, 'think'],
+  [/^(delegate_task|orchestrator_capabilities|task_status|task_cancel|task_send)$/, 'think'],
+  [/^thread_(launch|list|read|send|watch|unwatch|cancel)$/, 'thread'],
   [/panel|workspace|project_state|render_frames|apply_commands|edit_video|rollback/, 'panel'],
   [/^(web|search|browse|fetch|grep|glob|find|ls$|list)|url/, 'search'],
   [/^(bash|command|shell|terminal|exec|run|process)/, 'run'],
@@ -102,19 +104,30 @@ type RowMeta = { renderKey: string; pulsing: boolean };
     Claude Code do, rather than folded into a tool group. */
 export interface ThoughtRow { kind: 'thought'; id: string; text: string; live: boolean }
 
+/** Work handed to other agents. Subagents are people-like collaborators, not
+    tool calls: they get their own card with who is doing what, live. */
+export interface TasksRow { kind: 'tasks'; id: string; tasks: AgentTask[] }
+
 export type ActivityRow =
   | (Extract<TraceStep, { kind: 'text' }> & RowMeta)
   | (ThoughtRow & RowMeta)
   | (Extract<TraceStep, { kind: 'question' }> & RowMeta)
-  | (ToolsRow & RowMeta);
+  | (ToolsRow & RowMeta)
+  | (TasksRow & RowMeta);
 
 /* Tool names come from wildly different providers (`bash`, `str_replace_edit`,
    `mcp__github__search_issues`). Match on the FAMILY, not the exact name, so a
    new tool still produces a sentence instead of a raw identifier. */
 const ACTION_RULES: Array<[RegExp, string]> = [
-  [/^delegate_task$/, 'delegated tasks'],
-  [/^task_status$/, 'checked subagents'],
+  [/^delegate_task$/, 'asked subagents'],
+  [/^task_status$/, 'checked on subagents'],
   [/^task_cancel$/, 'stopped a subagent'],
+  [/^task_send$/, 'redirected a subagent'],
+  [/^thread_launch$/, 'started a thread'],
+  [/^thread_send$/, 'messaged a thread'],
+  [/^thread_(watch|unwatch)$/, 'followed a thread'],
+  [/^thread_(read|list)$/, 'checked threads'],
+  [/^thread_cancel$/, 'stopped a thread'],
   [/^orchestrator_capabilities$/, 'checked available models'],
   [/^compact/, 'compacted the conversation'],
   [/^view_image$/, 'viewed images'],
@@ -180,6 +193,17 @@ export function thoughtLead(text: string): string {
   const sentence = flat.match(/^.{12,}?[.!?](\s|$)/)?.[0]?.trim();
   const lead = sentence && sentence.length < flat.length ? sentence : flat;
   return lead.length > 96 ? `${lead.slice(0, 95).trimEnd()}…` : lead;
+}
+
+/* Provider labels for thread tools are raw names ("Thread launch"). Say what
+   happened to the person's conversations instead. */
+const THREAD_LABELS: Record<string, string> = {
+  thread_launch: 'Started a thread', thread_send: 'Messaged a thread', thread_watch: 'Following a thread',
+  thread_unwatch: 'Stopped following a thread', thread_read: 'Read a thread', thread_list: 'Checked threads', thread_cancel: 'Stopped a thread'
+};
+export function threadToolLabel(toolName?: string): string | undefined {
+  const name = String(toolName ?? '').trim().toLowerCase();
+  return THREAD_LABELS[name.startsWith('mcp__') ? (name.split('__').at(-1) || name) : name];
 }
 
 function basename(path: string): string {
@@ -250,8 +274,8 @@ export function groupedToolRow(work: WorkStep[]): ToolsRow {
       ? thoughtDetail(step)
       : {
           kind: 'tool' as const,
-          id: step.id, label: settleMediaLabel(step.toolName, step.label, step.status), status: step.status, toolName: step.toolName,
-          detail: step.detail, output: step.output, startedAt: step.startedAt, endedAt: step.endedAt, task: step.task,
+          id: step.id, label: threadToolLabel(step.toolName) ?? settleMediaLabel(step.toolName, step.label, step.status), status: step.status, toolName: step.toolName,
+          detail: step.thread?.title ?? step.detail, output: step.thread ? undefined : step.output, startedAt: step.startedAt, endedAt: step.endedAt, task: step.task, thread: step.thread,
           family: toolFamily(step.toolName)
         }).filter((detail) => Boolean(detail.label)),
     files: [...new Set(steps
@@ -274,7 +298,8 @@ export function groupedToolRow(work: WorkStep[]): ToolsRow {
 }
 
 export function activityRows(steps: TraceStep[] = []): ActivityRow[] {
-  const rows: Array<TraceStep | ThoughtRow | ToolsRow> = [];
+  const rows: Array<TraceStep | ThoughtRow | ToolsRow | TasksRow> = [];
+  const cards = new Map<string, TasksRow>();
   let work: WorkStep[] = [];
   const flushWork = (): void => {
     if (!work.length) return;
@@ -303,6 +328,19 @@ export function activityRows(steps: TraceStep[] = []): ActivityRow[] {
       rows.push(step);
       continue;
     }
+    if (step?.kind === 'tool' && step.task) {
+      // A nested subagent joins its parent's card wherever it was started, so
+      // the tree reads as one team; others gather into the card just above.
+      const home = step.task.parentTaskId ? cards.get(step.task.parentTaskId) : undefined;
+      if (home) { home.tasks.push(step.task); cards.set(step.task.taskId, home); continue; }
+      flushWork();
+      const previous = rows.at(-1) as TasksRow | undefined;
+      const card = previous?.kind === 'tasks' ? previous : { kind: 'tasks' as const, id: `tasks-${step.id}`, tasks: [] };
+      if (card !== previous) rows.push(card);
+      card.tasks.push(step.task);
+      cards.set(step.task.taskId, card);
+      continue;
+    }
     if (step?.kind === 'tool') {
       work.push(step);
     } else {
@@ -318,7 +356,8 @@ export function activityRows(steps: TraceStep[] = []): ActivityRow[] {
   let pulsingIndex = -1;
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index] as any;
-    if ((row.kind === 'tools' && row.status === 'running') || (row.kind === 'thought' && row.live)) {
+    if ((row.kind === 'tools' && row.status === 'running') || (row.kind === 'thought' && row.live)
+      || (row.kind === 'tasks' && row.tasks.some((task: AgentTask) => ['queued', 'running', 'waiting'].includes(task.status)))) {
       pulsingIndex = index;
     }
   }

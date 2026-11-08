@@ -201,6 +201,18 @@ export class AgentOrchestrator {
     if (this.nodes.get(rootRunId) === root) await this.save(root.scope);
   }
 
+  /** The person messages a subagent from its sub-thread: delivered like the
+   * parent's own task_send, on behalf of whichever agent owns the task. */
+  async messageTask(rootRunId: string, taskId: string, message: string): Promise<'live' | 'resumed' | 'answered'> {
+    const root = this.nodes.get(rootRunId);
+    const record = root?.scope.records.get(taskId);
+    if (!root || root.depth !== 0 || !record) throw new Error('This task does not belong to the active conversation.');
+    const owner = record.task.parentTaskId ? [...this.nodes.values()].find(node => node.record?.task.taskId === record.task.parentTaskId) : root;
+    if (!owner || owner.stopped) throw new Error('The agent that started this subagent has finished.');
+    const result = await this.sendTask(owner, { taskId, message: `The person watching your work says:\n${message}` });
+    return result.delivery === 'already_sent' ? 'live' : result.delivery;
+  }
+
   async forgetProject(projectId: string): Promise<string[]> {
     if ([...this.activeScopes.keys()].some(key => key.startsWith(`${projectId}/`))) throw new Error('Subagents are still using this project.');
     this.threadRuns.forget(projectId);
@@ -438,6 +450,8 @@ export class AgentOrchestrator {
     const child: Node = { request, scope: parent.scope, depth: parent.depth + 1, record, role: input.role, stopped: false, done: new Promise(resolve => { resolveChild = resolve; }) };
     this.nodes.set(childRunId, child);
     this.emit(child);
+    // The subagent's sub-thread opens with the brief it was given.
+    parent.scope.onTrace({ kind: 'subagent', taskId, step: { kind: 'prompt', text: input.task.slice(0, 20_000) } });
     // Persist the reservation before starting a provider: retries cannot create
     // duplicate work, and a crash leaves a recoverable interrupted task.
     try { await this.save(parent.scope); }
@@ -509,7 +523,13 @@ export class AgentOrchestrator {
                 if (itemId) { node.scope.onTrace({ ...step, itemId }); this.childQuestions.delete(itemId); }
                 questionIds.delete(step.itemId);
               }
-              else if (step.kind === 'tool-start') { node.record.task.progress = step.label.replace(/\s+/g, ' ').slice(0, 320); this.emit(node); }
+              else {
+                if (step.kind === 'tool-start') { node.record.task.progress = step.label.replace(/\s+/g, ' ').slice(0, 320); this.emit(node); }
+                // Everything else the subagent does plays out in its own sub-thread.
+                if (step.kind === 'thought' || step.kind === 'answer' || step.kind === 'tool-start' || step.kind === 'tool-end') {
+                  node.scope.onTrace({ kind: 'subagent', taskId: node.record.task.taskId, step });
+                }
+              }
             }
           });
         } catch (error) { result = { ok: false, error: error instanceof Error ? error.message : String(error), cancelled: node.stopped }; }
@@ -533,7 +553,11 @@ export class AgentOrchestrator {
         if (!children.some(record => !record.acknowledged || !terminal(record.task)) && !watches.length) return this.finish(node, { ...result, ...(extensions.size ? { extensions: [...extensions.values()] } : {}) });
         if (children.some(record => !terminal(record.task)) || watches.some(watch => !threadRunTerminal(watch.record.state))) {
           if (node.record) { node.record.task.status = 'waiting'; node.record.task.workState = 'waiting_for_children'; node.record.task.hasPendingChildRuns = true; this.emit(node); }
-          else node.scope.onProgress(watches.length ? 'Waiting for watched threads…' : 'Waiting for subagents…');
+          else {
+            // Plain words for the status line: how many subagents are still out.
+            const pending = children.filter(record => !terminal(record.task)).length;
+            node.scope.onProgress(pending ? `Waiting for ${pending} ${pending === 1 ? 'subagent' : 'subagents'} to finish…` : 'Waiting for watched threads…');
+          }
           const updated = new Promise<void>(resolve => { node.wakeControl = resolve; });
           try {
             await Promise.race([updated, Promise.all([

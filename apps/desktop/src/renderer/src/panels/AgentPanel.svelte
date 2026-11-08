@@ -9,6 +9,7 @@
   import PlanPreview from './agent/PlanPreview.svelte';
   import ResultActions from './agent/ResultActions.svelte';
   import ThreadPicker from './agent/ThreadPicker.svelte';
+  import SubthreadBar from './agent/SubthreadBar.svelte';
   import { agentState } from './agent/agent-state.svelte';
   import { panelFocusContext } from './agent/panel-focus';
   import { bridge } from '../kernel/bridge';
@@ -216,6 +217,7 @@
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 2 6 0-1 4 2 3H4l2-3-1-4ZM8 9v5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
     </button>
   </div>
+  <SubthreadBar {PM} />
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable transcript needs keyboard focus for text selection and scrolling.) -->
   <div
     class="agent-scroll"

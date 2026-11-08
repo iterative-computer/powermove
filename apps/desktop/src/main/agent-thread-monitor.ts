@@ -53,7 +53,7 @@ export class AgentThreadMonitor {
   progress(record: ThreadRunRecord, text: string): void {
     if (threadRunTerminal(record.state)) return;
     record.state.progress = text.replace(/\s+/g, ' ').slice(0, 320);
-    record.state.status = /^Waiting for (subagents|watched threads)/.test(text) ? 'waiting' : 'running';
+    record.state.status = /^Waiting for (?:\d+ )?(?:subagents?|watched threads)/.test(text) ? 'waiting' : 'running';
   }
 
   trace(record: ThreadRunRecord, trace: CodexTraceEvent): void {

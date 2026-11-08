@@ -16,6 +16,7 @@
   import TextRow from './TextRow.svelte';
   import ThoughtRow from './ThoughtRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
+  import TaskGroup from './TaskGroup.svelte';
   import { splitUIPlacementText } from './ui-placement';
   import { displayPromptText, promptSegments } from './inline-prompt';
   import { activatePromptAttachment } from './attachments';
@@ -60,8 +61,10 @@
       <ThoughtRow text={row.text} />
     {:else if row.kind === 'question'}
       <QuestionCard {PM} step={row} />
+    {:else if row.kind === 'tasks'}
+      <TaskGroup {row} {PM} />
     {:else if row.kind === 'tools'}
-      <ToolActivity {row} />
+      <ToolActivity {PM} {row} />
     {/if}
   {/each}
 {/snippet}

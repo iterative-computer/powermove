@@ -66,6 +66,8 @@ export type TraceStep =
       startedAt?: number;
       endedAt?: number;
       task?: AgentTask;
+      /** A separate thread this call started or messaged, so the row can open it. */
+      thread?: { id: string; title: string };
     }
   | {
       kind: 'question';
@@ -83,7 +85,7 @@ export type TraceStep =
 
 export interface AgentSnapshot {
   threadId?: string;
-  threads?: Array<{ id: string; title: string; updatedAt?: number; busy?: boolean }>;
+  threads?: Array<{ id: string; title: string; updatedAt?: number; busy?: boolean; parentId?: string; kind?: 'subagent' | 'thread'; status?: string }>;
   threadSwitchBlocked?: boolean;
   /** Runs still working in threads other than the one on screen. */
   backgroundRuns?: number;
@@ -237,7 +239,7 @@ function reconcileTrace(next: TraceStep[]): void {
       }
     } else {
       assignChangedFields(currentStep, nextStep, [
-        'toolName', 'label', 'status', 'detail', 'output', 'startedAt', 'endedAt', 'task'
+        'toolName', 'label', 'status', 'detail', 'output', 'startedAt', 'endedAt', 'task', 'thread'
       ]);
     }
   }

@@ -17,6 +17,10 @@ export interface AgentThread {
   /** Retry keys for model-controlled launches and follow-ups; no prompt bytes. */
   orchestration?: { callerThreadId: string; clientRequestId: string; fingerprint: string };
   controls?: Array<{ callerThreadId: string; clientRequestId: string; fingerprint: string; runId: string }>;
+  /** A sub-thread lives under the thread that started it: a subagent's own
+   * workspace, or a thread an agent launched. */
+  parentId?: string;
+  subagent?: { taskId: string; requestId: string; status: string };
 }
 
 interface ThreadArchive { version: 1; activeId: string; threads: AgentThread[] }
@@ -170,7 +174,7 @@ export class AgentThreads {
   get key(): string { return `agentThreads.${this.projectId}`; }
   /** A thread nobody has typed into yet: nothing said, nothing drafted, nothing attached. */
   static isBlank(thread: AgentThread | undefined): boolean {
-    return !!thread && thread.conversation.length === 0 && !thread.composerDraft.trim() && thread.attachments.length === 0;
+    return !!thread && !thread.parentId && thread.conversation.length === 0 && !thread.composerDraft.trim() && thread.attachments.length === 0;
   }
   /** "New thread" reuses a blank one rather than stacking empties: a thread
    * only really exists once its first message is sent. */

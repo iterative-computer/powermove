@@ -6,6 +6,7 @@
   import TextRow from './TextRow.svelte';
   import ThoughtRow from './ThoughtRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
+  import TaskGroup from './TaskGroup.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -59,8 +60,10 @@
         <ThoughtRow text={row.text} streaming={running && row.pulsing} animated />
       {:else if row.kind === 'question'}
         <QuestionCard {PM} step={row} />
+      {:else if row.kind === 'tasks'}
+        <TaskGroup {row} {PM} animated />
       {:else}
-        <ToolActivity {row} animated live={running && index === rows.length - 1} />
+        <ToolActivity {PM} {row} animated live={running && index === rows.length - 1} />
       {/if}
     {/each}
   </div>

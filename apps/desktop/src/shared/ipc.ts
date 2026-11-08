@@ -93,6 +93,7 @@ export const IPC = {
   codexAnswer: 'codex:answer',
   codexCancel: 'codex:cancel',
   codexCancelTask: 'codex:cancel-task',
+  codexMessageTask: 'codex:message-task',
   codexFixPrompt: 'codex:fix-prompt',
   codexRebasePrompt: 'codex:rebase-prompt',
   codexUpdateFork: 'codex:update-fork',
@@ -481,6 +482,9 @@ export type ForkUpdateResult =
    `detail`); the renderer patches the existing row instead of adding one. */
 export type CodexTraceEvent =
   | { kind: 'task'; task: AgentTask }
+  /* A subagent's own activity, for its sub-thread under the parent thread.
+     `prompt` opens the sub-thread with the brief the subagent was given. */
+  | { kind: 'subagent'; taskId: string; step: SubagentTraceStep }
   | { kind: 'thought'; text: string }
   | { kind: 'answer'; text: string }
   | {
@@ -516,6 +520,10 @@ export type CodexTraceEvent =
     }
   /** The provider settled a held question itself (timeout, turn ended). */
   | { kind: 'question-closed'; itemId: string };
+
+export type SubagentTraceStep =
+  | { kind: 'prompt'; text: string }
+  | Extract<CodexTraceEvent, { kind: 'thought' | 'answer' | 'tool-start' | 'tool-end' }>;
 
 export type CodexProgressEvent =
   | {
@@ -832,6 +840,7 @@ export interface PowermoveBridge {
     answer(req: CodexAnswerRequest): Promise<CodexSteerResult>;
     cancel(id: string, preserveChanges?: boolean): Promise<void>;
     cancelTask?(requestId: string, taskId: string): Promise<void>;
+    messageTask?(requestId: string, taskId: string, message: string): Promise<'live' | 'resumed' | 'answered'>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     rebasePrompt(req: CodexRebasePromptRequest): Promise<string>;
     updateFork(req: CodexRebasePromptRequest): Promise<ForkUpdateResult>;

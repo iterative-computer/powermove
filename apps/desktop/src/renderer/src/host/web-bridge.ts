@@ -441,6 +441,7 @@ export function createBridge(link: ReconnectingLink, hello: WebHello, storeSnaps
       answer: (req) => link.invoke(IPC.codexAnswer, req),
       cancel: (id, preserveChanges = false) => link.invoke(IPC.codexCancel, { id, preserveChanges }),
       cancelTask: (requestId, taskId) => link.invoke(IPC.codexCancelTask, { requestId, taskId }),
+      messageTask: (requestId, taskId, message) => link.invoke(IPC.codexMessageTask, { requestId, taskId, message }),
       fixPrompt: (req) => link.invoke(IPC.codexFixPrompt, req),
       rebasePrompt: (req) => link.invoke(IPC.codexRebasePrompt, req),
       updateFork: (req) => link.invoke(IPC.codexUpdateFork, req),

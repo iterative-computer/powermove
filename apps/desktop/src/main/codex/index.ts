@@ -780,6 +780,15 @@ export function registerCodexIpc(
     await orchestrator.cancelTask(rawRequest.requestId, rawRequest.taskId);
   });
 
+  ipcMain.handle(IPC.codexMessageTask, async (event, rawRequest: unknown) => {
+    requireTrusted(event, ctx);
+    if (!isRecord(rawRequest) || !isString(rawRequest.requestId) || !REQUEST_ID.test(rawRequest.requestId)
+      || !isString(rawRequest.taskId, 240) || !rawRequest.taskId
+      || !isString(rawRequest.message, 50_000) || !rawRequest.message.trim()) throw new IpcValidationError(IPC.codexMessageTask, 'invalid task message');
+    if (owners.get(rawRequest.requestId) !== event.sender) throw new Error('This task belongs to another conversation.');
+    return orchestrator.messageTask(rawRequest.requestId, rawRequest.taskId, rawRequest.message.trim());
+  });
+
   ipcMain.handle(IPC.codexFixPrompt, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     return buildFixPrompt(requireFixPromptRequest(rawRequest));

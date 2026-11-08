@@ -35,13 +35,51 @@
 
   const blocked = $derived(agentState.threadSwitchBlocked);
   const hint = $derived(blocked ? 'Finish applying the current change to switch threads' : 'Switch thread');
-  const running = $derived((agentState.threads || []).filter(thread => thread.busy).length);
+  type Thread = NonNullable<typeof agentState.threads>[number];
   const threads = $derived(agentState.threads || []);
   const active = $derived(threads.find(thread => thread.id === agentState.threadId));
+  const byId = $derived(new Map(threads.map(thread => [thread.id, thread])));
+  const parentOf = (thread: Thread | undefined) => thread?.parentId ? byId.get(thread.parentId) : undefined;
+  const activeParent = $derived(parentOf(active));
+  const childrenOf = $derived.by(() => {
+    const map = new Map<string, Thread[]>();
+    for (const thread of threads) if (thread.parentId && byId.has(thread.parentId)) map.set(thread.parentId, [...(map.get(thread.parentId) ?? []), thread]);
+    return map;
+  });
+  /* The family on screen: the current thread, its ancestors and their sub-threads. */
+  const family = $derived.by(() => {
+    const ids = new Set<string>();
+    for (let thread = active; thread; thread = parentOf(thread)) ids.add(thread.id);
+    return ids;
+  });
+  const descendants = (id: string): Thread[] => (childrenOf.get(id) ?? []).flatMap(child => [child, ...descendants(child.id)]);
+  /* Sub-threads sit under the thread that started them. They unfold for the
+     conversation you are in; elsewhere the parent row counts them. */
   const matches = $derived.by(() => {
     const needle = query.trim().toLowerCase();
-    return needle ? threads.filter(thread => thread.title.toLowerCase().includes(needle)) : threads;
+    if (needle) return threads.filter(thread => thread.title.toLowerCase().includes(needle)).map(thread => ({ thread, depth: 0 }));
+    const out: Array<{ thread: Thread; depth: number }> = [];
+    const visit = (thread: Thread, depth: number) => {
+      out.push({ thread, depth });
+      if (family.has(thread.id)) for (const child of childrenOf.get(thread.id) ?? []) visit(child, Math.min(depth + 1, 3));
+    };
+    for (const thread of threads) if (!thread.parentId || !byId.has(thread.parentId)) visit(thread, 0);
+    return out;
   });
+  function threadMeta(thread: Thread, depth: number): string {
+    const parent = parentOf(thread);
+    const role = thread.kind === 'subagent' ? 'Subagent' : thread.kind === 'thread' ? 'Started by the agent' : '';
+    const where = role && !depth && parent ? `${role} in ${parent.title}` : role;
+    const state = thread.busy ? 'Working…'
+      : thread.kind === 'subagent' && thread.status === 'failed' ? 'Failed'
+      : thread.kind === 'subagent' && thread.status === 'cancelled' ? 'Stopped'
+      : thread.id === agentState.threadId ? 'Current'
+      : thread.kind === 'subagent' && thread.status === 'completed' ? 'Done'
+      : relativeOpened(thread.updatedAt ?? 0, openedAt);
+    const hidden = depth || family.has(thread.id) ? [] : descendants(thread.id);
+    const folded = hidden.length ? ` · ${hidden.length} sub-thread${hidden.length === 1 ? '' : 's'}${hidden.some(item => item.busy) ? ' working' : ''}` : '';
+    return [where, state].filter(Boolean).join(' · ') + folded;
+  }
   const page = $derived(matches.slice(0, visible));
   const reduce = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -187,17 +225,21 @@
     if (id !== agentState.threadId) PM.AgentUI?.switchThread(id);
   }
 
-  async function remove(thread: { id: string; title: string; busy?: boolean }): Promise<void> {
+  async function remove(thread: Thread): Promise<void> {
+    const subs = descendants(thread.id).length;
+    const busy = thread.busy || descendants(thread.id).some(item => item.busy);
+    const also = subs ? ` and its ${subs === 1 ? 'sub-thread' : `${subs} sub-threads`}` : '';
     const ok = await PM.confirm?.({
       message: `Delete “${thread.title}”?`,
-      detail: thread.busy
-        ? 'This stops its run and removes the thread’s history. This cannot be undone.'
-        : 'This removes the thread’s history. This cannot be undone.',
+      detail: busy
+        ? `This stops its work and removes the thread’s history${also}. This cannot be undone.`
+        : `This removes the thread’s history${also}. This cannot be undone.`,
       confirmLabel: 'Delete Thread',
       destructive: true
     });
     if (!ok) { if (open) search?.focus(); return; }
-    const remaining = matches.filter(item => item.id !== thread.id);
+    const gone = new Set([thread.id, ...descendants(thread.id).map(item => item.id)]);
+    const remaining = matches.filter(item => !gone.has(item.thread.id));
     PM.AgentUI?.deleteThread?.(thread.id);
     if (!open) return;
     if (remaining.length) search?.focus(); else close();
@@ -212,7 +254,7 @@
     if (event.key === 'Tab') { event.preventDefault(); close(); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); step(row, 1); return; }
     if (event.key === 'ArrowUp') { event.preventDefault(); step(row, -1); return; }
-    if (event.key === 'Enter' && target === search) { event.preventDefault(); if (matches[0]) choose(matches[0].id); }
+    if (event.key === 'Enter' && target === search) { event.preventDefault(); if (matches[0]) choose(matches[0].thread.id); }
   }
 </script>
 
@@ -231,6 +273,7 @@
       onpointercancel={() => { dismissByPress = false; }}
       onclick={toggle}
     >
+      {#if activeParent}<span class="thread-parent">{activeParent.title}</span><span class="thread-sep" aria-hidden="true">›</span>{/if}
       <span class="thread-title">{active?.title || 'New thread'}</span>
       {#if agentState.backgroundRuns}
         <span class="thread-running" title={`${agentState.backgroundRuns} thread${agentState.backgroundRuns === 1 ? '' : 's'} still working`}>
@@ -283,10 +326,13 @@
       onscroll={onListScroll}
     >
       <div class="pm-menu-glider thread-glider" bind:this={glider} aria-hidden="true"></div>
-      {#each page as thread (thread.id)}
+      {#each page as { thread, depth } (thread.id)}
         <div
           class="thread-row"
           class:current={thread.id === agentState.threadId}
+          class:sub={depth > 0}
+          style:--depth={depth}
+          data-kind={thread.kind}
           role="option"
           tabindex="-1"
           aria-selected={thread.id === agentState.threadId}
@@ -299,7 +345,7 @@
               {#if thread.busy}<span class="thread-dot" aria-hidden="true"></span>{/if}{thread.title}
             </span>
             <span class="thread-row-meta" class:current={thread.id === agentState.threadId}>
-              {thread.busy ? 'Working…' : thread.id === agentState.threadId ? 'Current' : relativeOpened(thread.updatedAt ?? 0, openedAt)}
+              {threadMeta(thread, depth)}
             </span>
           </span>
           <button
@@ -340,5 +386,7 @@
   :disabled { opacity: var(--disabled); cursor: default; }
   svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
   .thread-warning { margin: 0 10px 6px 18px; font-size: var(--fs-xs); color: var(--accent); }
+  .thread-parent { flex: 0 1 auto; max-width: 42%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--tx-3); }
+  .thread-sep { flex-shrink: 0; padding: 0 4px; color: var(--tx-3); }
 
 </style>

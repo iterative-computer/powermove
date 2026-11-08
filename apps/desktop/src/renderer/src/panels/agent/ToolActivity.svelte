@@ -4,6 +4,12 @@
   import { toolGlyph, type ToolGlyph } from './tool-icons';
   import Markdown from './Markdown.svelte';
   import { bridge } from '../../kernel/bridge';
+  import { agentState } from './agent-state.svelte';
+
+  /* A thread the agent started or messaged is a real conversation: say
+     whether it is still working and offer to go there. */
+  const threadBusy = (id: string): boolean => Boolean(agentState.threads?.find(thread => thread.id === id)?.busy);
+  const threadExists = (id: string): boolean => Boolean(agentState.threads?.some(thread => thread.id === id));
 
   /* One stretch of agent work, in the beautiful-ui ToolChips grammar: a quiet
      header ("4 tool calls · 1 failed · 21s"), then flat rows
@@ -12,7 +18,8 @@
      show expand under a hairline; the chevron takes the glyph's place on
      hover. Edited files close the group as mono chips. */
 
-  let { row, animated = false, live = false }: {
+  let { PM, row, animated = false, live = false }: {
+    PM?: Record<string, any>;
     row: ToolsRow & { pulsing?: boolean };
     animated?: boolean;
     /** This group is the run's newest activity and the run is still going. */
@@ -79,7 +86,7 @@
   {/if}
   <span class:shimmer-text={headerless && detail.kind === 'thought' && detail.status === 'running' && animated}>{detail.label}</span>
   {#if detail.detail && !(open && detail.kind === 'thought')}
-    <code class="agent-tool-chip" class:is-prose={detail.kind === 'thought'}>{detail.detail}</code>
+    <code class="agent-tool-chip" class:is-prose={detail.kind === 'thought' || Boolean(detail.thread)}>{detail.detail}</code>
   {/if}
   {#if detail.status === 'error'}
     <em>Failed</em>
@@ -89,7 +96,7 @@
     <em>Waiting</em>
   {:else if detail.status === 'continued'}
     <em>Continued</em>
-  {:else if callSpan(detail)}
+  {:else if callSpan(detail) && !detail.thread}
     <em>{callSpan(detail)}</em>
   {/if}
 {/snippet}
@@ -120,6 +127,11 @@
           <div class="agent-tool-row">
             {@render call(detail, glyph, false, false)}
           </div>
+        {/if}
+        {#if detail.thread && PM?.AgentUI?.switchThread && threadExists(detail.thread.id)}
+          {#if threadBusy(detail.thread.id)}<span class="agent-thread-working"><i aria-hidden="true"></i>Working</span>{/if}
+          <button type="button" class="agent-thread-open" aria-label={`Open thread ${detail.thread.title}`}
+            onclick={() => PM?.AgentUI?.switchThread(detail.thread!.id)}>Open<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></button>
         {/if}
         {#if detail.task && detail.status === 'running'}
           <button type="button" class="agent-btn agent-task-stop" aria-label={`Stop ${detail.label}`} disabled={stopping[detail.id]} onclick={() => void stopTask(detail)}>Stop</button>
@@ -239,6 +251,17 @@
   .agent-tool-line { display: flex; align-items: center; min-width: 0; }
   .agent-tool-line > .agent-tool-row { flex: 1; min-width: 0; }
   .agent-task-stop { flex: none; font-size: var(--fs-xs); }
+  .agent-thread-working { display: inline-flex; align-items: center; gap: 5px; flex: none; margin: 0 6px; color: var(--tx-3); font-size: var(--fs-xs); }
+  .agent-thread-working > i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: agent-thread-pulse 1.6s ease-in-out infinite; }
+  @keyframes agent-thread-pulse { 50% { opacity: .35; } }
+  .agent-thread-open {
+    display: inline-flex; align-items: center; gap: 2px; flex: none; height: 22px; padding: 0 5px 0 8px;
+    border: 0; border-radius: var(--r-sm); background: var(--ink-1); box-shadow: inset 0 0 0 var(--hairline) var(--line-2);
+    color: var(--tx); font: inherit; font-size: var(--fs-xs); cursor: pointer; transition: background var(--dur-2);
+  }
+  .agent-thread-open:hover { background: var(--ink-2); }
+  .agent-thread-open:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .agent-thread-open svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   .agent-task-error { margin: 3px 6px; color: var(--danger); font-size: var(--fs-xs); }
   .agent-task-progress { margin: 0 6px 3px 25px; color: var(--tx-3); font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .agent-tool-row {
@@ -331,5 +354,6 @@
     .agent-tool-activity::details-content, .agent-tool-chevron, .agent-tool-row-chevron, .agent-tool-output { transition: none; }
     .agent-tool-details > div, .agent-tool-file { animation: none; }
     .agent-tool-spinner { animation: none; border-top-color: var(--line-2); }
+    .agent-thread-working > i { animation: none; }
   }
 </style>

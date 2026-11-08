@@ -9,6 +9,9 @@
   .thread-row { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; }
   .thread-row:focus-visible { outline: none; }
   .thread-row.current { background: var(--ink-1); }
+  /* A sub-thread hangs under the thread that started it. */
+  .thread-row.sub { padding-left: calc(8px + var(--depth) * 16px); }
+  .thread-row.sub::before { content: ''; position: absolute; left: calc(var(--depth) * 16px - 2px); top: 0; height: 50%; width: 6px; border-left: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); border-bottom-left-radius: 4px; }
   .thread-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .thread-row-title { display: flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .thread-running { display: flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 0 5px; border-radius: 999px; background: var(--ink-1); color: var(--tx-3); font-size: var(--fs-xs); }
