@@ -172,6 +172,7 @@ pub struct TimelineSurface {
     decorations: Arc<serde_json::Map<String, serde_json::Value>>,
     painted: Option<(u64, String)>,
     painting: bool,
+    asked: Option<std::time::Instant>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -215,6 +216,7 @@ impl TimelineSurface {
             decorations: Default::default(),
             painted: None,
             painting: false,
+            asked: None,
         };
         this.restore_view();
         cx.spawn(async move |this, cx| {
@@ -532,9 +534,16 @@ impl TimelineSurface {
             revision,
             serde_json::Value::Array(clips.clone()).to_string(),
         );
-        if self.painting || self.painted.as_ref() == Some(&key) {
+        // An empty answer may have come before a painter registered: ask again
+        // on a later frame, at most every half second.
+        let retry = self.decorations.is_empty()
+            && self
+                .asked
+                .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(500));
+        if self.painting || (self.painted.as_ref() == Some(&key) && !retry) {
             return;
         }
+        self.asked = Some(std::time::Instant::now());
         self.painting = true;
         self.painted = Some(key);
         let weak = cx.entity().downgrade();
