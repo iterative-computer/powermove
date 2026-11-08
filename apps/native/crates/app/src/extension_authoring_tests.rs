@@ -52,9 +52,15 @@ fn the_shipped_sample_and_a_v3_extension_pass_and_broken_code_reports_why() {
     );
     let error = check(&root.join("broken"), &broken).unwrap_err();
     assert!(error.contains("exports view() or mount(env)"), "{error}");
-    fs::write(root.join("broken/index.tsx"), "export function view( {").unwrap();
+    // A compile error names the file, line and column, as main's did.
+    fs::write(
+        root.join("broken/index.tsx"),
+        "export const a = 1;\nexport function view( {",
+    )
+    .unwrap();
     let error = check(&root.join("broken"), &broken).unwrap_err();
-    assert!(error.contains("TypeScript parse"), "{error}");
+    assert!(error.starts_with("index.tsx:2:"), "{error}");
+    assert!(!error.contains("OxcDiagnostic"), "{error}");
     fs::write(
         root.join("broken/index.tsx"),
         "import { readFileSync } from 'node:fs'; export const view = () => String(readFileSync);",
