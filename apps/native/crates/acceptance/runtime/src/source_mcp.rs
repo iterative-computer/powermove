@@ -1,8 +1,38 @@
 //! Actual file-backed MCP source adapter, using only disposable synthetic input.
 use pm_acceptance::fixture::{Fixture, tool_error};
-use pm_mcp_backends::extensions::BuiltinSources;
+use pm_mcp::extensions::ExtensionHost;
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+/// The app's extension host without compilation: forking only copies files.
+struct Sources {
+    profile: PathBuf,
+    builtins: PathBuf,
+}
+impl ExtensionHost for Sources {
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![self.profile.join("extensions")]
+    }
+    fn history(&self) -> PathBuf {
+        self.profile.join("agent-change-history")
+    }
+    fn builtins(&self) -> Option<PathBuf> {
+        Some(self.builtins.clone())
+    }
+    fn manifest(&self, raw: &Value) -> Result<Value, String> {
+        pm_compat_runner::manifest::parse(raw)
+    }
+    fn check(&self, _: &Path, _: &Value) -> Result<(), String> {
+        Ok(())
+    }
+    fn reload(&self, _: &[String]) {}
+    fn api_pack(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+}
 type Check = Result<(), String>;
 fn checked<T, E: std::fmt::Display>(value: Result<T, E>) -> Result<T, String> {
     value.map_err(|e| e.to_string())
@@ -25,8 +55,10 @@ pub fn fork() -> Check {
             source.join("src/helper.ts"),
             b"export const helper = 'authored';\n",
         ))?;
-        f.host.lock().unwrap().extension_sources =
-            Some(Arc::new(checked(BuiltinSources::new(resources))?));
+        f.host.lock().unwrap().extensions = Some(Arc::new(Sources {
+            profile: f.scratch.0.join("profile"),
+            builtins: resources,
+        }));
         let before = f.document()?;
         let revision = f.revision();
         let registries = f.host.lock().unwrap().kernel().state().registries.clone();

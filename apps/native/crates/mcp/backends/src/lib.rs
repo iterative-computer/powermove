@@ -1,6 +1,5 @@
 //! Worker-side bindings to the actual native services. No second kernel writer,
 //! profile discovery, HTTP implementation, or JS runtime is created here.
-pub mod extensions;
 
 use pm_mcp::{
     Automation, Error, Result,

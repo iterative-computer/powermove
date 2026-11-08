@@ -16,7 +16,7 @@ macos-sandbox = ["pm-runtime-v8/macos-sandbox", "pm-compat-runner/macos-sandbox"
 [dependencies]
 pm-acceptance = { path = ".." }
 pm-compat-runner = { path = "../../compat-runner" }
-pm-mcp-backends = { path = "../../mcp/backends" }
+pm-mcp = { path = "../../mcp" }
 pm-runtime-v8 = { path = "../../runtime-v8" }
 pm-services = { path = "../../services" }
 pm-promedia = { path = "../../promedia" }
