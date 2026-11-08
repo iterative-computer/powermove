@@ -57,9 +57,54 @@ impl Backend {
             })
             .collect()
     }
+    /// Settings › Media: proxy preferences and storage, from the host's
+    /// `mediaSettings` fact (this Mac's, so shown without a project).
+    fn media_rows(&self) -> Vec<Value> {
+        let media = &self.native.facts["mediaSettings"];
+        if media.is_null() {
+            return vec![];
+        }
+        let mut rows: Vec<Value> = media["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                json!({"id":r["id"],"section":"media","group":"Proxies","label":r["label"],
+                    "control":"choice","value":r["value"],"options":r["options"],
+                    "detail":r["detail"],"disabled":false})
+            })
+            .collect();
+        let used = &media["used"];
+        let space = if used.is_null() {
+            "Calculating storage…".to_owned()
+        } else {
+            format!(
+                "Proxies {} · Optimized Media {} · Renders {}",
+                used["proxies"].as_str().unwrap_or(""),
+                used["optimized"].as_str().unwrap_or(""),
+                used["renders"].as_str().unwrap_or("")
+            )
+        };
+        rows.extend([
+            json!({"id":"media.location","section":"media","group":"Storage","label":"Location",
+                "control":"action","action":"media.location","actionLabel":"Change…",
+                "detail":media["location"]}),
+            json!({"id":"media.used","section":"media","group":"Storage","label":"Space Used",
+                "control":"status","value":space}),
+            json!({"id":"media.clear","section":"media","group":"Storage",
+                "label":"Generated Media","control":"action","action":"media.clear",
+                "actionLabel":"Clear…",
+                "detail":"Removes proxies, optimized media and renders the open project doesn’t use. Originals, attached proxies and this project’s media stay."}),
+            json!({"id":"media.reveal","section":"media","group":"Storage",
+                "label":"Storage Folder","control":"action","action":"media.reveal",
+                "actionLabel":"Show in Finder"}),
+        ]);
+        rows
+    }
     pub(crate) fn settings_rows(&mut self) -> Result<Vec<Value>, String> {
+        let media = self.media_rows();
         let Some(p) = self.published() else {
-            return Ok(vec![]);
+            return Ok(media);
         };
         let root = p.snapshot.root().ok_or("Project closed")?;
         let comp = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
@@ -158,6 +203,7 @@ impl Backend {
             "value":root.get("memoryEnabled").map(pm_model::Node::to_value) != Some(pm_model::Value::Bool(false)),
             "detail":"Agents read these notes before they edit, and add to them as they work. Turning it off keeps the notes but hides them from agents.",
             "binding":memory["memory.enabled"]}));
+        rows.extend(media);
         Ok(rows)
     }
     pub(crate) fn settings_action(&mut self, args: &Value) -> Result<NativeCommand, String> {
@@ -167,6 +213,41 @@ impl Backend {
         }
         let action = &args["action"];
         match action["type"].as_str() {
+            Some("write")
+                if action["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("media.")) =>
+            {
+                // The host validates and keeps it; the row shows it at once.
+                let id = action["id"].as_str().unwrap_or_default();
+                if let Some(rows) = self.native.facts["mediaSettings"]["rows"].as_array_mut()
+                    && let Some(row) = rows.iter_mut().find(|r| r["id"] == id)
+                {
+                    if !row["options"]
+                        .as_array()
+                        .is_some_and(|o| o.iter().any(|o| o["v"] == action["value"]))
+                    {
+                        return Err("Invalid setting value".into());
+                    }
+                    row["value"] = action["value"].clone();
+                }
+                self.native.platform.push((
+                    "media.settings".into(),
+                    json!({"write":id,"value":action["value"]}),
+                ));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
+            Some("row")
+                if matches!(
+                    action["action"].as_str(),
+                    Some("media.location" | "media.clear" | "media.reveal")
+                ) =>
+            {
+                self.native
+                    .platform
+                    .push(("media.settings".into(), json!({"action":action["action"]})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             Some("write") => {
                 let value = &action["value"];
                 if action["id"] == "memory.enabled" {

@@ -143,6 +143,8 @@ pub struct ImportRequest {
 #[derive(Debug, Default, PartialEq)]
 pub struct Outcome {
     pub imported: Vec<String>,
+    /// The imported (or replaced) assets' ids.
+    pub assets: Vec<String>,
     /// File name and reason, in the panel's words.
     pub failed: Vec<(String, String)>,
     pub cancelled: bool,
@@ -241,6 +243,10 @@ impl Builtins {
             .iter()
             .filter_map(|item| Some(item.metadata.get("name")?.as_str()?.to_owned()))
             .collect();
+        let assets: Vec<String> = match &request.replace {
+            Some(id) => vec![id.clone()],
+            None => items.iter().map(|item| item.id.to_string()).collect(),
+        };
         let (mut attempt, mut waits) = (0, 0);
         let layers = loop {
             attempt += 1;
@@ -301,6 +307,7 @@ impl Builtins {
             let _ = self.broker.kernel.call(&project, request).wait();
         }
         outcome.imported = names;
+        outcome.assets = assets;
         Ok(outcome)
     }
 }

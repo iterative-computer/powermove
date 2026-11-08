@@ -239,6 +239,40 @@ impl Host {
     }
 }
 impl Controller {
+    /// The observed media runtime with each video's proxy and optimized
+    /// media and Always Play Original, as the pro media service has them.
+    fn rendition_runtime(&self) -> pm_panel_media::readiness::ObservedRuntime {
+        use crate::pro_media::Status;
+        use pm_panel_media::ProxyStatus;
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return self.builtins.media_runtime.clone();
+        };
+        let status = |s: Status, observed: &ProxyStatus| match s {
+            Status::Absent => observed.clone(),
+            Status::Queued => ProxyStatus::Queued,
+            Status::Creating { percent } => ProxyStatus::Generating { percent },
+            Status::Ready => ProxyStatus::Ready {
+                version: "generated".into(),
+            },
+            Status::Failed => ProxyStatus::Failed("The task couldn’t be completed.".into()),
+        };
+        self.builtins
+            .media_runtime
+            .clone()
+            .with_states(|id, state| {
+                let (proxy, optimized) = self.pro_media.status(
+                    &project,
+                    id,
+                    self.media_base
+                        .originals
+                        .get(id)
+                        .map(std::path::PathBuf::as_path),
+                );
+                state.proxy = status(proxy, &state.proxy);
+                state.optimized = status(optimized, &state.optimized);
+                state.play_original = self.pro_media.plays_original(&project, id);
+            })
+    }
     /// Readiness depends only on the media inputs, so an edit that left them
     /// alone moves the observation to its revision without any worker.
     fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
@@ -307,7 +341,8 @@ impl Controller {
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
+        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+            "mediaSettings":self.media_settings_fact()})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
     /// the playhead and timecode are CALayers fed from the display link.
@@ -348,7 +383,7 @@ impl Controller {
         };
         let facts = self.facts();
         let originals = self.media.originals.clone();
-        let observed = self.builtins.media_runtime.clone();
+        let observed = self.rendition_runtime();
         self.builtins.updating = true;
         let check = runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -726,6 +761,9 @@ impl Controller {
                                         folder,
                                         cx,
                                     ),
+                                pm_panel_media::Effect::Renditions { action, assets } => {
+                                    self.renditions(action, assets, cx)
+                                }
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -737,6 +775,10 @@ impl Controller {
                         }
                         _ => Err("Media action belongs to a retired publication".into()),
                     }
+                }
+                "media.settings" => {
+                    self.media_settings(&request.input, cx);
+                    Ok(Value::Null)
                 }
                 "export.begin" | "export.retry" => {
                     self.begin_builtin_export(

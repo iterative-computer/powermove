@@ -27,6 +27,7 @@ impl Controller {
             "bringSignIns" => self.bring_sign_ins(cx),
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
+            "backgroundTasks" => self.open_tasks_window(cx),
             _ => return false,
         }
         true

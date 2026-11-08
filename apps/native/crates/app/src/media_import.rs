@@ -167,7 +167,12 @@ impl Controller {
             let _ = this.update(cx, |v, cx| {
                 v.importing = None;
                 v.message = match result {
-                    Ok(outcome) => outcome.summary(),
+                    Ok(outcome) => {
+                        // Settings › Media › Create Proxies, once the
+                        // catalog resolves the new files.
+                        v.pro_media.after_import(outcome.assets.clone());
+                        outcome.summary()
+                    }
                     Err(error) => error,
                 };
                 v.refresh(cx);

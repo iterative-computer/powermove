@@ -12,6 +12,7 @@ for (const project of [undefined, { id: "p", name: "Fixture" }])
     expect(model.availableSections).toEqual([
       ...(project ? ["project" as const, "memory" as const] : []),
       "general",
+      "media",
       "accounts",
       "transcription",
       "extensions",
@@ -151,7 +152,7 @@ test("sidebar arrows/Home/End navigate matching sections only; scroll tracking c
   model.navigate("Home");
   expect(model.active).toBe("general");
   model.navigate("ArrowDown");
-  expect(model.active).toBe("accounts");
+  expect(model.active).toBe("media");
   model.navigate("ArrowUp");
   expect(model.active).toBe("general");
   await model.search("instant");
