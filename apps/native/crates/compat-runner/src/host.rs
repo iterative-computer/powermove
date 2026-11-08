@@ -2250,4 +2250,42 @@ mod tests {
                 .any(|command| command["id"] == id)
         })
     }
+    /// A v1–3 theme reaches the native shell as token patches (plan 3.6.5).
+    #[test]
+    fn an_activated_v1_theme_publishes_native_token_patches() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-theme",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.theme.register({id:'synthetic-theme.warm',name:'Warm',scheme:'dark',
+                     tokens:{'--accent':'#123456'},css:':root{--bg-panel:#202020}'});
+                   api.theme.activate('synthetic-theme.warm');
+                   api.commands.register({id:'synthetic-theme.off',label:'Off',run(){api.theme.activate('default')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("theme", |host| {
+            host.contributions()
+                .is_some_and(|c| c["nativeTheme"]["id"] == "synthetic-theme.warm")
+        });
+        let theme = fixture.host.contributions().unwrap()["nativeTheme"].clone();
+        assert_eq!(theme["dark"]["colors.accent"], 0x123456, "{theme}");
+        assert_eq!(theme["light"]["colors.accent"], 0x123456, "{theme}");
+        assert!(theme["error"].is_null(), "{theme}");
+        // Going back to the default theme publishes an empty patch.
+        fixture
+            .host
+            .run_command("synthetic-theme.off", serde_json::json!([]));
+        fixture.until("default", |host| {
+            host.contributions()
+                .is_some_and(|c| c["nativeTheme"]["id"] == "default")
+        });
+        let theme = fixture.host.contributions().unwrap()["nativeTheme"].clone();
+        assert_eq!(theme["dark"], serde_json::json!({}));
+    }
 }

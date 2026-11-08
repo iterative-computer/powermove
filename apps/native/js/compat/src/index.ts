@@ -3,6 +3,7 @@ export { CompatRealm, EditGesture } from "./realm";
 export { CompatPanels, SECTIONS_PANEL } from "./panels";
 export { connectControlState } from "./control-state";
 export { definitionSnapshots } from "./definitions";
+export { nativeTheme } from "./native-theme";
 export type { RealmOptions } from "./realm";
 export type { ExtensionOptions, ExtensionHandle } from "./extensions";
 export { HostChannel, HostError } from "./channel";

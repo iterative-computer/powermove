@@ -165,6 +165,8 @@ pub struct Extensions {
     v4_choices: Vec<Choice>,
     v4_seen: u64,
     v4_theme_choices: Vec<Choice>,
+    /// The v1–3 theme last applied (id and patch), so republishing is free.
+    v1_theme: Option<String>,
     v4_themes: Vec<Value>,
     v4_themes_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
@@ -202,6 +204,7 @@ impl Default for Extensions {
             v4_choices: vec![],
             v4_seen: 0,
             v4_theme_choices: vec![],
+            v1_theme: None,
             v4_themes: vec![],
             v4_themes_seen: 0,
             surfaces: BTreeMap::new(),
@@ -800,8 +803,39 @@ impl Controller {
             });
             self.apply_extension_resources();
         }
+        self.apply_v1_theme(&value["nativeTheme"], cx);
         self.update_builtins(cx);
         cx.notify();
+    }
+    /// The active v1–3 theme, translated in the realm (plan 3.6.5), restyles
+    /// every window's chrome and native panels when it changes. Choosing a v4
+    /// theme from the palette afterwards replaces it until this one changes.
+    fn apply_v1_theme(&mut self, theme: &Value, cx: &mut Context<Self>) {
+        if theme.is_null() {
+            return;
+        }
+        let dark = self.host.borrow().tokens.scheme == pm_design::Scheme::Dark;
+        let fields = &theme[if dark { "dark" } else { "light" }];
+        let key = format!("{}:{fields}:{}", theme["id"], theme["error"]);
+        if self.extensions.v1_theme.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.extensions.v1_theme = Some(key);
+        if let Some(error) = theme["error"].as_str() {
+            let name = theme["id"].as_str().unwrap_or("theme");
+            self.errors.borrow_mut().tell(
+                "Theme",
+                &format!("The theme “{name}” couldn’t be applied: {error}"),
+            );
+            return;
+        }
+        match theme_patch(fields) {
+            Ok(patch) => {
+                ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                apply_theme(patch, cx);
+            }
+            Err(message) => self.errors.borrow_mut().tell("Theme", &message),
+        }
     }
     /// Every live viewer renders the same contributed definitions.
     pub fn apply_extension_resources(&mut self) {

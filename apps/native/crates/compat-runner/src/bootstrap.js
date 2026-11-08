@@ -333,6 +333,8 @@ globalThis.__compat = {
       kernel.status,
     ])
       registry.onChange(changed);
+    // Activating a theme changes no registry, but the shell follows it.
+    kernel.events.on("theme:changed", changed, "powermove-host");
     if (this.dom && PowermoveCompat.controlStores)
       this.controls = PowermoveCompat.connectControlState(
         this.realm,
@@ -476,8 +478,21 @@ globalThis.__compat = {
         side: item.side,
       })),
       theme: kernel.theme.activeId,
+      nativeTheme: this.nativeTheme(),
       definitions: this.definitions(),
     };
+  },
+  /** The active theme as native token patches (translator in this realm). */
+  nativeTheme() {
+    const kernel = this.realm.kernel;
+    const active = kernel.theme.activeId;
+    const entry = kernel.themes.entries().find(({ id }) => id === active);
+    if (!entry) return { id: active, dark: {}, light: {}, blockers: [] };
+    try {
+      return PowermoveCompat.nativeTheme(entry.item, kernel.theme.scheme);
+    } catch (error) {
+      return { id: active, error: String(error?.message ?? error) };
+    }
   },
   definitions() {
     return PowermoveCompat.definitionSnapshots(this.realm.kernel, (id, error) =>

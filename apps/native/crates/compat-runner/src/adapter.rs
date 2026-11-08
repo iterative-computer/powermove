@@ -17,6 +17,31 @@ use std::{
 fn model(value: &Value) -> pm_model::Value {
     pm_model::json::parse(&value.to_string()).expect("JSON model input")
 }
+/// The project's workspace, or the shipped app's default one when it stores
+/// none: in v1–3 `PM.WS.current` always held a workspace with `layout.docks`,
+/// and extensions (themes among them) edit it on activation.
+fn workspace(value: &pm_model::Value) -> Value {
+    let stored = wire(value);
+    if stored["layout"]["docks"].is_array() {
+        return stored;
+    }
+    let p = |id: &str, extra: Value| {
+        let mut panel = json!({"id": id});
+        if let (Some(panel), Some(extra)) = (panel.as_object_mut(), extra.as_object()) {
+            panel.extend(extra.clone());
+        }
+        panel
+    };
+    json!({"id":"design","name":"Default","builtin":true,"density":"normal",
+    "theme":{"accent":"#FF6019"},"features":{"autosave":true,"adaptiveQuality":true},
+    "layout":{"docks":[
+        {"id":"left","size":300,"panels":[p("assets",json!({"flex":true,"group":"project"})),
+            p("layer-effects",json!({"flex":true,"group":"project","active":true}))]},
+        {"id":"center","panels":[p("viewer",json!({"flex":true}))]},
+        {"id":"bottom","size":344,"panels":[p("timeline",json!({"flex":true}))]},
+        {"id":"right","size":300,"panels":[p("inspector",json!({"flex":true})),p("fxbrowser",json!({"size":268}))]}
+    ]}})
+}
 fn wire(value: &pm_model::Value) -> Value {
     serde_json::from_str(&pm_model::json::to_canonical_string(value)).expect("JSON model output")
 }
@@ -172,7 +197,7 @@ impl KernelAdapter {
         let document = realized(&p);
         let selection = selection_wire(&p.selection);
         let publication = json!({"revision":p.revision(),"document":wire(&document),
-            "selection":selection,"workspace":wire(&p.workspace),"facts":Self::facts(&p)});
+            "selection":selection,"workspace":workspace(&p.workspace),"facts":Self::facts(&p)});
         self.sent = Some(Sent {
             document_id: p.snapshot.doc_id,
             revision: p.revision(),
@@ -209,7 +234,7 @@ impl KernelAdapter {
         let document = pm_model::json::to_canonical_string(&realized(&p));
         let selection = selection_wire(&p.selection);
         let rest = json!({"revision":p.revision(),"selection":selection,
-            "workspace":wire(&p.workspace),"facts":Self::facts(&p)})
+            "workspace":workspace(&p.workspace),"facts":Self::facts(&p)})
         .to_string();
         let mut text = String::with_capacity(document.len() + rest.len() + 16);
         text.push_str("{\"document\":");
