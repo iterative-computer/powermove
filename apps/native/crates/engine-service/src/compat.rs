@@ -159,6 +159,8 @@ fn need_key(need: &CompatNeed) -> NeedKey {
     )
 }
 
+/// Frames asked ahead of one the viewer missed.
+const AHEAD: i64 = 12;
 /// The rasters one revision's frames draw from, newest last.
 const MAX_BYTES: u64 = 256 << 20;
 
@@ -166,6 +168,8 @@ const MAX_BYTES: u64 = 256 << 20;
 struct Answers {
     revision: u64,
     producing: bool,
+    /// One frame of the open composition in ticks, for asking ahead.
+    frame: i64,
     map: HashMap<NeedKey, CompatAnswer>,
     order: VecDeque<(NeedKey, u64)>,
     bytes: u64,
@@ -191,8 +195,10 @@ impl CompatStore {
     pub fn set_state(&self, producing: bool, revision: u64) {
         let mut answers = self.answers.lock().unwrap();
         if answers.revision != revision {
+            let frame = answers.frame;
             *answers = Answers {
                 revision,
+                frame,
                 ..Answers::default()
             };
         }
@@ -212,13 +218,33 @@ impl CompatStore {
     pub(crate) fn set_redraw(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
         *self.redraw.lock().unwrap() = Some(redraw);
     }
-    /// A frame's missing answers: each is asked of the realm once.
+    /// One frame of the open composition, in ticks (0: don't ask ahead).
+    pub fn set_frame(&self, ticks: i64) {
+        self.answers.lock().unwrap().frame = ticks.max(0);
+    }
+    /// A frame's missing answers: each is asked of the realm once, with the
+    /// same layers' next frames, so playback finds them answered.
     pub(crate) fn request(&self, needs: Vec<CompatNeed>) {
         let mut answers = self.answers.lock().unwrap();
         let revision = answers.revision;
-        let fresh: Vec<CompatNeed> = needs
+        let frame = answers.frame;
+        let ahead = needs.iter().flat_map(|need| {
+            (1..=AHEAD).filter(move |_| frame > 0).map(move |k| {
+                let mut next = need.clone();
+                next.time = pm_render::compat::ticks_of(
+                    (need.time.get() as f64 + (k * frame) as f64)
+                        / pm_protocol::common::TICKS_PER_SECOND as f64,
+                );
+                next
+            })
+        });
+        let all: Vec<CompatNeed> = needs.iter().cloned().chain(ahead).collect();
+        let fresh: Vec<CompatNeed> = all
             .into_iter()
-            .filter(|need| answers.asked.insert(need_key(need)))
+            .filter(|need| {
+                let key = need_key(need);
+                !answers.map.contains_key(&key) && answers.asked.insert(key)
+            })
             .collect();
         drop(answers);
         if fresh.is_empty() {

@@ -196,8 +196,20 @@ impl Overrides {
     }
 }
 
-/// A new publication: frames are drawn at its revision.
-pub(crate) fn published(engine: &EngineService, revision: u64) {
+/// A new publication: frames are drawn at its revision, and asked ahead a
+/// frame of its open composition at a time.
+pub(crate) fn published(engine: &EngineService, p: &pm_kernel::Published) {
     let store = engine.compat();
-    store.set_state(store.producing_now(), revision);
+    store.set_state(store.producing_now(), p.revision());
+    let fps = p
+        .snapshot
+        .root()
+        .and_then(|root| {
+            let open = p.snapshot.open_comp();
+            let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+            comp.get("fps")?.to_value().as_f64()
+        })
+        .filter(|fps| *fps > 0.)
+        .unwrap_or(30.);
+    store.set_frame((TICKS_PER_SECOND as f64 / fps).round() as i64);
 }

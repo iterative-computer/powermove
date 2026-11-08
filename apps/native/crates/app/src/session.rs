@@ -460,7 +460,7 @@ impl Controller {
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.
-        crate::raster_overrides::published(&self.engine, p.revision());
+        crate::raster_overrides::published(&self.engine, &p);
         if let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
