@@ -101,11 +101,98 @@ struct DirectMeta {
 struct DirectCacheEntry {
     // Retaining the lines makes their pointer identity safe as a key.
     _lines: Arc<BezPath>,
-    _texture: wgpu::Texture,
     view: wgpu::TextureView,
     meta: DirectMeta,
+}
+
+type DirectKey = (usize, [u64; 4]);
+
+/// Glyph entries grouped by the chunk texture they share. A chunk's texture
+/// is charged once, when it is made, and leaves with all of its glyphs, so
+/// the retained textures stay within the bound however glyphs share them.
+struct DirectCache<C, E> {
+    entries: HashMap<DirectKey, (u64, E)>,
+    chunks: HashMap<u64, DirectChunk<C>>,
     bytes: u64,
+    limit: u64,
+    next: u64,
+}
+
+struct DirectChunk<C> {
+    _payload: C,
+    bytes: u64,
+    keys: Vec<DirectKey>,
     used: u64,
+}
+
+impl<C, E> DirectCache<C, E> {
+    fn new(limit: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            chunks: HashMap::new(),
+            bytes: 0,
+            limit,
+            next: 0,
+        }
+    }
+
+    fn hit(&mut self, key: &DirectKey, tick: u64) -> Option<&E> {
+        let (chunk, entry) = self.entries.get(key)?;
+        if let Some(chunk) = self.chunks.get_mut(chunk) {
+            chunk.used = tick;
+        }
+        Some(entry)
+    }
+
+    /// Charges a new chunk of `bytes`, first dropping the least recently
+    /// used chunks (with their glyphs) it would not fit beside.
+    fn admit(&mut self, payload: C, bytes: u64, tick: u64) -> u64 {
+        while self.bytes + bytes > self.limit {
+            let Some((&oldest, _)) = self.chunks.iter().min_by_key(|(_, c)| c.used) else {
+                break;
+            };
+            self.evict(oldest);
+        }
+        let id = self.next;
+        self.next += 1;
+        self.bytes += bytes;
+        self.chunks.insert(
+            id,
+            DirectChunk {
+                _payload: payload,
+                bytes,
+                keys: Vec::new(),
+                used: tick,
+            },
+        );
+        id
+    }
+
+    fn insert(&mut self, chunk: u64, key: DirectKey, entry: E) {
+        if let Some(c) = self.chunks.get_mut(&chunk) {
+            c.keys.push(key);
+            self.entries.insert(key, (chunk, entry));
+        }
+    }
+
+    fn evict(&mut self, id: u64) {
+        let Some(chunk) = self.chunks.remove(&id) else {
+            return;
+        };
+        self.bytes -= chunk.bytes;
+        for key in chunk.keys {
+            // A later chunk may hold the same glyph again.
+            if self.entries.get(&key).is_some_and(|(c, _)| *c == id) {
+                self.entries.remove(&key);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.chunks.clear();
+        self.bytes = 0;
+    }
 }
 
 struct DirectSource {
@@ -165,8 +252,7 @@ pub struct TextGpu {
     blur: [crate::pipelines::LazyRenderPipeline; 2],
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
     image_bytes: u64,
-    direct: HashMap<(usize, [u64; 4]), DirectCacheEntry>,
-    direct_bytes: u64,
+    direct: DirectCache<wgpu::Texture, DirectCacheEntry>,
     direct_scratch: Vec<[f32; 2]>,
     raster_pool: TargetPool,
     cache: HashMap<([u64; 2], Precision, WorkingEncoding), Cached>,
@@ -715,8 +801,7 @@ impl TextGpu {
             blur,
             images: HashMap::new(),
             image_bytes: 0,
-            direct: HashMap::new(),
-            direct_bytes: 0,
+            direct: DirectCache::new(DIRECT_CACHE_BYTES),
             direct_scratch: Vec::new(),
             raster_pool: TargetPool::new(),
             cache: HashMap::new(),
@@ -808,7 +893,6 @@ impl TextGpu {
         self.images.clear();
         self.image_bytes = 0;
         self.direct.clear();
-        self.direct_bytes = 0;
     }
 
     pub fn cached_bytes(&self) -> u64 {
@@ -907,8 +991,7 @@ impl TextGpu {
         lines: &pm_text::render::scene::CoverageLines,
         translation: [f64; 2],
     ) -> Option<DirectSource> {
-        let entry = self.direct.get_mut(&lines.key())?;
-        entry.used = self.tick;
+        let entry = self.direct.hit(&lines.key(), self.tick)?;
         Some(DirectSource {
             view: entry.view.clone(),
             meta: entry.meta,
@@ -993,27 +1076,20 @@ impl TextGpu {
                 size,
             );
             let view = texture.create_view(&Default::default());
-            for (lines, mut meta, texels) in chunk.drain(..) {
+            // The whole texture is retained while any of its glyphs is.
+            let id = self
+                .direct
+                .admit(texture, (width * height) as u64 * 8, self.tick);
+            for (lines, mut meta, _) in chunk.drain(..) {
                 meta.width = width as u32;
-                let bytes = texels as u64 * 8;
-                while self.direct_bytes + bytes > DIRECT_CACHE_BYTES {
-                    let Some((&oldest, _)) = self.direct.iter().min_by_key(|(_, e)| e.used) else {
-                        break;
-                    };
-                    if let Some(removed) = self.direct.remove(&oldest) {
-                        self.direct_bytes -= removed.bytes;
-                    }
-                }
-                self.direct_bytes += bytes;
+                let key = lines.key();
                 self.direct.insert(
-                    lines.key(),
+                    id,
+                    key,
                     DirectCacheEntry {
                         _lines: lines.lines,
-                        _texture: texture.clone(),
                         view: view.clone(),
                         meta,
-                        bytes,
-                        used: self.tick,
                     },
                 );
                 out.push((view.clone(), meta));
@@ -1900,6 +1976,43 @@ pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
 #[cfg(test)]
 mod direct_tests {
     use super::*;
+
+    #[test]
+    fn shared_chunk_textures_are_charged_once_and_stay_within_the_bound() {
+        // Four glyphs share each 4 KB chunk: the chunk, not each glyph, is
+        // what the cache retains and charges.
+        let mut cache: DirectCache<(), u32> = DirectCache::new(10 * 1024);
+        let key = |n: usize| (n, [0u64; 4]);
+        let mut tick = 0;
+        for chunk in 0..2 {
+            tick += 1;
+            let id = cache.admit((), 4096, tick);
+            for glyph in 0..4 {
+                cache.insert(id, key(chunk * 4 + glyph), glyph as u32);
+            }
+        }
+        assert_eq!(cache.bytes, 8192);
+        assert_eq!(cache.entries.len(), 8);
+        // The first chunk is used again; the third evicts the second, whole.
+        tick += 1;
+        assert!(cache.hit(&key(0), tick).is_some());
+        tick += 1;
+        let id = cache.admit((), 4096, tick);
+        cache.insert(id, key(8), 0);
+        assert_eq!(cache.bytes, 8192, "two chunks retained");
+        assert!(cache.bytes <= cache.limit);
+        assert!((4..8).all(|n| cache.hit(&key(n), tick).is_none()));
+        assert!((0..4).all(|n| cache.hit(&key(n), tick).is_some()));
+        // A glyph uploaded again into a newer chunk stays when the older
+        // chunk leaves.
+        let older = cache.admit((), 4096, tick);
+        cache.insert(older, key(9), 1);
+        let newer = cache.admit((), 4096, tick);
+        cache.insert(newer, key(9), 7);
+        assert!(cache.bytes <= cache.limit);
+        cache.evict(older);
+        assert_eq!(cache.hit(&key(9), tick), Some(&7));
+    }
 
     #[test]
     fn closed_form_clamped_integral_matches_piecewise_reference() {
