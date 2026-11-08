@@ -74,6 +74,17 @@ pub fn open_comp_id(root: &Node) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The id the engine addresses the open composition by: `compId`, or the
+/// project `id` when the layers sit at the root.
+pub fn render_comp_id(root: &Node) -> Option<String> {
+    open_comp_id(root).or_else(|| {
+        root.get("id")
+            .and_then(str_of)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
+}
+
 /// The composition node: `comps/<id>`, or the root itself when `comp_id` is
 /// `None`.
 pub fn comp_node<'a>(root: &'a Node, comp_id: Option<&str>) -> Option<&'a Node> {

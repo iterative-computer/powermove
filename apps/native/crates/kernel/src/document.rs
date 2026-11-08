@@ -57,6 +57,14 @@ impl Snapshot {
         self.root().and_then(model::open_comp_id)
     }
 
+    /// The id the engine renders the open composition by: `compId`, or the
+    /// project `id` when the layers sit at the root (as the engine resolves it).
+    pub fn render_comp(&self) -> String {
+        self.root()
+            .and_then(model::render_comp_id)
+            .unwrap_or_default()
+    }
+
     /// Layers panel rows of a composition (`None`: the open one).
     pub fn layers(&self, comp_id: Option<&str>) -> Vec<LayerInfo> {
         self.root()

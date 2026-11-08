@@ -307,7 +307,7 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
           <Icon
             id={`timeline:disclosure:${row.id}`}
             label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
-            symbol="chevron.right"
+            symbol={row.expanded ? "chevron.down" : "chevron.right"}
             tabIndex={-1}
             send={send}
             intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
@@ -503,8 +503,11 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
   );
 }
 const TimelineRow = memo(
-  function TimelineRow({ row, send }: { row: Row; send: Send; key?: string }) {
+  function TimelineRow({ row: published, send }: { row: Row; send: Send; key?: string }) {
     let clickModifiers: Modifiers = {};
+    // Hover is the pointer's, local to the row: switches show without a host trip.
+    const [hover, setHover] = useState(false);
+    const row = hover && !published.hovered ? { ...published, hovered: true } : published;
     return (
       <UI.TreeItem
         id={`timeline:row:${row.id}`}
@@ -526,6 +529,8 @@ const TimelineRow = memo(
         onClickCapture={(event) => {
           clickModifiers = modifiers(event);
         }}
+        onPointerEnter={() => setHover(true)}
+        onPointerLeave={() => setHover(false)}
         onSelect={() => {
           send({ type: "selectRow", id: row.id, modifiers: clickModifiers });
           clickModifiers = {};

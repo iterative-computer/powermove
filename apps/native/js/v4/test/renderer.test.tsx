@@ -196,6 +196,31 @@ describe("Preact native host", () => {
     // Keys follow focus: they reach the element as it is now.
     await root.dispatch(plan(before), "keydown", { key: "a" });
   });
+  test("an activation planned on an identified element lands after it restyles", async () => {
+    const { root } = recorder();
+    let picks = 0;
+    const row = (hovered: boolean) => (
+      <div id="row:a" onClick={() => picks++}>
+        <text>a</text>
+        {hovered && <text>switches</text>}
+      </div>
+    );
+    await root.render(row(false));
+    const target = root.host.root.children[0].id;
+    const seen = root.inspect().revision;
+    await root.render(row(true));
+    const plan = (semantic?: string) => ({
+      revision: seen,
+      target,
+      preventDefault: false,
+      deliveries: [{ id: target, capture: false }],
+      ...(semantic === undefined ? {} : { semantic }),
+    });
+    await expect(root.dispatch(plan(), "click")).rejects.toThrow("Stale");
+    await expect(root.dispatch(plan("row:b"), "click")).rejects.toThrow("Stale");
+    await root.dispatch(plan("row:a"), "click");
+    expect(picks).toBe(1);
+  });
   test("native input observation prevents redundant controlled value writes", async () => {
     const { root, commits } = recorder();
     let set!: (s: string) => void;

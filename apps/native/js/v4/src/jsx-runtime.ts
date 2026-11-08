@@ -50,6 +50,8 @@ export interface SurfaceProps {
   "data-pm-indeterminate"?: boolean;
   onKeyUp?: (event: SurfaceEvent) => void;
   onPointerMove?: (event: SurfaceEvent) => void;
+  onPointerEnter?: (event: SurfaceEvent) => void;
+  onPointerLeave?: (event: SurfaceEvent) => void;
   onPointerUp?: (event: SurfaceEvent) => void;
   onPointerCancel?: (event: SurfaceEvent) => void;
   onDoubleClick?: (event: SurfaceEvent) => void;

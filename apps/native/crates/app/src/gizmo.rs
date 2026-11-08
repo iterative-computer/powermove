@@ -18,6 +18,7 @@ pub enum Tool {
     Zoom,
     Rotate,
     Anchor,
+    Shape,
     Other,
 }
 /// Viewer navigation the pointer asks for.
@@ -39,6 +40,8 @@ pub struct ViewPlacement {
     pub pan: [f64; 2],
     /// The composition's scale as shown, which is what pointers map through.
     pub scale: Cell<f64>,
+    /// The viewer body the composition fits in, points.
+    pub stage: [f64; 2],
     local: bool,
 }
 impl Default for ViewPlacement {
@@ -47,6 +50,7 @@ impl Default for ViewPlacement {
             zoom: None,
             pan: [0., 0.],
             scale: Cell::new(1.),
+            stage: [640., 360.],
             local: false,
         }
     }
@@ -210,6 +214,13 @@ pub struct GizmoSurface {
     panning: Option<Point<Pixels>>,
     cursor: CursorStyle,
     refreshing: bool,
+    /// A Shape tool drag: where it started and the box drawn so far.
+    sketch: Option<Sketch>,
+}
+struct Sketch {
+    origin: Point<Pixels>,
+    start: [f64; 2],
+    shape: Option<crate::shape_tool::ShapeBox>,
 }
 const HANDLES: [(f64, f64); 8] = [
     (0., 0.),
@@ -235,7 +246,7 @@ fn inverse_linear(m: [f64; 4]) -> Option<[f64; 4]> {
     let det = m[0] * m[3] - m[1] * m[2];
     (det.abs() > 1e-12).then(|| [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det])
 }
-fn inverse_point(m: &[f64; 6], p: [f64; 2]) -> Option<[f64; 2]> {
+pub(crate) fn inverse_point(m: &[f64; 6], p: [f64; 2]) -> Option<[f64; 2]> {
     let inverse = inverse_linear([m[0], m[1], m[2], m[3]])?;
     Some(apply(inverse, [p[0] - m[4], p[1] - m[5]]))
 }
@@ -308,6 +319,11 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
     let mut poses = vec![];
     for id in p.selection.layers() {
         let q = mirror.queries();
+        // A selected layer the playhead is outside of has nothing on screen to
+        // box (viewer.ts visibleSelectionLayers).
+        if !q.active(None, id, time).unwrap_or(false) {
+            continue;
+        }
         let (Ok(world), Ok(local), Ok(Some(bounds))) = (
             q.world_matrix(None, id, time),
             q.local_matrix(None, id, time),
@@ -406,6 +422,7 @@ impl GizmoSurface {
             panning: None,
             cursor: CursorStyle::Arrow,
             refreshing: false,
+            sketch: None,
         }
     }
     /// Selection, document or playhead moved. The Controller calls in during its
@@ -465,7 +482,19 @@ impl GizmoSurface {
             return;
         };
         let poses: &[Pose] = if self.controls { &self.poses } else { &[] };
-        self.host.overlay(overlay(poses, frame, &self.tokens), cx);
+        let mut lines = overlay(poses, frame, &self.tokens);
+        if let Some(shape) = self.sketch.as_ref().and_then(|s| s.shape) {
+            let [w, h] = frame.size;
+            let c = shape.corners();
+            for i in 0..4 {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                lines.push(OverlayLine {
+                    ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
+                    color: [1., 1., 1., 1.],
+                });
+            }
+        }
+        self.host.overlay(lines, cx);
     }
     fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
         let at = position - frame.origin;
@@ -485,7 +514,7 @@ impl GizmoSurface {
         let at = self.to_comp(position, frame);
         let cursor = match self.host.tool(cx) {
             Tool::Hand => CursorStyle::OpenHand,
-            Tool::Anchor | Tool::Zoom => CursorStyle::Crosshair,
+            Tool::Anchor | Tool::Zoom | Tool::Shape => CursorStyle::Crosshair,
             _ => match self.handle_at(at, frame.scale) {
                 Some(Hit::Handle(index)) => self.poses[0].cursor(index),
                 _ => CursorStyle::Arrow,
@@ -544,6 +573,14 @@ impl GizmoSurface {
             Tool::Other => return,
             Tool::Hand => {
                 self.panning = Some(event.position);
+                return;
+            }
+            Tool::Shape => {
+                self.sketch = Some(Sketch {
+                    origin: event.position,
+                    start: at,
+                    shape: None,
+                });
                 return;
             }
             Tool::Zoom => {
@@ -716,6 +753,10 @@ impl GizmoSurface {
             self.host.navigate(Navigate::Pan(event.position - last), cx);
             return;
         }
+        if self.sketch.is_some() {
+            self.sketch_move(event, cx);
+            return;
+        }
         if self.drag.is_none() {
             if self.bounds.contains(&event.position) {
                 self.hover(event.position, cx);
@@ -757,6 +798,13 @@ impl GizmoSurface {
     fn on_up(&mut self, commit: bool, cx: &mut Context<Self>) {
         self.picking = None;
         self.panning = None;
+        if let Some(sketch) = self.sketch.take() {
+            if let Some(shape) = sketch.shape.filter(|_| commit) {
+                self.create_shape(shape, cx);
+            }
+            self.draw(cx);
+            return;
+        }
         let Some(drag) = self.drag.take() else {
             return;
         };
@@ -768,11 +816,82 @@ impl GizmoSurface {
         }
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.drag.is_none() {
+        if self.drag.is_none() && self.sketch.is_none() {
             return false;
         }
         self.on_up(false, cx);
         true
+    }
+    /// The box follows the pointer once it passes the drag threshold;
+    /// Shift draws a square, Option from the centre.
+    fn sketch_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let at = self.to_comp(event.position, frame);
+        let threshold = self.tokens.metrics.drag_threshold;
+        let Some(sketch) = self.sketch.as_mut() else {
+            return;
+        };
+        let moved = event.position - sketch.origin;
+        if sketch.shape.is_none() && f32::from(moved.x).hypot(f32::from(moved.y)) < threshold {
+            return;
+        }
+        let m = event.modifiers;
+        sketch.shape = Some(crate::shape_tool::ShapeBox::from_drag(
+            sketch.start,
+            at,
+            m.alt,
+            m.shift,
+        ));
+        self.draw(cx);
+    }
+    /// One undo step, planned and written off the main thread; a new shape
+    /// layer is selected, as in the shipped viewer.
+    fn create_shape(&mut self, shape: crate::shape_tool::ShapeBox, cx: &mut Context<Self>) {
+        let (kernel, project, time) = (
+            self.kernel.clone(),
+            self.project.clone(),
+            self.host.time(cx),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let published = kernel.published(&project).ok_or("No open project")?;
+                    let Some(plan) = crate::shape_tool::plan(&published, shape, time) else {
+                        return Ok(());
+                    };
+                    let call = Call::Transact {
+                        label: Some(plan.label.into()),
+                        body: WriteBody::Commands(plan.commands),
+                        expected_revision: Some(published.revision()),
+                    };
+                    let ack = kernel
+                        .call(&project, Request::new(Caller::native(), call))
+                        .await
+                        .ok_or("Kernel closed")?
+                        .map_err(|e| format!("{e:?}"))?;
+                    if let Reply::Throw(error) = ack.reply {
+                        return Err(error.to_string());
+                    }
+                    if let Some(id) = plan.select {
+                        let select = SelectionCall::Layers {
+                            ids: vec![id],
+                            add: false,
+                        };
+                        kernel
+                            .call(&project, Request::new(Caller::native(), select))
+                            .await;
+                    }
+                    Ok::<(), String>(())
+                })
+                .await;
+            if let Err(error) = result {
+                let _ = this.update(cx, |s, cx| s.host.report(error, cx));
+            }
+        })
+        .detach();
     }
     /// View ▸ Show/Hide Layer Controls: boxes off, handles disarmed.
     pub fn toggle_controls(&mut self, cx: &mut Context<Self>) {

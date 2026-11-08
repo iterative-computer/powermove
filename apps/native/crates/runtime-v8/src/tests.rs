@@ -981,8 +981,12 @@ impl EngineProxy for Engine {
                 thread::sleep(Duration::from_millis(1));
             },
             2 => Ok(json!("x".repeat(1000))),
+            3 => Ok(Value::Null),
             _ => Ok(json!({"operation":operation,"input":input,"owner":thread::current().name()})),
         }
+    }
+    fn metered(&self, _generation: &Generation, operation: &str) -> bool {
+        operation != "host.poll"
     }
 }
 #[test]
@@ -1039,6 +1043,33 @@ fn engine_hook_obeys_cancellation_timeout_and_byte_limits() {
     assert!(r.stop(pending.execution));
     assert!(matches!(wait(pending), Err(Error::Terminated)));
     assert_eq!(eval(&r, "42"), "42");
+    close(&r);
+}
+/// Unmetered queue plumbing (a host's poll) never exhausts the task's quota;
+/// every other operation still does.
+#[test]
+fn unmetered_operations_do_not_spend_the_engine_operation_quota() {
+    let engine = Arc::new(Engine::default());
+    engine.mode.store(3, Ordering::Relaxed);
+    let f = fixture_with(|c| {
+        c.engine = Some(engine.clone());
+        c.limits.max_host_ops = 4;
+    });
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{for(let i=0;i<100;i++)runtime.engine('host.poll',i);return 'ok'})()"
+        ),
+        "ok"
+    );
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{try{for(let i=0;i<5;i++)runtime.engine('read',i);return 'no'}catch(e){return String(e)}})()"
+        ),
+        "TypeError: Engine operation quota"
+    );
     close(&r);
 }
 #[test]

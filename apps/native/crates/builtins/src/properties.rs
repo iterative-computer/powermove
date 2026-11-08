@@ -304,7 +304,10 @@ impl Properties {
                         rows.push(row);
                     }
                 }
-                sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
+                // A layer saved without transform channels has nothing to list.
+                if !rows.is_empty() {
+                    sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
+                }
             }
             if target["first"]["type"] == "text" {
                 let animators = model

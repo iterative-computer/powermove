@@ -318,13 +318,7 @@ async fn execute_inner(
         &frozen.publication.snapshot,
         JobSpec::Export {
             session: SessionId::new(document).map_err(|e| e.to_string())?,
-            composition: frozen
-                .publication
-                .snapshot
-                .open_comp()
-                .unwrap_or_default()
-                .as_str()
-                .into(),
+            composition: frozen.publication.snapshot.render_comp().as_str().into(),
             settings: planned.settings.clone().ok_or("Missing render settings")?,
         },
         frozen.media.clone(),

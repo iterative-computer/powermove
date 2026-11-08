@@ -183,11 +183,27 @@ pub struct Prepared {
     pub anchors: Vec<Id>,
 }
 impl NumberFacts {
+    /// The shipped field's reading: the declared precision, else two places
+    /// for fine steps, one under ten and none above; trailing zeros trimmed.
     pub fn text(self, value: f64) -> String {
-        match self.precision {
-            Some(digits) => format!("{value:.*}", digits as usize),
-            None => value.to_string(),
+        let places = self.precision.map_or(
+            if self.step > 0. && self.step < 1. {
+                2
+            } else if value.abs() < 10. {
+                1
+            } else {
+                0
+            },
+            |digits| digits as usize,
+        );
+        let mut text = format!("{value:.places$}");
+        if places > 0 && text.contains('.') {
+            text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
         }
+        if text == "-0" {
+            text = "0".into();
+        }
+        text
     }
 }
 impl Prepared {
@@ -883,6 +899,23 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
 mod tests {
     use super::*;
     use serde_json::json;
+    #[::core::prelude::v1::test]
+    fn number_fields_read_like_the_shipped_field() {
+        let facts = |step: f64, precision: Option<u32>| NumberFacts {
+            value: 0.,
+            step,
+            speed: 1.,
+            min: f64::MIN,
+            max: f64::MAX,
+            precision,
+        };
+        assert_eq!(facts(1., None).text(1370.272623), "1370");
+        assert_eq!(facts(1., None).text(4.26), "4.3");
+        assert_eq!(facts(0.01, None).text(0.5), "0.5");
+        assert_eq!(facts(1., Some(2)).text(960.), "960");
+        assert_eq!(facts(1., Some(2)).text(12.345), "12.35");
+        assert_eq!(facts(1., Some(1)).text(-0.01), "0");
+    }
     #[::core::prelude::v1::test]
     fn tokens_resolve_through_one_flat_table() {
         let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());

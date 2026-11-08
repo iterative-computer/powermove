@@ -510,30 +510,39 @@ export function InspectorPanel({
       <>
         {target.kind === "layers" ? (
           <>
-            <text
+            <div
               role="heading"
               label={
                 target.count > 1
                   ? `${target.count} layers selected`
                   : `${target.first.name}, ${target.first.typeLabel.toLowerCase()} layer`
               }
-              title={target.first.name}
               style={{
+                ...horizontal,
+                gap: token("metrics.gap"),
                 height: token("metrics.row"),
                 paddingLeft: token("metrics.inset"),
                 paddingRight: token("metrics.inset"),
-                color: token("colors.text"),
-                fontSize: token("typography.title"),
-                fontWeight: token("typography.semibold_weight"),
               }}
             >
-              {target.count > 1 ? `${target.count} Layers` : target.first.name}
+              <text
+                title={target.first.name}
+                style={{
+                  color: token("colors.text"),
+                  fontSize: token("typography.title"),
+                  fontWeight: token("typography.semibold_weight"),
+                }}
+              >
+                {target.count > 1 ? `${target.count} Layers` : target.first.name}
+              </text>
               <text
                 style={{
                   color: token("colors.muted"),
                   fontSize: token("typography.title"),
                 }}
-              >{` · ${target.count > 1 ? (target.sharedType ?? "Mixed") : target.first.typeLabel}`}</text>
+              >
+                {`· ${target.count > 1 ? (target.sharedType ?? "Mixed") : target.first.typeLabel}`}
+              </text>
               {target.first.locked ? (
                 <text
                   attr={{ symbol: "lock" }}
@@ -544,7 +553,7 @@ export function InspectorPanel({
                   }}
                 />
               ) : null}
-            </text>
+            </div>
             <AlignmentStrip key={target.key} session={session} />
           </>
         ) : null}

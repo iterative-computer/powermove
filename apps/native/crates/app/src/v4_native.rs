@@ -54,10 +54,15 @@ pub fn menu(
             .unwrap_or_default(),
         None,
     );
-    cx.defer(move |cx| {
+    // Menu tracking runs a nested run loop that keeps draining the main queue.
+    // A deferred effect would hold the app borrowed through it, and the first
+    // task that touches the app would panic; a task holds no borrow.
+    cx.spawn(async move |cx| {
         menu.popUpMenuPositioningItem_atLocation_inView(None, point, Some(&view));
-        choose(target.ivars().selected.get(), cx);
-    });
+        let selected = target.ivars().selected.get();
+        cx.update(|cx| choose(selected, cx));
+    })
+    .detach();
 }
 
 /// Preorder identity keeps existing flat menu indices unchanged and gives every

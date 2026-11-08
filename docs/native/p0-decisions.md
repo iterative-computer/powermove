@@ -92,3 +92,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **Accessibility before activation:** with forced accessibility, the newest tree built before an AX client connects is handed to the adapter on activation (vendored GPUI), so idle or occluded windows aren't empty.
 - **Projects from before compositions:** a missing `compId` is filled at open, derived from the project id so every open of an unsaved file has one journal base; nested comps are left as stored.
 - **Shader cache:** translated built-in shaders live in `<profile>/shader-cache` (keys carry pipeline revision, translator versions and device).
+
+## v4 API additions
+
+- **`onPointerEnter` / `onPointerLeave` (2026-11-07, additive):** typed on every intrinsic element; the host already delivered `pointerenter`/`pointerleave` to listeners. Timeline rows use them to show their switches on hover.
+- **`EventPlan.semantic` (2026-11-08, additive, host↔renderer wire):** optional; the host sets it to the target's `id` when it planned an activation on an identified element, and the renderer then accepts the event even if a render restyled that element first (a hovered row stays clickable).

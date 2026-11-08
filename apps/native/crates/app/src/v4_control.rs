@@ -18,7 +18,7 @@ pub enum Kind {
 }
 struct TargetState {
     sender: async_channel::Sender<Value>,
-    options: Vec<Value>,
+    options: std::cell::RefCell<Vec<Value>>,
     kind: Kind,
 }
 define_class!(
@@ -32,7 +32,7 @@ define_class!(
         #[unsafe(method(act:))]
         fn act(&self,sender:&AnyObject){
             let value=match self.ivars().kind{
-                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};self.ivars().options.get(index as usize).map(|o|o.get("v").unwrap_or(o).clone()).unwrap_or(Value::Null)},
+                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};self.ivars().options.borrow().get(index as usize).map(|o|o.get("v").unwrap_or(o).clone()).unwrap_or(Value::Null)},
                 Kind::Checkbox|Kind::Switch=>{let state:isize=unsafe{msg_send![sender,state]};json!(state!=0)},
                 Kind::Push=>Value::Null,
             };
@@ -135,7 +135,7 @@ impl NativeControl {
             msg_send![
                 super(Target::alloc(mtm).set_ivars(TargetState {
                     sender: tx,
-                    options: options.clone(),
+                    options: std::cell::RefCell::new(options.clone()),
                     kind
                 })),
                 init
@@ -148,15 +148,7 @@ impl NativeControl {
                     NSRect::ZERO,
                     false,
                 );
-                for option in &options {
-                    v.addItemWithTitle(&NSString::from_str(
-                        option
-                            .get("label")
-                            .and_then(Value::as_str)
-                            .or_else(|| option.as_str())
-                            .unwrap_or(""),
-                    ));
-                }
+                add_items(&v, &options);
                 unsafe {
                     v.setTarget(Some(&target));
                     v.setAction(Some(sel!(act:)));
@@ -239,7 +231,23 @@ impl NativeControl {
     pub fn keep(&self) {
         self.slot.keep();
     }
-    pub fn update(&mut self, value: &Value, disabled: bool, cx: &mut Context<Self>) {
+    pub fn update(
+        &mut self,
+        value: &Value,
+        options: &[Value],
+        disabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // A pop-up's rows follow the tree (the viewer's zoom row names the
+        // current zoom), so a changed list replaces the menu's items.
+        if let Control::Popup(v) = &self.control
+            && options != self.options.as_slice()
+        {
+            v.removeAllItems();
+            add_items(v, options);
+            options.clone_into(&mut self.options);
+            options.clone_into(&mut self._target.ivars().options.borrow_mut());
+        }
         self.control.value(value, &self.options);
         self.control.enabled(!disabled);
         cx.notify();
@@ -270,5 +278,16 @@ impl Render for NativeControl {
             .absolute()
             .inset_0(),
         )
+    }
+}
+fn add_items(popup: &NSPopUpButton, options: &[Value]) {
+    for option in options {
+        popup.addItemWithTitle(&NSString::from_str(
+            option
+                .get("label")
+                .and_then(Value::as_str)
+                .or_else(|| option.as_str())
+                .unwrap_or(""),
+        ));
     }
 }

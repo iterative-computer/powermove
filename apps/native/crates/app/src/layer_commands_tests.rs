@@ -418,3 +418,48 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
         );
     }
 }
+
+/// The session's nudge burst: a mark, one write per arrow key, and a squash
+/// once the keys rest leave one "Nudge Selection" undo step.
+#[test]
+fn a_burst_of_nudges_squashes_into_one_undo_step() {
+    let (_actor, kernel) = open(&[layer("a", "solid", 40., 20., 0., "#FF0000", "")]);
+    let x = |kernel: &KernelHandle| {
+        let p = kernel.published("synthetic").unwrap();
+        let root = p.snapshot.root().unwrap();
+        let loc = pm_kernel::model::find_layer(root, "a").unwrap();
+        let layer = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
+        layer
+            .get("p")
+            .unwrap()
+            .get("position.x")
+            .unwrap()
+            .get("v")
+            .and_then(Value::as_f64)
+    };
+    select(&kernel, &["a"]);
+    let Reply::Mark(mark) = send(&kernel, HistoryCall::Mark.into()).reply else {
+        panic!("a history mark");
+    };
+    for _ in 0..3 {
+        let published = kernel.published("synthetic").unwrap();
+        let step = [serde_json::json!(1), serde_json::json!(0)];
+        run(
+            &kernel,
+            command_plan("nudgeSelection", &step, &published, 0.).unwrap(),
+        );
+    }
+    assert_eq!(x(&kernel), Some(43.));
+    let expected_revision = kernel.published("synthetic").unwrap().revision();
+    let squash = HistoryCall::Squash {
+        mark,
+        label: "Nudge Selection".into(),
+        expected_revision,
+    };
+    assert!(matches!(
+        send(&kernel, squash.into()).reply,
+        Reply::Entry(Some(_))
+    ));
+    send(&kernel, HistoryCall::Undo.into());
+    assert_eq!(x(&kernel), Some(40.), "one undo restores the burst");
+}

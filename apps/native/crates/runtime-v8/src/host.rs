@@ -185,6 +185,12 @@ pub trait EngineProxy: Send + Sync + 'static {
         input: &Value,
         budget: HostBudget,
     ) -> Result<Value>;
+    /// Whether `operation` from `generation`'s realm spends the task's
+    /// synchronous operation quota. A host may exempt queue plumbing it bounds
+    /// itself for realms it trusts (its own built-ins), never for extensions.
+    fn metered(&self, _generation: &Generation, _operation: &str) -> bool {
+        true
+    }
 }
 
 /// V8's statistics, not RSS or an admission reservation.

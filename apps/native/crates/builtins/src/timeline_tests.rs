@@ -114,7 +114,7 @@ fn joined_position_projection_and_selection_keep_all_subframe_key_identities() {
             .surface
             .nodes()
             .values()
-            .any(|n| n.text.contains("320.00, 180.00"))
+            .any(|n| n.text == "320, 180")
     );
 }
 

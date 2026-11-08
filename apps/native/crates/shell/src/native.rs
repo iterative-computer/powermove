@@ -1610,11 +1610,21 @@ impl Host {
                 }
                 self.layer.set_contents_scale(g.scale);
                 self.viewer_crop.set(g.crop);
+                // CAMetalLayer posts no KVO for drawableSize; the engine's
+                // output binding observes it, so announce the change here.
+                let key = NSString::from_str("drawableSize");
+                let layer = self.layer.as_ptr() as *mut AnyObject;
+                unsafe {
+                    let _: () = msg_send![layer, willChangeValueForKey: &*key];
+                }
                 self.layer
                     .set_drawable_size(core_graphics::geometry::CGSize::new(
                         g.layer.size.width * g.scale,
                         g.layer.size.height * g.scale,
                     ));
+                unsafe {
+                    let _: () = msg_send![layer, didChangeValueForKey: &*key];
+                }
             } else {
                 self.viewer.setHidden(true);
             }

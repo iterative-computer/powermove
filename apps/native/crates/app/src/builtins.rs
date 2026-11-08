@@ -297,7 +297,7 @@ impl Controller {
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":[self.dimensions[0],self.dimensions[1]],"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
+        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
     /// the playhead and timecode are CALayers fed from the display link.
@@ -447,6 +447,12 @@ impl Controller {
         }
         if id == "viewer" {
             let body_h = (bounds.h - t.metrics.header).max(1.);
+            let stage = [bounds.w as f64, body_h as f64];
+            if self.view.stage != stage {
+                // The chrome's Fit readout and zoom steps measure this slot.
+                self.view.stage = stage;
+                cx.defer_in(window, |v, _, cx| v.update_builtins(cx));
+            }
             let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, t.metrics.inset);
             let scale = self.view.zoom.unwrap_or(fit).min(self.zoom_limit());
             if self.view.scale.replace(scale) != scale
@@ -997,6 +1003,7 @@ impl crate::gizmo::Host for ControllerDelegate {
             "toolZoom" => Tool::Zoom,
             "toolRotate" => Tool::Rotate,
             "toolAnchor" => Tool::Anchor,
+            "toolShape" => Tool::Shape,
             _ => Tool::Other,
         }
     }

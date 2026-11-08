@@ -804,7 +804,7 @@ impl Controller {
         let (Some(popout), Some(p)) = (&mut self.popout, &self.published) else {
             return;
         };
-        let comp = p.snapshot.open_comp().unwrap_or_default();
+        let comp = p.snapshot.render_comp();
         let hz = std::env::var("PM_NATIVE_VERIFY_HZ")
             .ok()
             .and_then(|s| s.parse().ok())

@@ -226,7 +226,19 @@ impl QueryContext {
     /// Returns the `ok` value with special numbers (`NaN`, `±Infinity`, `-0`)
     /// revived, or the typed reason there was no answer.
     pub fn query(&mut self, request: &Value) -> Result<Value, QueryError> {
-        let bytes = to_canonical_string(request).into_bytes();
+        // Callers name a root-level composition "" (no compId); the engine
+        // addresses it by the project id.
+        let mut request = request.clone();
+        if let (Some(id), Value::Object(map)) =
+            (self.root().and_then(model::render_comp_id), &mut request)
+        {
+            for key in ["comp", "open"] {
+                if map.get(key).and_then(Value::as_str) == Some("") {
+                    map.insert(key, Value::from(id.as_str()));
+                }
+            }
+        }
+        let bytes = to_canonical_string(&request).into_bytes();
         let reply = self.engine.query(&bytes);
         let parsed = json::parse(&reply.text)
             .map_err(|e| QueryError::Error(format!("unreadable reply: {e}")))?;
@@ -318,6 +330,17 @@ impl QueryContext {
         t: f64,
     ) -> Result<f64, QueryError> {
         number(self.layer_query("worldOpacity", comp_id, layer_id, t, &[])?)
+    }
+
+    /// `PM.active`: inside its time range (with the shipped boundary
+    /// tolerance) and switched on, its group ancestors included.
+    pub fn active(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+    ) -> Result<bool, QueryError> {
+        Ok(self.layer_query("active", comp_id, layer_id, t, &[])? == Value::Bool(true))
     }
 
     /// The 2D affine matrix `[a, b, c, d, e, f]` of the layer alone.

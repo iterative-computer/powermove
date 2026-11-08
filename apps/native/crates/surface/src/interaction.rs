@@ -15,6 +15,11 @@ pub struct EventPlan {
     pub target: Id,
     pub prevent_default: bool,
     pub deliveries: Vec<Delivery>,
+    /// The `id` prop the host saw on the target. An activation whose target
+    /// still carries it reaches it even if a render lands first (a row that
+    /// restyles on hover is the same row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<String>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Interaction {
@@ -95,6 +100,7 @@ impl Interaction {
             target,
             prevent_default,
             deliveries,
+            semantic: None,
         })
     }
     pub fn push_scope(&mut self, surface: &Surface, id: Id) -> Result<(), String> {

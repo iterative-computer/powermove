@@ -280,7 +280,7 @@ impl Backend {
                         .map_err(|e| format!("{e:?}"))?;
                     let value = wire(&state.value);
                     values.push(match value.as_f64() {
-                        Some(n) => format!("{n:.2}"),
+                        Some(n) => readout(n),
                         None => value.to_string(),
                     });
                     animated |= state.animated;
@@ -343,11 +343,36 @@ impl Backend {
                 _ => None,
             })
             .unwrap_or_default();
-        frame["tabs"] =
-            json!([{"id":client.model.index.comp_id,"name":title,"active":true,"showClose":false}]);
+        // Root-level layers are the composition the shipped app calls `root`.
+        let tab = client.model.index.comp_id.as_deref().unwrap_or("root");
+        frame["tabs"] = json!([{"id":tab,"name":title,"active":true,"showClose":false}]);
         frame["renderSummary"] = json!("");
         frame["feedback"] = json!({});
         Ok(frame)
+    }
+    /// The viewer slot (the host's `stage` fact, in points) around the
+    /// composition. A pane shorter than two insets fits edge to edge.
+    fn viewer_viewport(
+        &self,
+        vm: &pm_panel_viewerchrome::ViewModel,
+    ) -> Result<pm_panel_viewerchrome::Viewport, String> {
+        let side = |i: usize, default: f64| {
+            self.native.facts["stage"][i]
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .unwrap_or(default)
+                .max(1.)
+        };
+        let stage = pm_panel_viewerchrome::Size {
+            width: side(0, 640.),
+            height: side(1, 360.),
+        };
+        let inset = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
+            .metrics
+            .inset as f64;
+        let room = stage.width.min(stage.height);
+        let inset = if inset * 2. < room { inset } else { 0. };
+        vm.viewport(stage, inset).map_err(|e| e.to_string())
     }
     pub(crate) fn viewer_snapshot(&mut self) -> Result<Value, String> {
         self.sync()?;
@@ -362,18 +387,7 @@ impl Backend {
             vm.chrome.effective_quality = scale;
         }
         let effective = vm.chrome.effective_quality;
-        let stage = pm_panel_viewerchrome::Size {
-            width: self.native.facts["stage"][0].as_f64().unwrap_or(640.),
-            height: self.native.facts["stage"][1].as_f64().unwrap_or(360.),
-        };
-        let viewport = vm
-            .viewport(
-                stage,
-                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
-                    .metrics
-                    .inset as f64,
-            )
-            .map_err(|e| e.to_string())?;
+        let viewport = self.viewer_viewport(&vm)?;
         let model = if let Some((stamp, previous_viewport, previous_effective, projection)) =
             &self.native.viewer_projection
             && *stamp == vm.stamp
@@ -1018,18 +1032,7 @@ impl Backend {
                 let p = self.published().ok_or("closed")?;
                 let vm = pm_panel_viewerchrome::ViewModel::read(&p, self.kernel.state().revision)
                     .map_err(|e| e.to_string())?;
-                let stage = pm_panel_viewerchrome::Size {
-                    width: self.native.facts["stage"][0].as_f64().unwrap_or(640.),
-                    height: self.native.facts["stage"][1].as_f64().unwrap_or(360.),
-                };
-                let viewport = vm
-                    .viewport(
-                        stage,
-                        pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
-                            .metrics
-                            .inset as f64,
-                    )
-                    .map_err(|e| e.to_string())?;
+                let viewport = self.viewer_viewport(&vm)?;
                 let plan = self
                     .native
                     .viewer
@@ -1289,10 +1292,29 @@ fn profile_key(key: &str) -> bool {
     )
 }
 
+/// A property's timeline readout, the same reading as its Properties field
+/// (two places, trailing zeros trimmed): 960 and 1372.84, never 960.00.
+fn readout(value: f64) -> String {
+    let text = format!("{value:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.into()
+    }
+}
+
 #[cfg(test)]
 mod store_tests {
     use super::*;
     use pm_agents::persistence::Store;
+    #[test]
+    fn readouts_read_like_the_properties_field() {
+        assert_eq!(readout(960.), "960");
+        assert_eq!(readout(1372.8427), "1372.84");
+        assert_eq!(readout(0.5), "0.5");
+        assert_eq!(readout(-0.001), "0");
+    }
     #[test]
     fn application_agent_archive_is_disjoint_and_preserves_unknown_fields() {
         let actor = KernelActor::spawn(KernelConfig::default());

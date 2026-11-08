@@ -359,6 +359,20 @@ fn pressing_another_layer_selects_it_and_the_same_drag_moves_it(cx: &mut TestApp
         .to_vec();
     assert_eq!(selected, vec!["l1".to_string()]);
 }
+/// A tap-to-click (down and up in the same instant) picks like a held press.
+#[gpui::test]
+fn an_instant_click_on_another_layer_selects_it(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let at = s.point_of([460., 160.]);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l1".to_string()]
+    });
+}
 #[gpui::test]
 fn a_click_on_empty_canvas_clears_the_selection(cx: &mut TestAppContext) {
     let mut s = stage(cx);
@@ -654,4 +668,85 @@ fn the_resolution_popup_changes_the_render_scale(cx: &mut TestAppContext) {
         })
     });
     assert_eq!(quality(&rig), pm_engine_service::Quality::Half);
+}
+/// A selected layer the playhead is outside of draws no box (viewer.ts
+/// visibleSelectionLayers); the active one keeps its own.
+#[gpui::test]
+fn a_selected_layer_outside_the_playhead_has_no_box(cx: &mut TestAppContext) {
+    let later = pair().replace(
+        r#""name":"Other","from":0,"dur":2"#,
+        r#""name":"Other","from":1,"dur":1"#,
+    );
+    let mut s = stage_on(cx, &later);
+    let both = SelectionCall::Layers {
+        ids: vec!["l0".into(), "l1".into()],
+        add: false,
+    };
+    let call = Request::new(Caller::native(), both);
+    s.rig.kernel.call(PROJECT, call).wait().unwrap().unwrap();
+    s.refresh(cx);
+    let ids: Vec<String> = s.surface.read_with(&s.vcx, |g, _| {
+        g.poses().iter().map(|p| p.id.clone()).collect()
+    });
+    assert_eq!(ids, ["l0".to_string()]);
+}
+fn layer_value(kernel: &pm_kernel::KernelHandle, id: &str) -> Option<pm_model::Value> {
+    let p = kernel.published(PROJECT).unwrap();
+    let root = p.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, id)?;
+    Some(pm_kernel::model::layer_at(root, &at)?.to_value())
+}
+/// A static channel value: `p` of a layer, or of its first mask.
+fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
+    let owner = if mask {
+        layer.get("masks")?.as_array()?.first()?
+    } else {
+        layer
+    };
+    owner.get("p")?.get(key)?.get("v")?.as_f64()
+}
+/// Shape tool over a selected shape layer: the drag draws a new shape layer
+/// whose Scale is the drawn size, selected, in one undo step.
+#[gpui::test]
+fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("shape"));
+    s.recorder.tool.set(Some(Tool::Shape));
+    let at = s.point_of([300., 200.]);
+    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+    });
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let id = p.selection.layers()[0].clone();
+    let layer = layer_value(&s.rig.kernel, &id).unwrap();
+    assert_eq!(
+        layer.get("type").and_then(pm_model::Value::as_str),
+        Some("shape")
+    );
+    assert_eq!(channel(&layer, false, "position.x"), Some(330.));
+    assert_eq!(channel(&layer, false, "position.y"), Some(220.));
+    assert_eq!(channel(&layer, false, "scale.x"), Some(60.));
+    assert_eq!(channel(&layer, false, "scale.y"), Some(40.));
+    let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
+    s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
+    assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
+}
+/// With a maskable layer selected the drawn box becomes a mask on it.
+#[gpui::test]
+fn the_shape_tool_draws_a_mask_on_a_selected_image(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Shape));
+    let at = s.point_of([300., 200.]);
+    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        layer_value(&kernel, "l0").is_some_and(|l| channel(&l, true, "w").is_some())
+    });
+    let layer = layer_value(&s.rig.kernel, "l0").unwrap();
+    assert_eq!(channel(&layer, true, "feather"), Some(0.));
+    assert_eq!(channel(&layer, true, "w"), Some(60.));
+    assert_eq!(channel(&layer, true, "h"), Some(40.));
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.selection.layers(), ["l0".to_string()]);
 }

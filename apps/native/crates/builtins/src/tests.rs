@@ -4,6 +4,25 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+/// Two compiler slots serve the whole test process. Render tests take turns
+/// (hold the guard until the frame is drawn), and a slot another test still
+/// holds is transient, as the engine service treats it.
+fn install_main_effects(
+    renderer: &mut pm_render::Renderer,
+    document: &pm_model::Document,
+) -> std::sync::MutexGuard<'static, ()> {
+    static RENDER: Mutex<()> = Mutex::new(());
+    let turn = RENDER.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while let Err(e) = renderer.set_main_effects_for_document(document) {
+        assert!(
+            e.contains("compiler-busy") && Instant::now() < deadline,
+            "{e}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    turn
+}
 fn finish(ticket: Ticket<Evaluation>) -> Evaluation {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -1585,6 +1604,30 @@ fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_th
     assert!(errors.is_empty(), "{errors:?}");
 }
 
+/// Only built-in panels' bounded queue plumbing skips the operation quota;
+/// a third-party surface sharing the broker stays metered for every operation.
+#[test]
+fn only_built_in_realms_skip_the_quota_for_queue_operations() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let realm = |id: &str| Generation {
+        realm: format!("scope:{:?}", RealmKind::V4Extension(id.into())),
+        number: 1,
+    };
+    let broker: &dyn EngineProxy = &*panels.broker;
+    for op in [
+        "host.enqueue",
+        "host.poll",
+        "platform.enqueue",
+        "platform.poll",
+    ] {
+        assert!(!broker.metered(&realm("inspector"), op), "{op}");
+        assert!(broker.metered(&realm("synthetic-surface"), op), "{op}");
+    }
+    assert!(broker.metered(&realm("inspector"), "read"));
+    actor.shutdown();
+}
+
 #[test]
 fn mounted_native_worker_cannot_adopt_a_reopened_document_reusing_project_and_layer_ids() {
     let actor = actor();
@@ -1707,4 +1750,48 @@ fn project_rows_follow_a_media_observation_that_lands_without_an_edit() {
         "the row shows the observation instead of staying Loading"
     );
     panels.close();
+}
+
+/// Projects whose layers sit at the root (no `compId`) are the composition
+/// the shipped app calls `root`: the timeline shows it and names its tab.
+#[test]
+fn root_level_project_has_a_timeline_composition_and_tab() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(r##"{"id":"root-film","name":"Root Film","w":32,"h":18,"fps":29.97,"dur":2,"assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10},"fx":[]}]}"##).unwrap();
+    actor
+        .handle()
+        .open("root-film", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "root-timeline".into(),
+        generation: 1,
+        project: "root-film".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "timeline", false).unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["hasComposition"], true);
+    assert_eq!(frame["tabs"][0]["id"], "root");
+    assert_eq!(frame["tabs"][0]["name"], "Root Film");
+    assert_eq!(frame["window"]["total"], 1);
+}
+
+/// A viewer pane shorter than two insets still publishes (fit edge to edge),
+/// and a 32 × 18 composition fits a real pane.
+#[test]
+fn viewer_publishes_for_tiny_panes_and_tiny_compositions() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "viewer-tiny".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "viewer", false).unwrap();
+    for stage in [[20., 10.], [1., 1.], [814., 467.]] {
+        backend.native.facts["stage"] = json!(stage);
+        backend.viewer_snapshot().unwrap();
+    }
 }

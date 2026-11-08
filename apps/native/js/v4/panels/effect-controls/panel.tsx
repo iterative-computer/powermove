@@ -187,6 +187,10 @@ export function EffectControls(props: PanelProps) {
           label={`${p.name} · ${p.typeLabel}`}
           title={`${p.name} · ${p.typeLabel}`}
           style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
             height: t("metrics.row"),
             paddingLeft: t("metrics.inset"),
             paddingRight: t("metrics.inset"),
@@ -201,7 +205,7 @@ export function EffectControls(props: PanelProps) {
               color: t("colors.muted"),
               fontWeight: t("typography.regular_weight"),
             }}
-          >{` · ${p.typeLabel}`}</text>
+          >{`· ${p.typeLabel}`}</text>
           {p.locked && (
             <text
               attr={{ symbol: "lock" }}

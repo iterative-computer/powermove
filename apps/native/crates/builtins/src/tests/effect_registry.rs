@@ -30,9 +30,7 @@ fn setup(fx: Value) -> KernelActor {
 }
 fn pixel(kernel: &pm_kernel::KernelHandle, renderer: &mut pm_render::Renderer) -> [f32; 4] {
     let p = kernel.published("synthetic").unwrap();
-    renderer
-        .set_main_effects_for_document(&p.snapshot.document)
-        .unwrap();
+    let _turn = install_main_effects(renderer, &p.snapshot.document);
     let mut request = pm_render::RenderRequest::sized(
         pm_protocol::common::Size::new(8, 8),
         pm_protocol::color::Precision::Float16,

@@ -431,9 +431,22 @@ impl Builtins {
         event: &str,
         detail: EventDetail,
     ) -> Result<Ticket<Evaluation>> {
+        self.dispatch(panel, generation, revision, target, event, detail, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+        semantic: Option<String>,
+    ) -> Result<Ticket<Evaluation>> {
         let mut entries = self.broker.entries.lock().unwrap();
         let entry = entries.get_mut(panel).ok_or(Error::Closed)?;
-        let event = entry
+        let mut event = entry
             .interaction
             .drive(
                 &mut entry.surface,
@@ -445,6 +458,7 @@ impl Builtins {
                 detail,
             )
             .map_err(Error::Host)?;
+        event.plan.semantic = semantic;
         let wire = serde_json::to_string(&event).map_err(|e| Error::Host(e.to_string()))?;
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.event({wire})"))
@@ -462,19 +476,22 @@ impl Builtins {
         event: &str,
         detail: EventDetail,
     ) -> Result<Ticket<Evaluation>> {
-        let revision = {
+        let (revision, semantic) = {
             let entries = self.broker.entries.lock().unwrap();
             let surface = &entries.get(panel).ok_or(Error::Closed)?.surface;
-            let same = semantic.is_some_and(|id| {
+            let same = semantic.filter(|id| {
                 surface
                     .node(target)
                     .and_then(|n| n.props.get("id"))
                     .and_then(Value::as_str)
-                    == Some(id)
+                    == Some(*id)
             });
-            if same { surface.revision() } else { revision }
+            match same {
+                Some(id) => (surface.revision(), Some(id.to_owned())),
+                None => (revision, None),
+            }
         };
-        self.event(panel, generation, revision, target, event, detail)
+        self.dispatch(panel, generation, revision, target, event, detail, semantic)
     }
     /// Pointer stream events address the current tree. A publication landing
     /// mid-gesture must not drop a release.
@@ -603,12 +620,14 @@ impl Drop for Builtins {
     }
 }
 impl Broker {
-    fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
-        let id = generation
+    fn realm_id(generation: &Generation) -> Option<&str> {
+        generation
             .realm
             .rsplit_once("V4Extension(\"")
             .and_then(|(_, s)| s.strip_suffix("\")"))
-            .ok_or(Error::Invalid("not a v4 built-in realm"))?;
+    }
+    fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
+        let id = Self::realm_id(generation).ok_or(Error::Invalid("not a v4 built-in realm"))?;
         if !LIVE_PANELS.contains(&id) && !self.extensions.lock().unwrap().contains(id) {
             return Err(Error::Invalid("unknown panel"));
         }
@@ -624,6 +643,16 @@ impl Broker {
     }
 }
 impl EngineProxy for Broker {
+    /// Request queues are bounded here (256 host, 128 platform), so a
+    /// built-in panel awaiting one reply per property row stays within its
+    /// task quota. Extensions mounted through this broker stay metered.
+    fn metered(&self, generation: &Generation, operation: &str) -> bool {
+        let queue = matches!(
+            operation,
+            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll"
+        );
+        !(queue && Self::realm_id(generation).is_some_and(|id| LIVE_PANELS.contains(&id)))
+    }
     fn call(
         &self,
         generation: &Generation,
