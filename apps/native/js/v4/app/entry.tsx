@@ -51,27 +51,29 @@ const MOUNTS: Record<string, Mount> = {
 };
 let mounted: Mounted | undefined;
 let host: HostClient;
+/** A native reply: polled at once while it is quick, then backing off to
+ * once a frame, so panels waiting on a busy kernel don't spin (each poll
+ * also advances the panel's backend). */
+async function reply<T>(read: () => T | null | undefined): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const value = read();
+    if (value) return value;
+    const delay = attempt < 4 ? 1 : Math.min(16, 2 ** (attempt - 3));
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
 async function platform(operation: string, input: unknown = null) {
   const id = native("platform.enqueue", { operation, input });
-  for (;;) {
-    const result = native("platform.poll", id);
-    if (result) {
-      if (!result.accepted) throw new Error(result.error);
-      return result.value;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
+  const result = await reply(() => native("platform.poll", id));
+  if (!result.accepted) throw new Error(result.error);
+  return result.value;
 }
 /** The realm's host connection and everything a panel mount may use. */
 function environment(panel: string): BuiltinEnv {
   const identity = native("identity") as HostIdentity;
   host = new HostClient(identity, async (request) => {
     native("host.enqueue", request);
-    for (;;) {
-      const ack = native("host.poll", request.requestId);
-      if (ack) return ack;
-      await new Promise((r) => setTimeout(r, 1));
-    }
+    return reply(() => native("host.poll", request.requestId));
   });
   const rootOptions = { generation: identity.generation };
   const transport: Transport = async (commit) =>

@@ -123,7 +123,9 @@ struct Broker {
     project: String,
     application: bool,
     kernel: KernelHandle,
-    entries: Mutex<BTreeMap<String, Entry>>,
+    /// Each panel's entry has its own lock: one panel's slow poll never holds
+    /// another's calls (all nine built-ins share this broker).
+    entries: Mutex<BTreeMap<String, Arc<Mutex<Entry>>>>,
     publications: Mutex<BTreeMap<String, Publication>>,
     platform: Mutex<Vec<PlatformRequest>>,
     errors: Mutex<Vec<String>>,
@@ -164,9 +166,10 @@ impl Builtins {
         if !self.broker.application {
             return None;
         }
-        let entries = self.broker.entries.lock().unwrap();
-        let state = entries
-            .get("agent")?
+        let entry = self.broker.entry("agent")?;
+        let state = entry
+            .lock()
+            .unwrap()
             .backend
             .lock()
             .unwrap()
@@ -399,8 +402,8 @@ impl Builtins {
     }
     pub fn update_facts(&self, facts: Value) {
         *self.broker.facts.lock().unwrap() = facts.clone();
-        for entry in self.broker.entries.lock().unwrap().values_mut() {
-            entry.backend.lock().unwrap().native.facts = facts.clone();
+        for entry in self.broker.all_entries() {
+            entry.lock().unwrap().backend.lock().unwrap().native.facts = facts.clone();
         }
     }
     /// Worker-only native observations. Never expose filesystem paths to JSX.
@@ -409,8 +412,9 @@ impl Builtins {
         originals: BTreeMap<String, std::path::PathBuf>,
         observed: pm_panel_media::readiness::ObservedRuntime,
     ) {
-        for entry in self.broker.entries.lock().unwrap().values_mut() {
-            let mut backend = entry.backend.lock().unwrap();
+        for entry in self.broker.all_entries() {
+            let backend = entry.lock().unwrap().backend.clone();
+            let mut backend = backend.lock().unwrap();
             backend.native.originals = originals.clone();
             if backend.native.media_runtime != observed {
                 backend.native.media_runtime = observed.clone();
@@ -545,7 +549,8 @@ impl Builtins {
         std::mem::take(&mut *self.broker.platform.lock().unwrap())
     }
     pub fn status(&self) -> Vec<Value> {
-        self.broker.entries.lock().unwrap().iter().map(|(id,e)|json!({"panel":id,"generation":e.generation,"surfaceRevision":e.surface.revision(),"subscriptions":e.router.subscription_count(),"kernelRevision":e.backend.lock().unwrap().service_revision})).collect()
+        let entries = self.broker.entries.lock().unwrap().clone();
+        entries.into_iter().map(|(id,e)|{let e=e.lock().unwrap();json!({"panel":id,"generation":e.generation,"surfaceRevision":e.surface.revision(),"subscriptions":e.router.subscription_count(),"kernelRevision":e.backend.lock().unwrap().service_revision})}).collect()
     }
     pub fn take_errors(&self) -> Vec<String> {
         std::mem::take(&mut *self.broker.errors.lock().unwrap())
@@ -574,8 +579,9 @@ impl Builtins {
         detail: EventDetail,
         semantic: Option<String>,
     ) -> Result<Ticket<Evaluation>> {
-        let mut entries = self.broker.entries.lock().unwrap();
-        let entry = entries.get_mut(panel).ok_or(Error::Closed)?;
+        let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
+        let mut entry = entry.lock().unwrap();
+        let entry = &mut *entry;
         let mut event = entry
             .interaction
             .drive(
@@ -607,8 +613,9 @@ impl Builtins {
         detail: EventDetail,
     ) -> Result<Ticket<Evaluation>> {
         let (revision, semantic) = {
-            let entries = self.broker.entries.lock().unwrap();
-            let surface = &entries.get(panel).ok_or(Error::Closed)?.surface;
+            let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
+            let entry = entry.lock().unwrap();
+            let surface = &entry.surface;
             let same = semantic.filter(|id| {
                 surface
                     .node(target)
@@ -635,11 +642,10 @@ impl Builtins {
     ) -> Result<Ticket<Evaluation>> {
         let revision = self
             .broker
-            .entries
+            .entry(panel)
+            .ok_or(Error::Closed)?
             .lock()
             .unwrap()
-            .get(panel)
-            .ok_or(Error::Closed)?
             .surface
             .revision();
         self.event(panel, generation, revision, target, event, detail)
@@ -716,11 +722,8 @@ impl Builtins {
     }
     fn backend(&self, panel: &str) -> Result<Arc<Mutex<Backend>>> {
         self.broker
-            .entries
-            .lock()
-            .unwrap()
-            .get(panel)
-            .map(|e| e.backend.clone())
+            .entry(panel)
+            .map(|e| e.lock().unwrap().backend.clone())
             .ok_or(Error::Closed)
     }
     /// Caller drops the owning window without waiting on JS. Runtime disposal
@@ -798,8 +801,8 @@ impl EngineProxy for Broker {
     ) -> Result<Value> {
         budget.check()?;
         let panel = self.panel(generation)?;
-        let mut entries = self.entries.lock().unwrap();
         if operation == "identity" {
+            let mut entries = self.entries.lock().unwrap();
             if entries.contains_key(panel) {
                 return Err(Error::Invalid("duplicate panel identity"));
             }
@@ -835,20 +838,22 @@ impl EngineProxy for Broker {
             .map_err(Error::Host)?;
             entries.insert(
                 panel.into(),
-                Entry {
+                Arc::new(Mutex::new(Entry {
                     generation: generation.number,
                     backend,
                     router,
                     surface: Surface::default(),
                     interaction: Interaction::default(),
-                },
+                })),
             );
             return Ok(serde_json::to_value(identity).unwrap());
         }
-        let entry = entries
-            .get_mut(panel)
-            .filter(|e| e.generation == generation.number)
-            .ok_or(Error::StaleGeneration)?;
+        let entry = self.entry(panel).ok_or(Error::StaleGeneration)?;
+        let mut entry = entry.lock().unwrap();
+        if entry.generation != generation.number {
+            return Err(Error::StaleGeneration);
+        }
+        let entry = &mut *entry;
         match operation {
             "tokens.row" => Ok(json!(
                 pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
@@ -1138,18 +1143,23 @@ impl KernelHooks for Broker {
     }
     fn revoke_generation(&self, generation: &Generation) {
         if let Ok(panel) = self.panel(generation) {
-            let mut entries = self.entries.lock().unwrap();
-            if let Some(entry) = entries
-                .get_mut(panel)
-                .filter(|e| e.generation == generation.number)
-            {
-                let _ = entry.router.retire();
+            if let Some(entry) = self.entry(panel) {
+                let mut entry = entry.lock().unwrap();
+                if entry.generation == generation.number {
+                    let _ = entry.router.retire();
+                }
             }
         }
     }
     fn seal_open_gestures(&self, _: &Generation) {}
 }
 impl Broker {
+    fn entry(&self, panel: &str) -> Option<Arc<Mutex<Entry>>> {
+        self.entries.lock().unwrap().get(panel).cloned()
+    }
+    fn all_entries(&self) -> Vec<Arc<Mutex<Entry>>> {
+        self.entries.lock().unwrap().values().cloned().collect()
+    }
     fn forget_commands(&self, panel: &str) {
         let mut commands = self.commands.lock().unwrap();
         if commands.1.remove(panel).is_some() {
