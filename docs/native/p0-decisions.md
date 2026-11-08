@@ -81,3 +81,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **First-run animation** plays inside the Welcome window.
 - **Going back:** there is no reverse migration. The old app must refuse a native file it can't read, safely and clearly, instead of opening it wrongly.
 
+
+## Core lane decisions (2026-11-07)
+
+- **Stale locks:** holding the flock proves no local owner, so a dead pid on a local volume is taken at once; a record younger than 30 s blocks only while its pid runs or on a shared volume; any record whose heartbeat stopped 30 s ago is stale.
+- **External files:** a `.pmv` opened from disk is edited in place under its `.pmvlock`; its library entry is the file under its own name. Only copies (locked, cloud, read-only, foreign library) get " — Native".
+- **Journals:** a project that closes saved and durable retires its journal; quit compacts only unsaved work.
+- **Projects from before compositions:** a missing `compId` is filled at open, derived from the project id so every open of an unsaved file has one journal base; nested comps are left as stored.
+- **Shader cache:** translated built-in shaders live in `<profile>/shader-cache` (keys carry pipeline revision, translator versions and device).
