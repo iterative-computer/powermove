@@ -659,12 +659,14 @@ impl EngineService {
         let engine = render::Engine::new(gpu)?;
         Self::start_engine(device, engine)
     }
+    /// `shader_cache` is a folder kept across launches for translated shaders.
     pub fn start_with_fonts(
         gpu: pm_gpu::Gpu,
         fonts: pm_node::fonts::render::RenderFonts,
+        shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
-        let mut engine = render::Engine::new(gpu)?;
+        let mut engine = render::Engine::with_shader_cache(gpu, shader_cache)?;
         engine.set_fonts(fonts);
         Self::start_engine(device, engine)
     }

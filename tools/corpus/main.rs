@@ -448,7 +448,7 @@ fn project(
         .exact_frame_ticks()
         .unwrap_or(pm_protocol::common::TICKS_PER_SECOND / 30);
     let size = Size::new(320, 180);
-    let service = EngineService::start_with_fonts(pm_gpu::Gpu::new("corpus-metal")?, fonts)?;
+    let service = EngineService::start_with_fonts(pm_gpu::Gpu::new("corpus-metal")?, fonts, None)?;
     let viewer = service.viewer(ViewerConfig {
         composition: comp.clone(),
         snapshot: p.snapshot.clone(),
