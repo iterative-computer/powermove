@@ -1,5 +1,10 @@
 //! Windowless service scheduling diagnostic. Synthetic ticks, never scanout.
-use pm_engine_service::{EngineService, Output, ViewerConfig};
+//!
+//! `pm-engine-service --bench [--hz=60] [--seconds=60]` plays a fixture;
+//! `--project=COPY.pmv [--definitions=FILE] [--width=1920 --height=1080]`
+//! plays a real project (a private copy: its embedded media are extracted to
+//! a scratch folder) and then seeks it at random, as the viewer does.
+use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
 use pm_protocol::{
     clock::TransportCommand,
     common::{PlaybackRate, TickRange, Ticks},
@@ -8,22 +13,64 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 #[cfg(not(feature = "kernel"))]
 use {pm_engine_service::Snapshot, std::sync::Arc};
-pub fn run() -> anyhow::Result<()> {
-    let arg = |name: &str, default: &str| {
-        std::env::args()
-            .find_map(|a| a.strip_prefix(&format!("--{name}=")).map(str::to_owned))
-            .unwrap_or(default.into())
-    };
-    let hz: f64 = arg("hz", "120").parse()?;
-    let seconds: f64 = arg("seconds", "60").parse()?;
-    anyhow::ensure!(
-        (1. ..=240.).contains(&hz) && (1. ..=300.).contains(&seconds),
-        "invalid duration/rate"
-    );
+
+fn arg(name: &str, default: &str) -> String {
+    std::env::args()
+        .find_map(|a| a.strip_prefix(&format!("--{name}=")).map(str::to_owned))
+        .unwrap_or(default.into())
+}
+
+fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
+    sorted
+        .get(((sorted.len() as f64 * q).ceil() as usize).saturating_sub(1))
+        .copied()
+}
+
+/// The fixture or the project copy named by `--project`, with its media.
+#[cfg(feature = "kernel")]
+fn scene() -> anyhow::Result<(
+    pm_engine_service::Snapshot,
+    MediaCatalog,
+    f64,
+    pm_time::Rate,
+)> {
+    let project = arg("project", "");
+    if project.is_empty() {
+        let value = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json"))?;
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(value).snapshot();
+        return Ok((snapshot, MediaCatalog::default(), 2., pm_time::Rate::FPS_30));
+    }
+    let opened = pm_kernel::open_project(std::path::Path::new(&project), Default::default())?;
+    let store = pm_kernel::document::DocumentStore::open(opened);
+    let media_dir = std::env::temp_dir().join(format!("pm-engine-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&media_dir)?;
+    let mut media = MediaCatalog::default();
+    for (i, entry) in store.file().media.iter().enumerate() {
+        let dest = media_dir.join(format!("embedded-{i}"));
+        entry.copy_to(&dest)?;
+        media.originals.insert(entry.id.to_string(), dest);
+    }
+    let snapshot = store.snapshot();
+    let comp = snapshot
+        .open_comp()
+        .ok_or_else(|| anyhow::anyhow!("the project has no open composition"))?;
+    let root = snapshot
+        .document
+        .to_value()
+        .ok_or_else(|| anyhow::anyhow!("empty project"))?;
+    let canonical: serde_json::Value =
+        serde_json::from_str(&pm_model::json::to_canonical_string(&root))?;
+    let c = &canonical["comps"][&comp];
+    let duration = c["dur"].as_f64().filter(|d| *d > 0.).unwrap_or(1.);
+    let fps = c["fps"].as_f64().filter(|f| *f > 0.).unwrap_or(30.);
+    let rate =
+        pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+    Ok((snapshot, media, duration, rate))
+}
+
+#[cfg(not(feature = "kernel"))]
+fn scene() -> anyhow::Result<(Snapshot, MediaCatalog, f64, pm_time::Rate)> {
     let value = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json"))?;
-    #[cfg(feature = "kernel")]
-    let snapshot = pm_kernel::document::DocumentStore::new_untitled(value).snapshot();
-    #[cfg(not(feature = "kernel"))]
     let snapshot = Snapshot {
         doc_id: 1,
         revision: 1,
@@ -32,38 +79,85 @@ pub fn run() -> anyhow::Result<()> {
             1,
         )),
     };
-    let service = EngineService::start(pm_gpu::Gpu::new("service-offscreen-diagnostic")?)?;
+    Ok((snapshot, MediaCatalog::default(), 2., pm_time::Rate::FPS_30))
+}
+
+pub fn run() -> anyhow::Result<()> {
+    let hz: f64 = arg("hz", "120").parse()?;
+    let seconds: f64 = arg("seconds", "60").parse()?;
+    let width: u32 = arg("width", "1280").parse()?;
+    let height: u32 = arg("height", "720").parse()?;
+    anyhow::ensure!(
+        (1. ..=240.).contains(&hz) && (1. ..=300.).contains(&seconds),
+        "invalid duration/rate"
+    );
+    let (snapshot, media, duration, rate) = scene()?;
+    // The font registry answers on this thread, as the app's main thread does.
+    let mut font_service = pm_node::fonts::FontService::new().map_err(anyhow::Error::msg)?;
+    let fonts = pm_node::fonts::render::FontBroker::new();
+    fonts.set_wake(std::sync::Arc::new(|| {}));
+    fonts.set_generation(font_service.generation());
+    let service = EngineService::start_with_fonts(
+        pm_gpu::Gpu::new("service-offscreen-diagnostic")?,
+        pm_node::fonts::render::RenderFonts::new(fonts.clone()),
+    )?;
     let viewer = service.viewer(ViewerConfig {
-        composition: snapshot.open_comp().unwrap(),
+        composition: snapshot
+            .open_comp()
+            .ok_or_else(|| anyhow::anyhow!("no composition"))?,
         snapshot,
-        media: Default::default(),
+        media,
         output: Output {
-            width: 1280,
-            height: 720,
+            width,
+            height,
             display: 0,
             headroom: 1.,
             crop: None,
         },
         layer: None,
-        rate: pm_time::Rate::FPS_30,
+        rate,
         end: None,
         audio: false,
     })?;
+    let definitions = arg("definitions", "");
+    if !definitions.is_empty() {
+        let set: pm_protocol::definitions::DefinitionSetSnapshot =
+            serde_json::from_slice(&std::fs::read(&definitions)?)?;
+        viewer.resources(std::sync::Arc::new(
+            pm_engine_service::resources::ResourceSnapshot {
+                generation: 1,
+                definitions: set.definitions,
+                ..Default::default()
+            },
+        ))?;
+    }
+    // A frame drawn before playing settles fonts, definitions and media.
+    let settle = Instant::now();
+    viewer.scrub(Ticks::ZERO)?;
+    while viewer.status().frame.is_none() && settle.elapsed() < Duration::from_secs(120) {
+        pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
+        viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let first_frame_s = settle.elapsed().as_secs_f64();
+    let end = Ticks::from_whole_seconds(duration.min(seconds).ceil() as i32);
     viewer.command(TransportCommand::SetLoop {
         range: Some(TickRange {
             start: Ticks::ZERO,
-            end: Ticks::from_whole_seconds(2),
+            end,
         }),
     })?;
     viewer.command(TransportCommand::Play {
         rate: PlaybackRate::NORMAL,
     })?;
+    let skipped_before = viewer.status().skipped_targets;
     let started = Instant::now();
     let mut next = started;
     let mut last = 0.;
     let mut costs = Vec::new();
-    let mut failures = 0;
+    let (mut failures, mut stand_ins, mut lowest_quality) = (0, 0, 1f64);
     while started.elapsed().as_secs_f64() < seconds + 1. {
+        pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
         let now = Instant::now();
         if now >= next {
             viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
@@ -81,17 +175,61 @@ pub fn run() -> anyhow::Result<()> {
                     costs.push(ms);
                 }
                 failures += u64::from(!f.gpu_ok);
+                stand_ins += u64::from(f.stand_ins);
+                lowest_quality = lowest_quality.min(status.effective_quality);
             }
         }
         std::thread::sleep(Duration::from_micros(250));
     }
+    let status = viewer.status();
+    viewer.command(TransportCommand::Pause)?;
     costs.sort_by(f64::total_cmp);
-    let p = |q: f64| {
-        costs
-            .get(((costs.len() as f64 * q).ceil() as usize).saturating_sub(1))
-            .copied()
-    };
-    let result = json!({"mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,"samples":costs.len(),"worker_to_completion_ms":{"p50":p(0.5),"p95":p(0.95)},"headroom_budget_ms":500./hz,"gpu_failures":failures,"skipped_targets":viewer.status().skipped_targets,"held_frames":viewer.status().held_frames,"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}});
+    // Seeks: input to a completed frame at the new time, as the viewer scrubs.
+    let mut seeks = Vec::new();
+    let mut stuck = Vec::new();
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let frame = rate
+        .exact_frame_ticks()
+        .unwrap_or(pm_protocol::common::TICKS_PER_SECOND / 30);
+    for _ in 0..if arg("project", "").is_empty() { 0 } else { 30 } {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let t = duration * ((seed >> 33) as f64 / (1u64 << 31) as f64);
+        let raw = (t * pm_protocol::common::TICKS_PER_SECOND as f64) as i64;
+        let at = Ticks::new(raw / frame * frame)?;
+        let input = Instant::now();
+        viewer.scrub(at)?;
+        loop {
+            pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
+            viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+            let status = viewer.status();
+            if status
+                .frame
+                .as_ref()
+                .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
+            {
+                seeks.push(input.elapsed().as_secs_f64() * 1000.);
+                break;
+            }
+            if input.elapsed() > Duration::from_secs(10) {
+                stuck.push(json!({"at":at.get(),"frame":status.frame.map(|f| f.time.get()),"error":status.error}));
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(250));
+        }
+    }
+    seeks.sort_by(f64::total_cmp);
+    let result = json!({
+        "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
+        "output":[width,height],"first_frame_s":first_frame_s,
+        "samples":costs.len(),
+        "worker_to_completion_ms":{"p50":percentile(&costs,0.5),"p95":percentile(&costs,0.95),"max":costs.last()},
+        "headroom_budget_ms":500./hz,"gpu_failures":failures,
+        "skipped_targets":status.skipped_targets - skipped_before,"held_frames":status.held_frames,
+        "stand_in_frames":stand_ins,"lowest_effective_quality":lowest_quality,
+        "layer_failures":status.layer_failures.len(),
+        "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"max":seeks.last(),"stuck":stuck},
+        "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
+    });
     std::fs::write(
         arg("report", "/tmp/es2-service-offscreen.json"),
         serde_json::to_vec_pretty(&result)?,
