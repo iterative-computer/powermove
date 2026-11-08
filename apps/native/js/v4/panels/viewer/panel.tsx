@@ -67,10 +67,7 @@ export function ViewerPanel({
       </div>
     );
   const zoomValue = m.fit ? "fit" : m.shownZoom;
-  // A zoom between presets (pinch, Zoom tool) is named by its own row.
-  const between = !m.fit && !(zoomPresets as readonly number[]).includes(m.shownZoom);
   const zoomOptions = [
-    ...(between ? [{ v: m.shownZoom, label: `${percent(m.shownZoom)} %` }] : []),
     { v: "fit", label: "Fit" },
     ...zoomPresets.map((v) => ({ v, label: `${percent(v)} %` })),
     ...[
