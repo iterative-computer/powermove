@@ -12,6 +12,7 @@ static TERMINATE_HEARD: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// SIGTERM blocked, and one waits for it, so SIGTERM runs the quit path
 /// ([`terminations`]) instead of killing the process mid-write.
 pub fn route_sigterm() {
+    ignore_user_signals();
     let tx = TERMINATE
         .get_or_init(|| async_channel::bounded(1))
         .0
@@ -41,6 +42,24 @@ pub fn route_sigterm() {
             }
         });
 }
+/// SIGUSR1 and SIGUSR2 terminate a process by default, and other tools send
+/// them to apps they take for Electron (to open its inspector): the editor
+/// would vanish without saving. A no-op handler, not `SIG_IGN`, so a child
+/// process gets the default back at `exec`.
+fn ignore_user_signals() {
+    extern "C" fn ignore(_: libc::c_int) {}
+    for signal in [libc::SIGUSR1, libc::SIGUSR2] {
+        // SAFETY: installs an async-signal-safe handler that does nothing.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
 /// SIGTERMs from [`route_sigterm`], for the quit coordinator.
 pub fn terminations() -> async_channel::Receiver<()> {
     TERMINATE_HEARD.store(true, std::sync::atomic::Ordering::Release);
@@ -400,4 +419,23 @@ pub fn ns_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     let view: Retained<objc2_app_kit::NSView> =
         unsafe { Retained::retain(handle.ns_view.as_ptr().cast())? };
     view.window()
+}
+
+#[cfg(test)]
+mod signal_tests {
+    #[test]
+    fn a_stray_sigusr1_or_sigusr2_does_not_end_the_app() {
+        super::ignore_user_signals();
+        // SAFETY: raising a signal whose handler was just installed.
+        unsafe {
+            assert_eq!(libc::raise(libc::SIGUSR1), 0);
+            assert_eq!(libc::raise(libc::SIGUSR2), 0);
+        }
+        // Still here. A child gets the default back at exec.
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "kill -USR1 $$; sleep 1"])
+            .status()
+            .unwrap();
+        assert!(!status.success(), "the default action ends the child");
+    }
 }
