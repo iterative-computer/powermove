@@ -1078,6 +1078,21 @@ impl MacWindowState {
             .log_err();
     }
 
+    /// A layer driven by a CAMetalDisplayLink must not vend drawables itself
+    /// (Core Animation raises, even with the link paused). A synchronous paint
+    /// detaches the link; the next start attaches a fresh one.
+    fn release_metal_display_link(&mut self) {
+        let metal = self.ca_display_link.as_ref().is_some_and(|link| unsafe {
+            let kind: Bool = msg_send![&**link, isKindOfClass: class!(CAMetalDisplayLink)];
+            kind.as_bool()
+        });
+        if metal && let Some(link) = self.ca_display_link.take() {
+            unsafe {
+                let _: () = msg_send![&*link, invalidate];
+            }
+        }
+    }
+
     fn stop_display_link(&mut self) {
         if let Some(link) = &self.ca_display_link {
             unsafe {
@@ -3501,6 +3516,7 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         lock.renderer.set_presents_with_transaction(true);
         lock.sync_present_requested = true;
         lock.stop_display_link();
+        lock.release_metal_display_link();
         let request = lock.next_frame_request();
         drop(lock);
         callback(request);

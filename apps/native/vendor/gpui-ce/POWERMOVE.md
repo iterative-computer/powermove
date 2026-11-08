@@ -177,6 +177,9 @@ The session locked before the after-patch display and OS IME checks; those are o
   slot transaction commits. The commit runs AppKit's display cycle, whose cursor
   rect reset takes the same lock; holding it deadlocked the main thread whenever
   the viewer slot moved.
+- **P-120 / sync paint:** `display_layer` invalidates a `CAMetalDisplayLink`
+  before its synchronous `nextDrawable` paint (Core Animation raised on any window
+  resize, even with the link paused); the next start attaches a fresh link.
 - **P-120 / headroom candidate:** S2 caches its unchanged native viewer pattern and
   clip masks, and gives the 1,000 static texture tiles a cached GPUI entity. The
   fresh 60-Hz producer is separate; texture leases/fences remain intact. This uses
