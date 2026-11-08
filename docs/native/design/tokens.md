@@ -186,6 +186,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
 | `metrics.text_padding` | Vertical text padding in bubbles, the composer and code blocks | 8 | 8 | 8 | 8 |
 | `metrics.thumbnail_min` | Minimum Project grid thumbnail width | 120 | 120 | 120 | 120 |
+| `metrics.titlebar` | Title bar band of a plain panel window; content starts below it | 28 | 28 | 28 | 28 |
 | `metrics.toolbar` | Unified toolbar height | 52 | 52 | 52 | 52 |
 | `metrics.toolbar_title_line` | Document title line height | 14 | 14 | 14 | 14 |
 | `metrics.toolbar_title_width` | Document title slot width | 160 | 160 | 160 | 160 |

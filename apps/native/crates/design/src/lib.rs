@@ -116,6 +116,8 @@ pub struct Metrics {
     pub row: f32,
     pub status: f32,
     pub toolbar: f32,
+    /// A plain window's title bar band (Settings, Export): content starts below it.
+    pub titlebar: f32,
     pub toolbar_title_width: f32,
     pub toolbar_title_line: f32,
     pub control: f32,
@@ -445,6 +447,7 @@ impl Tokens {
                 row: 28.,
                 status: 24.,
                 toolbar: 52.,
+                titlebar: 28.,
                 toolbar_title_width: 160.,
                 toolbar_title_line: 14.,
                 control: 28.,

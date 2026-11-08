@@ -394,7 +394,9 @@ impl SurfaceView {
                     disabled,
                     default: primary,
                     destructive: button_role == Some("destructive"),
-                    inline: self.publication.panel == "viewer"
+                    // Bar pop-ups (viewer zoom, agent composer choices) are
+                    // borderless titles; inspector and sheet pop-ups keep the bezel.
+                    inline: matches!(self.publication.panel.as_str(), "viewer" | "agent")
                         && matches!(kind, crate::v4_control::Kind::Popup),
                 },
                 &tokens,

@@ -743,8 +743,11 @@ impl Controller {
             }
             let result = cx.open_window(
                 options
-                    .titlebar(Some(TitlebarOptions {
+                    // A popover has no title bar; other panel windows get a
+                    // seamless transparent one over their own material.
+                    .titlebar(popover.is_none().then(|| TitlebarOptions {
                         title: Some(title),
+                        appears_transparent: true,
                         ..Default::default()
                     }))
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
@@ -1461,20 +1464,23 @@ impl Render for SurfaceWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = window.viewport_size();
         let panel = self.panel.clone();
-        let mut fill = 0;
+        let popover = self.panel == "agent";
+        let (mut fill, mut band) = (0, 0.);
         let body = self.owner.update(cx, |v, cx| {
-            let (header, colour) = {
+            let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
-                (t.metrics.header, t.colors.panel)
+                (t.metrics.header, t.colors.panel, t.metrics.titlebar)
             };
             fill = colour;
+            // Windows with a transparent title bar keep their content below it.
+            band = if popover { 0. } else { titlebar };
             v.builtin_panel(
                 &panel,
                 pm_shell::layout::Rect {
                     x: 0.,
                     y: 0.,
                     w: f32::from(size.width),
-                    h: f32::from(size.height) + header,
+                    h: f32::from(size.height) + header - band,
                 },
                 window,
                 cx,
@@ -1485,7 +1491,8 @@ impl Render for SurfaceWindow {
         div()
             .size_full()
             .overflow_hidden()
-            .when(self.panel != "agent", |d| d.bg(rgb(fill)))
+            .pt(px(band))
+            .when(!popover, |d| d.bg(rgb(fill)))
             .children(body)
     }
 }

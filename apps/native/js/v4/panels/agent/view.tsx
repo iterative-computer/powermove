@@ -507,6 +507,8 @@ export function AgentView({
       <div
         style={{
           ...vertical,
+          // The conversation takes the free height; the composer stays at the foot.
+          flexGrow: 1,
           paddingLeft: t("metrics.inset"),
           paddingRight: t("metrics.inset"),
         }}
@@ -684,6 +686,7 @@ export function AgentView({
           <UI.ToolbarItem
             id="agent-attach"
             label="Add Attachments"
+            attr={{ symbol: "plus" }}
             title="Add Attachments"
             disabled={s.composerDisabled || s.attachments.length >= 6}
             onClick={() => send({ type: "attach" })}

@@ -1352,9 +1352,9 @@ impl Render for Editor {
             let active = group.active;
             // Quiet text tabs (language §9): each takes its title's width plus
             // the leading close slot, trailing padding and the pill spacing.
-            // The header starts tab groups half a gap in, so the slot plus that
-            // lands the first title on the panel inset like a single title.
-            let close_slot = m.inset - m.gap / 2.;
+            // The leading close slot is the panel inset, and tab groups start
+            // flush, so the first title lands on the inset like a single title.
+            let close_slot = m.inset;
             let widths: Vec<f32> = tabs
                 .iter()
                 .map(|tab| {
@@ -1448,7 +1448,7 @@ impl Render for Editor {
                 header = header.px(px(0.));
             }
             if multi {
-                header = header.pl(px(m.gap / 2.));
+                header = header.pl(px(0.));
             }
             if multi || custom.is_none() {
                 // Quiet text tabs (language §9): the active title in `text`, the
@@ -1528,7 +1528,7 @@ impl Render for Editor {
                                 .group_hover_style(tab_group.clone(), |s| s.opacity(1.))
                                 .child(crate::symbol::symbol(
                                     "xmark",
-                                    close_slot,
+                                    m.symbol_inline - 3.,
                                     crate::symbol::Weight::Semibold,
                                     c.muted,
                                     w,

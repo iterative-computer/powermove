@@ -116,6 +116,10 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.row", "Inspector and list row height"),
     ("metrics.status", "Status bar height"),
     ("metrics.toolbar", "Unified toolbar height"),
+    (
+        "metrics.titlebar",
+        "Title bar band of a plain panel window; content starts below it",
+    ),
     ("metrics.toolbar_title_width", "Document title slot width"),
     ("metrics.toolbar_title_line", "Document title line height"),
     (
