@@ -483,7 +483,7 @@ sit on sharp chroma edges). The one project with an Electron capture (v1
 `real/`, 12 sample times) matches it within 1 CV on 98.5 to 99.6% of pixels;
 the rest are antialiased text and line edges. Open: one project's audio ends
 400 samples (8 ms) before its video when the composition duration is not a
-whole frame; a Store fork of a built-in could not draw saved instances until
+whole frame; a local fork of a built-in could not draw saved instances until
 this lane's fork rule (now drawn); one project needs an extension that is not
 on this Mac.
 
