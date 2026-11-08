@@ -39,7 +39,7 @@ no production caller.
   `thread_read` adds a live run's trace (`activity`, last 20,000 units) and open
   questions from the window's Agent panel (`Builtins::agent_thread_live`).
 
-Of the 68 tools, 46 have bodies in the app. The other 22 refuse with
+Of the 68 tools, 49 have bodies in the app. The other 19 refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
@@ -51,7 +51,8 @@ the running binary in both directions.
 | `publish_visual_reply` | A safe viewer and its input validator. |
 | `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |
 | `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | The signed Store envelope and install host. |
-| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_launch`, `thread_send`, `thread_cancel`, `thread_watch`, `thread_unwatch` | A production `Threads` and orchestration host over `ProviderRuns`. |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_watch`, `thread_unwatch` | Root-owned task records and run watches that resume the calling agent. |
+| `thread_launch`, `thread_send`, `thread_cancel` | A window: only the headless host refuses these. The app runs them on the window's Agent panel (`Builtins::agent_thread_control`). |
 <!-- refused-tools -->
 
 The sections below are older dated notes. Where they differ, this section wins.

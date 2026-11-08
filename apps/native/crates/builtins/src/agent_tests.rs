@@ -622,3 +622,63 @@ fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
     assert!(panel.text().contains("runtime is missing"));
     panel.panels.close();
 }
+#[test]
+fn an_agent_tool_launches_sends_to_and_cancels_a_background_thread() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let visible = thread_id(&agent);
+    let launched = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"Side task","message":"Hi from a tool"}),
+        )
+        .unwrap();
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    assert_ne!(thread, visible, "launch never takes the visible thread");
+    let finished = |state: &agent_host::AgentState| {
+        state
+            .panel
+            .session(&thread)
+            .is_ok_and(|s| s.run.is_none() && s.conversation.len() > 1)
+    };
+    panel.wait(finished);
+    assert_eq!(thread_id(&agent), visible);
+    let reply = |state: &agent_host::AgentState, text: &str| {
+        state
+            .panel
+            .session(&thread)
+            .unwrap()
+            .conversation
+            .values()
+            .any(|m| m.to_string().contains(text))
+    };
+    assert!(reply(&agent.lock().unwrap(), "Saw: Hi from a tool"));
+    panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"And again"}),
+        )
+        .unwrap();
+    panel.wait(|state| {
+        reply(state, "Saw: And again") && state.panel.session(&thread).unwrap().run.is_none()
+    });
+    let idle_cancel = panel
+        .panels
+        .agent_thread_control("thread_cancel", &json!({"threadId":thread}))
+        .unwrap();
+    assert_eq!(idle_cancel["busy"], false);
+    let missing = panel
+        .panels
+        .agent_thread_control("thread_send", &json!({"threadId":"none","message":"x"}))
+        .unwrap_err();
+    assert_eq!(
+        missing,
+        "This thread does not exist in the current project."
+    );
+    panel.panels.close();
+}

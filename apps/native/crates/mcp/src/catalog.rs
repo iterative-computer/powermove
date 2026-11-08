@@ -220,6 +220,9 @@ pub const IMPLEMENTED: &[&str] = &[
     "computer_use_panel",
     "set_panel_layout",
     "get_workspace_state",
+    "thread_launch",
+    "thread_send",
+    "thread_cancel",
 ];
 /// Adapter availability is distinct from a working standalone backend.
 pub const HOST_BACKED: &[&str] = &[
@@ -247,6 +250,9 @@ pub const HOST_BACKED: &[&str] = &[
     "computer_use_panel",
     "set_panel_layout",
     "get_workspace_state",
+    "thread_launch",
+    "thread_send",
+    "thread_cancel",
 ];
 pub fn backing(name: &str) -> &'static str {
     match name {

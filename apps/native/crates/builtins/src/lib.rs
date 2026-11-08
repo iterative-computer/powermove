@@ -179,6 +179,145 @@ impl Builtins {
             .store(true, std::sync::atomic::Ordering::Release);
         Some(carry)
     }
+    /// thread_launch, thread_send and thread_cancel from an agent tool, through
+    /// this window's Agent panel and its provider runs: the same send and stop
+    /// effects as the composer, without switching the person's visible thread.
+    pub fn agent_thread_control(
+        &self,
+        tool: &str,
+        args: &Value,
+    ) -> std::result::Result<Value, String> {
+        use pm_agents::Provider;
+        let (agent, link) = {
+            let entries = self.broker.entries.lock().unwrap();
+            let backend = entries
+                .get("agent")
+                .ok_or(
+                    "Open the Agent panel in this project's window before controlling its threads."
+                        .to_owned(),
+                )?
+                .backend
+                .lock()
+                .unwrap();
+            let agent = backend.native.agent.clone().ok_or(
+                "Open the Agent panel in this project's window before controlling its threads."
+                    .to_owned(),
+            )?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let now = agent_host::now_ms();
+        let missing = || "This thread does not exist in the current project.".to_owned();
+        let (thread, effect) = {
+            let mut state = agent.lock().unwrap();
+            let thread = match tool {
+                "thread_launch" => {
+                    let id = pm_kernel::new_id("agent-thread");
+                    state
+                        .panel
+                        .launch_background(&id, now)
+                        .map_err(|e| format!("{e:?}"))?;
+                    id
+                }
+                _ => {
+                    let id = args["threadId"].as_str().unwrap_or_default().to_owned();
+                    state.panel.session(&id).map_err(|_| missing())?;
+                    id
+                }
+            };
+            let effect = if tool == "thread_cancel" {
+                match state.panel.session(&thread).map_err(|_| missing())?.run {
+                    Some(_) => Some(state.panel.stop(&thread).map_err(|e| format!("{e:?}"))?),
+                    None => None,
+                }
+            } else {
+                let target = &args["target"];
+                if let Some(provider) = target["providerInstanceId"].as_str() {
+                    let provider = match provider {
+                        "chatgpt" => Provider::Chatgpt,
+                        "claude" => Provider::Claude,
+                        _ => Provider::Compatible,
+                    };
+                    let catalog = link.catalog(provider);
+                    let model = target["model"].as_str().unwrap_or_default().to_owned();
+                    state
+                        .panel
+                        .set_provider(&thread, provider, model, catalog)
+                        .map_err(|e| format!("{e:?}"))?;
+                }
+                if let Some(model) = target["model"].as_str() {
+                    let effort = target["options"]["reasoningEffort"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            state
+                                .panel
+                                .session(&thread)
+                                .map(|s| s.settings.effort.clone())
+                                .unwrap_or_default()
+                        });
+                    state
+                        .panel
+                        .set_model(&thread, model.into(), effort)
+                        .map_err(|e| format!("{e:?}"))?;
+                }
+                let session = state.panel.session(&thread).map_err(|_| missing())?;
+                let provider = session.settings.provider;
+                if session.needs_answer() {
+                    return Err("This thread is waiting on a question. Answer it in the Agent panel; a message can't answer it here yet.".into());
+                }
+                if !link.available(provider) {
+                    return Err(format!(
+                        "Sign in to {} in Settings › Agents before starting a run.",
+                        provider.name()
+                    ));
+                }
+                agent_host::admit_send(&state, &thread)?;
+                let message = args["message"].as_str().unwrap_or_default();
+                let (run, request) = (pm_kernel::new_id("run"), pm_kernel::new_id("request"));
+                Some(
+                    state
+                        .panel
+                        .send_message(&thread, message, &[], &run, &request, now)
+                        .map_err(|e| format!("{e:?}"))?,
+                )
+            };
+            if tool == "thread_launch"
+                && let Some(title) = args["title"].as_str()
+            {
+                let first = args["message"].as_str().unwrap_or_default();
+                let _ = state.panel.generated_title(&thread, first, title, now);
+            }
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    now,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+            (thread, effect)
+        };
+        if let Some(effect) = effect {
+            agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                &effect,
+            )?;
+        }
+        link.touch();
+        let state = agent.lock().unwrap();
+        let session = state.panel.session(&thread).map_err(|_| missing())?;
+        Ok(
+            json!({"threadId":thread,"runId":session.run.as_ref().map(|r| r.id.clone()),
+            "busy":session.run.is_some(),"provider":session.settings.provider.name(),
+            "model":session.settings.model,"reasoningEffort":session.settings.effort,
+            "status":if session.run.is_some() { "running" } else if tool == "thread_cancel" { "cancelled" } else { "idle" }}),
+        )
+    }
     /// What `thread_read` adds from this window's live Agent panel: the
     /// running trace as text, open questions, and the run. `None` when the
     /// panel holds no session for the thread.

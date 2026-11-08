@@ -152,6 +152,16 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
     let args = &call.args;
     let panel = args["panelId"].as_str().unwrap_or_default().to_owned();
     match call.tool.as_str() {
+        "thread_launch" | "thread_send" | "thread_cancel" => target.with(cx, |c, _, _, cx| {
+            let runtime = c.read(cx).builtins.runtime.clone().ok_or_else(|| {
+                Error::invalid(
+                    "Open the Agent panel in this project's window before controlling its threads.",
+                )
+            })?;
+            runtime
+                .agent_thread_control(&call.tool, args)
+                .map_err(Error::invalid)
+        }),
         "thread_live" => target.with(cx, |c, _, _, cx| {
             let thread = args["threadId"].as_str().unwrap_or_default();
             Ok(c.read(cx)

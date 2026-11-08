@@ -413,7 +413,7 @@ fn import_and_thread_tools_refuse_in_a_host_that_has_not_installed_them() {
     }
 }
 #[test]
-fn remaining_19_bodies_remain_explicit_blockers_without_mutating_the_project() {
+fn remaining_16_bodies_remain_explicit_blockers_without_mutating_the_project() {
     let evidence: Value =
         serde_json::from_str(include_str!("../fixtures/unavailable-wave4.json")).unwrap();
     let pending: std::collections::HashSet<_> = catalog::tools()
@@ -421,7 +421,7 @@ fn remaining_19_bodies_remain_explicit_blockers_without_mutating_the_project() {
         .map(|t| t["name"].as_str().unwrap())
         .filter(|n| !catalog::IMPLEMENTED.contains(n))
         .collect();
-    assert_eq!(pending.len(), 19);
+    assert_eq!(pending.len(), 16);
     let historical = evidence["cases"].as_array().unwrap();
     assert_eq!(historical.len(), 35);
     // Studio and durable project-memory bodies have their own admitted regressions.

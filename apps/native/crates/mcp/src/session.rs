@@ -328,6 +328,20 @@ impl McpSession {
                 _ => live,
             });
         }
+        if ["thread_launch", "thread_send", "thread_cancel"].contains(&name) {
+            // The window's Agent panel owns provider runs; only the app has one.
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let project = session.project.clone();
+            drop(host);
+            return surfaces.call(name, project.as_deref(), args);
+        }
         if ["thread_list", "thread_read"].contains(&name) {
             catalog::validate(name, args)?;
             if let Some(id) = &session.project {
