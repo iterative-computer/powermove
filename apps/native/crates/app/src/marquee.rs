@@ -27,9 +27,9 @@ fn enclosed(p: &pm_kernel::Published, b: crate::shape_tool::ShapeBox, time: f64)
             continue;
         }
         let bounds = if layer.kind == "group" {
-            q.group_bounds(None, &layer.id, time)
+            crate::text_host::query(p, |q| q.group_bounds(None, &layer.id, time))
         } else {
-            q.bounds(None, &layer.id, time)
+            crate::text_host::query(p, |q| q.bounds(None, &layer.id, time))
         };
         let (Ok(Some(bounds)), Ok(world)) =
             (bounds, mirror.queries().world_matrix(None, &layer.id, time))
@@ -84,7 +84,15 @@ impl GizmoSurface {
             return false;
         };
         cx.notify();
-        let Some(shape) = m.shape.filter(|_| commit) else {
+        if !commit {
+            return true;
+        }
+        let Some(shape) = m.shape else {
+            // A click on empty canvas clears the selection (Shift keeps it).
+            if !m.shift {
+                self.queue.push_back(super::Job::Select(None));
+                self.pump(cx);
+            }
             return true;
         };
         let (kernel, project, time) = (

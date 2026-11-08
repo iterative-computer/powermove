@@ -12,7 +12,7 @@
 use super::{GizmoSurface, Job, inverse_point, transform};
 use gpui::{prelude::*, *};
 use pm_kernel::{
-    Command, LayerCommand, MaskCommand, PropertyCommand, QueryMirror,
+    Command, LayerCommand, MaskCommand, PropertyCommand,
     commands::{layers::AddLayer, properties::SetProperty},
     new_id,
 };
@@ -49,6 +49,10 @@ pub struct Target {
 pub struct PenPose {
     pub layer: String,
     pub kind: String,
+    /// Locked layers (or inside locked groups) take no path edits.
+    pub locked: bool,
+    /// Layer space → composition, for a new path's first vertex.
+    pub world: [f64; 6],
     pub targets: Vec<Target>,
 }
 fn mul(a: &[f64; 6], b: &[f64; 6]) -> [f64; 6] {
@@ -77,155 +81,166 @@ pub fn read_pen(p: &pm_kernel::Published, time: f64) -> Option<PenPose> {
         .into_iter()
         .find(|l| l.id == id)?;
     if info.effectively_locked {
-        return None;
+        return Some(PenPose {
+            layer: id,
+            kind: info.kind,
+            locked: true,
+            world: [1., 0., 0., 1., 0., 0.],
+            targets: vec![],
+        });
     }
     let layer =
         pm_kernel::model::layer_at(root, &pm_kernel::model::find_layer(root, &id)?)?.to_value();
     let layer = &layer;
     let loc = pm_kernel::model::find_layer(root, &id)?;
-    let mut mirror = QueryMirror::new(p);
-    let q = mirror.queries();
-    let world = q.world_matrix(None, &id, time).ok()?;
-    // Static channels read as stored; animated ones through `evP`, which
-    // evaluates a structured channel (`g.…`, `mp.…`) with its keys.
-    let mut number = |node: Option<&Value>, key: &str, fallback: f64| {
-        let short = key.rsplit('.').next().unwrap_or(key);
-        let Some(prop) = node.and_then(|n| n.get("p")).and_then(|p| p.get(short)) else {
-            return fallback;
-        };
-        let animated = prop
-            .get("kf")
-            .and_then(Value::as_array)
-            .is_some_and(|k| !k.is_empty())
-            || prop
-                .get("expr")
-                .and_then(Value::as_str)
-                .is_some_and(|e| !e.is_empty());
-        let stored = prop.get("v").and_then(Value::as_f64);
-        if !animated {
-            return stored.unwrap_or(fallback);
-        }
-        let mut request = Map::new();
-        request.insert("op", Value::from("evP"));
-        request.insert("layer", Value::Number(loc.index as f64));
-        request.insert("t", Value::Number(time));
-        request.insert("comp", Value::from(loc.comp_id.clone().unwrap_or_default()));
-        request.insert("key", Value::from(key));
-        request.insert("prop", prop.clone());
-        q.query(&Value::Object(request))
-            .ok()
-            .and_then(|v| v.as_f64())
-            .or(stored)
-            .unwrap_or(fallback)
-    };
-    let list = |node: Option<&Value>, key: &str| -> Vec<Value> {
-        node.and_then(|n| n.get(key))
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default()
-    };
-    let text = |node: &Value, key: &str| {
-        node.get(key)
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default()
-    };
-    let paths = list(layer.get("d"), "paths");
-    let mut targets = vec![];
-    let path_target =
-        |path: &Value,
-         prefix: String,
-         base: [f64; 6],
-         number: &mut dyn FnMut(Option<&Value>, &str, f64) -> f64| {
-            let vertices = list(Some(path), "vertices")
-                .iter()
-                .map(|v| {
-                    let vid = text(v, "id");
-                    let key =
-                        |k: &str, number: &mut dyn FnMut(Option<&Value>, &str, f64) -> f64| {
-                            number(Some(v), &format!("{prefix}.v.{vid}.{k}"), 0.)
-                        };
-                    Vertex {
-                        x: key("x", number),
-                        y: key("y", number),
-                        in_x: key("inX", number),
-                        in_y: key("inY", number),
-                        out_x: key("outX", number),
-                        out_y: key("outY", number),
-                        id: vid.clone(),
-                    }
-                })
-                .collect();
-            let local = rotate_scale(
-                number(Some(path), &format!("{prefix}.rotation"), 0.),
-                number(Some(path), &format!("{prefix}.scaleX"), 100.) / 100.,
-                number(Some(path), &format!("{prefix}.scaleY"), 100.) / 100.,
-                number(Some(path), &format!("{prefix}.x"), 0.),
-                number(Some(path), &format!("{prefix}.y"), 0.),
-            );
-            let closed = static_value(Some(path), "closed") == Some(Value::Bool(true));
-            Target {
-                prefix: prefix.clone(),
-                path: text(path, "id"),
-                matrix: mul(&base, &local),
-                closed,
-                vertices,
+    // Off main, through the project's font-fed mirror.
+    let (world, targets) = crate::text_host::query(p, |q| {
+        let world = q.world_matrix(None, &id, time)?;
+        // Static channels read as stored; animated ones through `evP`, which
+        // evaluates a structured channel (`g.…`, `mp.…`) with its keys.
+        let mut number = |node: Option<&Value>, key: &str, fallback: f64| {
+            let short = key.rsplit('.').next().unwrap_or(key);
+            let Some(prop) = node.and_then(|n| n.get("p")).and_then(|p| p.get(short)) else {
+                return fallback;
+            };
+            let animated = prop
+                .get("kf")
+                .and_then(Value::as_array)
+                .is_some_and(|k| !k.is_empty())
+                || prop
+                    .get("expr")
+                    .and_then(Value::as_str)
+                    .is_some_and(|e| !e.is_empty());
+            let stored = prop.get("v").and_then(Value::as_f64);
+            if !animated {
+                return stored.unwrap_or(fallback);
             }
+            let mut request = Map::new();
+            request.insert("op", Value::from("evP"));
+            request.insert("layer", Value::Number(loc.index as f64));
+            request.insert("t", Value::Number(time));
+            request.insert("comp", Value::from(loc.comp_id.clone().unwrap_or_default()));
+            request.insert("key", Value::from(key));
+            request.insert("prop", prop.clone());
+            q.query(&Value::Object(request))
+                .ok()
+                .and_then(|v| v.as_f64())
+                .or(stored)
+                .unwrap_or(fallback)
         };
-    // Group transforms nest through `parent`.
-    let group = |start: &Value, number: &mut dyn FnMut(Option<&Value>, &str, f64) -> f64| {
-        let mut m = [1., 0., 0., 1., 0., 0.];
-        let mut at = paths
-            .iter()
-            .find(|c| text(c, "id") == text(start, "parent"))
-            .cloned();
-        let mut seen = 0;
-        while let Some(parent) = at.filter(|_| seen < 32) {
-            let prefix = format!("g.{}", text(&parent, "id"));
-            let local = rotate_scale(
-                number(Some(&parent), &format!("{prefix}.rotation"), 0.),
-                number(Some(&parent), &format!("{prefix}.scaleX"), 100.) / 100.,
-                number(Some(&parent), &format!("{prefix}.scaleY"), 100.) / 100.,
-                number(Some(&parent), &format!("{prefix}.x"), 0.),
-                number(Some(&parent), &format!("{prefix}.y"), 0.),
-            );
-            m = mul(&local, &m);
-            at = paths
+        let list = |node: Option<&Value>, key: &str| -> Vec<Value> {
+            node.and_then(|n| n.get(key))
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+        };
+        let text = |node: &Value, key: &str| {
+            node.get(key)
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        };
+        let paths = list(layer.get("d"), "paths");
+        let mut targets = vec![];
+        let path_target =
+            |path: &Value,
+             prefix: String,
+             base: [f64; 6],
+             number: &mut dyn FnMut(Option<&Value>, &str, f64) -> f64| {
+                let vertices = list(Some(path), "vertices")
+                    .iter()
+                    .map(|v| {
+                        let vid = text(v, "id");
+                        let key =
+                            |k: &str, number: &mut dyn FnMut(Option<&Value>, &str, f64) -> f64| {
+                                number(Some(v), &format!("{prefix}.v.{vid}.{k}"), 0.)
+                            };
+                        Vertex {
+                            x: key("x", number),
+                            y: key("y", number),
+                            in_x: key("inX", number),
+                            in_y: key("inY", number),
+                            out_x: key("outX", number),
+                            out_y: key("outY", number),
+                            id: vid.clone(),
+                        }
+                    })
+                    .collect();
+                let local = rotate_scale(
+                    number(Some(path), &format!("{prefix}.rotation"), 0.),
+                    number(Some(path), &format!("{prefix}.scaleX"), 100.) / 100.,
+                    number(Some(path), &format!("{prefix}.scaleY"), 100.) / 100.,
+                    number(Some(path), &format!("{prefix}.x"), 0.),
+                    number(Some(path), &format!("{prefix}.y"), 0.),
+                );
+                let closed = static_value(Some(path), "closed") == Some(Value::Bool(true));
+                Target {
+                    prefix: prefix.clone(),
+                    path: text(path, "id"),
+                    matrix: mul(&base, &local),
+                    closed,
+                    vertices,
+                }
+            };
+        // Group transforms nest through `parent`.
+        let group = |start: &Value, number: &mut dyn FnMut(Option<&Value>, &str, f64) -> f64| {
+            let mut m = [1., 0., 0., 1., 0., 0.];
+            let mut at = paths
                 .iter()
-                .find(|c| text(c, "id") == text(&parent, "parent"))
+                .find(|c| text(c, "id") == text(start, "parent"))
                 .cloned();
-            seen += 1;
-        }
-        m
-    };
-    for path in &paths {
-        if path.get("vertices").is_none() {
-            continue;
-        }
-        let base = mul(&world, &group(path, &mut number));
-        let prefix = format!("g.{}", text(path, "id"));
-        targets.push(path_target(path, prefix, base, &mut number));
-    }
-    for mask in list(Some(layer), "masks") {
-        let Some(path) = mask.get("path").filter(|p| p.get("vertices").is_some()) else {
-            continue;
+            let mut seen = 0;
+            while let Some(parent) = at.filter(|_| seen < 32) {
+                let prefix = format!("g.{}", text(&parent, "id"));
+                let local = rotate_scale(
+                    number(Some(&parent), &format!("{prefix}.rotation"), 0.),
+                    number(Some(&parent), &format!("{prefix}.scaleX"), 100.) / 100.,
+                    number(Some(&parent), &format!("{prefix}.scaleY"), 100.) / 100.,
+                    number(Some(&parent), &format!("{prefix}.x"), 0.),
+                    number(Some(&parent), &format!("{prefix}.y"), 0.),
+                );
+                m = mul(&local, &m);
+                at = paths
+                    .iter()
+                    .find(|c| text(c, "id") == text(&parent, "parent"))
+                    .cloned();
+                seen += 1;
+            }
+            m
         };
-        let mid = text(&mask, "id");
-        let key = |k: &str| format!("m.{mid}.{k}");
-        let base = mul(
-            &world,
-            &rotate_scale(
-                number(Some(&mask), &key("rotation"), 0.),
-                1.,
-                1.,
-                number(Some(&mask), &key("x"), 0.),
-                number(Some(&mask), &key("y"), 0.),
-            ),
-        );
-        let path = path.clone();
-        targets.push(path_target(&path, format!("mp.{mid}"), base, &mut number));
-    }
+        for path in &paths {
+            if path.get("vertices").is_none() {
+                continue;
+            }
+            let base = mul(&world, &group(path, &mut number));
+            let prefix = format!("g.{}", text(path, "id"));
+            targets.push(path_target(path, prefix, base, &mut number));
+        }
+        for mask in list(Some(layer), "masks") {
+            let Some(path) = mask.get("path").filter(|p| p.get("vertices").is_some()) else {
+                continue;
+            };
+            let mid = text(&mask, "id");
+            let key = |k: &str| format!("m.{mid}.{k}");
+            let base = mul(
+                &world,
+                &rotate_scale(
+                    number(Some(&mask), &key("rotation"), 0.),
+                    1.,
+                    1.,
+                    number(Some(&mask), &key("x"), 0.),
+                    number(Some(&mask), &key("y"), 0.),
+                ),
+            );
+            let path = path.clone();
+            targets.push(path_target(&path, format!("mp.{mid}"), base, &mut number));
+        }
+        Ok((world, targets))
+    })
+    .ok()?;
     Some(PenPose {
         layer: id,
         kind: info.kind,
+        locked: false,
+        world,
         targets,
     })
 }
@@ -285,6 +300,8 @@ pub struct PenDrag {
     pub moved: bool,
     /// Steps sent so far; the first never supersedes the press's own step.
     pub steps: usize,
+    /// A layer the press made, selected once the edit is kept.
+    pub select: Option<String>,
 }
 fn set(layer: &str, channel: String, value: f64, time: f64) -> Command {
     let mut set = SetProperty::new(
@@ -341,6 +358,8 @@ fn fill_box(
 impl GizmoSurface {
     pub(super) fn pen_reread(&mut self, cx: &mut Context<Self>) {
         if self.host.tool(cx) != super::Tool::Pen || self.host.playing(cx) {
+            self.pen_ready = false;
+            self.pen_active = None;
             if self.pen.take().is_some() {
                 cx.notify();
             }
@@ -360,11 +379,19 @@ impl GizmoSurface {
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.pen_reading == ticket {
-                    if pose.as_ref().map(|p| &p.layer) != s.pen.as_ref().map(|p| &p.layer) {
+                    // The open path lives on while its layer is the one
+                    // selected (a new path layer's own selection keeps it).
+                    if s.pen_active.as_ref().map(|(layer, _)| layer)
+                        != pose.as_ref().map(|p| &p.layer)
+                    {
                         s.pen_active = None;
                     }
                     s.pen = pose;
+                    s.pen_ready = true;
                     cx.notify();
+                    if let Some((event, at, scale)) = s.pen_waiting.take() {
+                        s.pen_down(&event, at, scale, cx);
+                    }
                 }
             });
         })
@@ -379,13 +406,17 @@ impl GizmoSurface {
         cx: &mut Context<Self>,
     ) {
         let time = self.host.time(cx);
-        // The first press after choosing the tool may beat its read.
-        if self.pen.is_none()
-            && let Some(p) = self.kernel.published(&self.project)
-        {
-            self.pen = read_pen(&p, time);
+        // The first press after choosing the tool may beat its read; it runs
+        // once the read lands, never by querying here.
+        if !self.pen_ready {
+            self.pen_waiting = Some((event.clone(), at, scale));
+            self.pen_reread(cx);
+            return;
         }
         let pose = self.pen.clone();
+        if pose.as_ref().is_some_and(|p| p.locked) {
+            return;
+        }
         let cmd = event.modifiers.platform || event.modifiers.control;
         if let Some(pose) = &pose
             && let Some(h) = hit(pose, at, scale)
@@ -396,7 +427,8 @@ impl GizmoSurface {
                 || (h.index == 0
                     && h.side == Side::Point
                     && target.vertices.len() >= 3
-                    && self.pen_active.as_deref() == Some(target.path.as_str())
+                    && self.pen_active.as_ref().map(|(_, p)| p.as_str())
+                        == Some(target.path.as_str())
                     && !event.modifiers.alt
                     && !cmd);
             if closes {
@@ -441,39 +473,21 @@ impl GizmoSurface {
                 time,
                 moved: false,
                 steps: 0,
+                select: None,
             });
             self.pump(cx);
             return;
         }
-        // A new vertex: on the open path, or a new path (and layer).
-        let Some(published) = self.kernel.published(&self.project) else {
-            return;
-        };
+        // A new vertex: on the open path, or a new path (and a new layer,
+        // inside the same gesture so Undo or Escape leaves nothing).
         let mut commands: Vec<Command> = vec![];
         let selected = pose
             .as_ref()
             .filter(|p| MASKABLE.contains(&p.kind.as_str()));
+        let mut select = None;
         let (layer, kind, world) = match selected {
-            Some(p) => {
-                let world = QueryMirror::new(&published)
-                    .queries()
-                    .world_matrix(None, &p.layer, time)
-                    .unwrap_or([1., 0., 0., 1., 0., 0.]);
-                (p.layer.clone(), p.kind.clone(), world)
-            }
+            Some(p) => (p.layer.clone(), p.kind.clone(), p.world),
             None => {
-                if !published.selection.layers().is_empty() && pose.is_none() {
-                    // A locked layer is selected: nothing to draw on.
-                    let locked = published.snapshot.root().is_some_and(|root| {
-                        pm_kernel::model::list_layers(root, None).iter().any(|l| {
-                            published.selection.layers().first() == Some(&l.id)
-                                && l.effectively_locked
-                        })
-                    });
-                    if locked {
-                        return;
-                    }
-                }
                 let id = new_id("L");
                 let mut content = Map::new();
                 content.insert("paths", Value::Array(vec![]));
@@ -499,12 +513,9 @@ impl GizmoSurface {
                     collapsed: None,
                     time,
                 };
-                self.queue.push_back(Job::Transact(
-                    "New path layer",
-                    vec![LayerCommand::Add(Box::new(add)).into()],
-                    Some(id.clone()),
-                ));
+                commands.push(LayerCommand::Add(Box::new(add)).into());
                 self.pen_active = None;
+                select = Some(id.clone());
                 (id, "shape".to_owned(), [1., 0., 0., 1., 0., 0.])
             }
         };
@@ -512,9 +523,10 @@ impl GizmoSurface {
             .as_ref()
             .filter(|p| p.layer == layer)
             .and_then(|p| {
-                p.targets
-                    .iter()
-                    .find(|t| self.pen_active.as_deref() == Some(t.path.as_str()) && !t.closed)
+                p.targets.iter().find(|t| {
+                    self.pen_active.as_ref().map(|(_, p)| p.as_str()) == Some(t.path.as_str())
+                        && !t.closed
+                })
             })
             .cloned();
         let (path, prefix, matrix) = match open {
@@ -551,7 +563,7 @@ impl GizmoSurface {
             }
             .into(),
         );
-        self.pen_active = Some(path.clone());
+        self.pen_active = Some((layer.clone(), path.clone()));
         self.pen_selected = Some((path, vertex.clone()));
         self.queue.push_back(Job::Begin("Draw path vertex"));
         self.queue.push_back(Job::Step(commands, false));
@@ -571,6 +583,7 @@ impl GizmoSurface {
             time,
             moved: false,
             steps: 0,
+            select,
         });
         self.pump(cx);
     }
@@ -601,10 +614,13 @@ impl GizmoSurface {
         true
     }
     pub(super) fn pen_up(&mut self, commit: bool, cx: &mut Context<Self>) -> bool {
-        if self.pen_drag.take().is_none() {
+        let Some(drag) = self.pen_drag.take() else {
             return false;
-        }
+        };
         self.queue.push_back(Job::Finish(commit));
+        if let Some(id) = drag.select.filter(|_| commit) {
+            self.queue.push_back(Job::Select(Some(id)));
+        }
         self.pump(cx);
         true
     }
@@ -687,7 +703,7 @@ impl GizmoSurface {
             }
             // Drawing: the rubber band to the pointer, and a ring when the
             // first vertex would close the path.
-            if self.pen_active.as_deref() == Some(target.path.as_str())
+            if self.pen_active.as_ref().map(|(_, p)| p.as_str()) == Some(target.path.as_str())
                 && !target.closed
                 && self.pen_drag.is_none()
                 && let (Some(last), Some(pointer)) = (v.last(), self.pen_pointer)
@@ -733,6 +749,8 @@ mod tests {
         PenPose {
             layer: "l".into(),
             kind: "shape".into(),
+            locked: false,
+            world: [1., 0., 0., 1., 0., 0.],
             targets: vec![Target {
                 prefix: "g.p".into(),
                 path: "p".into(),
@@ -767,6 +785,7 @@ mod tests {
             time: 0.,
             moved: true,
             steps: 0,
+            select: None,
         };
         assert_eq!(drag_commands(&d, [5., 6.], false).len(), 4);
         assert_eq!(drag_commands(&d, [5., 6.], true).len(), 2);

@@ -85,6 +85,7 @@ impl TextInput for FakeInput {
     fn context_menu(&self, _: (usize, usize)) {}
     fn place(&self, _: Bounds<Pixels>, _: Bounds<Pixels>) {}
     fn stage_caret(&self, _: Option<(Bounds<Pixels>, Bounds<Pixels>)>) {}
+    fn stage_input_rect(&self, _: Option<Bounds<Pixels>>) {}
     fn marked_range(&self) -> Option<(usize, usize)> {
         None
     }
@@ -1199,9 +1200,192 @@ fn the_common_box_scales_a_multiple_selection(cx: &mut TestAppContext) {
         l0.position,
         [left + (200. - left) * 2., top + (150. - top) * 2.]
     );
-    let l1 = poses.iter().find(|p| p.id == "l1").unwrap();
-    assert_eq!(l1.scale, [200., 200.]);
+    // A parametric shape grows by its size, not its scale.
+    let l1 = layer_value(&s.rig.kernel, "l1").unwrap();
+    assert_eq!(channel(&l1, false, "scale.x"), Some(100.));
+    let w = l1.get("d").and_then(|d| d.get("w")).cloned().unwrap();
+    assert_eq!(
+        w.as_f64()
+            .or_else(|| w.get("v").and_then(pm_model::Value::as_f64)),
+        Some(200.)
+    );
     s.undo(cx);
     let poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
     assert!(poses.iter().all(|p| p.scale == [100., 100.]));
+}
+
+fn world(kernel: &pm_kernel::KernelHandle, id: &str) -> [f64; 6] {
+    let p = kernel.published(PROJECT).unwrap();
+    pm_kernel::QueryMirror::new(&p)
+        .queries()
+        .world_matrix(None, id, 0.5)
+        .unwrap()
+}
+fn select_ids(s: &mut Stage, cx: &mut TestAppContext, ids: &[&str]) {
+    let ids = ids.iter().map(|i| (*i).to_owned()).collect();
+    let select = SelectionCall::Layers { ids, add: false };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), select))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.refresh(cx);
+}
+/// A child of a parent scaled 200 % × 100 % turns with the common box: its
+/// world matrix becomes the turned one (rotation, scale and skew solved
+/// under the parent), not a rotation channel bumped by the angle.
+#[gpui::test]
+fn the_common_box_turns_a_child_of_a_nonuniform_parent_exactly(cx: &mut TestAppContext) {
+    let parented = pair()
+        .replacen(
+            r#""id":"l0","type":"image","name":"Square","from":0,"dur":2,"on":true,"p":{"#,
+            r#""id":"l0","parent":"pa","type":"image","name":"Square","from":0,"dur":2,"on":true,"p":{"skew":{"v":0,"kf":[]},"#,
+            1,
+        )
+        .replace(
+            r#""layers":["#,
+            r#""layers":[{"id":"pa","type":"null","name":"Parent","from":0,"dur":2,"on":true,"p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]},"scale.x":{"v":200,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},"#,
+        );
+    let mut s = unposed(cx, &parented);
+    select_ids(&mut s, cx, &["l0", "l1"]);
+    let before = world(&s.rig.kernel, "l0");
+    let (handle, centre, _) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.group_points())
+        .unwrap();
+    // A quarter turn clockwise about the box centre.
+    let r = [handle[0] - centre[0], handle[1] - centre[1]];
+    let to = [centre[0] - r[1], centre[1] + r[0]];
+    let at = s.point_of(handle);
+    s.drag(
+        cx,
+        at,
+        point(
+            px((to[0] - handle[0]) as f32),
+            px((to[1] - handle[1]) as f32),
+        ),
+        Modifiers::shift(),
+    );
+    let after = world(&s.rig.kernel, "l0");
+    let w = before;
+    let turned = [-w[1], w[0], -w[3], w[2]];
+    for (got, want) in after[..4].iter().zip(turned) {
+        assert!((got - want).abs() < 1e-3, "{after:?} vs {turned:?}");
+    }
+}
+/// A mirrored layer (negative scale) stays mirrored through a common resize.
+#[gpui::test]
+fn the_common_box_keeps_a_mirrored_layer_mirrored(cx: &mut TestAppContext) {
+    let mirrored = pair().replacen(
+        r#""scale.x":{"v":100,"kf":[]}"#,
+        r#""scale.x":{"v":-100,"kf":[]}"#,
+        1,
+    );
+    let mut s = unposed(cx, &mirrored);
+    select_ids(&mut s, cx, &["l0", "l1"]);
+    let (_, centre, corner) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.group_points())
+        .unwrap();
+    let at = s.point_of(corner);
+    let by = [(corner[0] - centre[0]) * 2., (corner[1] - centre[1]) * 2.];
+    s.drag(
+        cx,
+        at,
+        point(px(by[0] as f32), px(by[1] as f32)),
+        Modifiers::none(),
+    );
+    let l0 = layer_value(&s.rig.kernel, "l0").unwrap();
+    assert_eq!(channel(&l0, false, "scale.x"), Some(-200.));
+    assert_eq!(channel(&l0, false, "scale.y"), Some(200.));
+}
+#[test]
+fn solving_local_transforms_round_trips_and_keeps_mirrors() {
+    use crate::gizmo::solve_local;
+    // An unrotated child of a 200 % × 100 % parent, turned 45°.
+    let parent = Some([2., 0., 0., 1.]);
+    let (s, c) = 45f64.to_radians().sin_cos();
+    let desired = [2. * c, 2. * s, -s, c];
+    let local = solve_local(parent, desired, 1., 0.).unwrap();
+    // Rotating a child of a non-uniform parent needs skew, not just rotation.
+    assert!(local.skew.abs() > 1., "{local:?}");
+    let mirrored = solve_local(None, [-1., 0., 0., 1.], -1., 0.).unwrap();
+    assert_eq!((mirrored.scale_x, mirrored.rotation.round()), (-1., 0.));
+    assert!(solve_local(Some([1., 0., 0., 0.]), desired, 1., 0.).is_none());
+}
+/// The first Pen click with nothing selected makes a path layer, its path
+/// and vertex as one undo step; the next click extends that same path.
+#[gpui::test]
+fn the_first_pen_click_makes_a_path_layer_in_one_undo_step(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.recorder.tool.set(Some(Tool::Pen));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let count = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None).len()
+    };
+    let before = count(&s);
+    let click = |s: &mut Stage, cx: &mut TestAppContext, at: [f64; 2]| {
+        let p = s.point_of(at);
+        s.vcx.simulate_click(p, Modifiers::none());
+        let surface = s.surface.clone();
+        settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+        s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    };
+    click(&mut s, cx, [400., 300.]);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers().len() == 1
+    });
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.pen_paths() == [1])
+    });
+    click(&mut s, cx, [500., 300.]);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.pen_paths() == [2])
+    });
+    assert_eq!(count(&s), before + 1);
+    let undo = || Request::new(Caller::native(), Call::History(HistoryCall::Undo));
+    s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
+    s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
+    assert_eq!(count(&s), before, "two clicks, two steps, nothing left");
+}
+/// Escape during a marquee leaves the selection as it was.
+#[gpui::test]
+fn escape_during_a_marquee_keeps_the_selection(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let from = s.point_of([20., 20.]);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    s.vcx.simulate_mouse_move(
+        from + point(px(60.), px(60.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(s.surface.update(&mut s.vcx, |g, cx| g.cancel(cx)));
+    s.vcx.simulate_mouse_up(
+        from + point(px(60.), px(60.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.selection.layers(), ["l0".to_string()]);
 }

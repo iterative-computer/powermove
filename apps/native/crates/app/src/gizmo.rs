@@ -175,6 +175,9 @@ pub struct Pose {
     bounds: [f64; 4],
     /// A parametric shape resizes its content, not its scale.
     shape: Option<ShapeSize>,
+    /// A text layer's font size: the common box resizes type by it.
+    text_size: Option<f64>,
+    has_skew: bool,
     pub corners: [[f64; 2]; 4],
     /// Where the anchor lands in the composition.
     pub anchor: [f64; 2],
@@ -221,6 +224,8 @@ enum Job {
     Finish(bool),
     /// A one-step edit outside any gesture, then the layer to select.
     Transact(&'static str, Vec<Command>, Option<String>),
+    /// Select one layer, or nothing (not an edit).
+    Select(Option<String>),
 }
 pub struct GizmoSurface {
     kernel: KernelHandle,
@@ -250,8 +255,12 @@ pub struct GizmoSurface {
     /// The Pen tool's view of the selected layer's paths.
     pen: Option<pen::PenPose>,
     pen_reading: u64,
-    /// The open path new clicks extend.
-    pen_active: Option<String>,
+    /// The layer and open path new clicks extend.
+    pen_active: Option<(String, String)>,
+    /// A pen read has landed since the tool was chosen.
+    pen_ready: bool,
+    /// A press that came before the read, replayed when it lands.
+    pen_waiting: Option<(MouseDownEvent, [f64; 2], f64)>,
     /// Path and vertex whose tangents show.
     pen_selected: Option<(String, String)>,
     pen_drag: Option<pen::PenDrag>,
@@ -371,7 +380,8 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
         let (Ok(world), Ok(local), Ok(Some(bounds))) = (
             q.world_matrix(None, id, time),
             q.local_matrix(None, id, time),
-            q.bounds(None, id, time),
+            // Text measures with the registry's fonts.
+            crate::text_host::query(p, |q| q.bounds(None, id, time)),
         ) else {
             continue;
         };
@@ -405,13 +415,30 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                 .and_then(|layer| layer.get("d"))
                 .and_then(|d| d.get("paths"))
                 .is_none_or(|paths| paths.to_value().as_array().is_none_or(|p| p.is_empty()));
+        // Static content reads as stored; animated content is evaluated.
+        let stored = |key: &str| {
+            let d = pm_kernel::model::find_layer(root, id)
+                .and_then(|at| pm_kernel::model::layer_at(root, &at))
+                .and_then(|layer| layer.get("d"))?
+                .to_value();
+            let v = d.get(key)?.clone();
+            let animated = v
+                .get("kf")
+                .and_then(Value::as_array)
+                .is_some_and(|k| !k.is_empty());
+            if animated {
+                return None;
+            }
+            v.as_f64().or_else(|| v.get("v").and_then(Value::as_f64))
+        };
+        let mut content = |key: &str| stored(key).or_else(|| number(&format!("c.{key}")));
         let shape = if parametric {
-            number("c.w")
-                .zip(number("c.h"))
+            content("w")
+                .zip(content("h"))
                 .map(|(width, height)| ShapeSize {
                     width,
                     height,
-                    stroke: number("c.stroke").unwrap_or(0.).max(0.),
+                    stroke: content("stroke").unwrap_or(0.).max(0.),
                 })
         } else {
             None
@@ -426,6 +453,12 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             to_parent,
             bounds: [bounds.x0, bounds.y0, bounds.x1, bounds.y1],
             shape,
+            text_size: if kind == "text" {
+                content("size")
+            } else {
+                None
+            },
+            has_skew: number("skew").is_some(),
             corners: [
                 transform(&world, [bounds.x0, bounds.y0]),
                 transform(&world, [bounds.x1, bounds.y0]),
@@ -472,6 +505,8 @@ impl GizmoSurface {
             pen: None,
             pen_reading: 0,
             pen_active: None,
+            pen_ready: false,
+            pen_waiting: None,
             pen_selected: None,
             pen_drag: None,
             pen_pointer: None,
@@ -760,11 +795,11 @@ impl GizmoSurface {
                     let options = pm_kernel::PickOptions {
                         include_locked: true,
                     };
-                    let hit = QueryMirror::new(&p)
-                        .queries()
-                        .pick(None, press.at[0], press.at[1], press.time, &options)
-                        .ok()?
-                        .layer_id?;
+                    let hit = crate::text_host::query(&p, |q| {
+                        q.pick(None, press.at[0], press.at[1], press.time, &options)
+                    })
+                    .ok()?
+                    .layer_id?;
                     if !p.selection.layers().contains(&hit) {
                         let ids = vec![hit];
                         let selection = SelectionCall::Layers { ids, add: false };
@@ -807,9 +842,10 @@ impl GizmoSurface {
                             selected.iter().filter(|s| *s != id).cloned().collect()
                         }
                         Some(id) => vec![id.clone()],
-                        // Shift on empty canvas keeps the selection for a marquee.
-                        None if press.shift => return Some((read_at(&p, press.time)?, None, true)),
-                        None => vec![],
+                        // Empty canvas keeps the selection until the release
+                        // decides (a click clears it, a marquee replaces it,
+                        // Escape leaves it).
+                        None => return Some((read_at(&p, press.time)?, None, true)),
                     };
                     let add =
                         press.shift && target.is_some() && !selected.contains(target.as_ref()?);
@@ -833,7 +869,12 @@ impl GizmoSurface {
                 };
                 s.poses = Arc::new(poses);
                 s.draw(cx);
-                // A press on empty canvas that is still held draws a marquee.
+                // A press on empty canvas that is still held draws a marquee;
+                // one already released was a click that clears.
+                if empty && held.is_none() && !press.shift {
+                    s.queue.push_back(Job::Select(None));
+                    s.pump(cx);
+                }
                 if let Some(origin) = held.filter(|_| empty) {
                     s.marquee = Some(marquee::Marquee {
                         origin,
@@ -980,10 +1021,13 @@ impl GizmoSurface {
             guides = result.1;
         }
         let commands = commands(drag, origin, at, mods, offset);
+        // The alignment feedback marks catching something new, not each
+        // step that stays caught.
+        let caught = |g: &[snap::Guide]| g.iter().map(|(_, to)| *to).collect::<Vec<_>>();
+        if caught(&guides) != caught(&self.guides) && !guides.is_empty() {
+            snap::haptic();
+        }
         if guides != self.guides {
-            if !guides.is_empty() {
-                snap::haptic();
-            }
             self.guides = guides;
             cx.notify();
         }
@@ -1141,6 +1185,15 @@ impl GizmoSurface {
                 .background_executor()
                 .spawn(async move {
                     let call: Call = match (job, gesture) {
+                        (Job::Select(id), _) => {
+                            let ids = id.into_iter().collect();
+                            let select = SelectionCall::Layers { ids, add: false };
+                            return kernel
+                                .call(&project, Request::new(Caller::native(), select))
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| format!("{e:?}"));
+                        }
                         (Job::Transact(label, commands, select), _) => {
                             let call = Call::Transact {
                                 label: Some(label.into()),
@@ -1208,6 +1261,18 @@ impl GizmoSurface {
         })
         .detach();
     }
+    /// The common box's rotate handle and centre.
+    #[cfg(test)]
+    pub fn group_points(&self) -> Option<([f64; 2], [f64; 2], [f64; 2])> {
+        let g = group_pose(&self.poses)?;
+        Some((g.rotate_handle(self.stem(1.)), g.anchor, g.handle(4)))
+    }
+    #[cfg(test)]
+    pub fn pen_paths(&self) -> Vec<usize> {
+        self.pen.as_ref().map_or(vec![], |p| {
+            p.targets.iter().map(|t| t.vertices.len()).collect()
+        })
+    }
     #[cfg(test)]
     pub fn pen_vertices(&self) -> usize {
         self.pen
@@ -1258,6 +1323,8 @@ fn group_pose(poses: &[Pose]) -> Option<Pose> {
         to_parent: [1., 0., 0., 1.],
         bounds: [x0, y0, x1, y1],
         shape: None,
+        text_size: None,
+        has_skew: false,
         corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
         anchor: centre,
         local_anchor: centre,
@@ -1266,10 +1333,90 @@ fn group_pose(poses: &[Pose]) -> Option<Pose> {
         rotation: 0.,
     })
 }
-/// Scale or rotate every selected root layer about the common box: Scale
-/// multiplies each layer's scale and carries its anchor about the pivot
-/// (the opposite handle, the centre with Option); Rotate turns each layer
-/// and carries its anchor about the box centre (Shift: 15° steps).
+/// A layer's local rotation, scale (as factors) and skew (degrees).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Decomposed {
+    pub rotation: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
+    pub skew: f64,
+}
+fn compose_linear(t: Decomposed) -> [f64; 4] {
+    let (sin, cos) = t.rotation.to_radians().sin_cos();
+    let skew = t.skew.to_radians().tan();
+    [
+        cos * t.scale_x,
+        sin * t.scale_x,
+        t.scale_y * (cos * skew - sin),
+        t.scale_y * (sin * skew + cos),
+    ]
+}
+/// The local rotation, scale and skew giving `desired` under `parent`
+/// (viewer.ts `solveLocalTransformForWorldLinear`); a mirrored layer keeps
+/// its mirror and the rotation stays near the one it had.
+pub(crate) fn solve_local(
+    parent: Option<[f64; 4]>,
+    desired: [f64; 4],
+    preferred_scale_x: f64,
+    preferred_rotation: f64,
+) -> Option<Decomposed> {
+    let local = match parent {
+        Some(p) => {
+            let inverse = inverse_linear(p)?;
+            let column = |x: f64, y: f64| apply(inverse, [x, y]);
+            let (a, b) = (
+                column(desired[0], desired[1]),
+                column(desired[2], desired[3]),
+            );
+            [a[0], a[1], b[0], b[1]]
+        }
+        None => desired,
+    };
+    let scale_x = local[0].hypot(local[1]);
+    if !scale_x.is_finite() || scale_x < 1e-8 {
+        return None;
+    }
+    let (cos, sin) = (local[0] / scale_x, local[1] / scale_x);
+    let skew_scale_y = cos * local[2] + sin * local[3];
+    let scale_y = -sin * local[2] + cos * local[3];
+    if !scale_y.is_finite() || scale_y.abs() < 1e-8 {
+        return None;
+    }
+    let mut skew = skew_scale_y.atan2(scale_y);
+    if skew > std::f64::consts::FRAC_PI_2 {
+        skew -= std::f64::consts::PI;
+    } else if skew < -std::f64::consts::FRAC_PI_2 {
+        skew += std::f64::consts::PI;
+    }
+    let mut rotation = local[1].atan2(local[0]).to_degrees();
+    let (mut sx, mut sy) = (scale_x, scale_y);
+    if preferred_scale_x < 0. {
+        rotation += 180.;
+        sx = -sx;
+        sy = -sy;
+    }
+    rotation += ((preferred_rotation - rotation) / 360.).round() * 360.;
+    let out = Decomposed {
+        rotation,
+        scale_x: sx,
+        scale_y: sy,
+        skew: skew.to_degrees(),
+    };
+    let check = compose_linear(out);
+    let magnitude = local.iter().fold(1f64, |m, v| m.max(v.abs()));
+    check
+        .iter()
+        .zip(local)
+        .all(|(c, l)| (c - l).abs() <= magnitude * 1e-7)
+        .then_some(out)
+}
+/// Resize or rotate the selected root layers about the common box
+/// (viewer.ts common transform). Resizing is proportional: type by its size,
+/// parametric shapes by their size, others by a signed scale (a mirrored
+/// layer stays mirrored), and each anchor follows the pivot (the opposite
+/// handle, the centre with Option). Rotating carries each anchor about the
+/// box centre and solves the layer's own rotation, scale and skew for the
+/// turned world matrix under its parent (Shift: 15° steps, Command: 45°).
 fn group_commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Vec<Command> {
     let Some(group) = group_pose(&drag.poses) else {
         return vec![];
@@ -1313,38 +1460,31 @@ fn group_commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Ve
                 at[0] - (origin[0] - handle[0]),
                 at[1] - (origin[1] - handle[1]),
             ];
-            let factor = |active: bool, span: f64, grabbed: f64, pivot: f64| {
-                if active && span.abs() > 1e-9 {
-                    (grabbed - pivot) / span
-                } else {
-                    1.
-                }
-            };
             let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
-            let mut f = [
-                factor(active_x, dx, grabbed[0], pivot[0]),
-                factor(active_y, dy, grabbed[1], pivot[1]),
-            ];
-            if mods.shift {
-                let uniform = if active_x && active_y {
-                    ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
-                        / (dx * dx + dy * dy).max(1e-9)
-                } else if active_x {
-                    f[0]
-                } else {
-                    f[1]
-                };
-                f = [uniform, uniform];
-            }
+            let f = if active_x && active_y {
+                ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                    / (dx * dx + dy * dy).max(1e-9)
+            } else if active_x {
+                (grabbed[0] - pivot[0]) / dx.abs().max(1e-9).copysign(dx)
+            } else {
+                (grabbed[1] - pivot[1]) / dy.abs().max(1e-9).copysign(dy)
+            };
+            // calculateResize's floor: the box never turns inside out.
+            let f = f.max(0.01);
             for pose in roots {
-                let sx = (pose.scale[0] * f[0]).max(MIN_SCALE);
-                let sy = (pose.scale[1] * f[1]).max(MIN_SCALE);
-                out.push(set(&pose.id, "scale.x", round(sx, 3), t));
-                out.push(set(&pose.id, "scale.y", round(sy, 3), t));
-                let kept = [sx / pose.scale[0], sy / pose.scale[1]];
+                if let Some(size) = pose.text_size {
+                    out.push(set(&pose.id, "c.size", round((size * f).max(4.), 2), t));
+                } else if let Some(shape) = pose.shape {
+                    let side = |v: f64| round(((v + shape.stroke) * f - shape.stroke).max(1.), 3);
+                    out.push(set(&pose.id, "c.w", side(shape.width), t));
+                    out.push(set(&pose.id, "c.h", side(shape.height), t));
+                } else {
+                    out.push(set(&pose.id, "scale.x", round(pose.scale[0] * f, 3), t));
+                    out.push(set(&pose.id, "scale.y", round(pose.scale[1] * f, 3), t));
+                }
                 let moved = [
-                    pivot[0] + (pose.anchor[0] - pivot[0]) * kept[0],
-                    pivot[1] + (pose.anchor[1] - pivot[1]) * kept[1],
+                    pivot[0] + (pose.anchor[0] - pivot[0]) * f,
+                    pivot[1] + (pose.anchor[1] - pivot[1]) * f,
                 ];
                 carry(pose, moved, &mut out);
             }
@@ -1353,18 +1493,48 @@ fn group_commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Ve
             let angle = |p: [f64; 2]| (p[1] - centre[1]).atan2(p[0] - centre[0]);
             let mut turn =
                 ((angle(at) - angle(origin)).to_degrees() + 180.).rem_euclid(360.) - 180.;
-            if mods.shift {
+            if mods.snap {
+                turn = (turn / 45.).round() * 45.;
+            } else if mods.shift {
                 turn = (turn / 15.).round() * 15.;
             }
             let (s, c) = turn.to_radians().sin_cos();
             for pose in roots {
-                out.push(set(&pose.id, "rotation", round(pose.rotation + turn, 2), t));
                 let r = [pose.anchor[0] - centre[0], pose.anchor[1] - centre[1]];
                 let moved = [
                     centre[0] + c * r[0] - s * r[1],
                     centre[1] + s * r[0] + c * r[1],
                 ];
                 carry(pose, moved, &mut out);
+                let parent = inverse_linear(pose.to_parent).filter(|p| {
+                    p.iter()
+                        .zip([1., 0., 0., 1.])
+                        .any(|(a, b)| (a - b).abs() > 1e-9)
+                });
+                let Some(parent) = parent else {
+                    // No parent: turning the world turns only the rotation.
+                    out.push(set(&pose.id, "rotation", round(pose.rotation + turn, 3), t));
+                    continue;
+                };
+                let w = [pose.world[0], pose.world[1], pose.world[2], pose.world[3]];
+                let desired = [
+                    c * w[0] - s * w[1],
+                    s * w[0] + c * w[1],
+                    c * w[2] - s * w[3],
+                    s * w[2] + c * w[3],
+                ];
+                let Some(local) =
+                    solve_local(Some(parent), desired, pose.scale[0] / 100., pose.rotation)
+                else {
+                    continue;
+                };
+                out.push(set(&pose.id, "rotation", round(local.rotation, 4), t));
+                out.push(set(&pose.id, "scale.x", round(local.scale_x * 100., 4), t));
+                out.push(set(&pose.id, "scale.y", round(local.scale_y * 100., 4), t));
+                // A layer saved without a skew channel takes none it doesn't need.
+                if pose.has_skew || local.skew.abs() > 1e-6 {
+                    out.push(set(&pose.id, "skew", round(local.skew, 4), t));
+                }
             }
         }
         _ => {}
@@ -1639,16 +1809,16 @@ fn resize_shape(
 /// for their members; Command reaches the leaf (viewer.ts resolvePickTarget).
 fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>> {
     let root = p.snapshot.root()?;
-    let hit = QueryMirror::new(p)
-        .queries()
-        .pick(
+    let hit = crate::text_host::query(p, |q| {
+        q.pick(
             None,
             press.at[0],
             press.at[1],
             press.time,
             &Default::default(),
         )
-        .ok()?;
+    })
+    .ok()?;
     let Some(id) = hit.layer_id else {
         return Some(None);
     };

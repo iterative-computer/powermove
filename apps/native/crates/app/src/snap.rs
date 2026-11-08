@@ -50,7 +50,7 @@ pub fn points(p: &pm_kernel::Published, moving: &[String], time: f64) -> Option<
             continue;
         }
         let (Ok(Some(b)), Ok(world)) = (
-            q.bounds(None, &layer.id, time),
+            crate::text_host::query(p, |q| q.bounds(None, &layer.id, time)),
             mirror.queries().world_matrix(None, &layer.id, time),
         ) else {
             continue;
