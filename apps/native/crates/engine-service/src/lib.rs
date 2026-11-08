@@ -836,6 +836,9 @@ struct Runtime {
     auto: policy::AutoQuality,
     /// A transient refusal: draw again no earlier than this.
     not_before: f64,
+    /// Frames in a row the layer had no drawable of the output's size. Each
+    /// retry renders a whole frame, so they back off until it is reconfigured.
+    drawable_misses: u32,
     prepared: f64,
 }
 struct Flight {
@@ -874,6 +877,10 @@ const PREPARE_AHEAD_SECONDS: f64 = 0.75;
 const PREPARE_EVERY_SECONDS: f64 = 0.25;
 /// A transient refusal (fonts, GPU watchdog) waits this long to try again.
 const RETRY_SECONDS: f64 = 0.016;
+/// One frame, doubling per miss, to at most a second.
+fn drawable_retry(misses: u32) -> f64 {
+    (RETRY_SECONDS * f64::from(1u32 << misses.min(6))).min(1.)
+}
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
@@ -1181,6 +1188,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
+                    drawable_misses: 0,
                     prepared: 0.,
                 }
             });
@@ -1366,13 +1374,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             });
             break;
         }
+        // A view waiting out a missing drawable can't draw: exports go ahead.
+        let now = trace::now();
         shared.interactive.store(
             !flights.is_empty()
                 || work.is_some()
-                || state
-                    .views
-                    .values()
-                    .any(|v| v.dirty || !v.commands.is_empty())
+                || state.views.iter().any(|(id, v)| {
+                    (v.dirty && runtime.get(id).is_none_or(|r| r.not_before <= now))
+                        || !v.commands.is_empty()
+                })
                 || runtime.values().any(|r| r.transport.running()),
             std::sync::atomic::Ordering::Release,
         );
@@ -1460,6 +1470,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         v.status.effective_quality = spec.scale;
                         if let Some(r) = runtime.get_mut(&id) {
                             r.stand_in = s.stand_ins.then_some(landed_before);
+                            r.drawable_misses = 0;
                         }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
@@ -1491,6 +1502,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         v.status.no_drawable += 1;
                         v.dirty = true;
                         v.input = input;
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.drawable_misses = r.drawable_misses.saturating_add(1);
+                            r.not_before = trace::now() + drawable_retry(r.drawable_misses);
+                        }
                     }
                     Err(e) if render::transient(&e) => {
                         v.capture |= capture;
@@ -1512,7 +1527,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
-            let timeout = if waiting {
+            // Only back-offs pending, nothing playing: sleep until the first is due.
+            let backoff = (flights.is_empty()
+                && runtime
+                    .values()
+                    .all(|r| r.stand_in.is_none() && !r.transport.running()))
+            .then(|| {
+                runtime
+                    .values()
+                    .map(|r| r.not_before - now)
+                    .filter(|wait| *wait > 0.)
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .filter(|wait| wait.is_finite());
+            let timeout = if let Some(wait) = backoff {
+                Duration::from_secs_f64(wait.max(0.001))
+            } else if waiting {
                 Duration::from_millis(2)
             } else if busy {
                 let now = trace::now();
