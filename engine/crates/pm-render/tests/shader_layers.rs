@@ -13,14 +13,6 @@ use pm_protocol::definitions::{DefinitionSetSnapshot, DefinitionSnapshot};
 use pm_render::{Feature, MapResolver, RenderError, RenderRequest, Renderer};
 use serde_json::{Value, json};
 
-// Each fixture requires immediate native compiler admission. Deliberate
-// two-slot contention and recovery are tested in pm-glsl's pool suite.
-static COMPILER_FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn compiler_fixture() -> std::sync::MutexGuard<'static, ()> {
-    COMPILER_FIXTURE.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 fn ch(v: Value) -> Value {
     json!({ "v": v, "kf": [], "expr": null })
 }
@@ -78,7 +70,6 @@ fn shader(code: &str, uniforms: Value) -> Value {
 
 #[test]
 fn uniform_binding_follows_the_compositor_quirks() {
-    let _compiler_fixture = compiler_fixture();
     let mut r = Renderer::headless().unwrap();
     let decls = "uniform float uF;   // @param 0.25 0 1\nuniform vec2 uV2;   // @param 0.5\nuniform vec4 uV4;   // @param 0.5\nuniform int uI;     // @param 3 0 9\nuniform bool uB;    // @param true\nuniform vec3 uC;    // @param #FF8000\nuniform vec3 uDir;  // @param 1 0 0\nuniform float uNoAnn;\n";
     let values = json!({ "uF": 0.25, "uV2": 0.5, "uV4": 0.5, "uI": 3, "uB": true, "uC": "#FF8000", "uDir": 1, "uNoAnn": 0.75 });
@@ -146,7 +137,6 @@ fn uniform_binding_follows_the_compositor_quirks() {
 
 #[test]
 fn time_frame_mouse_and_resolution_uniforms() {
-    let _compiler_fixture = compiler_fixture();
     let mut r = Renderer::headless().unwrap();
     let mut d = shader(
         "void main(){ fragColor = vec4(iTime, iGlobalTime / 2.0, iProgress, float(iFrame) / 60.0); }",
@@ -174,7 +164,6 @@ fn time_frame_mouse_and_resolution_uniforms() {
 
 #[test]
 fn targets_are_capped_at_4096_pixels() {
-    let _compiler_fixture = compiler_fixture();
     let mut r = Renderer::headless().unwrap();
     let mut d = shader(
         "void main(){ fragColor = vec4(iResolution.x / 8192.0, iResolution.y / 8192.0, 0.0, 1.0); }",
@@ -193,7 +182,6 @@ fn targets_are_capped_at_4096_pixels() {
 
 #[test]
 fn level2_shader_layers_render_at_the_density_they_are_drawn_at() {
-    let _compiler_fixture = compiler_fixture();
     // A 40 × 20 layer scaled 3×: level 1 renders 40 × 20 texels (today),
     // level 2 renders at the drawn density (120 × 60) without the 4,096 px
     // cap and draws through the level 2 resampler.
@@ -233,7 +221,6 @@ fn level2_shader_layers_render_at_the_density_they_are_drawn_at() {
 
 #[test]
 fn code_webgl_refuses_draws_nothing_and_is_reported() {
-    let _compiler_fixture = compiler_fixture();
     let mut r = Renderer::headless().unwrap();
     let doc = document(
         16,
@@ -298,7 +285,6 @@ fn set(definitions: Vec<DefinitionSnapshot>, missing: Vec<&str>) -> DefinitionSe
 
 #[test]
 fn extension_fragment_layers_bind_their_parameters() {
-    let _compiler_fixture = compiler_fixture();
     let mut r = Renderer::headless().unwrap();
     let def = fragment_definition(
         "example.orb",
@@ -348,7 +334,6 @@ fn extension_fragment_layers_bind_their_parameters() {
 
 #[test]
 fn missing_extension_definitions_draw_the_checkerboard_and_unknown_ones_route() {
-    let _compiler_fixture = compiler_fixture();
     let mut r = Renderer::headless().unwrap();
     let doc = document(
         48,
@@ -391,7 +376,6 @@ fn missing_extension_definitions_draw_the_checkerboard_and_unknown_ones_route() 
 
 #[test]
 fn third_party_mesh_layers_render_from_their_snapshot() {
-    let _compiler_fixture = compiler_fixture();
     let mut r = Renderer::headless().unwrap();
     let mesh: DefinitionSnapshot = serde_json::from_value(json!({
         "id": "example.obj", "kind": "layer", "version": 1, "origin": "local",
@@ -449,7 +433,6 @@ impl pm_eval::text_geom::TextMeasure for NoText {
 
 #[test]
 fn shader_extension_and_obj_layers_pick_by_their_rectangle() {
-    let _compiler_fixture = compiler_fixture();
     // `GL.pick` (pm-eval's port): no 3D raycast for these kinds; the legacy
     // OBJ layer with its default (truthy) background picks by rectangle too.
     let mut d = shader("void main(){ fragColor = vec4(1.0); }", json!({}));
@@ -498,7 +481,6 @@ fn shader_extension_and_obj_layers_pick_by_their_rectangle() {
 /// and `parseFloat` (`tools/shaders/parse-uniforms-fixture.ts`).
 #[test]
 fn parse_uniforms_matches_the_app() {
-    let _compiler_fixture = compiler_fixture();
     use pm_render::shader_layers::{Control, parse_uniforms};
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/parse-uniforms.json")).unwrap();
