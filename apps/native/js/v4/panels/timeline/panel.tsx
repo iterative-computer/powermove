@@ -307,7 +307,7 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
           <Icon
             id={`timeline:disclosure:${row.id}`}
             label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
-            symbol="chevron.right"
+            symbol={row.expanded ? "chevron.down" : "chevron.right"}
             tabIndex={-1}
             send={send}
             intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
