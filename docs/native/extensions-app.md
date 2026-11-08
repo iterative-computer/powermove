@@ -88,8 +88,10 @@ contributions, then opens without them.
 panel, no layer) and answer with the new asset; bytes the realm made are written to a
 private temporary file first. `assets.pick` is the open panel; a picked file stays on
 disk behind an opaque token (`compat-runner/src/files.rs`) and reads its bytes only when
-asked, so importing it copies nothing into V8. `assets.importUrl` downloads over HTTPS
-in the realm and imports the result.
+asked, so importing it copies nothing into V8. `assets.import` takes 3D models (glb,
+glTF, OBJ) and keeps `layerDefinition` on the asset, as main does. `assets.importUrl`
+is main's media download, run by the app on a worker: public HTTPS only, at most five
+redirects, 512 MiB, the file type taken from its bytes.
 
 `api.storage` is the kernel's `ext.<id>` settings, the keys the shipped app wrote,
 so values survive a restart and are read by a later window.
@@ -145,9 +147,12 @@ window is open is shown in it.
   or export (typewriter-effect, number-counter, linked-scene-bezier and
   variable-font-anchor depend on them): the engine needs a render continuation that
   asks the realm for a layer's canvas and resumes with its pixels (s5-compat.md §3).
-- `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine
-  (a one-frame PNG export, `mcp_services::frame_renderer`), so each call takes as long
-  as a frame export; snapshot is a JPEG at quality 0.92.
+- `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine as
+  main draws it (opaque over black, motion blur unless `{mblur:false}`, a target canvas
+  filled and returned; snapshot at most `maxWidth` wide, no blur, JPEG 0.74). Each new
+  frame is still a one-frame export in the engine process (`mcp_services::frame_renderer`);
+  the last four are cached by revision, and a stopped task or the 30 s host deadline
+  cancels it. `mbSamples` is not honoured: the engine picks its own sample count.
 - `api.services` holds only what extensions register; the built-in `viewer`,
   `timeline`, `inspector`, `tool` and `shaderHooks` services do not exist natively.
 - `ui.modal` and `PM.Fonts` throw `Unavailable`.
