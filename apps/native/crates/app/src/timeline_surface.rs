@@ -1502,7 +1502,13 @@ impl Render for TimelineSurface {
                         if let Some(frame) = frame {
                             // The outline row owns the keyframe toggle; the scene's
                             // copy would sit stale beneath it.
-                            for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
+                            // The shell already paints the panel material; an opaque
+                            // `ground` would turn the translucent timeline solid.
+                            for op in frame
+                                .ops
+                                .iter()
+                                .filter(|op| op.id != "ground" && !op.id.starts_with("toggle:"))
+                            {
                                 paint(op, bounds.origin, &tokens, window, cx);
                             }
                         }
@@ -1579,12 +1585,23 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     .corner_radii(area.size.width / 2.),
             );
         }
-        "diamond"
-        | "diamond.fill"
-        | "diamond.lefthalf.filled"
-        | "keyframe.hold"
-        | "marker"
-        | "ph-head" => diamond(area, color, window),
+        "diamond" | "diamond.fill" | "diamond.lefthalf.filled" | "keyframe.hold" | "marker" => {
+            diamond(area, color, window)
+        }
+        // The playhead pin: a rounded top and a rounder point (the owner's demo).
+        "ph-head" => {
+            let r = |key: &str| px(op.detail[key].as_f64().unwrap_or(0.) as f32);
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(color)
+                    .corner_radii(Corners {
+                        top_left: r("topRadius"),
+                        top_right: r("topRadius"),
+                        bottom_right: r("bottomRadius"),
+                        bottom_left: r("bottomRadius"),
+                    }),
+            );
+        }
         "line" => {
             if let (Some(from), Some(to)) =
                 (point_of(&op.detail["from"]), point_of(&op.detail["to"]))

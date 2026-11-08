@@ -39,3 +39,17 @@ uses. The governing rules stay in [language.md](language.md).
   `rectangle.split.1x2`, `point.topleft.down.to.point.bottomright.curvepath`)
   with the names as tooltips, so the header reads as transport + tabs, not a
   row of long labels. Layers | Tracks stays text.
+
+## 2c. Timeline tracks
+
+- The track area no longer paints an opaque `colors.panel` ground: it sits on
+  the shell's panel material like every other panel (the `gutter` keeps
+  `panel_secondary`).
+- Ruler ticks are `text` ink at 0.14 (minor) and 0.3 (major); a 0.04 grid
+  line runs under the tracks at each labelled time. Increase Contrast keeps
+  solid `separator`/`secondary` ticks and no grid.
+- Unselected clips get a hairline keyline (`Tokens::edge` at twice its
+  alpha; solid `separator` under Increase Contrast); selection stays the
+  `text` ring.
+- The playhead head is the rounded pin (top 3, bottom 6) the render op
+  already described; the painter drew it as a diamond.
