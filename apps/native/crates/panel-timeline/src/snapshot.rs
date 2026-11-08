@@ -99,6 +99,15 @@ impl Default for TimelineIndex {
     }
 }
 impl TimelineIndex {
+    /// An open composition: `comps/<compId>`, or the root of a project whose
+    /// layers sit at the top level.
+    pub fn has_composition(&self) -> bool {
+        self.source
+            .as_ref()
+            .and_then(Snapshot::root)
+            .and_then(|root| model::comp_node(root, self.comp_id.as_deref()))
+            .is_some()
+    }
     pub fn from_snapshot(snapshot: &Snapshot) -> Self {
         let mut result = Self {
             doc_id: snapshot.doc_id,

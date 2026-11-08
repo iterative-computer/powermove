@@ -534,7 +534,7 @@ fn frame_facts(
 ) -> Value {
     json!({
         "document": model.index.doc_id.to_string(), "revision": model.index.revision.to_string(),
-        "hasComposition": model.index.comp_id.is_some(),
+        "hasComposition": model.index.has_composition(),
         "mode": if model.mode == TimelineMode::Layers { "Layers" } else { "Tracks" },
         "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
         "snapping": !model.track_snap_disabled,
