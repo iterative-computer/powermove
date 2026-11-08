@@ -152,12 +152,11 @@ globalThis.__compat = {
           throw new TypeError(
             "assets.importUrl accepts an https URL of at most 2 KB without credentials",
           );
-        const response = await fetch(target.href, { credentials: "omit" });
-        if (!response.ok) throw Error(`The download returned ${response.status}`);
-        const blob = await response.blob();
-        const name =
-          decodeURIComponent(target.pathname.split("/").pop() || "") || "Download";
-        return (await this.assets.import(new File([blob], name, { type: blob.type }))).id;
+        // The app downloads it as main does: public HTTPS, at most five
+        // redirects, 512 MiB, its type from its bytes; then Import Media.
+        const reply = await ask({ kind: "download", url: target.href });
+        if (!reply?.id) throw Error(reply?.error ?? "The download could not be imported");
+        return reply.id;
       },
     };
     const reveal = (id, open) =>

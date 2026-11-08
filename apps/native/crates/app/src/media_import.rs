@@ -139,7 +139,45 @@ impl Controller {
     }
     /// `assets.import` from an extension: the held file into the Project panel,
     /// no layer, answering the realm with the new asset's id.
-    pub(crate) fn import_for_extension(&mut self, answer: u64, file: u64, cx: &mut Context<Self>) {
+    /// `assets.importUrl`: main's media download (public HTTPS, five
+    /// redirects, 512 MiB, type from the bytes) on a worker, then the import.
+    pub(crate) fn download_for_extension(
+        &mut self,
+        answer: u64,
+        url: String,
+        cx: &mut Context<Self>,
+    ) {
+        let download = cx.background_executor().spawn(async move {
+            let response = pm_compat_runner::net::download(&url, 512 << 20, 600)
+                .map_err(|e| format!("The download failed: {e}"))?;
+            if !(200..300).contains(&response.status) {
+                return Err(format!("The download returned {}", response.status));
+            }
+            let extension = pm_compat_runner::files::media_extension(&response.body)
+                .ok_or("The download isn't an image, video, audio or 3D file")?;
+            let name = pm_compat_runner::files::download_name(&url, extension);
+            pm_compat_runner::files::stage(&response.body, &name).map_err(|e| e.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let staged = download.await;
+            let _ = this.update(cx, |v, cx| match staged {
+                Ok(file) => v.import_for_extension(answer, file, None, cx),
+                Err(error) => {
+                    if let Some(host) = &v.extensions.host {
+                        host.answer(answer, json!({ "error": error }));
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+    pub(crate) fn import_for_extension(
+        &mut self,
+        answer: u64,
+        file: u64,
+        layer_definition: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(path) = pm_compat_runner::files::path(file) else {
             self.answer_import(
                 &ExtensionImport { answer, file },
@@ -154,8 +192,11 @@ impl Controller {
             );
             return;
         }
+        // As main's assets.import: 3D models too, and the layer definition kept.
         let request = ImportRequest {
             paths: vec![path],
+            models: true,
+            layer_definition,
             ..Default::default()
         };
         self.imports
@@ -170,7 +211,9 @@ impl Controller {
             },
             Err(error) => json!({ "error": error }),
         };
-        pm_compat_runner::files::release_staged(import.file);
+        let file = import.file;
+        // Deleting a staged copy is disk work: never on the main thread.
+        std::thread::spawn(move || pm_compat_runner::files::release_staged(file));
         if let Some(host) = &self.extensions.host {
             host.answer(import.answer, value);
         }
@@ -194,9 +237,11 @@ impl Controller {
         let extensions = pm_builtins::media_import::accept_extensions(accept);
         let extensions: Vec<&str> = extensions.iter().map(String::as_str).collect();
         let rx = platform::import_paths(&self.host.borrow().window, false, multiple, &extensions);
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let paths = rx.recv().await.unwrap_or_default();
-            let files: Vec<_> = paths
+            // File facts come from disk (maybe a network volume): on a worker.
+            let files: Vec<_> = executor.spawn(async move { paths
                 .into_iter()
                 .filter_map(|path| {
                     let meta = std::fs::metadata(&path).ok()?;
@@ -211,7 +256,7 @@ impl Controller {
                     Some(json!({"token":token.to_string(),"name":name,"type":kind.unwrap_or_default(),
                         "size":meta.len(),"lastModified":modified}))
                 })
-                .collect();
+                .collect::<Vec<_>>() }).await;
             let _ = this.update(cx, |v, _| {
                 if let Some(host) = &v.extensions.host {
                     host.answer(answer, files.into());

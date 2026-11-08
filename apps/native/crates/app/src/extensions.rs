@@ -434,7 +434,10 @@ impl Controller {
                 .detach();
             }
             Some("import") => match request["file"].as_str().and_then(|t| t.parse::<u64>().ok()) {
-                Some(file) => self.import_for_extension(token, file, cx),
+                Some(file) => {
+                    let definition = request["layerDefinition"].as_str().map(str::to_owned);
+                    self.import_for_extension(token, file, definition, cx)
+                }
                 None => {
                     if let Some(host) = &self.extensions.host {
                         host.answer(
@@ -444,6 +447,10 @@ impl Controller {
                     }
                 }
             },
+            Some("download") => {
+                let url = request["url"].as_str().unwrap_or_default().to_owned();
+                self.download_for_extension(token, url, cx);
+            }
             Some("pick") => {
                 let accept = request["accept"].as_str().unwrap_or_default().to_owned();
                 self.pick_for_extension(token, &accept, request["multiple"] == true, cx);
