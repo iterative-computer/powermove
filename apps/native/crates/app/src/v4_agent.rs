@@ -3,7 +3,7 @@
 //! order, as main's panel tools read a panel's DOM.
 use super::SurfaceView;
 use crate::v4_compile::NodeView;
-use gpui::Context;
+use gpui::{Context, Pixels, Point, Styled, canvas, prelude::*};
 use pm_surface::{Id, events::EventDetail, kit::Component};
 use serde_json::{Value, json};
 
@@ -11,6 +11,10 @@ use serde_json::{Value, json};
 pub struct Control {
     pub id: Id,
     pub fact: Value,
+}
+pub struct Target {
+    pub protected: bool,
+    pub editable: bool,
 }
 pub struct Reading {
     pub text: String,
@@ -66,6 +70,62 @@ impl SurfaceView {
         for child in &view.children {
             self.descendant_text(*child, out);
         }
+    }
+    /// A bounds probe for an agent-relevant node, only while probing.
+    pub(super) fn probe(&self, id: Id) -> Option<gpui::AnyElement> {
+        let view = self.prepared.node(id)?;
+        let relevant = self.is_control(view)
+            || view.component == Some(Component::SecureField)
+            || !self.prop(id, "href").is_null();
+        if !self.probing || !relevant {
+            return None;
+        }
+        let targets = self.targets.clone();
+        Some(
+            canvas(
+                move |bounds, _, _| {
+                    targets.borrow_mut().insert(id, bounds);
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element(),
+        )
+    }
+    /// Turns bounds recording on for the next draw (and off after it).
+    pub fn set_probing(&mut self, on: bool) {
+        if on {
+            self.targets.borrow_mut().clear();
+        }
+        self.probing = on;
+    }
+    /// What lies under a window point: the innermost recorded control, and
+    /// whether it (or a link around it) is protected, and whether it edits text.
+    pub fn agent_target(&self, at: Point<Pixels>) -> Option<Target> {
+        let targets = self.targets.borrow();
+        let (id, _) =
+            targets
+                .iter()
+                .filter(|(_, b)| b.contains(&at))
+                .min_by(|(_, a), (_, b)| {
+                    (f32::from(a.size.width) * f32::from(a.size.height))
+                        .total_cmp(&(f32::from(b.size.width) * f32::from(b.size.height)))
+                })?;
+        let view = self.prepared.node(*id)?;
+        let mut linked = false;
+        let mut next = Some(view);
+        while let Some(node) = next {
+            linked |= !self.prop(node.id, "href").is_null();
+            next = node.parent.and_then(|p| self.prepared.node(p));
+        }
+        Some(Target {
+            protected: view.disabled || view.component == Some(Component::SecureField) || linked,
+            editable: matches!(
+                view.component,
+                Some(Component::TextField | Component::NumberField)
+            ) || view.number.is_some(),
+        })
     }
     fn is_control(&self, view: &NodeView) -> bool {
         !view.is_plain_text

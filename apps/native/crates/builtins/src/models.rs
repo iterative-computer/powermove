@@ -114,7 +114,8 @@ impl Models {
 }
 // A disjoint actor setting namespace avoids treating any real project ID as
 // reserved. Unknown application fields are retained; concurrent writes refuse.
-const APPLICATION_AGENT_STORE: &str = "ext.builtin-application-agent";
+/// Where the application Agent panel (no project) keeps its archives.
+pub const APPLICATION_AGENT_STORE: &str = "ext.builtin-application-agent";
 pub(crate) struct KernelStore {
     kernel: KernelHandle,
     application: bool,

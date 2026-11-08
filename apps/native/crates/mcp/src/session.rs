@@ -65,6 +65,9 @@ struct Active {
     publications: u32,
     committed: bool,
     external_actions: bool,
+    /// Panel controls ran during this run (main's `panelActions`): their own
+    /// editor Undo applies, so the run never snapshot-restores over them.
+    panel_actions: bool,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -298,13 +301,49 @@ impl McpSession {
                 .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
             let project = session.project.clone();
+            let acting = ["interact_panel", "computer_use_panel"].contains(&name);
+            if acting && let Some(id) = project.as_deref() {
+                let revision = host.revision(id)?;
+                if session.transaction.is_none() {
+                    session.transaction = Some(Transaction {
+                        snapshot: host.read_document(id)?,
+                        mark: host.history_mark(id, self.writer)?,
+                        revision,
+                        changed: false,
+                        interleaved: false,
+                        label: "Use panel".into(),
+                    });
+                }
+                if session
+                    .transaction
+                    .as_ref()
+                    .is_some_and(|tx| tx.revision != revision)
+                {
+                    return Err(Error::invalid(
+                        "The project changed. Read get_project_state before using another panel control.",
+                    ));
+                }
+                session.panel_actions = true;
+            }
             let base = match name {
                 "get_workspace_state" => Some(host.workspace_state(project.as_deref())?),
                 "set_panel_layout" => Some(host.panel_layout(project.as_deref())?),
                 _ => None,
             };
             drop(host);
-            let live = surfaces.call(name, project.as_deref(), args)?;
+            let live = surfaces.call(name, project.as_deref(), args);
+            if acting && let Some(id) = project.as_deref() {
+                // Panel handlers may edit asynchronously; later reads see it.
+                let host = shared
+                    .lock()
+                    .map_err(|_| Error::unavailable("headless host stopped"))?;
+                let revision = host.revision(id)?;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.changed |= tx.snapshot["revision"].as_u64() != Some(revision);
+                    tx.revision = revision;
+                }
+            }
+            let live = live?;
             return Ok(match (name, base) {
                 ("get_workspace_state", Some(mut state)) => {
                     let layout = live_layout(state["layout"].take(), &live["layout"]);
@@ -340,7 +379,10 @@ impl McpSession {
             }
             let project = session.project.clone();
             drop(host);
-            return surfaces.call(name, project.as_deref(), args);
+            let mut call = args.clone();
+            call["callerAccess"] = json!(session.access);
+            call["callerRunId"] = json!(session.run);
+            return surfaces.call(name, project.as_deref(), &call);
         }
         if ["thread_list", "thread_read"].contains(&name) {
             catalog::validate(name, args)?;
@@ -872,6 +914,7 @@ impl McpSession {
             publications: 1,
             committed: false,
             external_actions: false,
+            panel_actions: false,
         });
         Ok(result)
     }
@@ -892,6 +935,16 @@ impl McpSession {
             let Some(tx) = session.transaction.as_ref() else {
                 return Ok(json!({"changed":session.committed}));
             };
+            if session.panel_actions {
+                let changed =
+                    tx.changed || tx.snapshot["revision"].as_u64() != Some(host.revision(&id)?);
+                if !commit && changed {
+                    return Err(Error::invalid(
+                        "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
+                    ));
+                }
+                return Ok(json!({"changed":session.committed || changed,"historyId":null}));
+            }
             let changed = tx.changed;
             let mut history_id = None;
             if !commit && changed {
@@ -1088,6 +1141,11 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
     if tx.interleaved {
         return Err(Error::conflict(
             "Other edits occurred during this run. Use the editor Undo command to undo agent changes without restoring over that work.",
+        ));
+    }
+    if session.panel_actions {
+        return Err(Error::conflict(
+            "Panel controls use their normal editor Undo. Their actions cannot be automatically rolled back; use the editor Undo command.",
         ));
     }
     if !tx.changed {

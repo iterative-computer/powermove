@@ -682,3 +682,121 @@ fn an_agent_tool_launches_sends_to_and_cancels_a_background_thread() {
     );
     panel.panels.close();
 }
+#[test]
+fn a_signed_out_provider_refuses_a_thread_launch_before_anything_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    // Once the bundled providers have answered, the compatible one (never
+    // configured here) is the signed-out provider.
+    panel.connected(Provider::Chatgpt);
+    assert!(!panel.panels.broker.agent.available(Provider::Compatible));
+    let agent = panel.agent();
+    let before = agent.lock().unwrap().panel.summaries().len();
+    let refused = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"t","message":"m","target":{"providerInstanceId":"compatible"},"callerAccess":"project"}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "Sign in to your compatible provider in Settings › Agents before starting a run."
+    );
+    assert_eq!(agent.lock().unwrap().panel.summaries().len(), before);
+    panel.panels.close();
+}
+#[test]
+fn a_planning_caller_launches_planning_threads_and_retries_are_deduplicated() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let request = json!({"title":"Plan","message":"Look only","callerAccess":"editor",
+        "callerRunId":"caller-1","clientRequestId":"req-1"});
+    let first = panel
+        .panels
+        .agent_thread_control("thread_launch", &request)
+        .unwrap();
+    assert_eq!(first["access"], "editor", "{first}");
+    let thread = first["threadId"].as_str().unwrap().to_owned();
+    let again = panel
+        .panels
+        .agent_thread_control("thread_launch", &request)
+        .unwrap();
+    assert_eq!(
+        again["threadId"], first["threadId"],
+        "a retry returns the first launch"
+    );
+    let mut reused = request.clone();
+    reused["message"] = json!("Something else");
+    assert_eq!(
+        panel
+            .panels
+            .agent_thread_control("thread_launch", &reused)
+            .unwrap_err(),
+        "This clientRequestId belongs to another thread launch."
+    );
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    // A planning caller's new turn stays at planning access.
+    let sent = panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"More","callerAccess":"editor"}),
+        )
+        .unwrap();
+    assert_eq!(sent["access"], "editor", "{sent}");
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}
+#[test]
+fn reconfiguring_a_running_thread_restarts_it_and_cancel_stops_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let launched = panel
+        .panels
+        .agent_thread_control("thread_launch", &json!({"title":"Hold","message":"Wait"}))
+        .unwrap();
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    let first_run = launched["runId"].as_str().unwrap().to_owned();
+    assert_eq!(launched["busy"], true, "{launched}");
+    // A different effort can't steer the live turn: it stops and restarts.
+    let effort = if agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .settings
+        .effort
+        == "high"
+    {
+        "low"
+    } else {
+        "high"
+    };
+    let sent = panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"Go on","target":{"options":{"reasoningEffort":effort}}}),
+        )
+        .unwrap();
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    assert_eq!(sent["reasoningEffort"], effort, "{sent}");
+    assert_ne!(sent["runId"], json!(first_run), "{sent}");
+    assert_eq!(sent["busy"], true, "{sent}");
+    let cancelled = panel
+        .panels
+        .agent_thread_control("thread_cancel", &json!({"threadId":thread}))
+        .unwrap();
+    assert_eq!(cancelled["threadId"], json!(thread));
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}

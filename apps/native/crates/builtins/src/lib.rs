@@ -3,6 +3,7 @@
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
 pub use agent_host::AgentCarry;
+pub use models::APPLICATION_AGENT_STORE;
 #[cfg(test)]
 mod agent_tests;
 mod data;
@@ -78,6 +79,8 @@ pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::Pat
     }
 }
 
+/// A deduplicated agent-tool thread request: fingerprint, thread, run.
+type ThreadRequest = (String, String, Option<String>);
 #[derive(Clone, Debug)]
 pub struct Publication {
     pub panel: String,
@@ -137,6 +140,9 @@ struct Broker {
     carried: Mutex<Option<agent_host::SharedAgent>>,
     /// Set once `carry_agent` hands the runs on: closing no longer stops them.
     agent_released: std::sync::atomic::AtomicBool,
+    /// Agent-tool thread requests by caller and clientRequestId: the request's
+    /// fingerprint, its thread and run (main dedupes retries the same way).
+    thread_requests: Mutex<BTreeMap<String, ThreadRequest>>,
     /// Commands each extension realm registered (`commands.register`), by panel,
     /// with a revision that moves on every change.
     commands: Mutex<(u64, BTreeMap<String, Value>)>,
@@ -180,137 +186,66 @@ impl Builtins {
         Some(carry)
     }
     /// thread_launch, thread_send and thread_cancel from an agent tool, through
-    /// this window's Agent panel and its provider runs: the same send and stop
-    /// effects as the composer, without switching the person's visible thread.
+    /// this window's Agent panel and its provider runs (main's controlThread):
+    /// the composer's own send, steer, answer and stop effects, without
+    /// switching the person's visible thread. New threads and new turns run at
+    /// the caller's access (`callerAccess`); a caller never steers a thread
+    /// with broader access. Call it off the main thread: saves and launches
+    /// reach the kernel and disk, and a reconfiguration waits for a stop.
     pub fn agent_thread_control(
         &self,
         tool: &str,
         args: &Value,
     ) -> std::result::Result<Value, String> {
+        use pm_agents::Access;
         use pm_agents::Provider;
+        let closed = || {
+            "Open the Agent panel in this project's window before controlling its threads."
+                .to_owned()
+        };
+        let missing = || "This thread does not exist in the current project.".to_owned();
+        let failed = |e: pm_panel_agentpanel::Error| format!("{e:?}");
         let (agent, link) = {
             let entries = self.broker.entries.lock().unwrap();
             let backend = entries
                 .get("agent")
-                .ok_or(
-                    "Open the Agent panel in this project's window before controlling its threads."
-                        .to_owned(),
-                )?
+                .ok_or_else(closed)?
                 .backend
                 .lock()
                 .unwrap();
-            let agent = backend.native.agent.clone().ok_or(
-                "Open the Agent panel in this project's window before controlling its threads."
-                    .to_owned(),
-            )?;
+            let agent = backend.native.agent.clone().ok_or_else(closed)?;
             (agent, backend.native.agent_link.clone())
         };
-        let now = agent_host::now_ms();
-        let missing = || "This thread does not exist in the current project.".to_owned();
-        let (thread, effect) = {
-            let mut state = agent.lock().unwrap();
-            // Refuse a run no provider can take before anything changes.
-            if tool != "thread_cancel" {
-                let named = args["target"]["providerInstanceId"].as_str();
-                let current = match tool {
-                    "thread_send" => args["threadId"].as_str().unwrap_or_default(),
-                    _ => state.panel.active_id(),
-                };
-                let provider = match named {
-                    Some("chatgpt") => Provider::Chatgpt,
-                    Some("claude") => Provider::Claude,
-                    Some(_) => Provider::Compatible,
-                    None => {
-                        state
-                            .panel
-                            .session(current)
-                            .map_err(|_| missing())?
-                            .settings
-                            .provider
-                    }
-                };
-                if !link.available(provider) {
-                    let name = match provider {
-                        Provider::Chatgpt => "ChatGPT",
-                        Provider::Claude => "Claude",
-                        Provider::Compatible => "your compatible provider",
-                    };
-                    return Err(format!(
-                        "Sign in to {name} in Settings › Agents before starting a run."
-                    ));
-                }
+        // An unknown caller gets the narrowest access: planning.
+        let caller = match args["callerAccess"].as_str() {
+            Some("project") => "project",
+            _ => "editor",
+        };
+        let caller_run = args["callerRunId"].as_str().unwrap_or_default();
+        let thread_arg = args["threadId"].as_str().unwrap_or_default().to_owned();
+        let describe = |thread: &str, extra: Value| -> std::result::Result<Value, String> {
+            let state = agent.lock().unwrap();
+            let session = state.panel.session(thread).map_err(|_| missing())?;
+            let mut out = json!({"threadId":thread,"runId":session.run.as_ref().map(|r| r.id.clone()),
+                "busy":session.run.is_some(),"provider":session.settings.provider.name(),
+                "model":session.settings.model,"reasoningEffort":session.settings.effort,
+                "access":if session.settings.access == Access::Editor { "editor" } else { "project" },
+                "status":if session.run.is_some() { "running" } else if tool == "thread_cancel" { "cancelled" } else { "idle" }});
+            if let (Some(out), Some(extra)) = (out.as_object_mut(), extra.as_object()) {
+                out.extend(extra.clone());
             }
-            let thread = match tool {
-                "thread_launch" => {
-                    let id = pm_kernel::new_id("agent-thread");
-                    state
-                        .panel
-                        .launch_background(&id, now)
-                        .map_err(|e| format!("{e:?}"))?;
-                    id
-                }
-                _ => {
-                    let id = args["threadId"].as_str().unwrap_or_default().to_owned();
-                    state.panel.session(&id).map_err(|_| missing())?;
-                    id
-                }
-            };
-            let effect = if tool == "thread_cancel" {
-                match state.panel.session(&thread).map_err(|_| missing())?.run {
-                    Some(_) => Some(state.panel.stop(&thread).map_err(|e| format!("{e:?}"))?),
-                    None => None,
-                }
-            } else {
-                let target = &args["target"];
-                if let Some(provider) = target["providerInstanceId"].as_str() {
-                    let provider = match provider {
-                        "chatgpt" => Provider::Chatgpt,
-                        "claude" => Provider::Claude,
-                        _ => Provider::Compatible,
-                    };
-                    let catalog = link.catalog(provider);
-                    let model = target["model"].as_str().unwrap_or_default().to_owned();
-                    state
-                        .panel
-                        .set_provider(&thread, provider, model, catalog)
-                        .map_err(|e| format!("{e:?}"))?;
-                }
-                if let Some(model) = target["model"].as_str() {
-                    let effort = target["options"]["reasoningEffort"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| {
-                            state
-                                .panel
-                                .session(&thread)
-                                .map(|s| s.settings.effort.clone())
-                                .unwrap_or_default()
-                        });
-                    state
-                        .panel
-                        .set_model(&thread, model.into(), effort)
-                        .map_err(|e| format!("{e:?}"))?;
-                }
-                let session = state.panel.session(&thread).map_err(|_| missing())?;
-                if session.needs_answer() {
-                    return Err("This thread is waiting on a question. Answer it in the Agent panel; a message can't answer it here yet.".into());
-                }
-                agent_host::admit_send(&state, &thread)?;
-                let message = args["message"].as_str().unwrap_or_default();
-                let (run, request) = (pm_kernel::new_id("run"), pm_kernel::new_id("request"));
-                Some(
-                    state
-                        .panel
-                        .send_message(&thread, message, &[], &run, &request, now)
-                        .map_err(|e| format!("{e:?}"))?,
-                )
-            };
-            if tool == "thread_launch"
-                && let Some(title) = args["title"].as_str()
-            {
-                let first = args["message"].as_str().unwrap_or_default();
-                let _ = state.panel.generated_title(&thread, first, title, now);
-            }
+            Ok(out)
+        };
+        let run_effect = |effect: &pm_panel_agentpanel::model::Effect| {
+            agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                effect,
+            )
+        };
+        let save = |state: &mut agent_host::AgentState| {
             state
                 .panel
                 .save(
@@ -318,29 +253,246 @@ impl Builtins {
                         self.broker.kernel.clone(),
                         self.broker.application,
                     ),
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| format!("{e:?}"))
+        };
+        if tool == "thread_cancel" {
+            let effect = {
+                let mut state = agent.lock().unwrap();
+                let running = state
+                    .panel
+                    .session(&thread_arg)
+                    .map_err(|_| missing())?
+                    .run
+                    .is_some();
+                running
+                    .then(|| state.panel.stop(&thread_arg))
+                    .transpose()
+                    .map_err(failed)?
+            };
+            if let Some(effect) = effect {
+                run_effect(&effect)?;
+            }
+            link.touch();
+            return describe(&thread_arg, json!({}));
+        }
+        if self.broker.application && caller == "editor" {
+            return Err("Start an app thread with Project access. Planning threads need an attached project.".into());
+        }
+        // A retried request returns its first answer; a reused id refuses.
+        let target = &args["target"];
+        let fingerprint = json!({"title":args["title"],"message":args["message"],"target":target,"access":caller}).to_string();
+        let request_key = args["clientRequestId"].as_str().map(|id| {
+            format!(
+                "{tool}\u{0}{caller_run}\u{0}{}\u{0}{id}",
+                if tool == "thread_send" {
+                    thread_arg.as_str()
+                } else {
+                    ""
+                }
+            )
+        });
+        if let Some(key) = &request_key
+            && let Some((seen, thread, run)) = self
+                .broker
+                .thread_requests
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+        {
+            if seen != fingerprint {
+                return Err(if tool == "thread_launch" {
+                    "This clientRequestId belongs to another thread launch.".into()
+                } else {
+                    "This clientRequestId belongs to another message.".into()
+                });
+            }
+            return describe(
+                &thread,
+                if tool == "thread_launch" {
+                    json!({})
+                } else {
+                    json!({"runId":run,"delivery":"already_sent"})
+                },
+            );
+        }
+        if tool == "thread_send" && request_key.is_some() {
+            let prefix = format!("thread_send\u{0}{caller_run}\u{0}{thread_arg}\u{0}");
+            if self
+                .broker
+                .thread_requests
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .count()
+                >= 64
+            {
+                return Err("This thread has reached its saved update limit. Start a new thread for further orchestrated work.".into());
+            }
+        }
+        let provider_of = |name: &str| match name {
+            "chatgpt" => Provider::Chatgpt,
+            "claude" => Provider::Claude,
+            _ => Provider::Compatible,
+        };
+        let message = args["message"].as_str().unwrap_or_default();
+        let now = agent_host::now_ms();
+        // What the request asks for, against the thread's current settings.
+        let (thread, steer, reconfigure) = {
+            let mut state = agent.lock().unwrap();
+            let base = if tool == "thread_send" {
+                thread_arg.clone()
+            } else {
+                state.panel.active_id().to_owned()
+            };
+            let session = state.panel.session(&base).map_err(|_| missing())?;
+            let provider = target["providerInstanceId"]
+                .as_str()
+                .map_or(session.settings.provider, provider_of);
+            if !link.available(provider) {
+                let name = match provider {
+                    Provider::Chatgpt => "ChatGPT",
+                    Provider::Claude => "Claude",
+                    Provider::Compatible => "your compatible provider",
+                };
+                return Err(format!(
+                    "Sign in to {name} in Settings › Agents before starting a run."
+                ));
+            }
+            if tool == "thread_launch" {
+                let id = pm_kernel::new_id("agent-thread");
+                state.panel.launch_background(&id, now).map_err(failed)?;
+                (id, None, false)
+            } else {
+                let busy = session.run.as_ref().map(|r| r.id.clone());
+                if busy.is_some()
+                    && (session.settings.access == Access::Computer
+                        || caller == "editor" && session.settings.access != Access::Editor)
+                {
+                    return Err("This thread has broader permissions than the caller.".into());
+                }
+                if session.applying {
+                    return Err("This thread is applying its current change. Wait before sending new direction.".into());
+                }
+                let changes = target["providerInstanceId"]
+                    .as_str()
+                    .is_some_and(|p| provider_of(p) != session.settings.provider)
+                    || target["model"]
+                        .as_str()
+                        .is_some_and(|m| m != session.settings.model)
+                    || target["options"]["reasoningEffort"]
+                        .as_str()
+                        .is_some_and(|e| e != session.settings.effort);
+                (
+                    thread_arg.clone(),
+                    busy.clone().filter(|_| !changes),
+                    busy.is_some() && changes,
+                )
+            }
+        };
+        // A reconfigured run stops first; the new turn carries the request on.
+        if reconfigure {
+            let effect = agent.lock().unwrap().panel.stop(&thread).map_err(failed)?;
+            run_effect(&effect)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while agent
+                .lock()
+                .unwrap()
+                .panel
+                .session(&thread)
+                .is_ok_and(|s| s.run.is_some())
+            {
+                if std::time::Instant::now() > deadline {
+                    return Err("The running turn did not stop in time. Its work continues; try again shortly.".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        let effect = {
+            let mut state = agent.lock().unwrap();
+            if steer.is_none() {
+                // A new turn runs at the caller's access and the target settings.
+                if let Some(effect) = state.panel.set_access(&thread, caller).map_err(failed)? {
+                    drop(state);
+                    run_effect(&effect)?;
+                    state = agent.lock().unwrap();
+                }
+                if let Some(provider) = target["providerInstanceId"].as_str().map(provider_of) {
+                    let model = target["model"].as_str().unwrap_or_default().to_owned();
+                    state
+                        .panel
+                        .set_provider(&thread, provider, model, link.catalog(provider))
+                        .map_err(failed)?;
+                }
+                let current = state
+                    .panel
+                    .session(&thread)
+                    .map_err(|_| missing())?
+                    .settings
+                    .clone();
+                let model = target["model"]
+                    .as_str()
+                    .map_or(current.model.clone(), str::to_owned);
+                let effort = target["options"]["reasoningEffort"]
+                    .as_str()
+                    .map_or(current.effort.clone(), str::to_owned);
+                if model != current.model || effort != current.effort {
+                    state
+                        .panel
+                        .set_model(&thread, model, effort)
+                        .map_err(failed)?;
+                }
+                agent_host::admit_send(&state, &thread)?;
+            }
+            let run = steer.clone().unwrap_or_else(|| pm_kernel::new_id("run"));
+            let effect = state
+                .panel
+                .send_message(
+                    &thread,
+                    message,
+                    &[],
+                    &run,
+                    &pm_kernel::new_id("request"),
                     now,
                 )
-                .map_err(|e| format!("{e:?}"))?;
-            (thread, effect)
+                .map_err(failed)?;
+            if tool == "thread_launch"
+                && let Some(title) = args["title"].as_str()
+            {
+                let _ = state.panel.generated_title(&thread, message, title, now);
+            }
+            save(&mut state)?;
+            effect
         };
-        if let Some(effect) = effect {
-            agent_host::run_effect(
-                &agent,
-                &link,
-                &self.broker.kernel,
-                self.broker.application,
-                &effect,
-            )?;
-        }
+        let delivery = match (&effect.kind, steer.is_some()) {
+            (pm_panel_agentpanel::model::EffectKind::Answer { .. }, _) => "answered",
+            (_, true) => "live",
+            _ => "started",
+        };
+        run_effect(&effect)?;
         link.touch();
-        let state = agent.lock().unwrap();
-        let session = state.panel.session(&thread).map_err(|_| missing())?;
-        Ok(
-            json!({"threadId":thread,"runId":session.run.as_ref().map(|r| r.id.clone()),
-            "busy":session.run.is_some(),"provider":session.settings.provider.name(),
-            "model":session.settings.model,"reasoningEffort":session.settings.effort,
-            "status":if session.run.is_some() { "running" } else if tool == "thread_cancel" { "cancelled" } else { "idle" }}),
-        )
+        let result = describe(
+            &thread,
+            if tool == "thread_send" {
+                json!({"delivery":delivery})
+            } else {
+                json!({})
+            },
+        )?;
+        if let Some(key) = request_key {
+            self.broker.thread_requests.lock().unwrap().insert(
+                key,
+                (
+                    fingerprint,
+                    thread,
+                    result["runId"].as_str().map(str::to_owned),
+                ),
+            );
+        }
+        Ok(result)
     }
     /// What `thread_read` adds from this window's live Agent panel: the
     /// running trace as text, open questions, and the run. `None` when the
@@ -410,6 +562,7 @@ impl Builtins {
             agent,
             carried: Mutex::new(carried),
             agent_released: Default::default(),
+            thread_requests: Default::default(),
             commands: Default::default(),
         });
         let pool = RuntimePool::new(

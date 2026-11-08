@@ -121,6 +121,10 @@ pub struct SurfaceView {
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
+    /// While an agent tool draws (`agent::probe`), controls record where they
+    /// were drawn so a panel point maps to the control under it.
+    probing: bool,
+    targets: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
     scrub_ops: VecDeque<ScrubOp>,
@@ -170,6 +174,8 @@ impl SurfaceView {
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
+            probing: false,
+            targets: Default::default(),
             capture: None,
             scrub: None,
             scrub_ops: VecDeque::new(),
@@ -1063,7 +1069,11 @@ impl SurfaceView {
             return div().into_any_element();
         }
         if let Some(control) = self.controls.get(&id) {
-            return div().flex_none().child(control.clone()).into_any_element();
+            return div()
+                .flex_none()
+                .child(control.clone())
+                .children(self.probe(id))
+                .into_any_element();
         }
         if let Some(field) = self.fields.get(&id) {
             return self.field_element(node, field, cx);
@@ -1158,7 +1168,7 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let element = element.children(children);
+        let element = element.children(children).children(self.probe(node.id));
         self.place(element.into_any_element(), node, window, cx)
     }
     /// Anchored kit surfaces escape the panel clip and stack above it.
@@ -1594,7 +1604,8 @@ impl SurfaceView {
             .when(in_row, |d| d.flex_1())
             .when(!in_row, |d| d.flex_none().w_full())
             .min_w(px(0.))
-            .child(field.clone());
+            .child(field.clone())
+            .children(self.probe(id));
         if let Some(ax) = &node.ax {
             if let Some(role) = ax.role {
                 wrapper = wrapper.role(role);

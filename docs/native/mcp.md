@@ -33,8 +33,10 @@ no production caller.
   `capture_panel`, `computer_use_panel`, `set_panel_layout`,
   `get_workspace_state`, and the live half of `get_panel_layout`) run on the
   main thread through `app/src/panel_bridge.rs`, against the shell's live
-  layout and the v4 panels' compiled trees. Compat (WebKit) panel bodies and
-  the viewer's Metal layer aren't in captures or reads yet.
+  layout and the v4 panels' compiled trees. Captures list what they omit (the
+  engine's viewer/scopes picture, WebKit extension bodies); WebKit panel
+  controls aren't in reads yet. App agents (no project) reach the application
+  window and its Agent archive.
 - `thread_list` and `thread_read` read the durable thread archive. In the app,
   `thread_read` adds a live run's trace (`activity`, last 20,000 units) and open
   questions from the window's Agent panel (`Builtins::agent_thread_live`).

@@ -839,35 +839,30 @@ impl Editor {
             .map_or(self.layout.workspace.as_str(), |(_, name)| name);
         serde_json::json!({"workspace":{"id":self.layout.workspace,"name":name},"docks":docks})
     }
-    /// set_panel_layout: saves `docks` as a new named layout and shows it. A
-    /// name already taken gets a number, so earlier layouts stay.
-    pub fn agent_layout(
-        &mut self,
-        name: &str,
+    /// What set_panel_layout's background write needs: the layout file, this
+    /// window's project key, and `docks` as a layout of this workspace.
+    pub fn agent_layout_plan(
+        &self,
         docks: Vec<crate::layout::Dock>,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<String> {
+    ) -> (Option<PathBuf>, String, Layout) {
         let layout = Layout {
             version: self.layout.version,
             workspace: self.layout.workspace.clone(),
             docks,
         };
-        layout.validate()?;
-        let mut saved = String::new();
-        self.mutate_store(|store| {
-            let mut candidate = name.to_owned();
-            let mut n = 2;
-            while store.saved.contains_key(&candidate) {
-                candidate = format!("{name} {n}");
-                n += 1;
-            }
-            store.save_named(&candidate, &layout).map(|s| saved = s)
-        })?;
+        (self.path.clone(), self.project.clone(), layout)
+    }
+    /// Shows a layout whose store write already landed (no disk access here).
+    pub fn adopt_agent_layout(
+        &mut self,
+        store: LayoutStore,
+        layout: Layout,
+        cx: &mut Context<Self>,
+    ) {
+        self.store = store;
         self.layout = layout;
         self.maximized_panel = None;
-        self.save();
         cx.notify();
-        Ok(saved)
     }
     /// Runs a shell command without an AppKit host (tests).
     #[doc(hidden)]

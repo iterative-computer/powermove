@@ -519,11 +519,22 @@ fn describe_thread(thread: &Value) -> Value {
 impl ThreadArchive for EngineJobs {
     fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value> {
         let state = self.kernel.state();
+        let decode = |value: &pm_model::Value| {
+            serde_json::from_str::<Value>(&to_canonical_string(value)).ok()
+        };
+        // The application Agent panel (no project) nests its archive.
         let archive = match project {
-            Some(project) => state.settings.get(&format!("agentThreads.{project}")),
-            None => None,
+            Some(project) => state
+                .settings
+                .get(&format!("agentThreads.{project}"))
+                .and_then(decode),
+            None => state
+                .settings
+                .get(pm_builtins::APPLICATION_AGENT_STORE)
+                .and_then(decode)
+                .map(|fields| fields["agentThreads.builtin-application"].clone())
+                .filter(Value::is_object),
         }
-        .and_then(|value| serde_json::from_str::<Value>(&to_canonical_string(value)).ok())
         .unwrap_or_else(|| json!({"threads":[]}));
         let threads = archive["threads"].as_array().map_or(&[][..], Vec::as_slice);
         let count = |key: &str, default: usize| args[key].as_u64().map_or(default, |n| n as usize);
