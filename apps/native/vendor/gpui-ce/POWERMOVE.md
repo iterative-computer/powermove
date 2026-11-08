@@ -173,6 +173,10 @@ The session locked before the after-patch display and OS IME checks; those are o
   unlocked run. `PM_FRAME_PACING=1` records the **GPUI layer's** drawable timestamps;
   zero timestamps are unknown, never successful presentations. CPU phase timing
   remains opt-in through `ZED_MEASUREMENTS=1`.
+- **P-120 / composition:** `MacWindow::draw` releases the window lock before the
+  slot transaction commits. The commit runs AppKit's display cycle, whose cursor
+  rect reset takes the same lock; holding it deadlocked the main thread whenever
+  the viewer slot moved.
 - **P-120 / headroom candidate:** S2 caches its unchanged native viewer pattern and
   clip masks, and gives the 1,000 static texture tiles a cached GPUI entity. The
   fresh 60-Hz producer is separate; texture leases/fences remain intact. This uses
