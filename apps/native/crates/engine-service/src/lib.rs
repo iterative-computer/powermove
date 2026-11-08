@@ -1454,6 +1454,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 .and_then(|overlays| {
                     engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
                 });
+            // Media ahead of the playhead is prepared after this frame is
+            // submitted: building its plan must not delay this present.
+            let mut prepare_at = None;
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
                 && now - r.prepared >= PREPARE_EVERY_SECONDS
@@ -1462,7 +1465,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 let ahead = (PREPARE_AHEAD_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
                     * f64::from(r.transport.rate().num.signum());
                 let at = (spec.time.get() + ahead as i64).max(0);
-                engine.prepare(&scene, Ticks::new(at).unwrap_or(spec.time), spec);
+                prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
             }
             #[cfg(test)]
             if let Some(hook) = shared.before_submit.lock().unwrap().take() {
@@ -1556,6 +1559,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 }
             }
             state.notify();
+            drop(state);
+            if let Some(at) = prepare_at {
+                engine.prepare(&scene, at, spec);
+            }
         } else {
             let waiting = runtime
                 .values()
