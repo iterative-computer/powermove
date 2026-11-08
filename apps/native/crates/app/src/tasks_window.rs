@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex};
 pub struct TasksWindow {
     pro: Arc<ProMedia>,
     exports: Arc<Mutex<BackgroundTasks>>,
+    /// Cancels the running export through its own job (the export worker
+    /// settles its task; this window never moves the export queue).
+    controller: WeakEntity<crate::session::Controller>,
 }
 
 pub const TITLE: &str = "Background Tasks";
@@ -66,19 +69,18 @@ pub fn detail(task: &Task) -> String {
 }
 
 impl TasksWindow {
-    /// Media tasks act through the service; exports through their queue.
-    fn act(&self, media: bool, id: pm_promedia::tasks::TaskId, action: TaskAction) {
+    /// Media tasks act through the service. An export can only be
+    /// cancelled, through its job: it has no pause, and one runs at a time.
+    fn act(&self, media: bool, id: pm_promedia::tasks::TaskId, action: TaskAction, cx: &mut App) {
         if media {
             let _ = self.pro.act(id, action);
-            return;
+        } else if action == TaskAction::Cancel {
+            let _ = self.controller.update(cx, |v, _| {
+                if let Some(job) = &v.builtins.export_job {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
         }
-        let mut q = self.exports.lock().unwrap();
-        let _ = match action {
-            TaskAction::Pause => q.pause(id),
-            TaskAction::Resume => q.resume(id),
-            TaskAction::Cancel => q.cancel(id),
-            TaskAction::Priority(p) => q.priority(id, p),
-        };
     }
 
     fn row(
@@ -107,14 +109,14 @@ impl TasksWindow {
                     .text_color(rgb(if enabled { c.accent_text } else { c.muted }))
                     .when(enabled, |d| {
                         d.on_click(cx.listener(move |v, _, _, cx| {
-                            v.act(media, id, action);
+                            v.act(media, id, action, cx);
                             cx.notify();
                         }))
                     })
                     .child(label)
             };
         let mut trailing = div().flex().flex_none().gap(px(m.gap));
-        if let Some(label) = p.pause_resume_label {
+        if media && let Some(label) = p.pause_resume_label {
             let action = if label == "Resume" {
                 TaskAction::Resume
             } else {
@@ -131,26 +133,28 @@ impl TasksWindow {
             .items_center()
             .gap(px(m.inset))
             .py(px(m.gap))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |_, _, window, cx| {
-                    let options: Vec<serde_json::Value> = PRIORITIES
+            .when(media, |row| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |_, _, window, cx| {
+                        let options: Vec<serde_json::Value> = PRIORITIES
                         .iter()
                         .map(|(label, _)| serde_json::json!({"label": format!("{label} Priority")}))
                         .collect();
-                    let entity = cx.entity().downgrade();
-                    crate::v4_native::menu(window, &options, cx, move |chosen, cx| {
-                        if let Some(index) = chosen
-                            && let Some((_, priority)) = PRIORITIES.get(index)
-                        {
-                            let _ = entity.update(cx, |v, cx| {
-                                v.act(media, id, TaskAction::Priority(*priority));
-                                cx.notify();
-                            });
-                        }
-                    });
-                }),
-            )
+                        let entity = cx.entity().downgrade();
+                        crate::v4_native::menu(window, &options, cx, move |chosen, cx| {
+                            if let Some(index) = chosen
+                                && let Some((_, priority)) = PRIORITIES.get(index)
+                            {
+                                let _ = entity.update(cx, |v, cx| {
+                                    v.act(media, id, TaskAction::Priority(*priority), cx);
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    }),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -250,6 +254,7 @@ impl crate::session::Controller {
         let t = tokens();
         let pro = self.pro_media.clone();
         let exports = self.builtins.export_tasks.clone();
+        let controller = cx.entity().downgrade();
         let mut entity = None;
         let _ = cx.open_window(
             WindowOptions::new()
@@ -262,7 +267,11 @@ impl crate::session::Controller {
                     size(px(t.metrics.palette_width), px(t.metrics.palette_height)),
                 )))),
             |_, cx| {
-                let view = cx.new(|_| TasksWindow { pro, exports });
+                let view = cx.new(|_| TasksWindow {
+                    pro,
+                    exports,
+                    controller,
+                });
                 entity = Some(view.clone());
                 view
             },
