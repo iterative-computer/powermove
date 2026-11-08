@@ -79,6 +79,7 @@ pub struct HostConfig {
 
 enum Input {
     Kernel,
+    Viewport(f32, f32, f32),
     Realm(Writer, RealmEnvelope),
     Moved,
     Run(String, Value),
@@ -345,6 +346,7 @@ impl ExtensionHost {
             stores: vec![],
             confined: BTreeMap::new(),
             open: BTreeMap::new(),
+            viewport: None,
             shared: shared.clone(),
             inbox: inbox.clone(),
             transport: transport.clone(),
@@ -521,6 +523,10 @@ impl ExtensionHost {
     pub fn place_panel(&self, id: &str, rect: Option<[f32; 4]>) {
         let _ = self.inbox.send(Input::Place(id.to_owned(), rect));
     }
+    /// The editor window's viewport, for v1–3's `window.innerWidth` & co.
+    pub fn set_viewport(&self, width: f32, height: f32, scale: f32) {
+        let _ = self.inbox.send(Input::Viewport(width, height, scale));
+    }
     /// The app's clock moved. Cheap enough for every presented frame.
     pub fn publish_time(&self, time: f64, playing: bool) {
         if let Some(host) = &*self.transport.lock().unwrap() {
@@ -600,6 +606,8 @@ struct Owner {
     confined: BTreeMap<String, (Discovered, ModuleGraph)>,
     /// Open panels and their last placement, replayed into a rebuilt realm or helper.
     open: BTreeMap<String, Option<[f32; 4]>>,
+    /// The editor window's viewport, replayed into a rebuilt realm before boot.
+    viewport: Option<(f32, f32, f32)>,
     config: HostConfig,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
@@ -738,6 +746,10 @@ impl Owner {
                     self.open.remove(&id);
                 }
                 self.show_panel(&id, open);
+            }
+            Input::Viewport(width, height, scale) => {
+                self.viewport = Some((width, height, scale));
+                self.eval(&format!("__compat.viewport({width},{height},{scale})"));
             }
             Input::Place(id, rect) => {
                 if let Some(placed) = self.open.get_mut(&id) {
@@ -1435,6 +1447,9 @@ impl Owner {
         self.publish_records();
         self.publish_store();
         let records = self.trusted_records();
+        if let Some((width, height, scale)) = self.viewport {
+            self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+        }
         self.eval(&format!("__compat.boot({records})"));
     }
     /// The plan of the trusted realm. Confined records never enter it.
@@ -1558,6 +1573,9 @@ impl Owner {
             Ok(()) => {
                 self.publish_records();
                 let records = self.trusted_records();
+                if let Some((width, height, scale)) = self.viewport {
+                    self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+                }
                 self.eval(&format!("__compat.boot({records})"));
             }
             Err(error) => self.shared.update(|p| {
@@ -2287,5 +2305,42 @@ mod tests {
         });
         let theme = fixture.host.contributions().unwrap()["nativeTheme"].clone();
         assert_eq!(theme["dark"], serde_json::json!({}));
+    }
+    /// v1–3 extensions size docks from `window.innerWidth` on activation, as
+    /// in Electron; the realm has the editor window's viewport.
+    #[test]
+    fn extensions_read_the_editor_window_size() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-size",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.workspace.mutate((w) => { for (const d of w.layout.docks) if (d.id === 'left') d.size = Math.round(window.innerWidth * .18); });
+                   api.commands.register({id:'synthetic-size.'+window.innerWidth+'x'+window.innerHeight,label:'Size',run(){}});
+                   window.addEventListener('resize', () => api.commands.register({id:'synthetic-size.resized-'+window.innerWidth,label:'Resized',run(){}}));
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |id: &'static str| {
+            move |host: &ExtensionHost| {
+                host.contributions().is_some_and(|c| {
+                    c["commands"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|command| command["id"] == id)
+                })
+            }
+        };
+        fixture.until(
+            "activation with the default size",
+            has("synthetic-size.1440x900"),
+        );
+        fixture.host.set_viewport(1200., 700., 2.);
+        fixture.until("resize", has("synthetic-size.resized-1200"));
     }
 }

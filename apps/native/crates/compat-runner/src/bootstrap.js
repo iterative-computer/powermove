@@ -1,5 +1,27 @@
 // Runs in the actual Compat V8 owner. Missing app capabilities are errors, never test doubles.
+// The editor window's size, as Electron's `window` had it (v1–3 extensions
+// size docks from it); the host keeps it current. Defaults until it does.
+for (const [key, value] of [
+  ["innerWidth", 1440],
+  ["innerHeight", 900],
+  ["outerWidth", 1440],
+  ["outerHeight", 900],
+  ["devicePixelRatio", 2],
+])
+  globalThis[key] = value;
 globalThis.__compat = {
+  /** The editor window's viewport changed (points and backing scale). */
+  viewport(width, height, scale) {
+    const changed =
+      globalThis.innerWidth !== width || globalThis.innerHeight !== height;
+    for (const target of [globalThis, globalThis.window].filter(Boolean)) {
+      target.innerWidth = target.outerWidth = width;
+      target.innerHeight = target.outerHeight = height;
+      target.devicePixelRatio = scale;
+    }
+    if (changed && this.realm)
+      this.realm.task(() => globalThis.window?.dispatchEvent?.(new Event("resize")));
+  },
   create(initial) {
     const call = (operation, input = {}) => runtime.engine(operation, input);
     initial ??= call("kernel.publication");

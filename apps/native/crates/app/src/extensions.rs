@@ -170,6 +170,8 @@ pub struct Extensions {
     v4_choices: Vec<Choice>,
     v4_seen: u64,
     v4_theme_choices: Vec<Choice>,
+    /// The viewport last sent to the compat realm.
+    viewport: Option<(f32, f32, f32)>,
     /// The v4 theme an extension last asked to show (`themes.activate`).
     v4_theme_requested: Option<String>,
     /// The v1–3 theme last applied (id and patch), so republishing is free.
@@ -214,6 +216,7 @@ impl Default for Extensions {
             v4_theme_choices: vec![],
             v1_theme: None,
             v4_theme_requested: None,
+            viewport: None,
             v4_themes: vec![],
             v4_themes_seen: 0,
             surfaces: BTreeMap::new(),
@@ -283,6 +286,7 @@ impl Controller {
             }),
         });
         self.extensions.host = Some(host);
+        self.sync_viewport();
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {
                 if this.update(cx, |v, cx| v.drain_extensions(cx)).is_err() {
@@ -1386,7 +1390,25 @@ impl Controller {
         .detach();
     }
     /// Sends placement after layout: positions live in the realm's document.
+    /// v1–3's `window.innerWidth` & co. follow the editor window's content.
+    fn sync_viewport(&mut self) {
+        let (size, scale) = {
+            let shell = self.host.borrow();
+            let view = &shell.gpui;
+            let scale = view.window().map_or(2., |w| w.backingScaleFactor()) as f32;
+            (view.frame().size, scale)
+        };
+        let viewport = (size.width as f32, size.height as f32, scale);
+        if viewport.0 > 0.
+            && self.extensions.viewport != Some(viewport)
+            && let Some(host) = &self.extensions.host
+        {
+            host.set_viewport(viewport.0, viewport.1, viewport.2);
+            self.extensions.viewport = Some(viewport);
+        }
+    }
     fn place_panels(&mut self) {
+        self.sync_viewport();
         let Some(host) = &self.extensions.host else {
             return;
         };
