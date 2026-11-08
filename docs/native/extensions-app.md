@@ -57,11 +57,19 @@ because the v4 Inspector has no DOM slot.
 
 ## Failure
 
-A failed compile, throw or export leaves one record with its reason. A task that
-runs for eight seconds is terminated and the realm is rebuilt without the extension
-that was activating, which stays disabled in state; two restarts in one session stop
-the realm until the project reopens. The rebuild is a new writer generation: the old
-one is sealed (`RealmFailed`), and its page is replaced and its open panels reopened.
+A failed compile, throw or export leaves one record with its reason. Each
+extension activates in its own realm task. A task that runs for eight seconds gets
+the D11 sheet ("isn't responding — Wait / Stop"), named for the extension that was
+activating or whose command is running; the task keeps running meanwhile. Stop
+terminates it and rebuilds the realm; a hang during activation also turns that
+extension off in state. Two restarts in one session stop the realm until the project
+reopens. The rebuild is a new writer generation: the old one is sealed
+(`RealmFailed`), and its page is replaced and its open panels reopened. A panel whose
+extension reloads is parked (`panel:park`) and returns to its tab.
+
+The trusted realm queues fetches that do not fit its external-memory budget
+(`Limits::queue_fetches`) and always leaves room for one synchronous engine reply,
+so a panel that starts dozens of requests cannot starve the kernel channel.
 A fatal V8 process abort is not contained:
 the trusted realm is in-process, by decision 5.
 
@@ -93,12 +101,11 @@ once a Store key is pinned; until the Store signs releases there is none (see
 
 ## Known limits
 
-- On screen (2026-11-08, debug build): panel roots are placed in the realm, but the
-  WebKit page lags behind it after a realm rebuild; contributed panel bodies show the
-  themed page background without their content. Under load the 8 s watchdog rebuilds
-  the realm during activation of 38 extensions and disables the one activating.
-- With the 39-extension setup the app grew to 12–16 GB (301 MB without it; the realm
-  alone peaks at 211 MB). About 32 V8 isolates were created; not yet attributed.
+- Images do not decode in the realm (`Image.decode`, `naturalWidth`, `drawImage` of an
+  image), so checks such as Commons Logos' transparency test fail.
+- `PM.proj` hands out views: a project record read back is a view (its identity is
+  stable), not the stored object. `structuredClone` accepts views; other natives that
+  refuse proxies would not.
 
 - `render.raster`, `renderFrameTo` and `snapshot` have no engine backend, and raster
   overrides do not reach the viewer.

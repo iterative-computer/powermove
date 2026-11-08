@@ -89,3 +89,10 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - `PM.proj` is a write-tracking view; whole-tree diffs remain only for unflushed writes during native publications and for a replaced project root.
 - Contributed panels build into a body inside a host-owned root, hidden until placed; a panel the shell restored opens when its definition registers.
 - The page gets the compat theme edition matching the window's tokens (scheme, Increase Contrast, Reduce Transparency).
+- Trusted-realm watchdog follows D11: Wait / Stop sheet, never an automatic stop; Stop disables only an extension caught activating.
+- Each extension activates in its own realm task, so the watchdog times one extension.
+- Additive runtime-v8 API: `Limits::queue_fetches` (fetches wait for room and leave room for one engine reply; Store helpers keep failing).
+- Records an extension inserts read back as themselves; the realm's `structuredClone` unwraps project views.
+- The realm's first document becomes its live tree (no second copy); the first publication is staged model-to-text.
+- Shell `panel:park:<id>`: closes a tab but a later `panel:show` puts it back in place (used when an extension reloads).
+- ae-workspace-theme turning itself off on a fresh profile is its own one-time recovery (storage key `restore-request-1.0.4`), as in Electron; a migrated profile that carries the key keeps it on.
