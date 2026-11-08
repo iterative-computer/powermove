@@ -226,8 +226,8 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.06 | 0.08 | 0.06 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#080808` | `#EEEEF1` | `#080808` |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.09 | 0.07 | 0.09 | 0.07 |
-| `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.72 | 0.7 | 0.72 | 0.7 |
-| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.8 | 0.82 | 0.8 | 0.82 |
+| `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.66 | 0.7 | 0.66 | 0.7 |
+| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.82 | 0.62 | 0.82 |
 <!-- tokens:end -->
 
 ## Surface token additions — 2026-11-04
