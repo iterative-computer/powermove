@@ -29,12 +29,12 @@ pub const CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const RETIRED_BYTES: u64 = 2 * 1024 * 1024;
 const IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const DIRECT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
-/// Texels of one shared direct-source texture: every index stays below
-/// 2^24, where the shader's f32 metadata is exact.
+/// Texels of one glyph's packing at most: every index stays below 2^24,
+/// where the shader's f32 metadata is exact.
 const DIRECT_ARENA_TEXELS: usize = 1 << 24;
-/// Width of a shared direct-source texture.
-const DIRECT_ARENA_WIDTH: u32 = 4096;
-const DIRECT_UPLOAD_SCRATCH_BYTES: usize = 128 * 1024;
+/// Texels of glyphs sharing one direct-source texture (32 KB), the scratch
+/// they are written through, reused across frames.
+const DIRECT_CHUNK_TEXELS: usize = 1 << 12;
 const DIRECT_MAX_SIDE: f64 = 512.0;
 
 #[repr(C)]
@@ -114,14 +114,6 @@ struct DirectSource {
     translation: [f64; 2],
 }
 
-/// A glyph whose texels wait in an upload arena.
-struct StagedDirect {
-    lines: pm_text::render::scene::CoverageLines,
-    meta: DirectMeta,
-    arena: usize,
-    texels: usize,
-}
-
 /// What each scene item draws from, by item index.
 struct ItemSources {
     /// Atlas cells of coverage items.
@@ -175,7 +167,7 @@ pub struct TextGpu {
     image_bytes: u64,
     direct: HashMap<(usize, [u64; 4]), DirectCacheEntry>,
     direct_bytes: u64,
-    direct_upload: Vec<[f32; 2]>,
+    direct_scratch: Vec<[f32; 2]>,
     raster_pool: TargetPool,
     cache: HashMap<([u64; 2], Precision, WorkingEncoding), Cached>,
     cache_bytes: u64,
@@ -239,17 +231,96 @@ fn to_working(mut rgba: [f32; 4], working: WorkingEncoding) -> [f32; 4] {
     rgba
 }
 
-/// Append a resolved, line-only glyph to RG32Float texels: contiguous
-/// contour points, a conservative Y-row table, then pairs of edge-start
-/// point indices, all relative to where it starts. Only listed consecutive
-/// point pairs are edges, so MoveTo
-/// jumps never contribute area. A pixel querying row r has local Y in
-/// [r, r + 1), so its unit-height interval is contained in [r, r + 2).
-/// An edge can contribute only for r in [floor(min_y) - 1, floor(max_y)].
-fn direct_texels_into<I: Iterator<Item = PathEl>>(
-    elements: impl Fn() -> I,
-    texels: &mut Vec<[f32; 2]>,
-) -> Option<DirectMeta> {
+/// A glyph's packing, measured before its texels are written (so a frame's
+/// texels can be reserved at once).
+struct DirectPlan {
+    origin: [f64; 2],
+    row_start: i32,
+    row_end: i32,
+    cursors: Vec<usize>,
+    length: usize,
+    table: u32,
+    list: u32,
+    needed: usize,
+}
+
+// Visit points in exactly the packed order. The optional predecessor
+// identifies an edge; a MoveTo emits a point without an edge.
+fn walk_points(
+    elements: impl Iterator<Item = PathEl>,
+    origin: [f64; 2],
+    mut emit: impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+) -> Option<usize> {
+    fn append(
+        p: [f32; 2],
+        count: &mut usize,
+        last: &mut Option<[f32; 2]>,
+        emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+    ) {
+        if let Some(prev) = *last
+            && prev != p
+        {
+            emit(*count, p, Some(prev));
+            *count += 1;
+        }
+        *last = Some(p);
+    }
+    fn close(
+        count: &mut usize,
+        first: &mut Option<[f32; 2]>,
+        last: &mut Option<[f32; 2]>,
+        emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+    ) {
+        if let Some(p) = *first {
+            append(p, count, last, emit);
+        }
+        *first = None;
+        *last = None;
+    }
+
+    let (mut first, mut last) = (None, None);
+    let mut count = 0;
+    for element in elements {
+        match element {
+            PathEl::MoveTo(p) => {
+                close(&mut count, &mut first, &mut last, &mut emit);
+                let q = [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32];
+                emit(count, q, None);
+                count += 1;
+                first = Some(q);
+                last = Some(q);
+            }
+            PathEl::LineTo(p) => {
+                last?;
+                append(
+                    [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32],
+                    &mut count,
+                    &mut last,
+                    &mut emit,
+                );
+            }
+            PathEl::ClosePath => close(&mut count, &mut first, &mut last, &mut emit),
+            PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
+        }
+    }
+    close(&mut count, &mut first, &mut last, &mut emit);
+    Some(count)
+}
+
+fn direct_range(row_start: i32, row_end: i32, a: f32, b: f32) -> std::ops::RangeInclusive<i32> {
+    let low = (a.min(b).floor() as i32 - 1).max(row_start);
+    let high = (a.max(b).floor() as i32).min(row_end);
+    low..=high
+}
+
+/// Measures a resolved, line-only glyph's packing: contiguous contour
+/// points, a conservative Y-row table, then pairs of edge-start point
+/// indices, all relative to where it starts. Only listed consecutive point
+/// pairs are edges, so MoveTo jumps never contribute area. A pixel querying
+/// row r has local Y in [r, r + 1), so its unit-height interval is contained
+/// in [r, r + 2). An edge can contribute only for r in
+/// [floor(min_y) - 1, floor(max_y)].
+fn direct_plan<I: Iterator<Item = PathEl>>(elements: impl Fn() -> I) -> Option<DirectPlan> {
     let bounds = line_bounds(elements())?;
     if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
         .into_iter()
@@ -260,84 +331,16 @@ fn direct_texels_into<I: Iterator<Item = PathEl>>(
         return None;
     }
     let origin = [bounds.x0.floor(), bounds.y0.floor()];
-    // Visit points in exactly the packed order. The optional predecessor
-    // identifies an edge; a MoveTo emits a point without an edge.
-    fn walk_points(
-        elements: impl Iterator<Item = PathEl>,
-        origin: [f64; 2],
-        mut emit: impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
-    ) -> Option<usize> {
-        fn append(
-            p: [f32; 2],
-            count: &mut usize,
-            last: &mut Option<[f32; 2]>,
-            emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
-        ) {
-            if let Some(prev) = *last
-                && prev != p
-            {
-                emit(*count, p, Some(prev));
-                *count += 1;
-            }
-            *last = Some(p);
-        }
-        fn close(
-            count: &mut usize,
-            first: &mut Option<[f32; 2]>,
-            last: &mut Option<[f32; 2]>,
-            emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
-        ) {
-            if let Some(p) = *first {
-                append(p, count, last, emit);
-            }
-            *first = None;
-            *last = None;
-        }
-
-        let (mut first, mut last) = (None, None);
-        let mut count = 0;
-        for element in elements {
-            match element {
-                PathEl::MoveTo(p) => {
-                    close(&mut count, &mut first, &mut last, &mut emit);
-                    let q = [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32];
-                    emit(count, q, None);
-                    count += 1;
-                    first = Some(q);
-                    last = Some(q);
-                }
-                PathEl::LineTo(p) => {
-                    last?;
-                    append(
-                        [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32],
-                        &mut count,
-                        &mut last,
-                        &mut emit,
-                    );
-                }
-                PathEl::ClosePath => close(&mut count, &mut first, &mut last, &mut emit),
-                PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
-            }
-        }
-        close(&mut count, &mut first, &mut last, &mut emit);
-        Some(count)
-    }
-
     let row_start = -2i32;
     let row_end = bounds.height().ceil() as i32 + 3;
     let rows = (row_end - row_start + 1) as usize;
     let mut cursors = vec![0usize; rows];
-    let range = |a: f32, b: f32| {
-        let low = (a.min(b).floor() as i32 - 1).max(row_start);
-        let high = (a.max(b).floor() as i32).min(row_end);
-        low..=high
-    };
     let mut edges = 0usize;
     let point_count = walk_points(elements(), origin, |_, point, prev| {
         if let Some(prev) = prev {
             edges += 1;
             if prev[1] != point[1] {
-                for row in range(prev[1], point[1]) {
+                for row in direct_range(row_start, row_end, prev[1], point[1]) {
                     cursors[(row - row_start) as usize] += 1;
                 }
             }
@@ -348,7 +351,7 @@ fn direct_texels_into<I: Iterator<Item = PathEl>>(
     }
     let mut length = 0usize;
     // Prefix counts in place; each entry becomes the insertion cursor for
-    // the second walk after its starting offset has been written below.
+    // the fill after its starting offset has been written.
     for count in &mut cursors {
         let row_count = *count;
         *count = length;
@@ -363,33 +366,58 @@ fn direct_texels_into<I: Iterator<Item = PathEl>>(
     if needed as u64 * 8 > DIRECT_CACHE_BYTES / 2 || needed >= DIRECT_ARENA_TEXELS {
         return None;
     }
-    let base = texels.len();
-    texels.resize(base + needed, [0.0, 0.0]);
-    let texels = &mut texels[base..];
+    Some(DirectPlan {
+        origin,
+        row_start,
+        row_end,
+        cursors,
+        length,
+        table,
+        list,
+        needed,
+    })
+}
+
+/// Writes `plan`'s glyph into `texels` (exactly `plan.needed` long).
+fn direct_fill<I: Iterator<Item = PathEl>>(
+    mut plan: DirectPlan,
+    elements: impl Fn() -> I,
+    texels: &mut [[f32; 2]],
+) -> Option<DirectMeta> {
+    let DirectPlan {
+        origin,
+        row_start,
+        row_end,
+        table,
+        list,
+        length,
+        ..
+    } = plan;
+    let rows = plan.cursors.len();
     for row in 0..rows {
         let end = if row + 1 < rows {
-            cursors[row + 1]
+            plan.cursors[row + 1]
         } else {
             length
         };
-        texels[table as usize + row] = [cursors[row] as f32, (end - cursors[row]) as f32];
+        texels[table as usize + row] = [plan.cursors[row] as f32, (end - plan.cursors[row]) as f32];
     }
-    let written = walk_points(elements(), origin, |index, point, prev| {
+    let cursors = &mut plan.cursors;
+    walk_points(elements(), origin, |index, point, prev| {
         texels[index] = point;
         if let Some(prev) = prev
             && prev[1] != point[1]
         {
-            for row in range(prev[1], point[1]) {
+            for row in direct_range(row_start, row_end, prev[1], point[1]) {
                 let position = &mut cursors[(row - row_start) as usize];
                 texels[list as usize + *position / 2][*position & 1] = (index - 1) as f32;
                 *position += 1;
             }
         }
     })?;
-    debug_assert_eq!(written, point_count);
     Some(DirectMeta {
         origin,
-        base: base as u32,
+        base: 0,
         table,
         list,
         row_start,
@@ -398,11 +426,26 @@ fn direct_texels_into<I: Iterator<Item = PathEl>>(
     })
 }
 
-/// Width of a shared direct-source texture on `device`.
-fn direct_arena_width(device: &wgpu::Device) -> u32 {
-    DIRECT_ARENA_WIDTH
-        .min(device.limits().max_texture_dimension_2d)
-        .max(1)
+/// [`direct_plan`] and [`direct_fill`] appended to `texels`.
+#[cfg(test)]
+fn direct_texels_into<I: Iterator<Item = PathEl>>(
+    elements: impl Fn() -> I,
+    texels: &mut Vec<[f32; 2]>,
+) -> Option<DirectMeta> {
+    let plan = direct_plan(&elements)?;
+    let base = texels.len();
+    texels.resize(base + plan.needed, [0.0, 0.0]);
+    let mut meta = direct_fill(plan, elements, &mut texels[base..])?;
+    meta.base = base as u32;
+    Some(meta)
+}
+
+/// A shared direct-source texture's (width, height) for `texels`: the
+/// fewest rows that fit, each as short as they allow, so it pads less than
+/// one texel per row.
+fn arena_shape(texels: usize, max_side: usize) -> (usize, usize) {
+    let rows = texels.div_ceil(max_side.max(1)).max(1);
+    (texels.div_ceil(rows).max(1), rows)
 }
 
 /// The bounds of a line-only path's segments (a lone MoveTo adds none),
@@ -674,7 +717,7 @@ impl TextGpu {
             image_bytes: 0,
             direct: HashMap::new(),
             direct_bytes: 0,
-            direct_upload: Vec::new(),
+            direct_scratch: Vec::new(),
             raster_pool: TargetPool::new(),
             cache: HashMap::new(),
             cache_bytes: 0,
@@ -766,7 +809,6 @@ impl TextGpu {
         self.image_bytes = 0;
         self.direct.clear();
         self.direct_bytes = 0;
-        self.direct_upload = Vec::new();
     }
 
     pub fn cached_bytes(&self) -> u64 {
@@ -874,128 +916,115 @@ impl TextGpu {
         })
     }
 
-    /// Appends `lines`' texels to the last of `arenas` (a new one when it
-    /// is full); `None` when the glyph cannot draw directly.
-    /// [`Self::direct_flush`] uploads them.
-    fn direct_stage(
-        lines: pm_text::render::scene::CoverageLines,
-        capacity: usize,
-        arenas: &mut Vec<Vec<[f32; 2]>>,
-        staged: &mut Vec<StagedDirect>,
-    ) -> Option<()> {
-        if arenas.is_empty() {
-            arenas.push(Vec::new());
-        }
-        let arena = arenas.last_mut().expect("an arena");
-        let start = arena.len();
-        let mut meta = direct_texels_into(|| lines.device_elements(), arena)?;
-        let texels = arena.len() - start;
-        if texels > capacity {
-            arena.truncate(start);
-            return None;
-        }
-        if arena.len() > capacity {
-            // The next texture takes this glyph; earlier ones keep theirs.
-            let moved: Vec<[f32; 2]> = arena.drain(start..).collect();
-            arenas.push(moved);
-            meta.base = 0;
-        }
-        staged.push(StagedDirect {
-            lines,
-            meta,
-            arena: arenas.len() - 1,
-            texels,
-        });
-        Some(())
-    }
-
-    /// Uploads each arena as one texture and caches every staged glyph in
-    /// its arena's texture. Returns the sources in staging order.
-    fn direct_flush(
+    /// Uploads the planned glyphs a chunk at a time through the reused
+    /// scratch: one texture and one copy per chunk of at most
+    /// [`DIRECT_CHUNK_TEXELS`] (a larger glyph takes a chunk alone), and
+    /// caches each glyph in its chunk's texture. Returns the sources in
+    /// planning order; `None` if a glyph cannot be written.
+    fn direct_upload(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        arenas: Vec<Vec<[f32; 2]>>,
-        staged: Vec<StagedDirect>,
-    ) -> Vec<(wgpu::TextureView, DirectMeta)> {
-        let width = direct_arena_width(device);
-        let textures: Vec<(wgpu::Texture, wgpu::TextureView)> = arenas
-            .into_iter()
-            .map(|mut texels| {
-                let height = (texels.len() as u32).div_ceil(width).max(1);
-                texels.resize(width as usize * height as usize, [0.0, 0.0]);
-                let size = wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                };
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("pm text direct resolved edges"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rg32Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    // [f32; 2] has no padding; write_texture copies the
-                    // bytes before returning.
-                    unsafe {
-                        std::slice::from_raw_parts(texels.as_ptr().cast::<u8>(), texels.len() * 8)
-                    },
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(width * 8),
-                        rows_per_image: None,
-                    },
-                    size,
-                );
-                let view = texture.create_view(&Default::default());
-                (texture, view)
-            })
-            .collect();
-        let mut out = Vec::with_capacity(staged.len());
-        for StagedDirect {
-            lines,
-            mut meta,
-            arena,
-            texels,
-        } in staged
-        {
-            let (texture, view) = &textures[arena];
-            meta.width = width;
-            let bytes = texels as u64 * 8;
-            while self.direct_bytes + bytes > DIRECT_CACHE_BYTES {
-                let Some((&oldest, _)) = self.direct.iter().min_by_key(|(_, e)| e.used) else {
-                    break;
-                };
-                if let Some(removed) = self.direct.remove(&oldest) {
-                    self.direct_bytes -= removed.bytes;
-                }
+        planned: Vec<(pm_text::render::scene::CoverageLines, DirectPlan)>,
+    ) -> Option<Vec<(wgpu::TextureView, DirectMeta)>> {
+        let max_side = device.limits().max_texture_dimension_2d.max(1) as usize;
+        let mut out = Vec::with_capacity(planned.len());
+        let mut chunk: Vec<(pm_text::render::scene::CoverageLines, DirectMeta, usize)> = Vec::new();
+        let mut scratch = std::mem::take(&mut self.direct_scratch);
+        let sizes: Vec<usize> = planned.iter().map(|(_, p)| p.needed).collect();
+        let mut planned = planned.into_iter();
+        let mut at = 0;
+        while at < sizes.len() {
+            // This chunk's glyphs, and its texture's texels reserved at once.
+            let mut end = at + 1;
+            let mut total = sizes[at];
+            while end < sizes.len() && total + sizes[end] <= DIRECT_CHUNK_TEXELS {
+                total += sizes[end];
+                end += 1;
             }
-            self.direct_bytes += bytes;
-            self.direct.insert(
-                lines.key(),
-                DirectCacheEntry {
-                    _lines: lines.lines,
-                    _texture: texture.clone(),
-                    view: view.clone(),
-                    meta,
-                    bytes,
-                    used: self.tick,
+            let (w, h) = arena_shape(total, max_side);
+            scratch.clear();
+            scratch.reserve(w * h);
+            chunk.clear();
+            for _ in at..end {
+                let (lines, plan) = planned.next().expect("sized");
+                let base = scratch.len();
+                let needed = plan.needed;
+                scratch.resize(base + needed, [0.0, 0.0]);
+                let mut meta = direct_fill(plan, || lines.device_elements(), &mut scratch[base..])?;
+                meta.base = base as u32;
+                chunk.push((lines, meta, needed));
+            }
+            at = end;
+            let (width, height) = (w, h);
+            scratch.resize(width * height, [0.0, 0.0]);
+            let size = wgpu::Extent3d {
+                width: width as u32,
+                height: height as u32,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pm text direct resolved edges"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
                 },
+                // [f32; 2] has no padding; write_texture copies the bytes
+                // before returning.
+                unsafe {
+                    std::slice::from_raw_parts(scratch.as_ptr().cast::<u8>(), scratch.len() * 8)
+                },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width as u32 * 8),
+                    rows_per_image: None,
+                },
+                size,
             );
-            out.push((view.clone(), meta));
+            let view = texture.create_view(&Default::default());
+            for (lines, mut meta, texels) in chunk.drain(..) {
+                meta.width = width as u32;
+                let bytes = texels as u64 * 8;
+                while self.direct_bytes + bytes > DIRECT_CACHE_BYTES {
+                    let Some((&oldest, _)) = self.direct.iter().min_by_key(|(_, e)| e.used) else {
+                        break;
+                    };
+                    if let Some(removed) = self.direct.remove(&oldest) {
+                        self.direct_bytes -= removed.bytes;
+                    }
+                }
+                self.direct_bytes += bytes;
+                self.direct.insert(
+                    lines.key(),
+                    DirectCacheEntry {
+                        _lines: lines.lines,
+                        _texture: texture.clone(),
+                        view: view.clone(),
+                        meta,
+                        bytes,
+                        used: self.tick,
+                    },
+                );
+                out.push((view.clone(), meta));
+            }
         }
-        out
+        // Keep the common chunk's scratch; not an unusually large glyph's.
+        if scratch.capacity() <= 2 * DIRECT_CHUNK_TEXELS {
+            scratch.clear();
+            self.direct_scratch = scratch;
+        }
+        Some(out)
     }
 
     /// Renders the coverage pages of `atlas` into pool targets, which the
@@ -1145,14 +1174,10 @@ impl TextGpu {
         let mut direct_sources: HashMap<usize, DirectSource> = HashMap::new();
         if direct {
             // Glyphs the direct cache misses are uploaded together: one
-            // texture and one copy per frame, not one per glyph.
-            let mut arenas = vec![std::mem::take(&mut self.direct_upload)];
-            arenas[0].clear();
-            let max_side = device.limits().max_texture_dimension_2d;
-            let capacity =
-                DIRECT_ARENA_TEXELS.min(direct_arena_width(device) as usize * max_side as usize);
-            let mut staged = Vec::new();
-            let mut staged_at: HashMap<(usize, [u64; 4]), usize> = HashMap::new();
+            // texture and one copy per frame, not one per glyph, reserved
+            // once from every glyph's plan.
+            let mut planned = Vec::new();
+            let mut planned_at: HashMap<(usize, [u64; 4]), usize> = HashMap::new();
             let mut staged_items = Vec::new();
             for (i, item) in scene.items.iter().enumerate() {
                 let ItemContent::Coverage { paths } = &item.content else {
@@ -1166,36 +1191,33 @@ impl TextGpu {
                 let [_, _, _, _, x, y] = placed.transform.as_coeffs();
                 if let Some(source) = self.direct_hit(&lines, [x, y]) {
                     direct_sources.insert(i, source);
-                } else if let Some(&at) = staged_at.get(&lines.key()) {
+                } else if let Some(&at) = planned_at.get(&lines.key()) {
                     staged_items.push((i, at, [x, y]));
-                } else if Self::direct_stage(lines.clone(), capacity, &mut arenas, &mut staged)
-                    .is_some()
-                {
-                    staged_at.insert(lines.key(), staged.len() - 1);
-                    staged_items.push((i, staged.len() - 1, [x, y]));
+                } else if let Some(plan) = direct_plan(|| lines.device_elements()) {
+                    planned_at.insert(lines.key(), planned.len());
+                    staged_items.push((i, planned.len(), [x, y]));
+                    planned.push((lines, plan));
                 } else {
                     direct = false;
                     break;
                 }
             }
-            if direct && !staged.is_empty() {
-                let flushed = self.direct_flush(device, queue, arenas, staged);
-                for (i, at, translation) in staged_items {
-                    let (view, meta) = &flushed[at];
-                    direct_sources.insert(
-                        i,
-                        DirectSource {
-                            view: view.clone(),
-                            meta: *meta,
-                            translation,
-                        },
-                    );
-                }
-            } else if let Some(mut first) = arenas.into_iter().next() {
-                // Keep the scratch for the next frame, unless unusually large.
-                if first.capacity() * 8 <= DIRECT_UPLOAD_SCRATCH_BYTES {
-                    first.clear();
-                    self.direct_upload = first;
+            if direct && !planned.is_empty() {
+                match self.direct_upload(device, queue, planned) {
+                    Some(flushed) => {
+                        for (i, at, translation) in staged_items {
+                            let (view, meta) = &flushed[at];
+                            direct_sources.insert(
+                                i,
+                                DirectSource {
+                                    view: view.clone(),
+                                    meta: *meta,
+                                    translation,
+                                },
+                            );
+                        }
+                    }
+                    None => direct = false,
                 }
             }
         }

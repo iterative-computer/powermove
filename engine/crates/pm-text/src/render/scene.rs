@@ -665,8 +665,7 @@ impl CoverageLines {
 /// linear transform, are applied by the rasterizer.
 pub struct CoveragePathCache {
     entries: HashMap<CoverageKey, Vec<CoverageEntry>>,
-    /// Least recently used first: `used` tick to entry.
-    order: std::collections::BTreeMap<u64, CoverageKey>,
+    len: usize,
     /// Local geometry [`CoveragePathCache::prepare`] made for the misses it
     /// was given, until [`CoveragePathCache::get`] takes it into the cache.
     prepared: HashMap<CoverageKey, Vec<(PlacedPath, Vec<PathEl>)>>,
@@ -710,7 +709,7 @@ impl CoveragePathCache {
     pub fn new(limit: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            order: std::collections::BTreeMap::new(),
+            len: 0,
             prepared: HashMap::new(),
             resolver: NonzeroResolver::default(),
             bytes: 0,
@@ -724,16 +723,16 @@ impl CoveragePathCache {
     }
 
     pub fn len(&self) -> usize {
-        self.order.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
+        self.len == 0
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.order.clear();
+        self.len = 0;
         self.prepared.clear();
         self.resolver = NonzeroResolver::default();
         self.bytes = 0;
@@ -745,16 +744,26 @@ impl CoveragePathCache {
         self.tick
     }
 
+    /// Eviction scans: at this budget it is rare (an index cost more
+    /// allocation per cold frame than the scans it saves).
     fn evict_oldest(&mut self) {
-        let Some((used, key)) = self.order.pop_first() else {
+        let Some((key, index)) = self
+            .entries
+            .iter()
+            .flat_map(|(key, bucket)| {
+                bucket
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| (*key, index, entry.used))
+            })
+            .min_by_key(|(_, _, used)| *used)
+            .map(|(key, index, _)| (key, index))
+        else {
             return;
         };
-        let bucket = self.entries.get_mut(&key).expect("ordered entry exists");
-        let index = bucket
-            .iter()
-            .position(|entry| entry.used == used)
-            .expect("ordered entry exists");
+        let bucket = self.entries.get_mut(&key).expect("oldest entry exists");
         let entry = bucket.swap_remove(index);
+        self.len -= 1;
         let empty = bucket.is_empty();
         self.bytes -= entry.bytes;
         if empty {
@@ -792,9 +801,7 @@ impl CoveragePathCache {
         let entry = self.entries.get_mut(key)?.iter_mut().find(|entry| {
             Arc::ptr_eq(&entry.source, &placed.path) && entry.style == placed.style
         })?;
-        self.order.remove(&entry.used);
         entry.used = tick;
-        self.order.insert(tick, *key);
         Some(entry.lines.clone())
     }
 
@@ -905,7 +912,7 @@ impl CoveragePathCache {
                 bytes,
                 used,
             });
-            self.order.insert(used, key);
+            self.len += 1;
             self.bytes += bytes;
         }
         lines
