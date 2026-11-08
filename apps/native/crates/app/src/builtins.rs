@@ -518,6 +518,17 @@ impl Controller {
             ),
             _ => (m.sheet_width_wide, m.settings_height, WindowKind::Dialog),
         };
+        // The agent popover hangs from the toolbar's trailing Agent button;
+        // other panel windows cascade from the editor's top-left corner.
+        let editor = window.bounds();
+        let origin = if id == "agent" {
+            point(
+                editor.right() - px(width + m.gap),
+                editor.top() + px(m.toolbar + m.gap),
+            )
+        } else {
+            editor.origin + point(px(m.toolbar), px(m.toolbar))
+        };
         let title: SharedString = match id {
             "agent" => "Agent",
             "export" => "Export",
@@ -550,7 +561,7 @@ impl Controller {
                         ..Default::default()
                     }))
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
-                        point(px(m.toolbar), px(m.toolbar)),
+                        origin,
                         size(px(width), px(height)),
                     )))),
                 |_, cx| {

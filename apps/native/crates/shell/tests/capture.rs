@@ -90,11 +90,7 @@ fn shell_window_appearance_matrix() {
             let panel = image.get_pixel(40 * scale, 150 * scale).0;
             let edge = image.get_pixel(6 * scale, 200 * scale).0;
             near(gap, over(ground, [0, 0, 0, 255]), "ground");
-            near(
-                panel,
-                over((expected.panel, panel_alpha), gap),
-                "panel",
-            );
+            near(panel, over((expected.panel, panel_alpha), gap), "panel");
             near(edge, over(edge_ink, panel), "edge");
             if translucent {
                 // In dark the panel steps lighter than the ground it sits on.
