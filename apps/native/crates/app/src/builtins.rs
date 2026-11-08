@@ -968,6 +968,16 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                 v.clipboard = crate::layer_commands::Clipboard::Keys(tracks);
                 v.update_disabled();
             }
+            // The keyframe sheets on the keys the right-click was on.
+            E::EditKeyValues(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Value, keys, cx)
+            }
+            E::EditVelocity(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Velocity, keys, cx)
+            }
+            E::ScaleKeys(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Scale, keys, cx)
+            }
             other => v.message = format!("Not available yet: {other:?}"),
         });
     }

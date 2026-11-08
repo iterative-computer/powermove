@@ -1277,7 +1277,7 @@ fn group_commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Ve
     let t = drag.time;
     let centre = group.anchor;
     let mut out = vec![];
-    let mut carry = |pose: &Pose, moved: [f64; 2], out: &mut Vec<Command>| {
+    let carry = |pose: &Pose, moved: [f64; 2], out: &mut Vec<Command>| {
         let d = apply(
             pose.to_parent,
             [moved[0] - pose.anchor[0], moved[1] - pose.anchor[1]],
