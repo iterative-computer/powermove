@@ -9,6 +9,22 @@
     stopped = false;
   const waiting = [];
   const resourceImages = new WeakMap();
+  // A removed image gives back its page URL (and the bytes behind it).
+  const revoke = (node) => {
+    const url = resourceImages.get(node);
+    if (url) {
+      URL.revokeObjectURL(url);
+      resourceImages.delete(node);
+    }
+  };
+  new MutationObserver((records) => {
+    for (const record of records)
+      for (const node of record.removedNodes) {
+        if (node.nodeType !== 1 || node.isConnected) continue;
+        revoke(node);
+        for (const image of node.querySelectorAll?.("img") ?? []) revoke(image);
+      }
+  }).observe(document, { childList: true, subtree: true });
   for (const type of ["load", "error"])
     window.addEventListener(type, (event) => {
       if (resourceImages.has(event.target)) event.stopImmediatePropagation();

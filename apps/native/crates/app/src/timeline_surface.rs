@@ -1035,13 +1035,20 @@ impl TimelineSurface {
                 _ => MenuContext::Empty,
             }
         };
-        // As in the shipped timeline: no extension rows on the ruler.
-        let locations = match &context {
-            MenuContext::Keys { .. } => at("keyframe", None),
-            MenuContext::Graph { .. } => at("graph", None),
-            MenuContext::Track { layer, .. } => at("prop", Some(layer)),
-            MenuContext::Empty => at("empty", None),
-            _ => vec![],
+        // Main's contexts: a row's kind, `layerId` only on a layer row (with
+        // `layer:context` too), `empty` on the ruler and between rows.
+        let key_row = frame
+            .hit_key(x, y, 3.)
+            .and_then(|(row, _)| pm_panel_timeline::v4::parse_row(&row).ok());
+        let locations = match (&context, key_row) {
+            (MenuContext::Keys { .. }, Some(RowId::Layer(id))) => {
+                let mut locations = vec![("layer:context", serde_json::json!({ "layerId": id }))];
+                locations.extend(at("layer", Some(&id)));
+                locations
+            }
+            (MenuContext::Keys { .. } | MenuContext::Track { .. }, _) => at("prop", None),
+            (MenuContext::Graph { .. }, _) => at("graph", None),
+            _ => at("empty", None),
         };
         let mut items = self.model.menu(&context);
         // Keyframe dialogs run from the Animation menu on the selection; these
