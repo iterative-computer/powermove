@@ -33,6 +33,7 @@ pub struct Colors {
     pub accent: u32,
     pub selected_text: u32,
     pub selected_fill: u32,
+    /// Keyboard focus ring on GPUI surfaces: neutral, never the accent (owner rule).
     pub focus: u32,
     /// Accent used as text or a thin mark on panels; meets 4.5:1 on `panel`.
     pub accent_text: u32,
@@ -368,7 +369,7 @@ impl Tokens {
                 accent: 0xff6019,
                 selected_text: 0xffffff,
                 selected_fill: 0x3a3a3a,
-                focus: 0xff8a55,
+                focus: 0x9a9a9a,
                 accent_text: 0xff8a55,
                 accent_wash: 0x3c241a,
                 danger: 0xf36357,
@@ -404,7 +405,7 @@ impl Tokens {
                 accent: 0xf0580a,
                 selected_text: 0xffffff,
                 selected_fill: 0xd5d5da,
-                focus: 0xb93800,
+                focus: 0x76767c,
                 accent_text: 0xb93800,
                 accent_wash: 0xfbe9e1,
                 danger: 0xc22a1f,
@@ -586,14 +587,14 @@ impl Tokens {
                 c.separator = 0x888888;
                 c.secondary = 0xdddddd;
                 c.muted = 0xbfbfbf;
-                c.focus = 0xffa073;
+                c.focus = 0xe0e0e0;
                 c.accent_text = 0xffa073;
             }
             Scheme::Light => {
                 c.separator = 0x686868;
                 c.secondary = 0x303036;
                 c.muted = 0x414148;
-                c.focus = 0x9a2f00;
+                c.focus = 0x3c3c42;
                 c.accent_text = 0x9a2f00;
             }
         }

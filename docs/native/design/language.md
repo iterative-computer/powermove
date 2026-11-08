@@ -161,7 +161,7 @@ white bold labels on it pass 3:1 for large text). Use:
 | Playhead, selection ring, set keyframes, active tool glyph, snapping guide | `accent` |
 | Accent as text or a 1 pt mark on a panel (links, "Edited" badge, active tab underline) | `accent_text` (≥ 4.5:1) |
 | Drop target, active guide bed | `accent_wash` (opaque) |
-| Keyboard focus ring | system focus ring tinted by the app accent; GPUI surfaces draw `focus` |
+| Keyboard focus ring | GPUI surfaces draw the neutral `focus` ring; never the accent (owner rule, 2026-11-08) |
 
 The app's **AccentColor asset is Powermove orange**, so system controls
 (focused field ring, default button, checkboxes, switches, slider fill)
@@ -347,8 +347,11 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
 - System `NSSegmentedControl` in sheets and toolbars. In GPUI inspector rows
   (Align, axis selectors) draw the same shape: `field` track, 2 pt padding,
   `inner_radius` segments, selected segment `floating` with `text` glyph.
-- Panel tab groups (Project | Effect Controls) are drawn as a segmented
-  control in the panel header, left-aligned, `title` size, medium weight.
+- Panel tab groups (Project | Effect Controls) are quiet text tabs in the
+  panel header: `title` size, medium weight, the active title in `text`, the
+  rest in `muted`, a `hover` pill only under the pointer. Titles never
+  truncate; tabs that do not fit fold into the trailing More Panels menu
+  (2026-11-08, replaces the stretched segmented strip).
 
 ### Popovers
 

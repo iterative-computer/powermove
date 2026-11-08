@@ -216,15 +216,18 @@ fn overflow_keeps_active_and_never_loses_a_tab() {
         size: None,
     };
     let t = tokens();
+    let widths: Vec<f32> = (0..12).map(|i| 40. + 6. * i as f32).collect();
     for width in [24., 144., 300., 1200.] {
-        let track = group.tab_track(width, &t);
+        let track = group.tab_track(width, &widths, &t);
         assert!(track.visible.contains(&10));
         assert!(!track.overflow.contains(&10));
         let mut all = track.visible.clone();
         all.extend(&track.overflow);
         all.sort_unstable();
         assert_eq!(all, (0..12).collect::<Vec<_>>());
-        assert!(track.width.is_finite() && track.width >= 0.);
+        // Shown titles keep their full width: they fit, or only the active tab is left.
+        let shown: f32 = track.visible.iter().map(|&i| widths[i]).sum();
+        assert!(shown <= width || track.visible == [10]);
     }
 }
 #[test]

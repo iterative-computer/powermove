@@ -892,6 +892,28 @@ impl Editor {
     }
 }
 /// A token colour at an alpha (`translucency.*`, `Tokens::edge`, `Tokens::line`).
+/// Space between neighbouring tab pills.
+const TAB_SPACING: f32 = 2.;
+/// Width of a header title at `size` in the medium weight, as the tab strip draws it.
+fn title_width(text: &str, size: f32, window: &Window) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: Font {
+            family: pm_design::TEXT_FONT.into(),
+            weight: FontWeight::MEDIUM,
+            ..window.text_style().font()
+        },
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+        letter_spacing: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(text.to_string().into(), px(size), &[run]);
+    f32::from(line.width).ceil()
+}
 pub fn tint(rgb: u32, alpha: f32) -> gpui::Rgba {
     gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
 }
@@ -1227,11 +1249,21 @@ impl Render for Editor {
                 .is_some_and(|i| i.native_panel(&id, cx));
             let tabs = group.tabs.clone();
             let active = group.active;
-            // The tab strip's own padding (2 pt each side) and 2 pt gaps come
-            // out of the width before it is shared between the tabs.
-            let strip_chrome = 4. + 2. * tabs.len().saturating_sub(1) as f32;
-            let tab_track =
-                group.tab_track(p.rect.w - m.inset - m.gap * 2. - m.hit - strip_chrome, &t);
+            // Quiet text tabs (language §9): each takes its title's width plus
+            // the leading close slot, trailing padding and the pill spacing.
+            // The header starts tab groups half a gap in, so the slot plus that
+            // lands the first title on the panel inset like a single title.
+            let close_slot = m.inset - m.gap / 2.;
+            let widths: Vec<f32> = tabs
+                .iter()
+                .map(|tab| {
+                    title_width(layout::panel_title(tab), t.typography.title, w)
+                        + close_slot
+                        + m.gap
+                        + TAB_SPACING
+                })
+                .collect();
+            let tab_track = group.tab_track(p.rect.w - m.gap * 2. - m.hit, &widths, &t);
             let mut panel = positioned(p.rect)
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
@@ -1314,17 +1346,18 @@ impl Render for Editor {
             if custom.is_some() && !multi {
                 header = header.px(px(0.));
             }
+            if multi {
+                header = header.pl(px(m.gap / 2.));
+            }
             if multi || custom.is_none() {
-                // Approved mockup: a sunken segmented strip for tab groups, a
-                // semibold title for single panels. The whole tab is the drag handle.
-                // Tabs share what the panel's own header controls leave.
-                let mut strip = div().flex().items_center().gap(px(2.)).when(multi, |s| {
-                    s.flex_1()
-                        .min_w(px(0.))
-                        .bg(tint(line, line_alpha))
-                        .rounded(px(m.control_radius + 2.))
-                        .p(px(2.))
-                });
+                // Quiet text tabs (language §9): the active title in `text`, the
+                // rest in `muted`; a pill appears only on hover. The whole tab is
+                // the drag handle. A single panel shows its title the same way.
+                let mut strip = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(TAB_SPACING))
+                    .when(multi, |s| s.flex_1().min_w(px(0.)));
                 for (ti, tab) in tabs.iter().enumerate() {
                     if !tab_track.visible.contains(&ti) {
                         continue;
@@ -1352,19 +1385,27 @@ impl Render for Editor {
                         }))
                         .aria_label(title.clone())
                         .relative()
+                        .flex_none()
                         .flex()
                         .items_center()
-                        .justify_center()
-                        .px(px(if multi { m.gap } else { 0. }))
-                        .py(px(3.))
-                        .rounded(px(m.control_radius))
-                        .when(multi && selected, |s| s.bg(rgb(c.floating)))
+                        .h(px(m.hit))
+                        .when(multi, |s| {
+                            s.pl(px(close_slot))
+                                .pr(px(m.gap))
+                                .rounded(px(m.control_radius))
+                                .hover_style(|s| s.bg(rgb(c.hover)))
+                        })
                         .when(ghost, |s| s.opacity(0.4))
-                        .text_color(rgb(if selected { c.text } else { c.secondary }))
+                        .text_color(rgb(if selected || !multi { c.text } else { c.muted }))
+                        .when(multi && !selected, |s| {
+                            s.group_hover_style(tab_group.clone(), |s| {
+                                s.text_color(rgb(c.secondary))
+                            })
+                        })
                         .text_size(px(t.typography.title))
-                        .font_weight(FontWeight::MEDIUM)
-                        .when(multi, |s| s.flex_auto().min_w(px(0.)).overflow_hidden())
-                        .child(div().min_w(px(0.)).truncate().child(title.clone()));
+                        .font_weight(FontWeight(t.typography.medium_weight))
+                        .whitespace_nowrap()
+                        .child(title.clone());
                     if closable {
                         // Mac tabs: the close button sits at the leading edge, on hover.
                         cell = cell.child(
@@ -1373,31 +1414,24 @@ impl Render for Editor {
                                 .aria_label(format!("Close {title}"))
                                 .role(Role::Button)
                                 .tab_index(0)
-                                .focus_style(|s| {
-                                    s.opacity(1.)
-                                        .ring(px(m.border * 2.))
-                                        .ring_color(rgb(c.focus))
-                                })
+                                .focus_style(|s| s.opacity(1.))
                                 .absolute()
-                                .left(px(m.border))
+                                .left_0()
                                 .top_0()
                                 .bottom_0()
+                                .w(px(close_slot))
                                 .flex()
                                 .items_center()
+                                .justify_center()
                                 .opacity(0.)
                                 .group_hover_style(tab_group.clone(), |s| s.opacity(1.))
-                                .child(
-                                    div()
-                                        .rounded(px(m.inner_radius))
-                                        .hover_style(|s| s.bg(rgb(c.hover)))
-                                        .child(crate::symbol::symbol(
-                                            "xmark",
-                                            m.symbol_inline,
-                                            crate::symbol::Weight::Medium,
-                                            c.secondary,
-                                            w,
-                                        )),
-                                )
+                                .child(crate::symbol::symbol(
+                                    "xmark",
+                                    close_slot,
+                                    crate::symbol::Weight::Semibold,
+                                    c.muted,
+                                    w,
+                                ))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();

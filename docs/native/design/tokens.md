@@ -94,7 +94,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
 | `colors.field` | Value wells, text fields, segmented control track | `#F3F3F6` | `#262626` | `#F3F3F6` | `#262626` |
 | `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#2C2C2C` | `#FFFFFF` | `#2C2C2C` |
-| `colors.focus` | Keyboard focus ring | `#B93800` | `#FF8A55` | `#9A2F00` | `#FFA073` |
+| `colors.focus` | Keyboard focus ring | `#76767C` | `#9A9A9A` | `#3C3C42` | `#E0E0E0` |
 | `colors.hover` | Pointer hover fill on rows and borderless buttons | `#EBEBEF` | `#232323` | `#EBEBEF` | `#232323` |
 | `colors.labels.blue` | Label: default for text and shape layers | `#C9D4E8` | `#3B4250` | `#C9D4E8` | `#3B4250` |
 | `colors.labels.gray` | Label: guides, nulls, cameras | `#DCDCE0` | `#3A3A3A` | `#DCDCE0` | `#3A3A3A` |

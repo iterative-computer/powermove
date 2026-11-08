@@ -62,42 +62,41 @@ impl Group {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
 }
-/// Equal-width tab segments, with the active tab retained when trailing tabs fold.
+/// Content-width tab titles. Titles never truncate: tabs that do not fit fold
+/// into the trailing More Panels menu, and the active tab always stays shown.
 /// The caller reserves space for header tools before asking for this track.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabTrack {
     pub visible: Vec<usize>,
     pub overflow: Vec<usize>,
-    pub width: f32,
 }
 impl Group {
-    pub fn tab_track(&self, available: f32, tokens: &Tokens) -> TabTrack {
-        let minimum = tokens.metrics.hit * 3.;
+    /// `widths[i]` is the room tab `i` takes, padding and spacing included.
+    pub fn tab_track(&self, available: f32, widths: &[f32], tokens: &Tokens) -> TabTrack {
         let n = self.tabs.len();
-        let available = available.max(0.);
-        let fits = (available / minimum).floor() as usize;
-        let capacity = if fits >= n {
-            n
-        } else {
-            ((available - tokens.metrics.hit).max(0.) / minimum).floor() as usize
+        let width = |i: usize| widths.get(i).copied().unwrap_or(tokens.metrics.hit * 3.);
+        let total = |set: &[usize]| set.iter().map(|&i| width(i)).sum::<f32>();
+        let all: Vec<_> = (0..n).collect();
+        if total(&all) <= available {
+            return TabTrack {
+                visible: all,
+                overflow: vec![],
+            };
         }
-        .max(1)
-        .min(n);
-        let mut visible: Vec<_> = (0..capacity).collect();
-        if self.active >= capacity {
-            visible[capacity - 1] = self.active;
+        // The More Panels chevron takes one hit square.
+        let room = (available - tokens.metrics.hit).max(0.);
+        let active = self.active.min(n.saturating_sub(1));
+        let mut visible = vec![active];
+        for i in (0..n).filter(|&i| i != active) {
+            let mut next = visible.clone();
+            next.push(i);
+            if total(&next) <= room {
+                visible = next;
+            }
         }
-        let overflow: Vec<_> = (0..n).filter(|i| !visible.contains(i)).collect();
-        let reserved = if overflow.is_empty() {
-            0.
-        } else {
-            tokens.metrics.hit
-        };
-        TabTrack {
-            width: ((available - reserved).max(0.) / capacity as f32),
-            visible,
-            overflow,
-        }
+        visible.sort_unstable();
+        let overflow = (0..n).filter(|i| !visible.contains(i)).collect();
+        TabTrack { visible, overflow }
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
