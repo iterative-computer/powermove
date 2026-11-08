@@ -1,7 +1,15 @@
 import * as powermove from "./frozen/kernel/editor-helpers";
 import { installIcons } from "./frozen/host/icons";
 import { HostChannel, HostError } from "./channel";
-import { DocumentMirror, copy, diff, patch, rebase, reconcile } from "./mirror";
+import {
+  DocumentMirror,
+  copy,
+  diff,
+  isProjectView,
+  patch,
+  rebase,
+  reconcile,
+} from "./mirror";
 import type { ServicesRegistry } from "./services";
 import { createKernel } from "./frozen/host/registries";
 import {
@@ -376,6 +384,19 @@ export class CompatRealm {
     Object.assign(this.PM, options.capabilities?.PM ?? {});
     this.bridgeEvents();
     options.installLegacy?.(this.PM);
+    // A `raster` registration changes what the engine asks this realm for.
+    const register = this.services.register.bind(this.services);
+    this.services.register = ((name: string, implementation: unknown) => {
+      const registration = register(name, implementation);
+      if (name !== "raster") return registration;
+      this.rasterChanged();
+      return {
+        dispose: () => {
+          registration.dispose();
+          this.rasterChanged();
+        },
+      };
+    }) as typeof this.services.register;
     this.services.register("raster", this.baseRaster);
     this.domConnection = options.dom?.connect({
       realm: options.id,
@@ -755,8 +776,78 @@ export class CompatRealm {
     }
     return canvas;
   }
-  private baseRaster = (...args: any[]): any =>
-    this.renderQuery("render.raster", args);
+  /** Base rasters handed out and not yet known to be changed. */
+  private bases = new WeakSet<object>();
+  /** Whether `value` is a base raster an override passed through untouched. */
+  isBaseRaster(value: unknown): boolean {
+    return typeof value === "object" && value !== null && this.bases.has(value);
+  }
+  /**
+   * `render.raster(L, scale, T, uploaded, crop)`'s base: the layer as the
+   * engine paints it, with today's geometry (`cv`, `w`, `h`, `anchorX`,
+   * `anchorY`, `selection`, `fontOffset`). Lazy: an override that passes a
+   * layer through never makes the engine paint it here.
+   */
+  private baseRaster = (
+    layer: any,
+    scale = 1,
+    time = this.PM.time,
+    _uploaded?: unknown,
+    crop?: { x: number; y: number; width: number; height: number },
+  ): any => {
+    if (!layer || typeof layer !== "object") return null;
+    const view = isProjectView(layer);
+    const spec: Data = {
+      id: String(layer.id ?? ""),
+      ...(view ? {} : { content: JSON.parse(JSON.stringify(layer)) }),
+    };
+    let loaded: Data | null | undefined;
+    const load = () => {
+      if (loaded !== undefined) return loaded;
+      this.flush();
+      const value = this.options.host.query("render.raster", {
+        args: [spec, scale, time, crop ?? null],
+        revision: this.publication.revision,
+        realm: this.options.id,
+        generation: this.options.generation,
+      });
+      if (!value || value.kind !== "recorder-surface") return (loaded = null);
+      const cv = new RecorderCanvas(
+        this.options.recorder!,
+        value.width,
+        value.height,
+        value.surface,
+      );
+      this.track(cv);
+      const fontOffset = value.fontOffset ?? undefined;
+      return (loaded = {
+        cv,
+        w: value.w,
+        h: value.h,
+        anchorX: value.anchorX,
+        anchorY: value.anchorY,
+        selection: value.selection ?? undefined,
+        fontOffset,
+        uv: [0, 0, 1, 1],
+      });
+    };
+    const surface: Data = {};
+    for (const key of ["cv", "w", "h", "anchorX", "anchorY", "selection", "fontOffset", "uv"])
+      Object.defineProperty(surface, key, {
+        enumerable: true,
+        get: () => load()?.[key],
+      });
+    this.bases.add(surface);
+    return surface;
+  };
+  /** Tells the host whether an extension wraps the `raster` service. */
+  private rasterChanged(): void {
+    const on = this.services.get("raster") !== this.baseRaster;
+    if (on === this.overriding) return;
+    this.overriding = on;
+    this.options.capabilities?.rasterProducing?.(on);
+  }
+  private overriding = false;
   /** Metadata only: safe for headless inspection without exposing vars/user data. */
   inspect() {
     return {

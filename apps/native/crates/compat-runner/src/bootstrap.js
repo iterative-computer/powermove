@@ -161,7 +161,49 @@ globalThis.__compat = {
     };
     const reveal = (id, open) =>
       call("ui.request", { kind: "panel", id, open });
+    // Raster overrides: the viewer asks for layers it needs, a batch at a
+    // time; an override's canvas goes back as pixels, a pass-through as native.
+    const layerIn = (composition, id) => {
+      const proj = this.realm.PM.proj;
+      const comps = proj?.comps;
+      const nested = Array.isArray(comps)
+        ? comps.find((c) => c?.id === composition)
+        : comps?.[composition];
+      for (const list of [nested?.layers, proj?.layers])
+        for (const layer of list ?? []) if (layer?.id === id) return layer;
+      return null;
+    };
+    this.answerRasters = (batch, needs) => {
+      const answers = needs.map((need) => {
+        try {
+          const layer = layerIn(need.composition, need.layer);
+          if (!layer) return { native: true };
+          const result = this.realm.PM.raster(
+            layer,
+            need.scale,
+            need.seconds,
+            undefined,
+            need.crop ?? undefined,
+          );
+          if (!result || this.realm.isBaseRaster(result)) return { native: true };
+          const surface = this.nativeSurfaceOf?.(result.cv);
+          if (!surface) return { native: true };
+          return {
+            surface,
+            w: result.w,
+            h: result.h,
+            anchorX: result.anchorX,
+            anchorY: result.anchorY,
+          };
+        } catch (error) {
+          this.reportFailure(error);
+          return { native: true };
+        }
+      });
+      call("compat.answers", { batch, answers });
+    };
     const capabilities = {
+      rasterProducing: (on) => call("compat.producing", { on: !!on }),
       ui: { controls: PowermoveCompat.controls },
       extensions: {
         list: () => this.loader.records(),

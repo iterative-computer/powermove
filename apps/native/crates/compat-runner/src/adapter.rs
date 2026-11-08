@@ -275,6 +275,11 @@ impl KernelAdapter {
         }
     }
     /// Revision and timing facts for a transport without a document copy.
+    /// The published document and the composition the viewer renders.
+    pub fn document(&self) -> Result<(Arc<pm_model::Document>, String)> {
+        let p = self.published()?;
+        Ok((p.snapshot.document.clone(), p.snapshot.render_comp()))
+    }
     /// The open composition's width and height.
     pub fn size(&self) -> Result<(f64, f64)> {
         let p = self.published()?;

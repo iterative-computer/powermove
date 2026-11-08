@@ -155,6 +155,7 @@ pub struct Engine {
     resources: Arc<crate::resources::ResourceSnapshot>,
     /// Why a contributed definition cannot draw, for the viewer's status.
     pub definition_failure: Option<String>,
+    compat: Option<Arc<crate::compat::CompatStore>>,
     /// The peaks of the content on screen, and the output tone of its frames.
     hdr: Option<((u64, u64, String), Option<crate::color::HdrView>)>,
     output_tone: Option<pm_render::OutputTone>,
@@ -197,6 +198,7 @@ impl Engine {
         if let Some(fonts) = &self.fonts {
             next.set_fonts(fonts.clone());
         }
+        next.set_compat(self.compat.clone());
         Ok(next)
     }
     pub fn set_waker(&self, wake: Option<std::sync::mpsc::SyncSender<()>>) {
@@ -307,11 +309,24 @@ impl Engine {
             waker,
             resources: Arc::default(),
             definition_failure: None,
+            compat: None,
             hdr: None,
             output_tone: None,
             scope_frames: None,
             scopes: None,
         })
+    }
+    /// Raster overrides the viewer's frames ask for (`crate::compat`).
+    pub fn set_compat(&mut self, store: Option<Arc<crate::compat::CompatStore>>) {
+        self.renderer.set_compat_rasters(
+            store
+                .clone()
+                .map(|s| s as Arc<dyn pm_render::compat::CompatRasters>),
+        );
+        self.compat = store;
+    }
+    pub(crate) fn compat(&self) -> Option<&Arc<crate::compat::CompatStore>> {
+        self.compat.as_ref()
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
         self.fonts = Some(fonts);

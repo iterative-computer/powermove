@@ -233,6 +233,7 @@ mod mac {
             text: None,
             wake: Arc::new(|| ()),
             frames: None,
+            rasters: None,
         });
         let (feedback, messages) = mpsc::channel();
         let page = Rc::new(Page(feedback, RefCell::new(vec![])));

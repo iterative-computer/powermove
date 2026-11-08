@@ -133,6 +133,54 @@ pub struct FrameRequest<'a> {
     /// True once the realm's task is stopped or past its host deadline.
     pub stop: &'a (dyn Fn() -> bool + Sync),
 }
+/// A layer's base raster (`render.raster`, today's `PM.raster` before any
+/// override): the layer by id, or the object an override passed.
+pub struct BaseRasterRequest {
+    pub document: Arc<pm_model::Document>,
+    pub composition: String,
+    pub layer: String,
+    pub content: Option<pm_model::Value>,
+    pub seconds: f64,
+    pub scale: f64,
+    /// Today's preview crop window `[x, y, w, h]` in raster pixels.
+    pub crop: Option<[u32; 4]>,
+}
+/// A base raster's straight RGBA8 canvas and today's geometry.
+pub struct BaseRasterReply {
+    pub width: u32,
+    pub height: u32,
+    pub straight_rgba: Vec<u8>,
+    pub size: (f64, f64),
+    pub anchor: (f64, f64),
+    pub selection: Option<[f64; 4]>,
+    pub font_offset: Option<(f64, f64)>,
+}
+/// What an override answered for one layer at one frame.
+pub enum RasterAnswer {
+    /// Passed through: the engine draws the layer itself.
+    Native,
+    /// The override's canvas: straight RGBA8 rows, the quad's size and anchor.
+    Raster {
+        width: u32,
+        height: u32,
+        straight_rgba: Vec<u8>,
+        size: [f64; 2],
+        anchor: [f64; 2],
+    },
+}
+/// The app's side of raster overrides.
+#[derive(Clone)]
+pub struct RasterHooks {
+    pub base: Arc<
+        dyn Fn(BaseRasterRequest) -> std::result::Result<Option<BaseRasterReply>, String>
+            + Send
+            + Sync,
+    >,
+    /// The answers to one batch of needs, in the batch's order.
+    pub answers: Arc<dyn Fn(u64, Vec<RasterAnswer>) + Send + Sync>,
+    /// Whether a `raster` override is registered.
+    pub producing: Arc<dyn Fn(bool) + Send + Sync>,
+}
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
     Arc<dyn Fn(&FrameRequest) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
@@ -542,6 +590,88 @@ mod tests {
             runner.json("atob('YQ'.repeat(200000)).length").unwrap(),
             json!(300000)
         );
+    }
+    #[test]
+    fn raster_overrides_answer_with_pixels_and_pass_layers_through_unpainted() {
+        let runner = dom_runner();
+        let painted = Arc::new(std::sync::Mutex::new(vec![]));
+        let answered = Arc::new(std::sync::Mutex::new(vec![]));
+        let producing = Arc::new(std::sync::Mutex::new(vec![]));
+        let (p, a, o) = (painted.clone(), answered.clone(), producing.clone());
+        runner.host.set_rasters(Some(crate::RasterHooks {
+            base: Arc::new(move |request: crate::BaseRasterRequest| {
+                p.lock().unwrap().push(request.layer.clone());
+                Ok(Some(crate::BaseRasterReply {
+                    width: 2,
+                    height: 2,
+                    straight_rgba: [255, 0, 0, 255].repeat(4),
+                    size: (2., 2.),
+                    anchor: (1., 1.),
+                    selection: None,
+                    font_offset: Some((0.5, 0.)),
+                }))
+            }),
+            answers: Arc::new(move |batch, answers| {
+                for answer in answers {
+                    a.lock().unwrap().push(match answer {
+                        crate::RasterAnswer::Native => json!([batch, "native"]),
+                        crate::RasterAnswer::Raster {
+                            width,
+                            height,
+                            straight_rgba,
+                            size,
+                            anchor,
+                        } => json!([
+                            batch,
+                            width,
+                            height,
+                            &straight_rgba[..4],
+                            &straight_rgba[12..16],
+                            size,
+                            anchor
+                        ]),
+                    });
+                }
+            }),
+            producing: Arc::new(move |on| o.lock().unwrap().push(on)),
+        }));
+        let manifest = json!({"id":"widen","name":"Widen","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const original=api.services.get('raster');
+                 const r=api.services.register('raster',(layer,scale,time,up,crop)=>{if(layer.id!=='t1')return original(layer,scale,time,up,crop);
+                   const base=original(layer,scale,time,up,crop);const c=document.createElement('canvas');c.width=base.cv.width+2;c.height=base.cv.height;
+                   const x=c.getContext('2d');x.drawImage(base.cv,0,0);x.fillStyle='#0000ff';x.fillRect(base.cv.width,0,2,base.cv.height);
+                   return {...base,cv:c,w:base.w+2,fontOffset:base.fontOffset};});globalThis.dropRaster=()=>r.dispose();}",
+            )
+            .unwrap();
+        assert_eq!(*producing.lock().unwrap(), vec![true]);
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'t1',type:'text',name:'T1',d:{text:'a'}},{id:'t2',type:'text',name:'T2',d:{text:'b'}})")
+            .unwrap();
+        runner
+            .eval("__compat.answerRasters(7,[{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1},{composition:'synthetic-comp',layer:'t2',seconds:0,scale:1}])")
+            .unwrap();
+        assert_eq!(
+            *answered.lock().unwrap(),
+            vec![
+                json!([
+                    7,
+                    4,
+                    2,
+                    [255, 0, 0, 255],
+                    [0, 0, 255, 255],
+                    [4., 2.],
+                    [1., 1.]
+                ]),
+                json!([7, "native"])
+            ]
+        );
+        // The pass-through layer was never painted.
+        assert_eq!(*painted.lock().unwrap(), vec!["t1".to_owned()]);
+        runner.eval("dropRaster()").unwrap();
+        assert_eq!(*producing.lock().unwrap(), vec![true, false]);
     }
     #[test]
     fn render_frame_to_and_snapshot_read_the_engine_frame() {

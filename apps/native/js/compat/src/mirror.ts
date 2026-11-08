@@ -210,6 +210,10 @@ export function rebase(ops: Patch[], before: Data, after: Data): Patch[] {
 /** A raw record or array of the live tree, and where it was last seen. */
 type Link = { parent: Data; key: string | number };
 const raws = new WeakMap<object, object>();
+/** Whether `value` is a view of a record in the project (not a copy). */
+export function isProjectView(value: unknown): boolean {
+  return typeof value === "object" && value !== null && raws.has(value);
+}
 /**
  * `value` with project views replaced by the records they show, for natives
  * that refuse proxies (structured clone). Containers are copied only on the

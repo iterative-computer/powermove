@@ -69,6 +69,7 @@ pub struct NativeHost {
     events: Box<dyn RealmEvents>,
     text: Mutex<Option<CanvasText>>,
     frames: Mutex<Option<crate::FrameRenderer>>,
+    rasters: Mutex<Option<crate::RasterHooks>>,
 }
 pub(crate) fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
@@ -145,7 +146,122 @@ impl NativeHost {
             events,
             text: Mutex::new(None),
             frames: Mutex::new(None),
+            rasters: Mutex::new(None),
         }
+    }
+    pub fn set_rasters(&self, hooks: Option<crate::RasterHooks>) {
+        *self.rasters.lock().unwrap() = hooks;
+    }
+    /// A recorder canvas holding straight RGBA8 pixels, as a surface id.
+    fn canvas_of(&self, width: u32, height: u32, rgba: Vec<u8>) -> Result<String> {
+        crate::image::rgba_bytes(u64::from(width), u64::from(height))?;
+        let pixels = ImageData::from_rgba(width, height, rgba).map_err(host_error)?;
+        let mut state = self.state.lock().unwrap();
+        state.next += 1;
+        let id = state.next;
+        let mut canvas = Canvas::new(id, width, height).map_err(host_error)?;
+        canvas
+            .put_image_data(pixels, 0, 0, None)
+            .map_err(host_error)?;
+        state.surfaces.insert(id.to_string(), canvas);
+        Ok(id.to_string())
+    }
+    /// `render.raster(layer, scale, time, uploaded, crop)`'s base: the layer as
+    /// the engine paints it, with today's geometry, as a recorder canvas.
+    /// Args: `[{id, content?, composition?}, scale, time, crop?]`.
+    fn base_raster(&self, args: &Value) -> Result<Value> {
+        let hooks = self.rasters.lock().unwrap().clone().ok_or_else(|| {
+            Error::Host("render.raster needs the engine, which this host does not have".into())
+        })?;
+        let spec = &args[0];
+        let (document, open) = self.kernel.lock().unwrap().document()?;
+        let number = |i: usize, default: f64| {
+            args.get(i)
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite())
+                .unwrap_or(default)
+        };
+        let crop = args.get(3).and_then(|c| {
+            let at = |k: &str| c[k].as_f64().filter(|v| *v >= 0.).map(|v| v as u32);
+            Some([at("x")?, at("y")?, at("width")?, at("height")?])
+        });
+        let content = match &spec["content"] {
+            Value::Object(_) => Some(
+                pm_model::json::parse(&spec["content"].to_string())
+                    .map_err(|_| Error::Invalid("raster layer object"))?,
+            ),
+            _ => None,
+        };
+        let reply = (hooks.base)(crate::BaseRasterRequest {
+            document,
+            composition: spec["composition"].as_str().map_or(open, str::to_owned),
+            layer: spec["id"].as_str().unwrap_or_default().to_owned(),
+            content,
+            seconds: number(2, self.transport.time()),
+            scale: number(1, 1.).max(1e-6),
+            crop,
+        })
+        .map_err(Error::Host)?;
+        let Some(reply) = reply else {
+            return Ok(Value::Null);
+        };
+        let surface = self.canvas_of(reply.width, reply.height, reply.straight_rgba)?;
+        Ok(
+            json!({"kind":"recorder-surface","surface":surface,"width":reply.width,
+            "height":reply.height,"w":reply.size.0,"h":reply.size.1,
+            "anchorX":reply.anchor.0,"anchorY":reply.anchor.1,
+            "selection":reply.selection.map(|[x0,y0,x1,y1]| json!({"x0":x0,"y0":y0,"x1":x1,"y1":y1})),
+            "fontOffset":reply.font_offset.map(|(x,y)| json!({"x":x,"y":y}))}),
+        )
+    }
+    /// One batch of override answers: `{batch, answers: [{native} | {surface,
+    /// w, h, anchorX, anchorY}]}`, the canvases read here, on the realm worker.
+    fn raster_answers(&self, input: &Value) -> Result<Value> {
+        let Some(hooks) = self.rasters.lock().unwrap().clone() else {
+            return Ok(Value::Null);
+        };
+        let batch = input["batch"]
+            .as_u64()
+            .ok_or(Error::Invalid("raster batch"))?;
+        let items = input["answers"]
+            .as_array()
+            .ok_or(Error::Invalid("raster answers"))?;
+        let mut answers = Vec::with_capacity(items.len());
+        let mut state = self.state.lock().unwrap();
+        for item in items {
+            let surface = item["surface"]
+                .as_str()
+                .and_then(|id| state.surfaces.get_mut(id));
+            let answer = match surface {
+                Some(canvas) if !(canvas.size().0 == 0 || canvas.size().1 == 0) => {
+                    let (width, height) = canvas.size();
+                    let pixels = canvas
+                        .get_image_data(0, 0, width as i32, height as i32)
+                        .map_err(host_error)?;
+                    let number = |k: &str, default: f64| {
+                        item[k]
+                            .as_f64()
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(default)
+                    };
+                    crate::RasterAnswer::Raster {
+                        width,
+                        height,
+                        straight_rgba: pixels.bytes().to_vec(),
+                        size: [
+                            number("w", f64::from(width)),
+                            number("h", f64::from(height)),
+                        ],
+                        anchor: [number("anchorX", 0.), number("anchorY", 0.)],
+                    }
+                }
+                _ => crate::RasterAnswer::Native,
+            };
+            answers.push(answer);
+        }
+        drop(state);
+        (hooks.answers)(batch, answers);
+        Ok(Value::Null)
     }
     #[cfg(test)]
     pub(crate) fn kernel_size(&self) -> (f64, f64) {
@@ -1179,7 +1295,17 @@ impl EngineProxy for NativeHost {
                 let method = input["method"].as_str().unwrap_or_default();
                 return self.render_query(method, &input["args"]["args"], &budget);
             }
+            "kernel.query" if input["method"] == "render.raster" => {
+                return self.base_raster(&input["args"]["args"]);
+            }
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
+            "compat.producing" => {
+                if let Some(hooks) = self.rasters.lock().unwrap().clone() {
+                    (hooks.producing)(input["on"] == true);
+                }
+                return Ok(Value::Null);
+            }
+            "compat.answers" => return self.raster_answers(input),
             "extension.health" => {
                 self.events
                     .health(input["id"].as_str().unwrap_or_default(), &input["health"]);

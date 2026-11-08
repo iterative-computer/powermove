@@ -33,6 +33,7 @@ mod perf_gate;
 mod platform;
 mod playback;
 mod project_library;
+mod raster_overrides;
 mod rows;
 mod session;
 mod shape_tool;

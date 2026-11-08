@@ -78,6 +78,8 @@ pub struct HostConfig {
     /// The open composition rendered by the engine at a time and size, as PNG
     /// (`render.renderFrameTo`, `PM.Export.snapshot`).
     pub frames: Option<crate::FrameRenderer>,
+    /// The app's base rasters and override answers (`render.raster`).
+    pub rasters: Option<crate::RasterHooks>,
 }
 
 enum Input {
@@ -89,6 +91,8 @@ enum Input {
     Place(String, Option<[f32; 4]>),
     Page(u64, Value),
     Answer(u64, Value),
+    /// A batch of layers the viewer needs override answers for.
+    Rasters(u64, Value),
     Menu(String, Value, u64),
     StorePage(String, u64, Value),
     StoreDom(String),
@@ -472,6 +476,19 @@ impl ExtensionHost {
         });
     }
     /// Contributions for one open menu. A `key` keeps the reply tied to it.
+    /// Layers whose override answers a viewer needs, as
+    /// `[{composition, layer, seconds, scale, crop?}]`; answered through
+    /// `RasterHooks::answers` with `batch`.
+    pub fn rasters(&self, batch: u64, needs: Value) {
+        let _ = self.inbox.send(Input::Rasters(batch, needs));
+    }
+    /// `rasters` for another thread (the engine's).
+    pub fn raster_inbox(&self) -> Arc<dyn Fn(u64, Value) + Send + Sync> {
+        let inbox = std::sync::Mutex::new(self.inbox.clone());
+        Arc::new(move |batch, needs| {
+            let _ = inbox.lock().unwrap().send(Input::Rasters(batch, needs));
+        })
+    }
     /// One menu from several locations: `[[location, context], ...]`, gathered
     /// in order and answered once with every contribution.
     pub fn gather_menus(&self, pairs: Vec<Value>, key: u64) {
@@ -757,6 +774,9 @@ impl Owner {
             }
             Input::Answer(token, value) => {
                 self.eval(&format!("__compat.answer({token},{value})"));
+            }
+            Input::Rasters(batch, needs) => {
+                self.eval(&format!("__compat.answerRasters({batch},{needs})"));
             }
             Input::Menu(location, context, key) => {
                 self.eval(&format!(
@@ -1390,6 +1410,7 @@ impl Owner {
             host.set_text(text());
         }
         host.set_frames(self.config.frames.clone());
+        host.set_rasters(self.config.rasters.clone());
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         crate::boot_realm(&realm, &host, "")?;
@@ -1621,6 +1642,7 @@ mod tests {
                 owner: None,
                 text: None,
                 frames: None,
+                rasters: None,
                 wake: Arc::new(|| ()),
             });
             Self {
@@ -1801,6 +1823,7 @@ mod tests {
             text: None,
             wake: Arc::new(|| ()),
             frames: None,
+            rasters: None,
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         while !later.is_ready() || later.contributions().is_none() {

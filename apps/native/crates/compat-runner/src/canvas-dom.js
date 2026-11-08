@@ -429,6 +429,10 @@ globalThis.__installNativeCanvas = function (owner) {
     }
     return source;
   };
+  // The native surface behind a canvas an override drew: a DOM canvas or a
+  // realm canvas (`RecorderCanvas`).
+  owner.nativeSurfaceOf = (canvas) =>
+    isCanvas(canvas) ? native(canvas).canvas.surface : canvas?.surface;
   owner.pageAttribute = (node, name, value) =>
     name === "src" && images.get(node)?.local ? null : value;
   owner.flushCanvases = () => {

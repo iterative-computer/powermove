@@ -275,6 +275,11 @@ impl Controller {
         let project = session.project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
+        let rasters = crate::raster_overrides::Overrides::new(
+            &self.engine,
+            self.kernel.clone(),
+            project.clone(),
+        );
         let frames = crate::mcp_services::frame_renderer(
             self.kernel.clone(),
             project.clone(),
@@ -284,6 +289,7 @@ impl Controller {
         let host = ExtensionHost::start(HostConfig {
             kernel: self.kernel.clone(),
             frames,
+            rasters: Some(rasters.hooks()),
             project,
             roots: roots(&self.profile),
             cache: self.profile.join("extensions-build"),
@@ -298,6 +304,7 @@ impl Controller {
                 let _ = wake_tx.try_send(());
             }),
         });
+        rasters.connect(host.raster_inbox());
         self.extensions.host = Some(host);
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {
