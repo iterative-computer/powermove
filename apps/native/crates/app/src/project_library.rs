@@ -307,22 +307,27 @@ impl ProjectLibrary {
         let this = cx.entity();
         let m = self.tokens.metrics;
         let focus = self.focus.clone();
-        let handle = cx.open_window(
-            WindowOptions::new()
-                .titlebar(Some(TitlebarOptions {
-                    title: Some(TITLE.into()),
-                    ..Default::default()
-                }))
-                .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(m.toolbar), px(m.toolbar)),
-                    size(px(m.settings_width), px(m.settings_height)),
-                )))),
-            move |window, cx| {
-                window.focus(&focus, cx);
-                this
-            },
-        );
-        self.window = handle.ok();
+        // The window's root is this entity, which is being updated now: open
+        // it once the update ends (opening inside it panicked on File ▸ Projects…).
+        cx.defer(move |cx| {
+            let root = this.clone();
+            let handle = cx.open_window(
+                WindowOptions::new()
+                    .titlebar(Some(TitlebarOptions {
+                        title: Some(TITLE.into()),
+                        ..Default::default()
+                    }))
+                    .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(m.toolbar), px(m.toolbar)),
+                        size(px(m.settings_width), px(m.settings_height)),
+                    )))),
+                move |window, cx| {
+                    window.focus(&focus, cx);
+                    root
+                },
+            );
+            this.update(cx, |v, _| v.window = handle.ok());
+        });
     }
     fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
         let mut query = self.controller.query.clone();
