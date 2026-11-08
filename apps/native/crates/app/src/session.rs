@@ -153,7 +153,10 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).extensions.owns_panel(id)
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
-        self.0.update(cx, |v, _| v.sync_extension_panels(open));
+        self.0.update(cx, |v, cx| {
+            v.sync_extension_panels(open);
+            v.sync_parking(open, cx);
+        });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
         self.0.update(cx, |v, _| v.hide_extension_panels(shown));

@@ -79,6 +79,9 @@ pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::Pat
     }
 }
 
+/// Built-in panels that park while closed. The viewer and timeline are always
+/// shown; the agent holds live runs; Settings and Export are windows.
+pub const PARKABLE: &[&str] = &["assets", "layer-effects", "inspector", "fxbrowser"];
 /// A v4 extension's viewer overlay publishes as `<panel>@viewer`.
 pub const VIEWER_OVERLAY: &str = "@viewer";
 /// A deduplicated agent-tool thread request: fingerprint, thread, run.
@@ -157,6 +160,8 @@ struct Broker {
     /// The timeline chrome each extension replaced (`timeline.chrome`), put
     /// back when it leaves, as v1's workspace ownership did.
     timeline_owners: Mutex<BTreeMap<String, Value>>,
+    /// Built-in panels parked while closed (`Builtins::park`).
+    parked: Mutex<std::collections::BTreeSet<String>>,
     /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
     overlays_cleared: Mutex<Vec<String>>,
 }
@@ -633,6 +638,7 @@ impl Builtins {
             commands: Default::default(),
             themes: Default::default(),
             overlays_cleared: Default::default(),
+            parked: Default::default(),
             timeline_owners: Default::default(),
             painters_changed: Default::default(),
         });
@@ -649,6 +655,7 @@ impl Builtins {
                 // Reserved per isolate at its heap ceiling (64 MiB), for the
                 // plan's 64-isolate budget per window: the nine built-ins and
                 // the user's v4 extensions, each in its own isolate (§3.4/§3.7).
+                // Closed panels park to give theirs back.
                 admission: Admission::new(64 * 64 * 1024 * 1024),
             },
         )?;
@@ -663,6 +670,27 @@ impl Builtins {
     /// after Rust accepts the complete atomic surface commit.
     pub fn mount(&mut self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.mount_builtin(panel)
+    }
+    /// Parks a closed built-in panel: its isolate goes and its reservation
+    /// returns to the cage account; `unpark` starts it again from its first
+    /// commit. Waits (bounded) for the isolate: call off the main thread.
+    pub fn park(&self, panel: &str) -> bool {
+        if !PARKABLE.contains(&panel) || !self.realms.lock().unwrap().contains_key(panel) {
+            return false;
+        }
+        self.retire(panel);
+        self.broker.parked.lock().unwrap().insert(panel.into());
+        true
+    }
+    /// A parked panel opened again.
+    pub fn unpark(&self, panel: &str) -> Option<Result<Ticket<Evaluation>>> {
+        if !self.broker.parked.lock().unwrap().remove(panel) {
+            return None;
+        }
+        Some(self.mount_builtin(panel))
+    }
+    pub fn is_parked(&self, panel: &str) -> bool {
+        self.broker.parked.lock().unwrap().contains(panel)
     }
     fn mount_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         if !LIVE_PANELS.contains(&panel)

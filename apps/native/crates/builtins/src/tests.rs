@@ -2140,3 +2140,19 @@ fn an_extension_paints_on_a_thousand_timeline_clips() {
     panels.close();
     actor.shutdown();
 }
+#[test]
+fn a_closed_panel_parks_its_isolate_and_starts_again_when_opened() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("fxbrowser").unwrap());
+    assert!(!panels.is_parked("fxbrowser"));
+    // The viewer and timeline never park; a panel that isn't running can't.
+    assert!(!panels.park("viewer"));
+    assert!(panels.park("fxbrowser"));
+    assert!(panels.is_parked("fxbrowser"));
+    assert!(panels.unpark("fxbrowser").expect("parked").is_ok());
+    assert!(!panels.is_parked("fxbrowser"));
+    assert!(panels.unpark("fxbrowser").is_none());
+    panels.close();
+    actor.shutdown();
+}

@@ -25,6 +25,9 @@ pub struct Host {
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
+    /// The window's open panels, and closed built-ins whose isolates are going.
+    open: BTreeSet<String>,
+    parking: BTreeSet<String>,
     /// The clip painters' revision the timeline last asked for.
     painters: u64,
     /// v4 extensions' viewer overlays (`overlays.viewer`).
@@ -397,6 +400,73 @@ impl Controller {
                 if std::mem::take(&mut v.builtins.again) {
                     v.update_builtins(cx);
                 }
+            });
+        })
+        .detach();
+    }
+    /// Closed built-in panels park (their isolates leave the cage account);
+    /// reopened ones start again, the view keeping its tree until the new
+    /// generation publishes. Parking waits for the isolate, off the main thread.
+    pub fn sync_parking(&mut self, open: &[&str], cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        self.builtins.open = open.iter().map(|id| (*id).to_owned()).collect();
+        for id in pm_builtins::PARKABLE {
+            let shown = open.contains(id);
+            if shown && runtime.is_parked(id) {
+                self.unpark(id, cx);
+            } else if !shown
+                && self.builtins.ready.contains(*id)
+                && !runtime.is_parked(id)
+                && self.builtins.parking.insert((*id).to_owned())
+            {
+                self.builtins.ready.remove(*id);
+                self.builtins.keep_surface(id);
+                let (runtime, panel) = (runtime.clone(), (*id).to_owned());
+                cx.spawn(async move |this, cx| {
+                    let parked = {
+                        let runtime = runtime.clone();
+                        let panel = panel.clone();
+                        cx.background_executor()
+                            .spawn(async move { runtime.park(&panel) })
+                            .await
+                    };
+                    let _ = this.update(cx, |v, cx| {
+                        v.builtins.parking.remove(&panel);
+                        if !parked {
+                            v.builtins.ready.insert(panel.clone());
+                        } else if v.builtins.open.contains(&panel) {
+                            // Opened again while it was going.
+                            v.unpark(&panel, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+    fn unpark(&mut self, panel: &str, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        let Some(ticket) = runtime.unpark(panel) else {
+            return;
+        };
+        let id = panel.to_owned();
+        cx.spawn(async move |this, cx| {
+            let result = match ticket {
+                Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| match result {
+                Ok(generation) => {
+                    v.builtins.generations.insert(id.clone(), generation);
+                    v.builtins.ready.insert(id);
+                    v.drain_builtins(cx);
+                    cx.notify();
+                }
+                Err(error) => v.message = format!("Panel {id} could not start: {error}"),
             });
         })
         .detach();
