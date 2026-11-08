@@ -331,7 +331,6 @@ impl TimelineSurface {
             self.visible_rows(),
             cx,
         );
-        crate::playback::set_view(self.view.pps, self.view.scroll_time, self.view.layer_column);
         if persist {
             self.queue.retain(|j| !matches!(j, Job::Persist(_)));
             self.queue.push_back(Job::Persist(self.view));
@@ -451,6 +450,8 @@ impl TimelineSurface {
             self.clamp_scroll();
         }
         if self.frame.is_none() {
+            // The native playhead maps time through the view this frame shows.
+            crate::playback::set_view(self.view.pps, self.view.scroll_time, self.view.layer_column);
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
             self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
         }
