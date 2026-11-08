@@ -224,7 +224,9 @@ fn for_session_within(
                 continue;
             }
         };
-        if pm_builtins::delivery::embedded_proxy(snapshot, &id) {
+        // Proxy bytes never stand in for an original (plan §6), whether the
+        // asset says so or the first launch found the original gone.
+        if pm_builtins::delivery::embedded_proxy(snapshot, &id) || media.is_proxy_only(&id) {
             catalog.proxies.insert(id, resolved);
         } else {
             catalog.originals.insert(id, resolved);
@@ -330,6 +332,26 @@ mod tests {
             .collect();
         found.sort();
         found
+    }
+
+    #[test]
+    fn proxy_only_bytes_are_a_proxy_and_never_a_normal_export_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("media-cache");
+        let mut media = table(&[("b", b"original")]);
+        media.insert_proxy_only(MediaEntry {
+            id: "a".into(),
+            media_type: "image/png".into(),
+            revision: "1".into(),
+            source: MediaSource::Memory(Arc::from(&b"proxy"[..])),
+        });
+        let catalog = for_session(&snapshot(), &media, None, &cache)
+            .unwrap()
+            .catalog;
+        assert!(catalog.proxies.contains_key("a"));
+        assert!(!catalog.originals.contains_key("a"));
+        assert!(!catalog.export_paths(false).paths.contains_key("a"));
+        assert!(catalog.export_paths(true).paths.contains_key("a"));
     }
 
     #[test]

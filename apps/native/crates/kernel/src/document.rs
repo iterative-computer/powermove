@@ -1386,6 +1386,15 @@ impl DocumentStore {
             .media
             .iter()
             .filter(|m| {
+                // A file holds an asset's bytes as its own: proxy-only bytes
+                // there would reopen as the original. They stay in the library.
+                if self
+                    .file
+                    .media
+                    .is_proxy_only(m.id.as_str().unwrap_or_default())
+                {
+                    return false;
+                }
                 if self.root().is_some_and(|root| {
                     crate::media_versions::redundant_active_original(root, &self.file.media, m)
                 }) {
@@ -1672,7 +1681,7 @@ impl DocumentStore {
     /// Bytes the library's media store holds for assets the file lacks.
     pub(crate) fn hydrate_library_media(&mut self, store: &std::path::Path) {
         if let Some(root) = self.root().cloned() {
-            crate::library_media::hydrate(&root, &mut self.file.media, store);
+            crate::library_media::hydrate(&root, &self.history, &mut self.file.media, store);
         }
     }
     pub(crate) fn hydrate_originals(&mut self, archive: &crate::media_archive::Archive) {
