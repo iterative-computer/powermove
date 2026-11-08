@@ -905,3 +905,20 @@ fn the_reveal_shortcut_shows_property_rows(cx: &mut TestAppContext) {
     assert_eq!(rows(&s), 3, "Position X and Y rows in the native tracks");
     bounds(&mut s.vcx, r#"timeline:row:["property","l0","position.x"]"#);
 }
+/// Hovering a layer row shows its switches; leaving hides them again.
+#[gpui::test]
+fn hovering_a_layer_row_shows_its_switches(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let lock = r#"timeline:lock:["layer","l1"]"#;
+    let painted = |s: &mut Stage| s.vcx.debug_bounds(lock).is_some();
+    assert!(!painted(&mut s), "switches stay hidden at rest");
+    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l1"]"#);
+    s.vcx
+        .simulate_mouse_move(row.center(), None, Modifiers::none());
+    s.idle(cx);
+    assert!(painted(&mut s), "hover reveals the lock switch");
+    s.vcx
+        .simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::none());
+    s.idle(cx);
+    assert!(!painted(&mut s), "leaving hides it");
+}
