@@ -110,6 +110,10 @@ fn or_number(a: &JsValue, b: &JsValue) -> f64 {
     }
 }
 
+/// `pathGeometry`'s result: each path's values, its group matrix, and the
+/// layer's path geometry.
+pub type PathGeometry = (Vec<EvaluatedPath>, Vec<[f64; 6]>, PathLayer);
+
 /// Evaluated values of one editable path (`pathValues`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvaluatedPath {
@@ -171,6 +175,19 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         prefix: &str,
     ) -> JsResult<EvaluatedPath> {
+        self.path_values_noting(layer, path, time, prefix, &mut true)
+    }
+
+    /// [`Self::path_values`], clearing `fixed` when a channel it reads
+    /// depends on the time.
+    fn path_values_noting(
+        &mut self,
+        layer: &'d Node,
+        path: &'d Node,
+        time: f64,
+        prefix: &str,
+        fixed: &mut bool,
+    ) -> JsResult<EvaluatedPath> {
         let mut values = Content::new();
         let p = node::get_checked(Some(path), b"p")?;
         if let Got::Node(p) = &p {
@@ -180,8 +197,14 @@ impl<'d> Scope<'_, 'd> {
                 ));
             }
             for (k, prop) in node::entries(p) {
-                let key = format!("{prefix}.{}", k.to_string_lossy());
-                let v = self.evaluated(layer, prop.node(), time, &key)?;
+                let v = match self.static_value(prop.node()) {
+                    Some(v) => v,
+                    None => {
+                        *fixed = false;
+                        let key = format!("{prefix}.{}", k.to_string_lossy());
+                        self.evaluated(layer, prop.node(), time, &key)?
+                    }
+                };
                 values.insert(k, v);
             }
         } else {
@@ -192,15 +215,19 @@ impl<'d> Scope<'_, 'd> {
         let mut vertices = Vec::new();
         let list = node::get_checked(Some(path), b"vertices")?;
         for v in node::array(list.node()).unwrap_or(&[]) {
-            let id = node::to_js_string(node::member(Some(v), "id")).to_string_lossy();
+            let id = || node::to_js_string(node::member(Some(v), "id")).to_string_lossy();
             let mut out = Vec::new();
             if let Some(vp) = node::member(Some(v), "p") {
                 for (k, prop) in node::entries(vp) {
-                    let key = format!("{prefix}.v.{id}.{}", k.to_string_lossy());
-                    let x = crate::scope::or0(
-                        self.evaluated(layer, prop.node(), time, &key)?.to_number(),
-                    );
-                    out.push((k, x));
+                    let value = match self.static_value(prop.node()) {
+                        Some(value) => value,
+                        None => {
+                            *fixed = false;
+                            let key = format!("{prefix}.v.{}.{}", id(), k.to_string_lossy());
+                            self.evaluated(layer, prop.node(), time, &key)?
+                        }
+                    };
+                    out.push((k, crate::scope::or0(value.to_number())));
                 }
             }
             vertices.push(out);
@@ -246,23 +273,34 @@ impl<'d> Scope<'_, 'd> {
 
     /// Every editable path of a shape layer with its values (`d.paths`).
     pub fn layer_paths(&mut self, layer: &'d Node, time: f64) -> JsResult<Vec<EvaluatedPath>> {
+        self.layer_paths_noting(layer, time, &mut true)
+    }
+
+    fn layer_paths_noting(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        fixed: &mut bool,
+    ) -> JsResult<Vec<EvaluatedPath>> {
         let d = node::get_checked(Some(layer), b"d")?;
         let paths = d.node().and_then(|d| node::member(Some(d), "paths"));
         let mut out = Vec::new();
         for path in node::array(paths).unwrap_or(&[]) {
             let id = node::to_js_string(node::member(Some(path), "id")).to_string_lossy();
-            out.push(self.path_values(layer, path, time, &format!("g.{id}"))?);
+            out.push(self.path_values_noting(layer, path, time, &format!("g.{id}"), fixed)?);
         }
         Ok(out)
     }
 
     /// `groupMatrix` for each path, and the `rasterPaths` bounds.
-    pub fn path_geometry(
-        &mut self,
-        layer: &'d Node,
-        time: f64,
-    ) -> JsResult<(Vec<EvaluatedPath>, Vec<[f64; 6]>, PathLayer)> {
-        let evaluated = self.layer_paths(layer, time)?;
+    /// Kept across the frames of an unchanged document when no path channel
+    /// depends on the time (`crate::channel_memo`).
+    pub fn path_geometry(&mut self, layer: &'d Node, time: f64) -> JsResult<PathGeometry> {
+        if let Some(kept) = self.ev.kept_path_geometry(self.comp, layer) {
+            return Ok((*kept).clone());
+        }
+        let mut fixed = true;
+        let evaluated = self.layer_paths_noting(layer, time, &mut fixed)?;
         let d = node::member(Some(layer), "d");
         let stored = node::array(node::member(d, "paths")).unwrap_or(&[]);
         let nodes: Vec<PathNode> = evaluated
@@ -280,7 +318,12 @@ impl<'d> Scope<'_, 'd> {
         let matrices = (0..nodes.len())
             .map(|i| pm_vector::path::group_matrix(&nodes, i).as_coeffs())
             .collect();
-        Ok((evaluated, matrices, PathLayer::new(&nodes)))
+        let geometry = (evaluated, matrices, PathLayer::new(&nodes));
+        if fixed {
+            self.ev
+                .keep_path_geometry(self.comp, layer, std::sync::Arc::new(geometry.clone()));
+        }
+        Ok(geometry)
     }
 
     /// `groupMatrix(PM, layer, path, time)` for a path outside `d.paths` (a
