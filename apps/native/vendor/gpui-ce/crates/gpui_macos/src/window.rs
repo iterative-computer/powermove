@@ -1078,6 +1078,21 @@ impl MacWindowState {
             .log_err();
     }
 
+    /// A synchronous present calls `nextDrawable`, which Core Animation forbids
+    /// while a `CAMetalDisplayLink` owns the layer, even a paused one (it raises
+    /// `CAMetalLayerInvalidOperation`). Drop the link; `start_display_link`
+    /// makes a new one after the present.
+    fn release_display_link_for_sync_present(&mut self) {
+        if let Some(link) = self.ca_display_link.take() {
+            unsafe {
+                let _: () = msg_send![&*link, invalidate];
+            }
+        }
+        if let Some(frame_source) = self.frame_source.as_mut() {
+            frame_source.stop();
+        }
+    }
+
     fn stop_display_link(&mut self) {
         if let Some(link) = &self.ca_display_link {
             unsafe {
@@ -3370,7 +3385,7 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.sync_present_requested = true;
-                lock.stop_display_link();
+                lock.release_display_link_for_sync_present();
                 let request = lock.next_frame_request();
                 drop(lock);
                 callback(request);
@@ -3496,7 +3511,7 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.sync_present_requested = true;
-        lock.stop_display_link();
+        lock.release_display_link_for_sync_present();
         let request = lock.next_frame_request();
         drop(lock);
         callback(request);
