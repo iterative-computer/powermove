@@ -455,36 +455,36 @@
     },
     "text_cold": {
       "all_threads": {
-        "cpu.heap_alloc_bytes": 2575841,
-        "cpu.heap_allocs": 11744,
+        "cpu.heap_alloc_bytes": 2339455,
+        "cpu.heap_allocs": 8146,
         "engine.comp_passes": 1,
         "engine.layers_planned": 2,
-        "gpu.bind_group_binds": 24,
-        "gpu.bind_group_creations": 15,
-        "gpu.buffer_alloc_bytes": 8720,
-        "gpu.draw_calls": 13,
-        "gpu.pipeline_binds": 5,
-        "gpu.render_passes": 4,
-        "gpu.texture_alloc_bytes": 25218064,
-        "gpu.texture_allocs": 12,
-        "gpu.upload_bytes": 133032,
-        "gpu.uploads": 12
+        "gpu.bind_group_binds": 22,
+        "gpu.bind_group_creations": 13,
+        "gpu.buffer_alloc_bytes": 5392,
+        "gpu.draw_calls": 12,
+        "gpu.pipeline_binds": 4,
+        "gpu.render_passes": 3,
+        "gpu.texture_alloc_bytes": 10379192,
+        "gpu.texture_allocs": 9,
+        "gpu.upload_bytes": 118712,
+        "gpu.uploads": 10
       },
       "thread": {
-        "cpu.heap_alloc_bytes": 2575841,
-        "cpu.heap_allocs": 11744,
+        "cpu.heap_alloc_bytes": 2339455,
+        "cpu.heap_allocs": 8146,
         "engine.comp_passes": 1,
         "engine.layers_planned": 2,
-        "gpu.bind_group_binds": 24,
-        "gpu.bind_group_creations": 15,
-        "gpu.buffer_alloc_bytes": 8720,
-        "gpu.draw_calls": 13,
-        "gpu.pipeline_binds": 5,
-        "gpu.render_passes": 4,
-        "gpu.texture_alloc_bytes": 25218064,
-        "gpu.texture_allocs": 12,
-        "gpu.upload_bytes": 133032,
-        "gpu.uploads": 12
+        "gpu.bind_group_binds": 22,
+        "gpu.bind_group_creations": 13,
+        "gpu.buffer_alloc_bytes": 5392,
+        "gpu.draw_calls": 12,
+        "gpu.pipeline_binds": 4,
+        "gpu.render_passes": 3,
+        "gpu.texture_alloc_bytes": 10379192,
+        "gpu.texture_allocs": 9,
+        "gpu.upload_bytes": 118712,
+        "gpu.uploads": 10
       },
       "unit": "frames",
       "units": 1
@@ -886,6 +886,24 @@
       },
       "cpu.heap_allocs": {
         "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
+      }
+    },
+    "text_cold": {
+      "all_threads/cpu.heap_alloc_bytes": {
+        "reason": "As cpu.heap_allocs: thread-scope bytes moved 1,944,863 to 2,064,311 with helper scheduling; the all-thread total moved 2,339,327 to 2,339,455 over 6 runs.",
+        "relative": 0.001
+      },
+      "all_threads/cpu.heap_allocs": {
+        "reason": "Glyph geometry runs on the caller or helper threads (3de258cb0), so the counts depend on scheduling; both scopes hold the all-thread total. Measured spread over 6 identical runs: 8,104 to 8,109 (thread), 8,145 to 8,146 (all threads).",
+        "relative": 0.001
+      },
+      "cpu.heap_alloc_bytes": {
+        "reason": "As cpu.heap_allocs: thread-scope bytes moved 1,944,863 to 2,064,311 with helper scheduling; the all-thread total moved 2,339,327 to 2,339,455 over 6 runs.",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "Glyph geometry runs on the caller or helper threads (3de258cb0), so the counts depend on scheduling; both scopes hold the all-thread total. Measured spread over 6 identical runs: 8,104 to 8,109 (thread), 8,145 to 8,146 (all threads).",
         "relative": 0.001
       }
     }
