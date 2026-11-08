@@ -299,11 +299,25 @@ function overlaysFor(env: { rootOptions: any }): Overlays {
   };
 }
 /** v1–3's timeline chrome (`workspace.chrome.timeline`) for v4. */
+/** This realm's clip painter (`timeline.paint`), run when clips move. */
+let clipPainter: ((clips: Json[]) => unknown) | null = null;
 const timelineApi: Timeline = {
   chrome(patch) {
     if (!patch || typeof patch !== "object")
       throw new Error("Timeline chrome is an object of fields");
     native("timeline.chrome", patch as Json);
+  },
+  paint(painter) {
+    if (typeof painter !== "function")
+      throw new Error("A clip painter is a function");
+    clipPainter = painter as (clips: Json[]) => unknown;
+    native("timeline.painted", null);
+    return () => {
+      if (clipPainter === painter) {
+        clipPainter = null;
+        native("timeline.painted", null);
+      }
+    };
   },
 };
 async function mountExtension(
@@ -412,6 +426,10 @@ async function mountExtension(
     await host.command(name, args);
     await this.publish();
     return true;
+  },
+  /** The timeline shows these clips: this realm's decorations for them. */
+  paintClips(clips: Json[]) {
+    return JSON.stringify(clipPainter ? (clipPainter(clips) ?? {}) : null);
   },
   /** Where the composition sits in the viewer (for the overlay). */
   viewerFrame(frame: Json) {

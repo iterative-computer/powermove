@@ -2090,3 +2090,53 @@ fn an_extension_draws_a_viewer_overlay_that_follows_the_frame() {
     panels.close();
     actor.shutdown();
 }
+#[test]
+fn an_extension_paints_on_a_thousand_timeline_clips() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                export function activate({ timeline }) {
+                    timeline.paint((clips) => Object.fromEntries(clips.map((c) =>
+                        [c.id, [{ rect: [0, 0, c.width, c.height], color: '#5a1f8c', opacity: 0.5 }]])));
+                }
+                export function view() { return jsx('text', { children: 'Painter' }); }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    let before = panels.painters_revision();
+    finish(
+        panels
+            .mount_extension("synthetic-painter", &graph, None)
+            .unwrap(),
+    );
+    assert_ne!(panels.painters_revision(), before);
+    let clips: Vec<Value> = (0..1000)
+        .map(|i| json!({"id":format!("L{i}"),"layerId":format!("L{i}"),"width":80,"height":20,"from":0,"duration":1}))
+        .collect();
+    let started = Instant::now();
+    let (_, ticket) = panels
+        .paint_clips(&json!(clips))
+        .into_iter()
+        .next()
+        .unwrap();
+    let text = finish(ticket.unwrap()).value;
+    eprintln!(
+        "JS painter for 1,000 clips (debug, off the main thread): {:?}",
+        started.elapsed()
+    );
+    let text: String = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or(text);
+    let shapes: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(shapes.as_object().unwrap().len(), 1000);
+    assert_eq!(shapes["L7"][0]["color"], "#5a1f8c");
+    panels.close();
+    actor.shutdown();
+}

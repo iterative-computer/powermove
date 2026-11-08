@@ -84,7 +84,10 @@ and zoom. Display only. It returns a function that removes the overlay.
 Timeline: `timeline.chrome({ rowHeight, gutterWidth, rulerHeight,
 keyframeSize, … })` sets the timeline's chrome as v1–3's
 `workspace.chrome.timeline` did (each field optional, within v1's ranges);
-it's put back when the extension leaves.
+it's put back when the extension leaves. `timeline.paint((clips) => shapes)`
+paints on clips: it runs when the visible clips change (never per playback
+frame) and returns `{ [clipId]: [{ rect: [x, y, w, h], color: "#rrggbb",
+opacity?, radius? } | { text, x, y, color, size? }] }` in clip points.
 
 State survives a publish only through `hot` (in `mount(env)` it is `env.hot`).
 Each publish runs the new version in a fresh runtime. The old version first

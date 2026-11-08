@@ -1270,3 +1270,136 @@ impl Frame {
         })
     }
 }
+
+/// Extension clip shapes (`timeline.paint`) as timeline ops, in each clip's
+/// rectangle and clipped to it (TL-PAINT-1: ≤ 2 ms for 1,000 clips).
+pub fn decoration_ops(
+    ops: &[Op],
+    decorations: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<Op> {
+    if decorations.is_empty() {
+        return vec![];
+    }
+    let colour = |v: &serde_json::Value| {
+        v.as_str()
+            .and_then(|h| h.strip_prefix('#'))
+            .filter(|h| h.len() == 6)
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+    };
+    let mut out = vec![];
+    for clip in ops {
+        let Some(id) = clip.id.strip_prefix("clip:") else {
+            continue;
+        };
+        let Some(shapes) = decorations.get(id).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let b = clip.bounds;
+        let within = Some(match clip.clip {
+            Some(c) => {
+                let (x0, y0) = (b.x.max(c.x), b.y.max(c.y));
+                let (x1, y1) = (
+                    (b.x + b.width).min(c.x + c.width),
+                    (b.y + b.height).min(c.y + c.height),
+                );
+                Rect::new(x0, y0, (x1 - x0).max(0.), (y1 - y0).max(0.))
+            }
+            None => b,
+        });
+        for (i, shape) in shapes.iter().take(64).enumerate() {
+            let Some(color) = colour(&shape["color"]) else {
+                continue;
+            };
+            let base = Op {
+                id: format!("deco:{id}:{i}"),
+                shape: "rect",
+                bounds: b,
+                color,
+                opacity: shape["opacity"].as_f64().unwrap_or(1.).clamp(0., 1.),
+                radius: shape["radius"].as_f64().unwrap_or(0.).max(0.),
+                stroke: 0.,
+                text: None,
+                font_size: 0.,
+                detail: serde_json::Value::Null,
+                clip: within,
+            };
+            if let Some([x, y, w, h]) = shape["rect"].as_array().and_then(|r| {
+                let n: Vec<f64> = r.iter().filter_map(|v| v.as_f64()).collect();
+                <[f64; 4]>::try_from(n).ok()
+            }) {
+                out.push(Op {
+                    shape: if base.radius > 0. {
+                        "rounded-rect"
+                    } else {
+                        "rect"
+                    },
+                    bounds: Rect::new(b.x + x, b.y + y, w.max(0.), h.max(0.)),
+                    ..base
+                });
+            } else if let Some(text) = shape["text"].as_str() {
+                let size = shape["size"].as_f64().unwrap_or(10.).clamp(6., 24.);
+                out.push(Op {
+                    shape: "text",
+                    bounds: Rect::new(
+                        b.x + shape["x"].as_f64().unwrap_or(0.),
+                        b.y + shape["y"].as_f64().unwrap_or(0.),
+                        b.width,
+                        size * 1.4,
+                    ),
+                    text: Some(text.chars().take(200).collect()),
+                    font_size: size,
+                    ..base
+                });
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod decoration_tests {
+    use super::*;
+    /// TL-PAINT-1: extension shapes for 1,000 clips become ops in ≤ 2 ms
+    /// (an optimized build: `cargo test --release -p pm-panel-timeline`).
+    #[test]
+    fn a_thousand_painted_clips_cost_under_two_milliseconds() {
+        let ops: Vec<Op> = (0..1000)
+            .map(|i| {
+                let mut o = Op::new(
+                    format!("clip:L{i}"),
+                    "rounded-rect",
+                    Rect::new(
+                        300. + (i % 10) as f64 * 80.,
+                        (i / 10) as f64 * 22.,
+                        76.,
+                        20.,
+                    ),
+                    0x1f4b52,
+                );
+                o.clip = Some(Rect::new(266., 28., 1200., 2200.));
+                o
+            })
+            .collect();
+        let shapes: serde_json::Map<String, Value> = (0..1000)
+            .map(|i| {
+                (
+                    format!("L{i}"),
+                    json!([{"rect":[0,0,76,20],"color":"#5a1f8c","opacity":0.5},
+                           {"text":"take 3","x":4,"y":4,"color":"#ffffff","size":10}]),
+                )
+            })
+            .collect();
+        let out = decoration_ops(&ops, &shapes);
+        assert_eq!(out.len(), 2000);
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..20 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(decoration_ops(&ops, &shapes));
+            best = best.min(start.elapsed());
+        }
+        eprintln!("TL-PAINT-1 decoration ops for 1,000 clips: {best:?}");
+        if !cfg!(debug_assertions) {
+            assert!(best <= std::time::Duration::from_millis(2), "{best:?}");
+        }
+    }
+}

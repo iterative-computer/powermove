@@ -4,7 +4,7 @@ see its effect, revert it, see it gone. Synthetic extensions only.
 
 usage: agent-flows.py <powermove-native> <profile> [flow ...]
        (pm-gui launch <lane> <project> first; the profile is the lane's)
-Flows: v4-theme, v4-overlay, v1-timeline, v4-timeline, v1-theme (default: all). Exit status 1 on any failure.
+Flows: v4-theme, v4-overlay, v1-timeline, v4-timeline, v4-painter, v1-theme (default: all). Exit status 1 on any failure.
 """
 import base64, json, os, shutil, subprocess, sys, tempfile, time, zlib
 
@@ -127,6 +127,14 @@ def clip_left(mcp):
     return None if left is None else round(left * points)
 
 
+def timeline_purple(mcp):
+    """Whether purple is painted anywhere on the timeline's clips."""
+    content = mcp.tool("capture_panel", {"panelId": "timeline"})
+    width, rows = png_rows(base64.b64decode(content[1]["data"]))
+    return any(near(tuple(row[x * 4:x * 4 + 3]), PURPLE, 30)
+               for row in rows for x in range(width))
+
+
 def viewer_centre(mcp):
     """The viewer capture's centre: the composition's middle."""
     content = mcp.tool("capture_panel", {"panelId": "viewer"})
@@ -184,6 +192,15 @@ EXTENSIONS = {
                     "import { jsx } from 'powermove/jsx-runtime';\n"
                     "export function activate({ timeline }) { timeline.chrome({ gutterWidth: 340 }); }\n"
                     "export function view() { return jsx('text', { children: 'Flow timeline' }); }\n"),
+    "v4-painter": ({"id": "agent-flow-v4-painter", "name": "Flow Painter", "version": "1.0.0",
+                    "apiVersion": 4, "entry": "index.tsx", "author": "agent"},
+                   "index.tsx",
+                   "import { jsx } from 'powermove/jsx-runtime';\n"
+                   "export function activate({ timeline }) {\n"
+                   "  timeline.paint((clips) => Object.fromEntries(clips.map((c) =>\n"
+                   "    [c.id, [{ rect: [0, 0, c.width, c.height], color: '#5a1f8c' }]])));\n"
+                   "}\n"
+                   "export function view() { return jsx('text', { children: 'Flow painter' }); }\n"),
     "v1-theme": ({"id": "agent-flow-v1-theme", "name": "Flow Theme v1", "version": "1.0.0",
                   "apiVersion": 3, "entry": "index.ts", "contributes": ["themes"], "author": "agent"},
                  "index.ts",
@@ -195,11 +212,13 @@ EXTENSIONS = {
 }
 
 
-PROBES = {"v4-overlay": viewer_centre, "v1-timeline": clip_left, "v4-timeline": clip_left}
+PROBES = {"v4-overlay": viewer_centre, "v1-timeline": clip_left, "v4-timeline": clip_left,
+          "v4-painter": timeline_purple}
 # (visible?, reverted?) given the probe before and now; colours by default.
 CHECKS = {
     "v1-timeline": (lambda before, now: now is not None and now >= 410,
                     lambda before, now: now is not None and abs(now - before) <= 3),
+    "v4-painter": (lambda before, now: now is True, lambda before, now: now is False),
     "v4-timeline": (lambda before, now: now is not None and abs(now - 341) <= 3,
                     lambda before, now: now is not None and abs(now - before) <= 3),
 }

@@ -152,6 +152,8 @@ struct Broker {
     commands: Mutex<(u64, BTreeMap<String, Value>)>,
     /// Themes each extension realm offers (`themes.register`), by panel.
     themes: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Bumped when a clip painter (`timeline.paint`) arrives or leaves.
+    painters_changed: std::sync::atomic::AtomicU64,
     /// The timeline chrome each extension replaced (`timeline.chrome`), put
     /// back when it leaves, as v1's workspace ownership did.
     timeline_owners: Mutex<BTreeMap<String, Value>>,
@@ -632,6 +634,7 @@ impl Builtins {
             themes: Default::default(),
             overlays_cleared: Default::default(),
             timeline_owners: Default::default(),
+            painters_changed: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -837,6 +840,24 @@ impl Builtins {
     pub fn run_menu(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.runMenu({})", json!(key)))
+    }
+    /// Every v4 realm's clip decorations for the timeline's visible clips
+    /// (`timeline.paint`); each answers JSON text, or `null` without a painter.
+    pub fn paint_clips(&self, clips: &Value) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let script = format!("__pmBuiltin.paintClips({clips})");
+        self.extension_realms
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, realm)| (id.clone(), realm.eval(script.clone())))
+            .collect()
+    }
+    /// Moves when a clip painter arrives or leaves (and when an extension goes).
+    pub fn painters_revision(&self) -> u64 {
+        self.broker
+            .painters_changed
+            .load(std::sync::atomic::Ordering::Acquire)
+            + self.extension_realms.lock().unwrap().len() as u64 * 1_000_000
     }
     /// Viewer overlays whose extension took them down since the last look.
     pub fn take_cleared_overlays(&self) -> Vec<String> {
@@ -1543,6 +1564,13 @@ impl EngineProxy for Broker {
                 }
                 next["chrome"]["timeline"] = timeline;
                 self.write_workspace(next)?;
+                Ok(Value::Null)
+            }
+            "timeline.painted" => {
+                // A painter came or went: the timeline asks again.
+                self.painters_changed
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                (self.wake)();
                 Ok(Value::Null)
             }
             "overlay.clear" => {

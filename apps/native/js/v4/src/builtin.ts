@@ -58,6 +58,16 @@ export interface Timeline {
     toolbarDensity?: "compact" | "normal";
     surfaceOrder?: "normal" | "reversed";
   }): void;
+  /**
+   * Paints on the timeline's clips, as v1–3 extensions drew on its canvas.
+   * `painter(clips)` runs when the visible clips change (scroll, zoom,
+   * edits), never per playback frame. Each clip is `{ id, layerId, width,
+   * height, from, duration }` (points and seconds); return
+   * `{ [clipId]: shapes }` with shapes in clip points:
+   * `{ rect: [x, y, w, h], color: "#rrggbb", opacity?, radius? }` or
+   * `{ text, x, y, color, size? }`. Returns a function that removes it.
+   */
+  paint(painter: (clips: Json[]) => Record<string, unknown[]>): () => void;
 }
 
 /**

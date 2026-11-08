@@ -25,6 +25,8 @@ pub struct Host {
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
+    /// The clip painters' revision the timeline last asked for.
+    painters: u64,
     /// v4 extensions' viewer overlays (`overlays.viewer`).
     pub overlays: Option<Entity<crate::viewer_overlays::ViewerOverlays>>,
     clock: crate::playback::PanelClock,
@@ -428,6 +430,13 @@ impl Controller {
             eprintln!("v4: {error}");
         }
         self.sync_v4_commands(&runtime);
+        let painters = runtime.painters_revision();
+        if painters != self.builtins.painters
+            && let Some(timeline) = self.builtins.timeline.clone()
+        {
+            self.builtins.painters = painters;
+            timeline.update(cx, |t, cx| t.repaint_decorations(cx));
+        }
         self.sync_v4_themes(&runtime, cx);
         self.builtins
             .requests
@@ -1053,6 +1062,58 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
     ) {
         crate::v4_native::menu(window, &items, cx, choose);
+    }
+    fn painters_revision(&self, cx: &App) -> u64 {
+        self.0
+            .upgrade()
+            .and_then(|c| c.read(cx).builtins.runtime.clone())
+            .map_or(0, |runtime| runtime.painters_revision())
+    }
+    fn paint_clips(&self, clips: Value, done: crate::timeline_surface::PaintDone, cx: &mut App) {
+        let Some(runtime) = self
+            .0
+            .upgrade()
+            .and_then(|c| c.read(cx).builtins.runtime.clone())
+        else {
+            return;
+        };
+        cx.spawn(async move |cx| {
+            // Each realm answers within 100 ms or is left out of this paint.
+            let shapes = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut merged = serde_json::Map::new();
+                    for (_, ticket) in runtime.paint_clips(&clips) {
+                        let Ok(ticket) = ticket else { continue };
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_millis(100);
+                        let text = loop {
+                            if let Some(result) = ticket.try_take() {
+                                break result.ok().map(|e| e.value);
+                            }
+                            if std::time::Instant::now() > deadline {
+                                break None;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        };
+                        let value = text
+                            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                            .map(|v| match v {
+                                Value::String(inner) => {
+                                    serde_json::from_str(&inner).unwrap_or(Value::Null)
+                                }
+                                other => other,
+                            });
+                        if let Some(Value::Object(map)) = value {
+                            merged.extend(map);
+                        }
+                    }
+                    Value::Object(merged)
+                })
+                .await;
+            let _ = cx.update(|cx| done(shapes, cx));
+        })
+        .detach();
     }
     fn extension_menu(
         &self,

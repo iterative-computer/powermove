@@ -30,6 +30,13 @@ pub trait Delegate: 'static {
         cx: &mut App,
         choose: Choose,
     );
+    /// Asks extension clip painters (`timeline.paint`) for decorations of
+    /// `clips`; `done` gets `{clipId: shapes}` merged, on the main thread.
+    fn paint_clips(&self, _clips: serde_json::Value, _done: PaintDone, _cx: &mut App) {}
+    /// Moves when a clip painter arrives or leaves.
+    fn painters_revision(&self, _cx: &App) -> u64 {
+        0
+    }
     /// A context menu that extensions may add to (`location` as v1–3's
     /// `MenuLocation`, `ctx` what it was opened on).
     fn extension_menu(
@@ -44,6 +51,8 @@ pub trait Delegate: 'static {
         self.menu(items, window, cx, choose);
     }
 }
+/// Receives extension clip decorations (`{clipId: shapes}`).
+pub type PaintDone = Box<dyn FnOnce(serde_json::Value, &mut App)>;
 /// Runs with the picked row index once a native menu closes.
 pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
 #[derive(Clone, Debug)]
@@ -157,6 +166,12 @@ pub struct TimelineSurface {
     cursor: CursorStyle,
     /// A wheel or pinch view change waiting for the gesture to rest.
     idle_persist: Option<Task<()>>,
+    /// Extension clip decorations by clip id (`timeline.paint`), and what
+    /// they were asked for (painter revision, visible clips) and the request
+    /// in flight.
+    decorations: Arc<serde_json::Map<String, serde_json::Value>>,
+    painted: Option<(u64, String)>,
+    painting: bool,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -197,6 +212,9 @@ impl TimelineSurface {
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
             idle_persist: None,
+            decorations: Default::default(),
+            painted: None,
+            painting: false,
         };
         this.restore_view();
         cx.spawn(async move |this, cx| {
@@ -478,8 +496,60 @@ impl TimelineSurface {
             crate::playback::set_view(self.view.pps, self.view.scroll_time, self.view.layer_column);
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
             self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
+            if let Some(frame) = self.frame.clone() {
+                self.ask_painters(&frame, cx);
+            }
         }
         self.frame.clone()
+    }
+    /// A clip painter arrived or left: ask again on the next frame.
+    pub fn repaint_decorations(&mut self, cx: &mut Context<Self>) {
+        self.painted = None;
+        self.frame = None;
+        cx.notify();
+    }
+    /// Extension painters run when the visible clips change (scroll, zoom,
+    /// edits), never per playback frame; their shapes land asynchronously.
+    fn ask_painters(&mut self, frame: &Frame, cx: &mut Context<Self>) {
+        let revision = self.delegate.painters_revision(cx);
+        if revision == 0 {
+            if !self.decorations.is_empty() {
+                self.decorations = Default::default();
+            }
+            return;
+        }
+        let clips: Vec<serde_json::Value> = frame
+            .ops
+            .iter()
+            .filter_map(|op| {
+                let id = op.id.strip_prefix("clip:")?;
+                Some(serde_json::json!({"id":id,"layerId":id,
+                    "width":(op.bounds.width * 10.).round() / 10.,"height":(op.bounds.height * 10.).round() / 10.,
+                    "from":op.detail["from"],"duration":op.detail["duration"]}))
+            })
+            .collect();
+        let key = (
+            revision,
+            serde_json::Value::Array(clips.clone()).to_string(),
+        );
+        if self.painting || self.painted.as_ref() == Some(&key) {
+            return;
+        }
+        self.painting = true;
+        self.painted = Some(key);
+        let weak = cx.entity().downgrade();
+        self.delegate.clone().paint_clips(
+            serde_json::Value::Array(clips),
+            Box::new(move |shapes, cx| {
+                let _ = weak.update(cx, |s, cx| {
+                    s.painting = false;
+                    s.decorations = Arc::new(shapes.as_object().cloned().unwrap_or_default());
+                    s.frame = None;
+                    cx.notify();
+                });
+            }),
+            cx,
+        );
     }
     fn local(&self, position: Point<Pixels>) -> (f64, f64) {
         let at = position - self.bounds.origin;
@@ -1486,6 +1556,7 @@ impl Render for TimelineSurface {
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
         let graph = self.graph_area().and_then(|area| self.graph_ops(area));
+        let decorations = self.decorations.clone();
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
                 point(origin.x.min(at.x), origin.y.min(at.y)),
@@ -1538,6 +1609,11 @@ impl Render for TimelineSurface {
                             // copy would sit stale beneath it.
                             for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
                                 paint(op, bounds.origin, &tokens, window, cx);
+                            }
+                            for op in
+                                pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
+                            {
+                                paint(&op, bounds.origin, &tokens, window, cx);
                             }
                         }
                         for op in graph.iter().flatten() {
