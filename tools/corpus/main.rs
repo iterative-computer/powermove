@@ -53,8 +53,23 @@ fn anon(s: &str) -> String {
     blake3::hash(s.as_bytes()).to_hex()[..16].to_owned()
 }
 
+/// Lossy for lone UTF-16 surrogates, which serde strings can't hold (the
+/// runner only reads asset and extension facts from this).
 fn value(v: &pm_model::Value) -> Value {
-    serde_json::from_str(&pm_model::json::to_canonical_string(v)).unwrap()
+    use pm_model::Value as V;
+    match v {
+        V::Null => Value::Null,
+        V::Bool(b) => Value::Bool(*b),
+        V::Number(n) if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 => json!(*n as i64),
+        V::Number(n) => json!(n),
+        V::String(s) => Value::String(s.to_string_lossy()),
+        V::Array(items) => Value::Array(items.iter().map(value).collect()),
+        V::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.to_string_lossy(), value(v)))
+                .collect(),
+        ),
+    }
 }
 fn extensions(v: &Value) -> bool {
     static BUILTINS: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();

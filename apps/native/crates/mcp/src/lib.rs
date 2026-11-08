@@ -120,6 +120,39 @@ pub(crate) fn assets_in_order(project: &Value) -> Vec<&Value> {
 pub(crate) fn model(value: &Value) -> pm_model::Value {
     pm_model::json::parse(&value.to_string()).expect("valid JSON")
 }
+/// A lone UTF-16 surrogate (valid in a saved project, as in JavaScript) has no
+/// serde form; such a string reads as U+FFFD instead of stopping the worker.
 pub(crate) fn json_value(value: &pm_model::Value) -> Value {
-    serde_json::from_str(&pm_model::json::to_canonical_string(value)).expect("valid model JSON")
+    serde_json::from_str(&pm_model::json::to_canonical_string(value))
+        .unwrap_or_else(|_| lossy_json(value))
+}
+fn lossy_json(value: &pm_model::Value) -> Value {
+    use pm_model::Value as V;
+    match value {
+        V::Null => Value::Null,
+        V::Bool(b) => Value::Bool(*b),
+        V::Number(n) if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 => {
+            Value::from(*n as i64)
+        }
+        V::Number(n) => serde_json::Number::from_f64(*n).map_or(Value::Null, Value::Number),
+        V::String(s) => Value::String(s.to_string_lossy()),
+        V::Array(items) => Value::Array(items.iter().map(lossy_json).collect()),
+        V::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.to_string_lossy(), lossy_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod lone_surrogate_tests {
+    #[test]
+    fn a_lone_surrogate_reads_as_a_replacement_instead_of_stopping_the_worker() {
+        let model = pm_model::json::parse(r#"{"name":"a\ud800b","n":2,"x":0.5}"#).unwrap();
+        let json = super::json_value(&model);
+        assert_eq!(json["name"], "a\u{fffd}b");
+        assert_eq!(json["n"], 2);
+        assert_eq!(json["x"], 0.5);
+    }
 }
