@@ -183,7 +183,9 @@
   }
   // Blob, File and object URLs hold bytes in this realm. `__bytes` hands a
   // payload to the host without a JSON copy (image decode, file import).
-  const blobBytes = new WeakMap(), objectURLs = new Map();
+  const blobData = new WeakMap(), hostFiles = new WeakMap(), objectURLs = new Map();
+  // A file the host holds (one the user picked) reads its bytes only when asked.
+  const blobBytes = {get(blob) { let b = blobData.get(blob); if (typeof b === 'function') blobData.set(blob, b = b()); return b; }, set: (blob, b) => blobData.set(blob, b)};
   let nextObjectURL = 0;
   const viewBytes = part => part instanceof ArrayBuffer ? new Uint8Array(part) : ArrayBuffer.isView(part) ? new Uint8Array(part.buffer, part.byteOffset, part.byteLength) : null;
   const mimeType = type => { type = String(type ?? ''); return /^[\x20-\x7e]*$/.test(type) ? type.toLowerCase() : ''; };
@@ -196,7 +198,7 @@
       let at = 0; for (const c of chunks) { bytes.set(c, at); at += c.byteLength; }
       blobBytes.set(this, bytes); this._type = mimeType(options?.type);
     }
-    get size() { return blobBytes.get(this).byteLength; }
+    get size() { return hostFiles.get(this)?.size ?? blobBytes.get(this).byteLength; }
     get type() { return this._type; }
     slice(start = 0, end = this.size, type = '') {
       const b = blobBytes.get(this), clamp = v => { v = Math.trunc(Number(v) || 0); return v < 0 ? Math.max(b.byteLength + v, 0) : Math.min(v, b.byteLength); };
@@ -288,6 +290,10 @@
     bytes(operation, payload, input = null) { const bytes = payload instanceof Blob ? blobBytes.get(payload) : viewBytes(payload); if (!bytes) throw new TypeError('runtime.bytes takes a Blob or bytes'); return JSON.parse(__bytes(String(operation), bytes, JSON.stringify(input))); },
     /** The bytes and type behind a realm blob: or data: URL; null for other URLs, undefined for a revoked one. */
     local: localBytes,
+    /** A File the host holds under `token`; its bytes are read on first use. */
+    hostFile({token, name, type, size, lastModified}) { const file = new File([], name, {type, lastModified}); hostFiles.set(file, {token, size: Number(size)}); blobData.set(file, () => new Uint8Array(__read('file.read', JSON.stringify({token})))); return file; },
+    /** The host's token for a File it holds, else undefined. */
+    fileToken: file => hostFiles.get(file)?.token,
     stage(op) { const text=JSON.stringify(op), copy=JSON.parse(text); const bytes=new TextEncoder().encode(text).byteLength+(ops.length?1:0); if(ops.length>=__limits.max_ops || opBytes+bytes>__limits.max_op_bytes) throw new RangeError('Operation quota'); ops.push(copy); opBytes+=bytes; }
   });
   globalThis.__pm = Object.freeze({

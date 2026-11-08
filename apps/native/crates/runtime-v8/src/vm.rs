@@ -280,6 +280,46 @@ fn bytes_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::
         Err(error) => throw(s, &error),
     }
 }
+/// `__read(operation, input)`: bytes the host holds, as a new `ArrayBuffer`.
+fn read_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let op = a.get(0).to_rust_string_lossy(s);
+    let input = a.get(1).to_rust_string_lossy(s);
+    let state = s.get_slot::<Native>().unwrap().0.clone();
+    let max = state.lock().unwrap().limits.max_response_bytes;
+    let mut bytes = None;
+    let result = serde_json::from_str::<Value>(&input)
+        .map_err(|e| e.to_string())
+        .and_then(|input| {
+            engine_call(&state, &op, |engine, generation, mut budget| {
+                budget.max_response_bytes = max;
+                let read = engine.read_bytes(generation, &op, &input, budget)?;
+                if read.len() > max {
+                    return Err(crate::Error::Quota("Engine response quota"));
+                }
+                bytes = Some(read);
+                Ok(String::new())
+            })
+        });
+    if state.lock().unwrap().cancellation.is_cancelled() {
+        s.terminate_execution();
+        return;
+    }
+    match (result, bytes) {
+        (Ok(_), Some(bytes)) => {
+            // Inside the V8 sandbox: allocated by the isolate, then filled.
+            let buffer = v8::ArrayBuffer::new(s, bytes.len());
+            if let Some(data) = buffer.get_backing_store().data() {
+                // SAFETY: a fresh buffer of exactly `bytes.len()` bytes no one else sees yet.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.as_ptr().cast(), bytes.len())
+                };
+            }
+            rv.set(buffer.into());
+        }
+        (Err(error), _) => throw(s, &error),
+        _ => throw(s, "Host read failed"),
+    }
+}
 /// The reply as JSON text, serialized once.
 fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<String, String> {
     let operation = input["operation"]
@@ -632,6 +672,7 @@ impl Vm {
                 ("__now", v8::Function::new(cs, now).unwrap()),
                 ("__clone", v8::Function::new(cs, clone_value).unwrap()),
                 ("__bytes", v8::Function::new(cs, bytes_op).unwrap()),
+                ("__read", v8::Function::new(cs, read_op).unwrap()),
                 (
                     "__linkModules",
                     v8::Function::new(cs, crate::modules::link).unwrap(),

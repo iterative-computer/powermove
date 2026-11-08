@@ -84,6 +84,13 @@ item's closure. `ui.confirm`, `ui.menu`, `ui.openExternal`, `panels.open` and
 `panel:context` contributions take this path. A tab menu waits 150 ms for
 contributions, then opens without them.
 
+`assets.import` and `PM.assets.add` go through Import Media (probe, retain, Project
+panel, no layer) and answer with the new asset; bytes the realm made are written to a
+private temporary file first. `assets.pick` is the open panel; a picked file stays on
+disk behind an opaque token (`compat-runner/src/files.rs`) and reads its bytes only when
+asked, so importing it copies nothing into V8. `assets.importUrl` downloads over HTTPS
+in the realm and imports the result.
+
 `api.storage` is the kernel's `ext.<id>` settings, the keys the shipped app wrote,
 so values survive a restart and are read by a later window.
 

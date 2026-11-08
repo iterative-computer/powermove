@@ -29,6 +29,42 @@ pub fn extensions() -> Vec<&'static str> {
     [IMAGES, AUDIO, VIDEO].concat()
 }
 
+/// An HTML `accept` list (`image/*`, `.png`, `video/mp4`) as open-panel
+/// extensions; empty when any file is allowed.
+pub fn accept_extensions(accept: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for token in accept.split(',').map(|t| t.trim().to_ascii_lowercase()) {
+        let listed: &[&str] = match token.as_str() {
+            "" => continue,
+            "image/*" => IMAGES,
+            "video/*" => VIDEO,
+            "audio/*" => AUDIO,
+            "image/jpeg" => &["jpg", "jpeg"],
+            "image/svg+xml" => &["svg"],
+            "image/tiff" => &["tif", "tiff"],
+            "video/quicktime" => &["mov"],
+            "video/x-matroska" => &["mkv"],
+            "audio/mpeg" => &["mp3"],
+            "audio/mp4" => &["m4a"],
+            "audio/wav" | "audio/x-wav" => &["wav"],
+            "application/json" => &["json"],
+            "text/plain" => &["txt"],
+            other => {
+                match other.strip_prefix('.').or_else(|| other.split('/').nth(1)) {
+                    Some(extension) if !extension.is_empty() && extension != "*" => {
+                        out.push(extension.into())
+                    }
+                    // `*/*` or an unknown wildcard: anything goes.
+                    _ => return vec![],
+                }
+                continue;
+            }
+        };
+        out.extend(listed.iter().map(|e| e.to_string()));
+    }
+    out.dedup();
+    out
+}
 fn extension(path: &Path) -> String {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -143,6 +179,8 @@ pub struct ImportRequest {
 #[derive(Debug, Default, PartialEq)]
 pub struct Outcome {
     pub imported: Vec<String>,
+    /// The new assets' ids, in the order of `imported`.
+    pub ids: Vec<String>,
     /// File name and reason, in the panel's words.
     pub failed: Vec<(String, String)>,
     pub cancelled: bool,
@@ -301,6 +339,7 @@ impl Builtins {
             let _ = self.broker.kernel.call(&project, request).wait();
         }
         outcome.imported = names;
+        outcome.ids = items.iter().map(|item| item.id.clone()).collect();
         Ok(outcome)
     }
 }

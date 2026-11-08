@@ -2,11 +2,18 @@
 //! probing, byte retention and the kernel's reply all wait on a worker.
 use crate::{platform, session::Controller};
 use gpui::Context;
-use pm_builtins::media_import::{ImportRequest, extensions};
+use pm_builtins::media_import::{ImportRequest, Outcome, extensions};
+use serde_json::json;
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
+
+/// An extension's `assets.import`: the realm promise to answer and the held file.
+pub(crate) struct ExtensionImport {
+    pub answer: u64,
+    pub file: u64,
+}
 
 impl Controller {
     /// File ▸ Import…, Project panel Import and Replace. `place` adds a layer
@@ -127,8 +134,91 @@ impl Controller {
     }
     /// Batches run in order: user order and project identity both depend on it.
     pub(crate) fn import(&mut self, request: ImportRequest, cx: &mut Context<Self>) {
-        self.imports.push_back(request);
+        self.imports.push_back((request, None));
         self.next_import(cx);
+    }
+    /// `assets.import` from an extension: the held file into the Project panel,
+    /// no layer, answering the realm with the new asset's id.
+    pub(crate) fn import_for_extension(&mut self, answer: u64, file: u64, cx: &mut Context<Self>) {
+        let Some(path) = pm_compat_runner::files::path(file) else {
+            self.answer_import(
+                &ExtensionImport { answer, file },
+                Err("The file is no longer available"),
+            );
+            return;
+        };
+        if self.session.is_none() {
+            self.answer_import(
+                &ExtensionImport { answer, file },
+                Err("Open a project before importing media"),
+            );
+            return;
+        }
+        let request = ImportRequest {
+            paths: vec![path],
+            ..Default::default()
+        };
+        self.imports
+            .push_back((request, Some(ExtensionImport { answer, file })));
+        self.next_import(cx);
+    }
+    fn answer_import(&self, import: &ExtensionImport, result: Result<&Outcome, &str>) {
+        let value = match result {
+            Ok(outcome) => match outcome.ids.first() {
+                Some(id) => json!({ "id": id }),
+                None => json!({ "error": outcome.summary() }),
+            },
+            Err(error) => json!({ "error": error }),
+        };
+        pm_compat_runner::files::release_staged(import.file);
+        if let Some(host) = &self.extensions.host {
+            host.answer(import.answer, value);
+        }
+    }
+    /// Abandons queued batches; an extension waiting on one hears why.
+    fn drop_imports(&mut self, reason: &str) {
+        for (_, extension) in std::mem::take(&mut self.imports) {
+            if let Some(extension) = extension {
+                self.answer_import(&extension, Err(reason));
+            }
+        }
+    }
+    /// `assets.pick`: the open panel, the chosen files held for the realm.
+    pub(crate) fn pick_for_extension(
+        &mut self,
+        answer: u64,
+        accept: &str,
+        multiple: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let extensions = pm_builtins::media_import::accept_extensions(accept);
+        let extensions: Vec<&str> = extensions.iter().map(String::as_str).collect();
+        let rx = platform::import_paths(&self.host.borrow().window, false, multiple, &extensions);
+        cx.spawn(async move |this, cx| {
+            let paths = rx.recv().await.unwrap_or_default();
+            let files: Vec<_> = paths
+                .into_iter()
+                .filter_map(|path| {
+                    let meta = std::fs::metadata(&path).ok()?;
+                    let name = path.file_name()?.to_string_lossy().into_owned();
+                    let kind = pm_builtins::media_import::classify(&path).map(|(_, mime)| mime);
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_millis() as u64);
+                    let token = pm_compat_runner::files::hold_picked(path);
+                    Some(json!({"token":token.to_string(),"name":name,"type":kind.unwrap_or_default(),
+                        "size":meta.len(),"lastModified":modified}))
+                })
+                .collect();
+            let _ = this.update(cx, |v, _| {
+                if let Some(host) = &v.extensions.host {
+                    host.answer(answer, files.into());
+                }
+            });
+        })
+        .detach();
     }
     fn next_import(&mut self, cx: &mut Context<Self>) {
         if self.importing.is_some() {
@@ -137,15 +227,18 @@ impl Controller {
         let (Some(published), Some(runtime)) =
             (self.published.clone(), self.builtins.runtime.clone())
         else {
-            self.imports.clear();
+            self.drop_imports("Open a project before importing media");
             return;
         };
-        let Some(request) = self.imports.pop_front() else {
+        let Some((request, extension)) = self.imports.pop_front() else {
             return;
         };
         // Close and quit wait for this fence, so an import never lands half way.
         let Some(operation) = self.mcp.try_operation() else {
-            self.imports.clear();
+            self.imports.push_front((request, extension));
+            self.drop_imports(
+                "A project operation is in progress. Try importing again when it finishes.",
+            );
             self.message =
                 "A project operation is in progress. Try importing again when it finishes.".into();
             cx.notify();
@@ -166,6 +259,9 @@ impl Controller {
             drop(operation);
             let _ = this.update(cx, |v, cx| {
                 v.importing = None;
+                if let Some(extension) = &extension {
+                    v.answer_import(extension, result.as_ref().map_err(String::as_str));
+                }
                 v.message = match result {
                     Ok(outcome) => outcome.summary(),
                     Err(error) => error,

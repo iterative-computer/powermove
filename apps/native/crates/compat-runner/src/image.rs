@@ -96,58 +96,25 @@ impl Encoded {
 }
 
 fn sniff(bytes: &[u8]) -> Option<&'static str> {
-    Some(match bytes {
-        [0x89, b'P', b'N', b'G', ..] => "image/png",
-        [0xff, 0xd8, 0xff, ..] => "image/jpeg",
-        [b'G', b'I', b'F', b'8', ..] => "image/gif",
-        [
-            b'R',
-            b'I',
-            b'F',
-            b'F',
-            _,
-            _,
-            _,
-            _,
-            b'W',
-            b'E',
-            b'B',
-            b'P',
-            ..,
-        ] => "image/webp",
-        [b'B', b'M', ..] => "image/bmp",
-        [
-            _,
-            _,
-            _,
-            _,
-            b'f',
-            b't',
-            b'y',
-            b'p',
-            b'a',
-            b'v',
-            b'i',
-            b'f',
-            ..,
-        ] => "image/avif",
-        [
-            _,
-            _,
-            _,
-            _,
-            b'f',
-            b't',
-            b'y',
-            b'p',
-            b'h',
-            b'e',
-            b'i',
-            b'c',
-            ..,
-        ] => "image/heic",
-        [b'I', b'I', 42, 0, ..] | [b'M', b'M', 0, 42, ..] => "image/tiff",
-        _ => return None,
+    let at = |offset: usize, magic: &[u8]| bytes.get(offset..offset + magic.len()) == Some(magic);
+    Some(if at(0, b"\x89PNG") {
+        "image/png"
+    } else if at(0, b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if at(0, b"GIF8") {
+        "image/gif"
+    } else if at(0, b"RIFF") && at(8, b"WEBP") {
+        "image/webp"
+    } else if at(0, b"BM") {
+        "image/bmp"
+    } else if at(4, b"ftypavif") {
+        "image/avif"
+    } else if at(4, b"ftypheic") {
+        "image/heic"
+    } else if at(0, b"II*\0") || at(0, b"MM\0*") {
+        "image/tiff"
+    } else {
+        return None;
     })
 }
 

@@ -13,6 +13,7 @@ use std::{
 pub mod adapter;
 pub mod compile;
 pub mod discovery;
+pub mod files;
 pub mod host;
 mod image;
 pub mod manifest;
@@ -482,6 +483,23 @@ mod tests {
             ("image/png", 1, 1)
         );
         assert!(image.png.starts_with(b"\x89PNG"));
+    }
+    #[test]
+    fn extension_bytes_are_staged_as_files_and_held_files_read_lazily() {
+        let runner = dom_runner();
+        let staged = runner
+            .json("runtime.bytes('assets.stage', new File(['logo bytes'], '../logo.svg', {type:'image/svg+xml'}), {name:'../logo.svg'}).token")
+            .unwrap();
+        let token: u64 = staged.as_str().unwrap().parse().unwrap();
+        let path = crate::files::path(token).unwrap();
+        assert_eq!(path.file_name().unwrap(), "_logo.svg");
+        assert_eq!(std::fs::read(&path).unwrap(), b"logo bytes");
+        let read = runner
+            .json(&format!("(async()=>{{const f=runtime.hostFile({{token:{staged},name:'logo.svg',type:'image/svg+xml',size:10,lastModified:1}});return [f.size,f.name,f instanceof File,runtime.fileToken(f),await f.text()]}})()"))
+            .unwrap();
+        assert_eq!(read, json!([10, "logo.svg", true, staged, "logo bytes"]));
+        crate::files::release_staged(token);
+        assert!(!path.exists());
     }
     #[test]
     fn native_png_encoding_matches_pixel_readback_and_zero_size_contract() {

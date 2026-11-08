@@ -390,6 +390,21 @@ impl Controller {
                 })
                 .detach();
             }
+            Some("import") => match request["file"].as_str().and_then(|t| t.parse::<u64>().ok()) {
+                Some(file) => self.import_for_extension(token, file, cx),
+                None => {
+                    if let Some(host) = &self.extensions.host {
+                        host.answer(
+                            token,
+                            serde_json::json!({"error":"assets.import requires a File"}),
+                        );
+                    }
+                }
+            },
+            Some("pick") => {
+                let accept = request["accept"].as_str().unwrap_or_default().to_owned();
+                self.pick_for_extension(token, &accept, request["multiple"] == true, cx);
+            }
             Some("openExternal") => {
                 let url = request["url"].as_str().unwrap_or_default();
                 let opened = external_link(url) && crate::platform::open_url(url);

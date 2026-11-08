@@ -91,7 +91,10 @@ pub struct Controller {
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
     /// Queued batches and the cancel flag of the running one.
-    pub(crate) imports: std::collections::VecDeque<pm_builtins::media_import::ImportRequest>,
+    pub(crate) imports: std::collections::VecDeque<(
+        pm_builtins::media_import::ImportRequest,
+        Option<crate::media_import::ExtensionImport>,
+    )>,
     pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Arrow-key nudges less than [`NUDGE_IDLE`] apart are one undo step
     /// (keymap.ts): the history mark taken before the first, and the timer

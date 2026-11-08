@@ -214,6 +214,17 @@ pub trait EngineProxy: Send + Sync + 'static {
     ) -> Result<Value> {
         Err(crate::Error::Host(format!("{operation} is unavailable")))
     }
+    /// Bytes the host holds for the realm (a file the user picked), as one
+    /// `ArrayBuffer`. Hosts without one refuse it.
+    fn read_bytes(
+        &self,
+        _generation: &Generation,
+        operation: &str,
+        _input: &Value,
+        _budget: HostBudget,
+    ) -> Result<Vec<u8>> {
+        Err(crate::Error::Host(format!("{operation} is unavailable")))
+    }
     /// The reply as JSON text. A host that already holds the text (a large
     /// document it serialized ahead of time) returns it without a second pass.
     fn call_text(

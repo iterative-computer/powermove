@@ -108,6 +108,54 @@ globalThis.__compat = {
         });
       unsaved.set(key, value);
     };
+    // Media an extension imports goes through the app's Import Media: probed,
+    // retained in the project's media store, in the Project panel. A picked
+    // file stays on disk behind a token; only bytes the realm made are written.
+    const imported = (id, file, reply) =>
+      this.realm.PM.proj.assets?.[id] ?? {
+        id,
+        name: file.name,
+        kind: reply.kind,
+        size: file.size,
+      };
+    this.assets = {
+      get: (id) => this.realm.PM.proj.assets?.[id],
+      import: async (file, options = {}) => {
+        if (!(file instanceof File)) throw Error("assets.import requires a File");
+        const token =
+          runtime.fileToken(file) ??
+          runtime.bytes("assets.stage", file, { name: file.name }).token;
+        const reply = await ask({
+          kind: "import",
+          file: token,
+          name: file.name,
+          layerDefinition: options?.layerDefinition ?? null,
+        });
+        if (!reply?.id) throw Error(reply?.error ?? `Could not import ${file.name || "asset"}`);
+        return imported(reply.id, file, reply);
+      },
+      pick: async (options = {}) => {
+        const files = await ask({
+          kind: "pick",
+          accept: String(options?.accept ?? ""),
+          multiple: options?.multiple === true,
+        });
+        return (files ?? []).map((file) => runtime.hostFile(file));
+      },
+      importUrl: async (url) => {
+        const target = new URL(String(url));
+        if (target.protocol !== "https:" || target.username || target.password || String(url).length > 2048)
+          throw new TypeError(
+            "assets.importUrl accepts an https URL of at most 2 KB without credentials",
+          );
+        const response = await fetch(target.href, { credentials: "omit" });
+        if (!response.ok) throw Error(`The download returned ${response.status}`);
+        const blob = await response.blob();
+        const name =
+          decodeURIComponent(target.pathname.split("/").pop() || "") || "Download";
+        return (await this.assets.import(new File([blob], name, { type: blob.type }))).id;
+      },
+    };
     const reveal = (id, open) =>
       call("ui.request", { kind: "panel", id, open });
     const capabilities = {
@@ -119,9 +167,7 @@ globalThis.__compat = {
         },
         reload: (id) => this.loader.reload(id),
       },
-      assets: {
-        get: (id) => this.realm.PM.proj.assets?.[id],
-      },
+      assets: this.assets,
       panelsBackend: Object.fromEntries(
         ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
           (name) => [
@@ -188,9 +234,7 @@ globalThis.__compat = {
         },
         assets: {
           get: (id) => this.realm.PM.proj.assets?.[id],
-          add: () => {
-            throw Error("Import media from the Project panel");
-          },
+          add: (file, options) => this.assets.import(file, options),
         },
         store: {
           get: (key, fallback) => storage[key] ?? fallback,

@@ -964,6 +964,29 @@ impl EngineProxy for NativeHost {
                 state.images.insert(id, image);
                 Ok(reply)
             }
+            "assets.stage" => {
+                let token = crate::files::stage(bytes, input["name"].as_str().unwrap_or(""))?;
+                Ok(json!({"token":token.to_string()}))
+            }
+            _ => Err(Error::Host(format!("{operation} is unavailable"))),
+        }
+    }
+    fn read_bytes(
+        &self,
+        _: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<Vec<u8>> {
+        budget.check()?;
+        match operation {
+            "file.read" => {
+                let token = input["token"]
+                    .as_str()
+                    .and_then(|t| t.parse().ok())
+                    .ok_or(Error::Invalid("file token"))?;
+                crate::files::read(token, budget.max_response_bytes)
+            }
             _ => Err(Error::Host(format!("{operation} is unavailable"))),
         }
     }
