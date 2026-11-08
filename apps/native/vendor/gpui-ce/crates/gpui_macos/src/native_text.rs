@@ -666,7 +666,7 @@ impl NativeTextSlot {
         unsafe {
             let checker: Retained<AnyObject> =
                 msg_send![class!(NSSpellChecker), sharedSpellChecker];
-            let tag: isize = msg_send![&**v, spellDocumentTag];
+            let tag: isize = msg_send![&**v, spellCheckerDocumentTag];
             let mut from = 0usize;
             while from < length {
                 let found: NSRange = msg_send![
@@ -707,7 +707,7 @@ impl NativeTextSlot {
             unsafe {
                 let checker: Retained<AnyObject> =
                     msg_send![class!(NSSpellChecker), sharedSpellChecker];
-                let tag: isize = msg_send![&**v, spellDocumentTag];
+                let tag: isize = msg_send![&**v, spellCheckerDocumentTag];
                 let range = NSRange::new(word.0, word.1 - word.0);
                 let guesses: Option<Retained<NSArray<NSString>>> = msg_send![
                     &checker,
