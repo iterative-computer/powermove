@@ -999,6 +999,9 @@ impl Render for Editor {
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
+        // Extension pages sit below GPUI too; their bodies are read at paint
+        // time, after this frame's layout has recorded them.
+        let native_bodies = self.host.as_ref().map(|h| h.borrow().native_panels.clone());
         let dragging = matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved);
         let mut root = div()
             .id("editor")
@@ -1021,42 +1024,20 @@ impl Render for Editor {
                     move |_, _, _| (),
                     move |b, _, window, _| {
                         let (width, height) = (f32::from(b.size.width), f32::from(b.size.height));
-                        let mut rects = vec![];
-                        if let Some(v) = canvas_viewer.filter(|_| native) {
-                            rects.extend([
-                                Rect {
-                                    x: 0.,
-                                    y: 0.,
-                                    w: width,
-                                    h: v.y,
-                                },
-                                Rect {
-                                    x: 0.,
-                                    y: v.y,
-                                    w: v.x,
-                                    h: v.h,
-                                },
-                                Rect {
-                                    x: v.x + v.w,
-                                    y: v.y,
-                                    w: width - v.x - v.w,
-                                    h: v.h,
-                                },
-                                Rect {
-                                    x: 0.,
-                                    y: v.y + v.h,
-                                    w: width,
-                                    h: height - v.y - v.h,
-                                },
-                            ]);
-                        } else {
-                            rects.push(Rect {
+                        let mut holes: Vec<Rect> =
+                            canvas_viewer.filter(|_| native).into_iter().collect();
+                        if let Some(bodies) = &native_bodies {
+                            holes.extend(bodies.borrow().iter().map(|(_, r)| *r));
+                        }
+                        let rects = layout::outside(
+                            Rect {
                                 x: 0.,
                                 y: 0.,
                                 w: width,
                                 h: height,
-                            });
-                        }
+                            },
+                            &holes,
+                        );
                         for r in rects {
                             window.paint_quad(
                                 PaintQuad::new(Bounds::new(

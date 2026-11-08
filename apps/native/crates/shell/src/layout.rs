@@ -9,6 +9,43 @@ pub struct Rect {
     pub w: f32,
     pub h: f32,
 }
+/// `area` less `holes`, as horizontal bands of rectangles.
+pub fn outside(area: Rect, holes: &[Rect]) -> Vec<Rect> {
+    let mut edges = vec![area.y, area.y + area.h];
+    for h in holes {
+        edges.extend([h.y, h.y + h.h]);
+    }
+    edges.retain(|y| *y >= area.y && *y <= area.y + area.h);
+    edges.sort_by(f32::total_cmp);
+    edges.dedup();
+    let mut out = vec![];
+    for band in edges.windows(2) {
+        let (top, bottom) = (band[0], band[1]);
+        if bottom <= top {
+            continue;
+        }
+        let mut cuts: Vec<(f32, f32)> = holes
+            .iter()
+            .filter(|h| h.y <= top && h.y + h.h >= bottom)
+            .map(|h| (h.x.max(area.x), (h.x + h.w).min(area.x + area.w)))
+            .filter(|(a, b)| b > a)
+            .collect();
+        cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut x = area.x;
+        for (a, b) in cuts.into_iter().chain([(area.x + area.w, area.x + area.w)]) {
+            if a > x {
+                out.push(Rect {
+                    x,
+                    y: top,
+                    w: a - x,
+                    h: bottom - top,
+                });
+            }
+            x = x.max(b);
+        }
+    }
+    out
+}
 impl Rect {
     pub fn contains(self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
@@ -1127,6 +1164,22 @@ pub struct DropPreview {
 #[cfg(test)]
 mod contributed_tests {
     use super::*;
+    #[test]
+    fn outside_leaves_every_hole_unpainted_and_covers_the_rest() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        let area = r(0., 0., 100., 50.);
+        let holes = [r(10., 10., 20., 20.), r(60., 0., 30., 50.)];
+        let rects = outside(area, &holes);
+        let covered: f32 = rects.iter().map(|r| r.w * r.h).sum();
+        assert_eq!(covered, 100. * 50. - 20. * 20. - 30. * 50.);
+        for (x, y) in [(15., 15.), (75., 25.)] {
+            assert!(!rects.iter().any(|r| r.contains(x, y)));
+        }
+        for (x, y) in [(5., 5.), (40., 40.), (95., 49.)] {
+            assert!(rects.iter().any(|r| r.contains(x, y)));
+        }
+        assert_eq!(outside(area, &[]), vec![area]);
+    }
     #[test]
     fn contributed_panels_dock_title_and_survive_like_builtins() {
         set_contributed_panels(1, [("synthetic.panel".to_owned(), "Synthetic".to_owned())]);
