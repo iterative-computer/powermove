@@ -1600,7 +1600,7 @@ impl SurfaceView {
                 element = element.group(group.clone()).child(
                     div()
                         .when(*open, |d| {
-                            d.opacity(0.).group_hover(group, |s| s.opacity(1.))
+                            d.opacity(0.).group_hover_style(group, |s| s.opacity(1.))
                         })
                         .child(pm_shell::symbol::symbol(
                             if *open {

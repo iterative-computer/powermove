@@ -128,3 +128,7 @@ uses. The governing rules stay in [language.md](language.md).
 - The content column is solid `panel`: the selected section's name as a
   `heading` in the title band, then 28 pt rows, name truncating, facts in
   `minimum`/`muted` tabular figures.
+- GPUI's own `MacosWindowBackground::Blurred` panics in its layer update
+  (`blurred_view_update_layer`, a non-unwinding panic that aborts the app).
+  The Library uses a transparent window over the shell's behind-window blur
+  (`pm_shell::window_backdrop`) instead; nothing should use `Blurred`.

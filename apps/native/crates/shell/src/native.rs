@@ -248,6 +248,26 @@ pub fn material(
         }
     }
 }
+/// A transparent GPUI window over the shell's behind-window blur, tinted by
+/// its own content (the Project Library sidebar), as the editor's ground.
+/// Solid `window` under Reduce Transparency. GPUI's own `Blurred` background
+/// panics in its layer update, so windows use this instead.
+pub fn window_backdrop(w: &gpui::Window, t: &Tokens) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let gpui: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let (Some(window), Some(content)) =
+        (gpui.window(), gpui.window().and_then(|w| w.contentView()))
+    else {
+        return;
+    };
+    let view = backdrop(mtm, &content);
+    ground(&window, &view, t);
+}
 /// Frames a borderless GPUI window as a popover: `Surface::Popover` material
 /// (glass on macOS 26, a visual-effect popover before, solid `floating`
 /// under Reduce Transparency) under the transparent GPUI view, rounded to

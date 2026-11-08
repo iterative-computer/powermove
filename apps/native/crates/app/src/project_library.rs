@@ -307,6 +307,7 @@ impl ProjectLibrary {
         let this = cx.entity();
         let m = self.tokens.metrics;
         let translucent = self.tokens.translucent();
+        let tokens = self.tokens.clone();
         let focus = self.focus.clone();
         // The window's root is this entity, which is being updated now: open
         // it once the update ends (opening inside it panicked on File ▸ Projects…).
@@ -315,10 +316,11 @@ impl ProjectLibrary {
             // A Mac library window: full-size content under a transparent
             // title bar, the sidebar on the behind-window blur.
             let background = if translucent {
-                gpui::MacosWindowBackground::Blurred
+                gpui::MacosWindowBackground::Transparent
             } else {
                 gpui::MacosWindowBackground::Opaque
             };
+            let tokens = tokens.clone();
             let handle = cx.open_window(
                 WindowOptions::new()
                     .macos_window_background(background)
@@ -332,6 +334,9 @@ impl ProjectLibrary {
                         size(px(m.settings_width), px(m.settings_height)),
                     )))),
                 move |window, cx| {
+                    if tokens.translucent() {
+                        pm_shell::window_backdrop(window, &tokens);
+                    }
                     window.focus(&focus, cx);
                     root
                 },
