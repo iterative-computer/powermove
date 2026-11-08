@@ -137,3 +137,6 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 
 - Realm images decode natively on the realm worker: ImageIO for rasters (embedded profile to sRGB, EXIF orientation, as WebKit shows them), resvg for SVG, rasterized at the scale it is drawn (×2 for Retina) instead of stretched. An SVG's intrinsic size is usvg's (`viewBox` when width/height are missing), not Chromium's 300×150 fallback.
 - The realm gains the web platform's `Blob`, `File`, `FileReader`, `URL.createObjectURL`, `atob`/`btoa`, `Image`, `ImageBitmap` and `createImageBitmap`; a realm `blob:`/`data:` image reaches the page as its bytes, never as a URL.
+- While a project opens and until its panels have drawn it, the app holds a user-initiated activity (idle system sleep allowed), so App Nap never throttles an open in the background; measured on the T3 project with the screen locked: open finished in ~70 s instead of not finishing after 13 min at priority 4.
+- Built-in panels lock only their own broker entry, and wait for host replies with a backoff (1 ms ×4, then doubling to 16 ms) instead of polling every 1 ms.
+- `assets.import` from an extension imports into the Project panel without a layer, as v1; bytes the realm made are written to a private temporary file first, a picked file never is.
