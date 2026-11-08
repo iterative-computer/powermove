@@ -865,6 +865,7 @@ fn engine_reservation_counts_v8_and_pending_fetch_memory_before_calling_host() {
         c.engine = Some(engine.clone());
         c.limits.external_bytes = 2 * 1024 * 1024;
         c.limits.max_response_bytes = 1024 * 1024;
+        c.limits.max_engine_response_bytes = 1024 * 1024;
     });
     f.host.mode.store(1, Ordering::Relaxed);
     let r = f.pool.realm(RealmKind::Compat).unwrap();
