@@ -209,6 +209,37 @@ impl Builtins {
         let missing = || "This thread does not exist in the current project.".to_owned();
         let (thread, effect) = {
             let mut state = agent.lock().unwrap();
+            // Refuse a run no provider can take before anything changes.
+            if tool != "thread_cancel" {
+                let named = args["target"]["providerInstanceId"].as_str();
+                let current = match tool {
+                    "thread_send" => args["threadId"].as_str().unwrap_or_default(),
+                    _ => state.panel.active_id(),
+                };
+                let provider = match named {
+                    Some("chatgpt") => Provider::Chatgpt,
+                    Some("claude") => Provider::Claude,
+                    Some(_) => Provider::Compatible,
+                    None => {
+                        state
+                            .panel
+                            .session(current)
+                            .map_err(|_| missing())?
+                            .settings
+                            .provider
+                    }
+                };
+                if !link.available(provider) {
+                    let name = match provider {
+                        Provider::Chatgpt => "ChatGPT",
+                        Provider::Claude => "Claude",
+                        Provider::Compatible => "your compatible provider",
+                    };
+                    return Err(format!(
+                        "Sign in to {name} in Settings › Agents before starting a run."
+                    ));
+                }
+            }
             let thread = match tool {
                 "thread_launch" => {
                     let id = pm_kernel::new_id("agent-thread");
@@ -261,15 +292,8 @@ impl Builtins {
                         .map_err(|e| format!("{e:?}"))?;
                 }
                 let session = state.panel.session(&thread).map_err(|_| missing())?;
-                let provider = session.settings.provider;
                 if session.needs_answer() {
                     return Err("This thread is waiting on a question. Answer it in the Agent panel; a message can't answer it here yet.".into());
-                }
-                if !link.available(provider) {
-                    return Err(format!(
-                        "Sign in to {} in Settings › Agents before starting a run.",
-                        provider.name()
-                    ));
                 }
                 agent_host::admit_send(&state, &thread)?;
                 let message = args["message"].as_str().unwrap_or_default();
