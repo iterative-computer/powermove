@@ -455,31 +455,43 @@ fn file_provider_xattr_causes_copy_without_a_cloud_folder_name() {
     assert!(is_cloud_path(&dir.path("p.pmv")));
 }
 #[test]
-fn stale_lock_requires_both_dead_pid_and_thirty_seconds() {
+fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     let dir = common::TempDir::new("stale");
     let path = dir.path("p.pmvlock");
     let dead = 2_000_000_000u32;
     assert!(!pid_alive(dead));
+    // A live pid with a fresh heartbeat owns the lock (an unflocked writer).
+    fs::write(
+        &path,
+        format!("{{\"pid\":{},\"heartbeat\":{}}}", std::process::id(), now_ms()),
+    )
+    .unwrap();
+    assert_eq!(
+        FileLock::acquire(&path).err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
+    // Killed a moment ago: the flock is free and the pid is gone. No wait.
     fs::write(
         &path,
         format!("{{\"pid\":{dead},\"heartbeat\":{}}}", now_ms()),
     )
     .unwrap();
-    assert!(FileLock::acquire(&path).is_err());
-    fs::write(
-        &path,
-        format!("{{\"pid\":{},\"heartbeat\":0}}", std::process::id()),
-    )
-    .unwrap();
-    assert!(FileLock::acquire(&path).is_err());
-    fs::write(&path, format!("{{\"pid\":{dead},\"heartbeat\":0}}")).unwrap();
     let lock = FileLock::acquire(&path).unwrap();
     let record = parse(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
         record.get("pid"),
         Some(&Value::Number(std::process::id() as f64))
     );
+    // Held: a second claim, even from this process, waits.
+    assert!(FileLock::acquire(&path).is_err());
     drop(lock);
+    // A reused pid whose heartbeat stopped 30 s ago is stale too.
+    fs::write(
+        &path,
+        format!("{{\"pid\":{},\"heartbeat\":0}}", std::process::id()),
+    )
+    .unwrap();
+    drop(FileLock::acquire(&path).unwrap());
     assert!(FileLock::acquire(&path).is_ok());
 }
 #[test]
