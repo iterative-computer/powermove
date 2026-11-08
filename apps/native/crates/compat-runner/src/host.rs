@@ -472,6 +472,13 @@ impl ExtensionHost {
         });
     }
     /// Contributions for one open menu. A `key` keeps the reply tied to it.
+    /// One menu from several locations: `[[location, context], ...]`, gathered
+    /// in order and answered once with every contribution.
+    pub fn gather_menus(&self, pairs: Vec<Value>, key: u64) {
+        let _ = self
+            .inbox
+            .send(Input::Menu(String::new(), Value::Array(pairs), key));
+    }
     pub fn gather_menu(&self, location: &str, context: Value, key: u64) {
         let _ = self
             .inbox

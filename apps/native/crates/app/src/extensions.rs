@@ -87,6 +87,40 @@ struct OpenMenu {
     entries: Vec<MenuEntry>,
     at: (f32, f32),
 }
+/// A native surface's right-click menu (layer, timeline, viewer) waiting for the
+/// extensions' rows for its locations.
+struct SurfaceMenu {
+    key: u64,
+    rows: Vec<Value>,
+    choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    window: AnyWindowHandle,
+}
+/// Rows and their descendants, in the menu's preorder index space.
+fn preorder_len(rows: &[Value]) -> usize {
+    rows.iter()
+        .map(|row| 1 + row["children"].as_array().map_or(0, |c| preorder_len(c)))
+        .sum()
+}
+/// An extension's menu items as native menu rows; `runs` gets each row's
+/// closure index in the realm, in preorder.
+fn contributed_rows(items: &[Value], runs: &mut Vec<Option<u64>>) -> Vec<Value> {
+    items
+        .iter()
+        .map(|item| {
+            if item["separator"] == true {
+                runs.push(None);
+                return json!({"separator":true});
+            }
+            runs.push(item["run"].as_u64());
+            let mut row = json!({"label":item["label"],"checked":item["on"] == true,
+                "disabled":item["disabled"] == true || (item["run"].is_null() && item["submenu"].is_null())});
+            if let Some(children) = item["submenu"].as_array() {
+                row["children"] = contributed_rows(children, runs).into();
+            }
+            row
+        })
+        .collect()
+}
 
 /// What an extension's menu items are in the native menu.
 fn menu_entries(items: &[Value], token: u64) -> Vec<MenuEntry> {
@@ -147,6 +181,7 @@ pub struct Extensions {
     /// Open panels with no body right now: tabs behind another.
     hidden: BTreeSet<String>,
     menu: Option<OpenMenu>,
+    surface_menu: Option<SurfaceMenu>,
     next_menu: u64,
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
@@ -183,6 +218,7 @@ impl Default for Extensions {
             open_panels: BTreeSet::new(),
             hidden: BTreeSet::new(),
             menu: None,
+            surface_menu: None,
             next_menu: 0,
             placed: BTreeMap::new(),
             seen: 0,
@@ -425,6 +461,19 @@ impl Controller {
                 let size = shell.gpui.bounds().size;
                 shell.context_menu(&entries, size.width as f32 / 2., size.height as f32 / 2.);
             }
+            Some("menu")
+                if self
+                    .extensions
+                    .surface_menu
+                    .as_ref()
+                    .is_some_and(|m| Some(m.key) == request["key"].as_u64()) =>
+            {
+                let menu = self.extensions.surface_menu.take().unwrap();
+                let mut runs = vec![];
+                let items =
+                    contributed_rows(request["items"].as_array().unwrap_or(&vec![]), &mut runs);
+                self.open_surface_menu(menu, items, runs, token, cx);
+            }
             Some("menu") => {
                 let items = menu_entries(request["items"].as_array().unwrap_or(&vec![]), token);
                 let open = self
@@ -452,6 +501,84 @@ impl Controller {
             }
             _ => (),
         }
+    }
+    /// A right-click menu on a native surface: `rows` first, so the positions
+    /// people learned never move, then what extensions contribute for
+    /// `locations` after a separator (`layer:context`, `timeline:context`,
+    /// `viewer:context`). It opens when they answer or at the deadline.
+    pub(crate) fn surface_menu(
+        &mut self,
+        locations: Vec<(&str, Value)>,
+        rows: Vec<Value>,
+        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
+            crate::v4_native::menu(window, &rows, cx, choose);
+            return;
+        };
+        self.extensions.next_menu += 1;
+        let key = self.extensions.next_menu;
+        let pairs = locations
+            .into_iter()
+            .map(|(location, context)| json!([location, context]))
+            .collect();
+        host.gather_menus(pairs, key);
+        if let Some(stale) = self.extensions.surface_menu.replace(SurfaceMenu {
+            key,
+            rows,
+            choose,
+            window: window.window_handle(),
+        }) {
+            (stale.choose)(None, cx);
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MENU_DEADLINE).await;
+            let _ = this.update(cx, |v, cx| {
+                if let Some(menu) = v.extensions.surface_menu.take_if(|m| m.key == key) {
+                    v.open_surface_menu(menu, vec![], vec![], 0, cx);
+                }
+            });
+        })
+        .detach();
+    }
+    fn open_surface_menu(
+        &mut self,
+        menu: SurfaceMenu,
+        items: Vec<Value>,
+        runs: Vec<Option<u64>>,
+        token: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let SurfaceMenu {
+            mut rows,
+            choose,
+            window,
+            ..
+        } = menu;
+        let native = preorder_len(&rows);
+        if !items.is_empty() {
+            rows.push(json!({"separator":true}));
+            rows.extend(items);
+        }
+        let host = cx.entity().downgrade();
+        let _ = window.update(cx, move |_, window, cx| {
+            crate::v4_native::menu(window, &rows, cx, move |index, cx| {
+                // A contributed row runs its closure in the realm; anything else
+                // (a native row, or no choice) tells the realm nothing was chosen.
+                let run = index
+                    .and_then(|i| i.checked_sub(native + 1))
+                    .and_then(|i| runs.get(i).copied().flatten());
+                if token != 0
+                    && let Some(controller) = host.upgrade()
+                    && let Some(extensions) = &controller.read(cx).extensions.host
+                {
+                    extensions.answer(token, run.map_or(Value::Null, Value::from));
+                }
+                choose(index.filter(|i| *i < native), cx);
+            });
+        });
     }
     /// Extensions add to a tab's menu asynchronously, so it opens when they
     /// answer or the deadline passes, whichever comes first.

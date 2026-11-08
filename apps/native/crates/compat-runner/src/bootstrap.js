@@ -93,7 +93,11 @@ globalThis.__compat = {
       if (choice !== null && choice !== undefined) await runs[choice]?.();
     };
     this.gatherMenu = (location, context, key) => {
-      showMenu(this.realm.kernel.gatherMenu(location, context), { key }).catch(
+      // An empty location gathers each `[location, context]` pair, in order.
+      const lists = location
+        ? [this.realm.kernel.gatherMenu(location, context)]
+        : context.map(([at, value]) => this.realm.kernel.gatherMenu(at, value));
+      showMenu(Promise.all(lists).then((all) => all.flat()), { key }).catch(
         (error) => this.reportFailure(error),
       );
     };

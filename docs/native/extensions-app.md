@@ -151,8 +151,10 @@ window is open is shown in it.
 - `api.services` holds only what extensions register; the built-in `viewer`,
   `timeline`, `inspector`, `tool` and `shaderHooks` services do not exist natively.
 - `ui.modal` and `PM.Fonts` throw `Unavailable`.
-- `layer:context`, `timeline:context` and `viewer:context` have nowhere to appear,
-  because those native surfaces have no context menus. `titlebar:right` has no host.
+- `titlebar:right` has no host. `layer:context`, `timeline:context` and `viewer:context`
+  rows follow the native rows in the timeline's and viewer's right-click NSMenus
+  (`Controller::surface_menu`, the same 150 ms deadline as tab menus), with v1's contexts:
+  a layer gathers both `layer:context` and its surface's location.
 - Contributed layer types render and label their timeline row, but their parameters
   have no Properties rows until per-kind controls are designed.
 - Layout reads in the realm are cached from the last page report (`remote-dom.md`).

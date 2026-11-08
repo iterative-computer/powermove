@@ -23,8 +23,10 @@ pub trait Delegate: 'static {
     /// Run a shell command by name, as its menu item or chord would.
     fn command(&self, name: &str, cx: &mut App);
     /// `choose` runs with the picked row, on the main thread, once tracking ends.
+    /// Extensions' rows for `locations` follow the native ones.
     fn menu(
         &self,
+        locations: Vec<(&'static str, serde_json::Value)>,
         items: Vec<serde_json::Value>,
         window: &mut Window,
         cx: &mut App,
@@ -993,6 +995,13 @@ impl TimelineSurface {
             }
             return;
         }
+        let time = self.time_at(x);
+        let at = |kind: &str, layer: Option<&str>| {
+            vec![(
+                "timeline:context",
+                serde_json::json!({"kind":kind,"layerId":layer,"time":time}),
+            )]
+        };
         let context = if y < ruler {
             match frame.hit_op("marker:", x, y, 2.) {
                 Some(op) => MenuContext::Marker {
@@ -1026,6 +1035,14 @@ impl TimelineSurface {
                 _ => MenuContext::Empty,
             }
         };
+        // As in the shipped timeline: no extension rows on the ruler.
+        let locations = match &context {
+            MenuContext::Keys { .. } => at("keyframe", None),
+            MenuContext::Graph { .. } => at("graph", None),
+            MenuContext::Track { layer, .. } => at("prop", Some(layer)),
+            MenuContext::Empty => at("empty", None),
+            _ => vec![],
+        };
         let mut items = self.model.menu(&context);
         // Keyframe dialogs run from the Animation menu on the selection; these
         // rows would target the clicked keys, which no sheet takes yet. Graph
@@ -1043,6 +1060,7 @@ impl TimelineSurface {
             .collect();
         let weak = cx.entity().downgrade();
         self.delegate.clone().menu(
+            locations,
             rows,
             window,
             cx,
@@ -1065,11 +1083,21 @@ impl TimelineSurface {
     /// The shared layer menu runs ordinary commands on the row's selection.
     fn layer_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.model.selection.contains(&id) {
-            self.queue.push_back(Job::SelectLayer(id, Mods::default()));
+            self.queue
+                .push_back(Job::SelectLayer(id.clone(), Mods::default()));
             self.pump(cx);
         }
         let delegate = self.delegate.clone();
+        let time = self.delegate.time(cx);
+        let locations = vec![
+            ("layer:context", serde_json::json!({ "layerId": id })),
+            (
+                "timeline:context",
+                serde_json::json!({"kind":"layer","layerId":id,"time":time}),
+            ),
+        ];
         self.delegate.clone().menu(
+            locations,
             crate::layer_commands::layer_menu_rows(),
             window,
             cx,
