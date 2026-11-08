@@ -268,16 +268,20 @@ fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
         .to_string();
     let store = ProxyStore::open(temp.path().join("store")).unwrap();
     let cancel = AtomicBool::new(false);
-    for format in [
-        ProxyFormat::ProResProxy,
-        ProxyFormat::ProResLt,
-        ProxyFormat::Hevc10,
+    // Proxies at half size, and optimized media (ProRes 422 HQ) at full size.
+    let reported = std::sync::Mutex::new(Vec::<f64>::new());
+    let record = |share: f64| reported.lock().unwrap().push(share);
+    for (format, size) in [
+        (ProxyFormat::ProResProxy, ProxySize::Half),
+        (ProxyFormat::ProResLt, ProxySize::Half),
+        (ProxyFormat::Hevc10, ProxySize::Half),
+        (ProxyFormat::ProResHq, ProxySize::Full),
     ] {
         let request = || GenerationRequest {
             source: &source,
             source_hash: &hash,
             format,
-            size: ProxySize::Half,
+            size,
             ffmpeg: &ffmpeg,
             ffprobe: &ffprobe,
             store: &store,
@@ -285,6 +289,7 @@ fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
                 cancel: &cancel,
                 pause: &|| false,
                 on_pause: &|_| {},
+                on_progress: &record,
             },
         };
         let result = generate_with_disk_probe(request(), &TEST_QUOTA).unwrap();
@@ -293,7 +298,22 @@ fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
         let again = generate_with_disk_probe(request(), &TEST_QUOTA).unwrap();
         assert!(again.reused);
         assert_eq!(again.stored.path, result.stored.path);
+        if size == ProxySize::Full {
+            assert_eq!(
+                (result.stored.recipe.width, result.stored.recipe.height),
+                (128, 72),
+                "optimized media keeps the source size"
+            );
+        }
     }
+    assert!(
+        reported
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|share| (0.0..=1.0).contains(share)),
+        "progress is a share of the clip"
+    );
     let replaced = Command::new(&ffmpeg)
         .args([
             "-hide_banner",
@@ -332,6 +352,7 @@ fn synthetic_video_with_pcm_audio_generates_validated_prores_proxy() {
                 cancel: &cancel,
                 pause: &|| false,
                 on_pause: &|_| {},
+                on_progress: &|_| {},
             },
         },
         &TEST_QUOTA,
@@ -393,6 +414,7 @@ fn alpha_source_forces_prores_4444_even_with_hevc_preference() {
                 cancel: &cancel,
                 pause: &|| false,
                 on_pause: &|_| {},
+                on_progress: &|_| {},
             },
         },
         &TEST_QUOTA,
@@ -463,6 +485,7 @@ fn float64_pcm_source_keeps_its_coding_and_samples() {
                 cancel: &cancel,
                 pause: &|| false,
                 on_pause: &|_| {},
+                on_progress: &|_| {},
             },
         },
         &TEST_QUOTA,
@@ -548,6 +571,7 @@ fn variable_frame_intervals_keep_exact_pts() {
                 cancel: &cancel,
                 pause: &|| false,
                 on_pause: &|_| {},
+                on_progress: &|_| {},
             },
         },
         &TEST_QUOTA,
@@ -608,6 +632,7 @@ fn odd_source_dimensions_retain_display_aspect() {
                 cancel: &cancel,
                 pause: &|| false,
                 on_pause: &|_| {},
+                on_progress: &|_| {},
             },
         },
         &TEST_QUOTA,

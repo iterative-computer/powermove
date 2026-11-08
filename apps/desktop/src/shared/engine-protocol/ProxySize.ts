@@ -3,4 +3,4 @@
 /**
  * Proxy sizes (appendix D). Automatic never goes below 540p.
  */
-export type ProxySize = "automatic" | "half" | "quarter" | "p1080" | "p720";
+export type ProxySize = "automatic" | "full" | "half" | "quarter" | "p1080" | "p720";

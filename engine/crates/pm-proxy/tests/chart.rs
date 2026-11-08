@@ -176,6 +176,7 @@ fn sixteen_bit_chart_proxy_meets_the_delta_e_bar() {
                 cancel: &cancel,
                 pause: &never,
                 on_pause: &on_pause,
+                on_progress: &|_| {},
             },
         },
         &quota,
