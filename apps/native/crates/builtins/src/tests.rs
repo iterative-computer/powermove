@@ -2510,3 +2510,36 @@ fn a_replaced_viewer_overlay_publishes_from_its_own_first_commit() {
     panels.close();
     actor.shutdown();
 }
+
+#[test]
+fn project_size_offers_the_shipped_presets_and_writes_width_and_height() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings-size".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "settings", false).unwrap();
+    let publication = backend.settings_snapshot().unwrap();
+    let rows = publication["rows"].as_array().unwrap();
+    let find = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+    let size = find("project.size");
+    assert!(size["binding"].is_string(), "{size}");
+    assert_eq!(
+        size["options"][0],
+        json!({"v":"3840x2160","label":"4K UHD · 3840×2160"})
+    );
+    assert!(find("project.width")["binding"].is_string());
+    assert!(find("project.height")["binding"].is_string());
+    assert!(backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.size","value":"custom"}})).is_err());
+    let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.size","value":"1280x720"}})).unwrap() else { panic!("actor request") };
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let publication = backend.settings_snapshot().unwrap();
+    let rows = publication["rows"].as_array().unwrap();
+    let find = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+    assert_eq!(find("project.size")["value"], json!("1280x720"));
+    assert_eq!(find("project.width")["value"], json!(1280.0));
+    assert_eq!(find("project.height")["value"], json!(720.0));
+}

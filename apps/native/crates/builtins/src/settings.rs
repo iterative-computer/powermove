@@ -11,6 +11,16 @@ use pm_kernel::{
 };
 use serde_json::{Value, json};
 
+/// The shipped composition size presets (v1.2.0 `RESOLUTION_PRESETS`).
+const SIZE_PRESETS: [(f64, f64, &str); 6] = [
+    (3840., 2160., "4K UHD · 3840×2160"),
+    (1920., 1080., "HD 1080p · 1920×1080"),
+    (1280., 720., "HD 720p · 1280×720"),
+    (1080., 1920., "Vertical HD · 1080×1920"),
+    (1080., 1350., "Portrait 4:5 · 1080×1350"),
+    (1080., 1080., "Square · 1080×1080"),
+];
+
 impl Backend {
     /// Live subscription rows. These replace the catalogue's disabled ones by id.
     pub(crate) fn account_rows(&self) -> Vec<Value> {
@@ -110,6 +120,9 @@ impl Backend {
         let comp = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
             .ok_or("Composition closed")?;
         let fields = self.fields(&json!([
+            "project.size",
+            "project.width",
+            "project.height",
             "project.name",
             "project.fps",
             "project.duration",
@@ -172,6 +185,44 @@ impl Backend {
                 row["unit"] = json!("s");
             }
             rows.push(row);
+        }
+        // The shipped presets (v1.2.0 RESOLUTION_PRESETS), then Custom with the size.
+        let size = |k: &str| {
+            comp.get(k)
+                .and_then(|n| n.to_value().as_f64())
+                .unwrap_or(0.)
+                .round()
+        };
+        let (w, h) = (size("w"), size("h"));
+        let preset = SIZE_PRESETS
+            .iter()
+            .find(|(pw, ph, _)| *pw == w && *ph == h)
+            .map(|(pw, ph, _)| format!("{pw}x{ph}"));
+        let mut options: Vec<Value> = SIZE_PRESETS
+            .iter()
+            .map(|(pw, ph, label)| json!({"v":format!("{pw}x{ph}"),"label":label}))
+            .collect();
+        options.push(json!({"v":"custom","label":format!("Custom · {w}×{h}")}));
+        rows.insert(
+            1,
+            json!({"id":"project.size","section":"project","group":"Composition",
+            "label":"Size","control":"choice","value":preset.unwrap_or_else(|| "custom".into()),
+            "options":options,"detail":"Pick a common size, or set your own pixel dimensions.",
+            "binding":fields["project.size"],"disabled":false}),
+        );
+        for (at, (id, label, value)) in [
+            ("project.width", "Width", w),
+            ("project.height", "Height", h),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            rows.insert(
+                2 + at,
+                json!({"id":id,"section":"project","group":"Composition",
+                "label":label,"control":"number","value":value,"min":16,"max":8192,"unit":"px",
+                "binding":fields[id],"disabled":false}),
+            );
         }
         rows.push(json!({"id":"project.colorDepth","section":"project","group":"Composition",
             "label":"Color Depth","control":"choice","value":root.get("colorDepth")
@@ -272,6 +323,23 @@ impl Backend {
                     Some("project.name") => {
                         patch.name = Some(value.as_str().ok_or("Project name must be text")?.into())
                     }
+                    Some("project.size") => {
+                        let Some((w, h)) =
+                            value
+                                .as_str()
+                                .and_then(|v| v.split_once('x'))
+                                .and_then(|(w, h)| {
+                                    Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?))
+                                })
+                        else {
+                            // Custom: the Width and Height rows set it.
+                            return Err("Choose a size, or set Width and Height".into());
+                        };
+                        patch.width = Some(number(&json!(w), 16., 8192.)?);
+                        patch.height = Some(number(&json!(h), 16., 8192.)?);
+                    }
+                    Some("project.width") => patch.width = Some(number(value, 16., 8192.)?),
+                    Some("project.height") => patch.height = Some(number(value, 16., 8192.)?),
                     Some("project.fps") => patch.fps = Some(number(value, 1., 240.)?),
                     Some("project.duration") => {
                         patch.duration = Some(number(value, 0.1, f64::MAX)?)

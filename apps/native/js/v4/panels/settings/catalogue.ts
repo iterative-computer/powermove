@@ -202,6 +202,8 @@ export function projectRows(): Row[] {
         "Custom…",
       ]),
     },
+    { ...row("width", "Composition", "Width", "number"), unit: "px" },
+    { ...row("height", "Composition", "Height", "number"), unit: "px" },
     {
       ...row(
         "fps",
@@ -224,7 +226,7 @@ export function projectRows(): Row[] {
     ),
     {
       ...row(
-        "depth",
+        "colorDepth",
         "Composition",
         "Color Depth",
         "choice",
