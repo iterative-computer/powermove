@@ -138,3 +138,5 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Background Tasks exposes priority through a right-click NSMenu (High/Normal/Low), as plan section 1 asks; rows keep queue order (the design review's "don't reorder" stands).
 - Automatic plays optimized media in place of originals (Final Cut's optimized media); Originals and exports never read it; Export › Use Proxies (Draft) is the only way an export reads proxies.
 - `pm_protocol::priority` gains `ProxySize::Full` and `ProxyFormat::ProResHq` (additive; bindings regenerated).
+- Pro media renditions are keyed by the original's content (media-cache object name or a once-per-stamp BLAKE3), not its path and mtime; Clear… keeps anything another original, attached record, task or the open project references (wave 16 review).
+- The direct glyph cache charges and evicts whole chunk textures, and still prefetch counts decoded bytes from the worker's decode and drops stills no frame asked for within 4 s (wave 16 review).
