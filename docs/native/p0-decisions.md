@@ -81,3 +81,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **First-run animation** plays inside the Welcome window.
 - **Going back:** there is no reverse migration. The old app must refuse a native file it can't read, safely and clearly, instead of opening it wrongly.
 
+
+## v4 API additions
+
+- **`onPointerEnter` / `onPointerLeave` (2026-11-07, additive):** typed on every intrinsic element; the host already delivered `pointerenter`/`pointerleave` to listeners. Timeline rows use them to show their switches on hover.
