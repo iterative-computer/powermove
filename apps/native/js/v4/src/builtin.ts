@@ -31,7 +31,40 @@ export interface BuiltinEnv {
   commands?: Commands;
   /** Extensions only: themes for the whole window (see `Themes`). */
   themes?: Themes;
+  /** Extensions only: context-menu items (see `Menus`). */
+  menus?: Menus;
 }
+
+/**
+ * Context-menu items, as v1–3's `menus.contribute`: `items(ctx)` runs on every
+ * open of that menu (`"panel:context"`, with `ctx.panelId`) and returns items:
+ * `"-"`, `{ header }`, or `{ label, kb?, on?, disabled?, run?, submenu? }`. A
+ * Promise is waited for at most 100 ms. Returns a function that removes them.
+ */
+export interface Menus {
+  contribute(
+    location:
+      | "panel:context"
+      | "layer:context"
+      | "timeline:context"
+      | "viewer:context"
+      | "titlebar:right",
+    items: (
+      ctx: Record<string, Json>,
+    ) => MenuContribution[] | Promise<MenuContribution[]>,
+  ): () => void;
+}
+export type MenuContribution =
+  | "-"
+  | { header: string }
+  | {
+      label: string;
+      kb?: string | null;
+      on?: boolean;
+      disabled?: boolean;
+      run?: () => unknown;
+      submenu?: MenuContribution[];
+    };
 
 /**
  * Themes an extension offers. Each is listed in the command palette as

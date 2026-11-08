@@ -41,6 +41,8 @@ const V4_COMMAND: &str = "extension.v4:";
 const V4_OWNER: &str = "v4-extension:";
 /// `extension.v4theme:<panel>:<id>`, or `…:default` for the built-in look.
 const V4_THEME: &str = "extension.v4theme:";
+/// `extension.v4menu:<panel>:<key>`: a v4 extension's context-menu item.
+const V4_MENU: &str = "extension.v4menu:";
 thread_local! {
     /// The v4 theme the person chose (`panel:id`), for every window.
     static ACTIVE_THEME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -444,8 +446,8 @@ impl Controller {
             _ => (),
         }
     }
-    /// Extensions add to a tab's menu asynchronously, so it opens when they
-    /// answer or the deadline passes, whichever comes first.
+    /// Extensions add to a tab's menu asynchronously: v4 realms answer first
+    /// (100 ms at most, off the main thread), then v1–3 within the deadline.
     pub fn extension_panel_menu(
         &mut self,
         id: &str,
@@ -453,13 +455,51 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
+        let compat = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0);
+        let runtime = self.builtins.runtime.clone().filter(|r| r.has_extensions());
         // With no realm nothing can add to it, so it opens right away.
-        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
+        if !compat && runtime.is_none() {
             return Some(entries);
+        }
+        let ctx = json!({"panelId": id});
+        cx.spawn(async move |this, cx| {
+            let extra = match runtime {
+                Some(runtime) => {
+                    let asked = ctx.clone();
+                    cx.background_executor()
+                        .spawn(async move { v4_menu_items(&runtime, "panel:context", &asked) })
+                        .await
+                }
+                None => vec![],
+            };
+            let _ = this.update(cx, |v, cx| {
+                let mut entries = entries;
+                if !extra.is_empty() {
+                    entries.push(MenuEntry::separator());
+                    entries.extend(extra);
+                }
+                v.open_compat_menu(entries, at, &ctx, cx);
+            });
+        })
+        .detach();
+        None
+    }
+    /// v1–3 realms add to the menu, which opens when they answer or the
+    /// deadline passes.
+    fn open_compat_menu(
+        &mut self,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        ctx: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
+            self.host.borrow().context_menu(&entries, at.0, at.1);
+            return;
         };
         self.extensions.next_menu += 1;
         let key = self.extensions.next_menu;
-        host.gather_menu("panel:context", json!({"panelId": id}), key);
+        host.gather_menu("panel:context", ctx.clone(), key);
         self.extensions.menu = Some(OpenMenu { key, entries, at });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(MENU_DEADLINE).await;
@@ -472,7 +512,6 @@ impl Controller {
             });
         })
         .detach();
-        None
     }
     /// Each v4 extension gets its own realm and draws through the v4 panel path.
     /// One that is disabled, removed or rebuilt loses that realm here. A fork
@@ -797,6 +836,32 @@ impl Controller {
                 && let (Ok(token), Ok(run)) = (token.parse(), run.parse::<u64>())
             {
                 host.answer(token, run.into());
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_MENU) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            runtime
+                                .run_menu(&panel, &key)
+                                .map_err(|e| format!("{e:?}"))
+                                .and_then(|ticket| {
+                                    wait_ticket(ticket, std::time::Duration::from_secs(30))
+                                })
+                        })
+                        .await;
+                    if let Err(message) = outcome {
+                        let _ = this
+                            .update(cx, |v, _| v.errors.borrow_mut().tell("Extension", &message));
+                    }
+                })
+                .detach();
             }
             return true;
         }
@@ -1365,4 +1430,78 @@ mod theme_tests {
             "unknown tokens are refused"
         );
     }
+}
+
+/// Waits for a realm evaluation on a worker, up to `limit`.
+fn wait_ticket(
+    ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>,
+    limit: std::time::Duration,
+) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if let Some(result) = ticket.try_take() {
+            return result.map(|e| e.value).map_err(|e| format!("{e:?}"));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("The extension didn't answer in time.".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+/// Every v4 extension's items for a menu, as native entries (off the main
+/// thread). Each realm answers within its own 100 ms, so this waits ~150 ms.
+fn v4_menu_items(runtime: &pm_builtins::Builtins, location: &str, ctx: &Value) -> Vec<MenuEntry> {
+    let mut entries = vec![];
+    for (panel, ticket) in runtime.gather_menus(location, ctx) {
+        let Some(text) = ticket
+            .ok()
+            .and_then(|t| wait_ticket(t, std::time::Duration::from_millis(150)).ok())
+        else {
+            continue;
+        };
+        // The realm returns the items as JSON text.
+        let items = serde_json::from_str::<Value>(&text)
+            .ok()
+            .map(|v| match v {
+                Value::String(inner) => serde_json::from_str(&inner).unwrap_or(Value::Null),
+                other => other,
+            })
+            .unwrap_or(Value::Null);
+        entries.extend(v4_entries(&panel, &items));
+    }
+    entries
+}
+fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
+    items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            if item == "-" {
+                return Some(MenuEntry::separator());
+            }
+            if let Some(header) = item["header"].as_str() {
+                let mut entry = MenuEntry::item(header, "");
+                entry.enabled = false;
+                return Some(entry);
+            }
+            let label = item["label"].as_str()?;
+            if let Some(children) = item["submenu"].as_array() {
+                return Some(MenuEntry::submenu(
+                    label,
+                    v4_entries(panel, &Value::Array(children.clone())),
+                ));
+            }
+            let command = match (item["key"].as_str(), item["disabled"] == true) {
+                (Some(key), false) => format!("{V4_MENU}{panel}:{key}"),
+                _ => String::new(),
+            };
+            let mut entry = MenuEntry::item(label, command);
+            if item["on"] == true {
+                entry = entry.checked(true);
+            }
+            entry.enabled = !entry.command.is_empty();
+            Some(entry)
+        })
+        .collect()
 }

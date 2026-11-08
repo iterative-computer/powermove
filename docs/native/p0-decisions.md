@@ -102,6 +102,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 
 - **`activate({ themes })` / `env.themes` (2026-11-08, additive):** `themes.register({ id, title, tokens })` offers a whole-window theme as palette "Theme: <title>"; the app applies its token patch through the shell's theme pipeline (`pm_shell::theme`), restyling chrome and every panel in every window; it follows reloads and leaves with its extension. Tokens only (no surface rules yet); the choice lasts until quit.
 
+- **`activate({ menus })` / `env.menus` (2026-11-08, additive):** `menus.contribute(location, ctx => items)` with v1–3's `MenuContribution` shape and 100 ms answer limit; the app gathers v4 items off the main thread and merges them into panel tab context menus (`panel:context`) before v1–3's. Other locations are typed but not yet gathered by the native timeline, viewer or titlebar.
+
 ## Look lane decisions (2026-11-08)
 
 - **The owner's GPUI demo is the visual reference.** Translucent window (`translucency.ground` at `translucency.window` over a behind-window blur), one shared panel material (`colors.panel` at `translucency.panel`) with a `text` hairline edge, 8 pt panel radius, 38 pt headers with a divider, 24 pt status line. Reduce Transparency makes both solid; Increase Contrast makes edges solid `separator`.

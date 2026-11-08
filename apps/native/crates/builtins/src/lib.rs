@@ -799,6 +799,30 @@ impl Builtins {
         })
     }
     /// Runs a command an extension registered, in that extension's realm.
+    /// True while any v4 extension realm runs (context menus ask them).
+    pub fn has_extensions(&self) -> bool {
+        !self.extension_realms.lock().unwrap().is_empty()
+    }
+    /// Every v4 extension's items for a menu opening at `location` (each
+    /// realm waits at most 100 ms on its own contributions).
+    pub fn gather_menus(
+        &self,
+        location: &str,
+        ctx: &Value,
+    ) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let script = format!("__pmBuiltin.gatherMenu({},{})", json!(location), ctx);
+        self.extension_realms
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, realm)| (id.clone(), realm.eval(script.clone())))
+            .collect()
+    }
+    /// The person chose `key` from the items `panel` gave the last gather.
+    pub fn run_menu(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.runMenu({})", json!(key)))
+    }
     pub fn run_command(&self, panel: &str, id: &str, args: &[Value]) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval(format!(
             "__pmBuiltin.runCommand({},{})",

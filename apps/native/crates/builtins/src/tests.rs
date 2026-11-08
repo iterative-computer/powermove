@@ -1978,3 +1978,66 @@ fn an_extension_offers_a_theme_the_window_can_apply() {
     panels.close();
     actor.shutdown();
 }
+#[test]
+fn an_extension_adds_items_to_a_panel_context_menu() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                import { useState } from 'powermove/hooks';
+                let mark = () => {};
+                export function activate({ menus }) {
+                    menus.contribute('panel:context', (ctx) => [
+                        { header: 'Synthetic' },
+                        { label: 'Mark ' + ctx.panelId, run: () => mark() },
+                        '-',
+                        { label: 'More', submenu: [{ label: 'Off', disabled: true }] },
+                    ]);
+                    menus.contribute('panel:context', () => new Promise(() => {}));
+                }
+                export function view() {
+                    const [n, setN] = useState(0);
+                    mark = () => setN((v) => v + 1);
+                    return jsx('text', { children: 'Marked ' + n });
+                }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {
+                "powermove/jsx-runtime":"runtime:powermove/jsx-runtime",
+                "powermove/hooks":"runtime:powermove/hooks"
+            }
+        }
+    });
+    finish(
+        panels
+            .mount_extension("synthetic-menu", &graph, None)
+            .unwrap(),
+    );
+    assert!(panels.has_extensions());
+    let asked = Instant::now();
+    let gathered = panels.gather_menus("panel:context", &json!({"panelId":"timeline"}));
+    let (panel, ticket) = gathered.into_iter().next().unwrap();
+    let value = finish(ticket.unwrap()).value;
+    // A contribution that never answers is left out after 100 ms.
+    assert!(asked.elapsed() < Duration::from_secs(2));
+    let text: String = serde_json::from_str::<Value>(&value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or(value);
+    let items: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(panel, "synthetic-menu");
+    assert_eq!(items[0], json!({"header":"Synthetic"}));
+    assert_eq!(items[1]["label"], "Mark timeline");
+    assert_eq!(items[2], "-");
+    assert_eq!(items[3]["submenu"][0]["disabled"], true);
+    let key = items[1]["key"].as_str().unwrap().to_owned();
+    finish(panels.run_menu("synthetic-menu", &key).unwrap());
+    assert!(text_of(&panels, "synthetic-menu").contains(&"Marked 1".to_owned()));
+    panels.unmount_extension("synthetic-menu");
+    assert!(!panels.has_extensions());
+    panels.close();
+    actor.shutdown();
+}

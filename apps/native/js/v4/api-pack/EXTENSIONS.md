@@ -36,7 +36,7 @@ when available, and say honestly what you could not check.
   extension API, documented in `v3/EXTENSIONS.md` with its types in `v3/`
   (Svelte panels, effects, transitions, layer types, commands, keybindings,
   menus, themes, status items). They load and publish the same way. Use them
-  for context menus and effects: v4 has no registration API for those yet.
+  for effects: v4 has no registration API for those yet.
 - `replaces`: built-in ids this extension draws in place of (forks).
 - Credentials never go in source: declare `vars` and read them at runtime.
 
@@ -52,7 +52,7 @@ The entry is TypeScript/TSX and exports one of:
   panel, `env.platform` requests (menus, focus), and `env.root()` for a surface.
   Return `{ root, dispose, settle?, show?, publish? }`.
 
-An optional `activate({ host, id, hot, commands, themes })` runs before
+An optional `activate({ host, id, hot, commands, themes, menus })` runs before
 `view()` renders.
 
 Commands: `commands.register({ id, title, key }, run)` adds `title` to the
@@ -66,6 +66,11 @@ command palette; choosing it restyles the window chrome and every panel.
 (`"colors.accent"`, `"colors.panel"`, …), lengths and alphas as numbers
 (`"metrics.gap"`, `"translucency.panel"`, …). Unknown tokens are refused. It
 returns a function that removes the theme; a chosen theme follows reloads.
+
+Menus: `menus.contribute("panel:context", (ctx) => items)` adds items to a
+panel tab's context menu (`ctx.panelId`) each time it opens, as v1–3's
+`menus.contribute`: `"-"`, `{ header }` or `{ label, kb?, on?, disabled?,
+run?, submenu? }`; a Promise is waited for at most 100 ms.
 
 State survives a publish only through `hot` (in `mount(env)` it is `env.hot`).
 Each publish runs the new version in a fresh runtime. The old version first

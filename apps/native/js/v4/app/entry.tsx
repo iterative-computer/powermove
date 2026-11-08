@@ -24,6 +24,7 @@ import type {
   Mount,
   Mounted,
   Themes,
+  Menus,
 } from "../src/builtin";
 import { mount as layerEffects } from "../panels/effect-controls/mount";
 import { mount as fxbrowser } from "../panels/effects/mount";
@@ -185,6 +186,69 @@ const themeApi: Themes = {
     };
   },
 };
+/** Context-menu items this realm adds (main's `MenusAPI.contribute`). */
+type MenuItem =
+  | "-"
+  | { header: string }
+  | {
+      label: string;
+      kb?: string | null;
+      on?: boolean;
+      disabled?: boolean;
+      run?: () => unknown;
+      submenu?: MenuItem[];
+    };
+const menuProviders: {
+  location: string;
+  items: (ctx: Record<string, Json>) => MenuItem[] | Promise<MenuItem[]>;
+}[] = [];
+/** The runnable items of the menu last gathered, by key. */
+let menuRuns = new Map<string, () => unknown>();
+const menuApi: Menus = {
+  contribute(location, items) {
+    if (typeof location !== "string" || typeof items !== "function")
+      throw new Error("A menu contribution needs a location and a function");
+    const entry = { location, items };
+    menuProviders.push(entry);
+    return () => {
+      const at = menuProviders.indexOf(entry);
+      if (at >= 0) menuProviders.splice(at, 1);
+    };
+  },
+};
+/** As main: a Promise is waited for at most 100 ms per open. */
+async function gatherMenu(location: string, ctx: Record<string, Json>) {
+  menuRuns = new Map();
+  let serial = 0;
+  const lower = (item: MenuItem): Json =>
+    item === "-"
+      ? "-"
+      : "header" in item
+        ? { header: String(item.header) }
+        : {
+            label: String(item.label),
+            kb: item.kb ?? null,
+            on: !!item.on,
+            disabled: !!item.disabled,
+            key: item.run
+              ? (() => {
+                  const key = `m${++serial}`;
+                  menuRuns.set(key, item.run!);
+                  return key;
+                })()
+              : null,
+            submenu: item.submenu ? item.submenu.map(lower) : null,
+          };
+  const out: Json[] = [];
+  for (const provider of menuProviders.filter((p) => p.location === location)) {
+    const items = await Promise.race([
+      Promise.resolve(provider.items(ctx)).catch(() => [] as MenuItem[]),
+      new Promise<MenuItem[]>((resolve) => setTimeout(() => resolve([]), 100)),
+    ]);
+    for (const item of Array.isArray(items) ? items : []) out.push(lower(item));
+  }
+  return JSON.stringify(out);
+}
 async function mountExtension(
   id: string,
   text: string,
@@ -204,6 +268,7 @@ async function mountExtension(
     hot: api,
     commands: commandApi,
     themes: themeApi,
+    menus: menuApi,
   };
   (globalThis as any).__powermove_runtime = RUNTIME;
   const graph = JSON.parse(text);
@@ -252,6 +317,7 @@ async function mountExtension(
     hot: api,
     commands: commandApi,
     themes: themeApi,
+    menus: menuApi,
   });
   // A component, so the view's hooks have one to belong to.
   const View = namespace.view;
@@ -284,6 +350,18 @@ async function mountExtension(
   async command(name: string, args: Json) {
     await host.command(name, args);
     await this.publish();
+    return true;
+  },
+  /** The window is opening a menu at `location`: this realm's items. */
+  gatherMenu(location: string, ctx: Record<string, Json>) {
+    return gatherMenu(location, ctx);
+  },
+  /** The person chose one of this realm's menu items. */
+  async runMenu(key: string) {
+    const run = menuRuns.get(key);
+    if (!run) throw new Error("This menu item is gone");
+    await run();
+    await settle();
     return true;
   },
   /** The palette or a shortcut ran a command this extension registered. */
