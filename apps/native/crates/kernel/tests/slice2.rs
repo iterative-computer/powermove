@@ -590,6 +590,35 @@ fn a_locked_file_opens_as_a_named_copy_and_never_saves_over_the_source() {
     assert!(rows[0].name.ends_with("— Native"));
 }
 #[test]
+fn an_external_file_opens_in_place_and_its_library_entry_keeps_its_name() {
+    let dir = common::TempDir::new("in-place");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let ShellReply::Opened {
+        session, decision, ..
+    } = k
+        .shell(ShellCall::Open {
+            id: "F".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(decision, OpenDecision::Writable);
+    assert!(project_lock_path(&file).exists(), "held under its .pmvlock");
+    edit(&mut k, "F", 20.0);
+    k.shell(ShellCall::Save(session.clone())).unwrap();
+    k.shell(ShellCall::Close(session)).unwrap();
+    let rows = LibraryStore::open(&dir.path("native")).projects().unwrap();
+    assert_eq!(rows.len(), 1, "one entry: the file itself, not a copy");
+    assert_eq!(rows[0].name, "Fixture");
+    let saved = String::from_utf8_lossy(&fs::read(&file).unwrap()).into_owned();
+    assert!(saved.contains("Fixture"), "saved in place");
+}
+#[test]
 fn foreign_electron_library_is_readonly_and_copy_identity_is_new() {
     let dir = common::TempDir::new("foreign-copy");
     let source = dir.path("electron");

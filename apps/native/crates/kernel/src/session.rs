@@ -1381,7 +1381,11 @@ impl Kernel {
                     .and_then(Value::as_str)
                     .unwrap_or("Project")
             ))
-        } else if value.get("id").and_then(Value::as_str) != Some(slot) {
+        } else if value.get("id").and_then(Value::as_str) != Some(slot)
+            && matches!(self.sessions[id].destination, Destination::Library(_))
+        {
+            // A copy is told apart from its source. A file's own entry is the
+            // file, under its own name (plan §6: external files open in place).
             Some(format!(
                 "{} — Native",
                 value
