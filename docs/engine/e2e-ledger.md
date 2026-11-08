@@ -438,7 +438,7 @@ binary run to completion with `RUST_TEST_THREADS=3`, as `--no-fail-fast` does.
 | Run | Binaries | Pass | Fail | Ignored | Harness `main` failing |
 |---|---:|---:|---:|---:|---|
 | Head, before this lane | 180 | 2,633 | 68 | 74 | `text_corpus` |
-| After this lane's fixes | 188 | 2,816 | 5 | 74 | `text_corpus`, perf `ratchet` |
+| After this lane's fixes | 188 | 2,815 | 6 | 74 | `text_corpus`, perf `ratchet` |
 
 **Missing captures no longer pass.** On a machine with the corpus, a missing
 capture family fails the gate; with no corpus it prints `NOT RUN`. The newest
@@ -456,9 +456,6 @@ still did not run in the second run, counted as not run: 4 `pm-audio`
   shipped admission still never queues.
 - `pm-glsl` `source_shader`: the test left out the camera log module that the
   source pass includes.
-- `pm-audio` `legacy_parity`: `conformed` and `animated-trim` play the AAC video
-  soundtrack since exports mix with the playback mixer; without today's FFmpeg
-  they take `embedded`'s existing decode ceiling (−110.9 dBFS measured).
 
 **Open:**
 
@@ -468,6 +465,7 @@ still did not run in the second run, counted as not run: 4 `pm-audio`
 | `text_corpus` (harness `main`) | Real plus missing witness | 48 frames: unowned text reference gaps and pending rows changed as above; 5 rows "not measured" because no `text-proj-*` capture exists. |
 | `scene3d`, `scene3d_gltf` G-D1 | Setup | Need `PM_SCENE3D_FLOAT_REF` / `PM_GLTF_FLOAT_REF` from `examples/scene3d_float_reference.ts`, which needs a Chromium bundle. Not generated. |
 | `playback` AUDIO-2 and scheduled-play line | Timing under load | AUDIO-2 passed in run 1 (7.3 to 8.1 ms, load 40) and failed in run 2 (13.7 to 15.7 ms, load 86, exports running). The 10.667 ms bound is unchanged. A shorter fresh-start grid cut the work but worsened fresh-start fidelity (3.58 dB LSD over the 3 dB bound), so it was not kept. |
+| `pm-audio` `legacy_parity` `conformed`, `animated-trim` | Real, unattributed | Without today's FFmpeg both now leave a −110.9 dBFS residual against their −240 dBFS ceiling, like `embedded`'s AAC decode. Which merge made them decode the AAC soundtrack through our FFmpeg is not found; the ceiling was not raised. |
 | perf `ratchet` | Real, pre-existing | `drag_500` heap bytes +0.8% and `blend_stack_cold` heap bytes +3.7% over their baselines on the merged head before this lane. `text_cold` passes again (see perfbench.md). |
 
 **Real projects (private copies; names stay out of Git).** Three local
