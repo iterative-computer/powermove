@@ -29,6 +29,18 @@ import {
 } from "./presentation";
 import { ProjectService } from "./service";
 
+/** Trailing status ink. On a selected row (`selected_fill`) `muted` and
+ * `danger` drop under 4.5:1, so the selection-aware tokens take over. */
+export function trailingInk(
+  state: { overlay: string; tone: "danger" | "muted" | "warning" } | null,
+  selected: boolean,
+): string {
+  const tone = state?.overlay ? state.tone : "muted";
+  if (!selected) return `colors.${tone}`;
+  return tone === "danger"
+    ? "colors.selected_danger"
+    : "colors.selected_secondary";
+}
 export const projectPanel = Object.freeze({
   id: "assets",
   title: "Project",
@@ -362,11 +374,7 @@ export function ProjectView(props: ProjectViewProps) {
               ...muted,
               flexShrink: 0,
               whiteSpace: "nowrap",
-              color: token(
-                state?.overlay && state.tone !== "muted"
-                  ? `colors.${state.tone}`
-                  : "colors.muted",
-              ),
+              color: token(trailingInk(state, row.selected)),
             }}
           >
             {trailing}

@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
+import { trailingInk } from "../index";
 test("panel browser bundle mounts without Node or DOM globals", async () => {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), "pm-project-bundle-"));
   try {
@@ -78,4 +79,12 @@ test("panel styles have no visual literals; only kit tokens and structural keywo
     }
   expect(styles.length).toBeGreaterThan(10);
   expect(text).not.toContain("data-pm-component="); // No invented UI-kit recipe.
+});
+
+test("selected rows use the selection-aware status inks (4.5:1 on selected_fill)", () => {
+  const missing = { overlay: "Missing", tone: "danger" as const };
+  expect(trailingInk(missing, false)).toBe("colors.danger");
+  expect(trailingInk(missing, true)).toBe("colors.selected_danger");
+  expect(trailingInk(null, false)).toBe("colors.muted");
+  expect(trailingInk(null, true)).toBe("colors.selected_secondary");
 });
