@@ -42,7 +42,7 @@ fn scene() -> anyhow::Result<(
     }
     let opened = pm_kernel::open_project(std::path::Path::new(&project), Default::default())?;
     let store = pm_kernel::document::DocumentStore::open(opened);
-    let media_dir = std::env::temp_dir().join(format!("pm-engine-bench-{}", std::process::id()));
+    let media_dir = scratch_dir();
     std::fs::create_dir_all(&media_dir)?;
     let mut media = MediaCatalog::default();
     for (i, entry) in store.file().media.iter().enumerate() {
@@ -82,7 +82,21 @@ fn scene() -> anyhow::Result<(Snapshot, MediaCatalog, f64, pm_time::Rate)> {
     Ok((snapshot, MediaCatalog::default(), 2., pm_time::Rate::FPS_30))
 }
 
+/// Where the bench extracts a project's embedded media for one run.
+fn scratch_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("pm-engine-bench-{}", std::process::id()))
+}
+
+/// Removes the run's extracted media however the run ends.
+struct Scratch;
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(scratch_dir());
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
+    let _scratch = Scratch;
     let hz: f64 = arg("hz", "120").parse()?;
     let seconds: f64 = arg("seconds", "60").parse()?;
     let width: u32 = arg("width", "1280").parse()?;

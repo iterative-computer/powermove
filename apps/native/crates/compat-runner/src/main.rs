@@ -100,7 +100,10 @@ fn definitions(
     while !host.is_ready() && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(5));
     }
-    let ready = host.is_ready();
+    // A partial set would draw a project without some of its effects.
+    if !host.is_ready() {
+        return Err("the extensions did not finish loading within 120 s".into());
+    }
     let definitions = host
         .contributions()
         .map(|c| c["definitions"].clone())
@@ -109,7 +112,7 @@ fn definitions(
     drop(host);
     actor.shutdown();
     Ok(
-        json!({"ready":ready,"generation":1,"definitions":definitions,"missing":[],"records":records}),
+        json!({"ready":true,"generation":1,"definitions":definitions,"missing":[],"records":records}),
     )
 }
 fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {

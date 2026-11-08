@@ -271,6 +271,9 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
     if o.output.as_os_str().is_empty() {
         return Err("no output (-o)".into());
     }
+    if o.definitions.is_some() && o.contributed.is_some() {
+        return Err("--definitions and --contributed draw different sets; pass one".into());
+    }
     Ok(o)
 }
 
