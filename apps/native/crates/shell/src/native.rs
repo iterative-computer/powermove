@@ -130,10 +130,16 @@ fn active_state() -> MenuState {
 }
 pub fn settings() -> Accessibility {
     let w = NSWorkspace::sharedWorkspace();
+    // Review captures may force settings for this process (comma-separated
+    // `increase-contrast`, `reduce-transparency`, `reduce-motion`).
+    let forced = std::env::var("PM_NATIVE_ACCESSIBILITY").unwrap_or_default();
+    let on = |name: &str| forced.split(',').any(|f| f.trim() == name);
     Accessibility {
-        reduce_transparency: w.accessibilityDisplayShouldReduceTransparency(),
-        increase_contrast: w.accessibilityDisplayShouldIncreaseContrast(),
-        reduce_motion: w.accessibilityDisplayShouldReduceMotion(),
+        reduce_transparency: on("reduce-transparency")
+            || w.accessibilityDisplayShouldReduceTransparency(),
+        increase_contrast: on("increase-contrast")
+            || w.accessibilityDisplayShouldIncreaseContrast(),
+        reduce_motion: on("reduce-motion") || w.accessibilityDisplayShouldReduceMotion(),
     }
 }
 /// The highest zoom whose layer stays inside Metal's largest drawable.

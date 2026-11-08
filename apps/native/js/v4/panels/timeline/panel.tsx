@@ -105,7 +105,9 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                 value={f.timeEditor.value}
                 binding={f.timeEditor.binding}
                 metadata={{ cancelChange: true }}
-                onChange={(e) => send({ type: "editDone", value: String(e.value ?? "") })}
+                onChange={(e) =>
+                  send({ type: "editDone", value: String(e.value ?? "") })
+                }
                 style={{
                   color: t("colors.text"),
                   fontSize: t("typography.timecode"),
@@ -221,9 +223,21 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             label="Timeline view"
             value={f.view}
             options={[
-              { id: "DopeSheet", label: "Dope Sheet", symbol: "chart.bar.doc.horizontal" },
-              { id: "Combined", label: "Dope Sheet and Graph", symbol: "rectangle.split.1x2" },
-              { id: "Graph", label: "Graph Editor", symbol: "point.topleft.down.to.point.bottomright.curvepath" },
+              {
+                id: "DopeSheet",
+                label: "Dope Sheet",
+                symbol: "chart.bar.doc.horizontal",
+              },
+              {
+                id: "Combined",
+                label: "Dope Sheet and Graph",
+                symbol: "rectangle.split.1x2",
+              },
+              {
+                id: "Graph",
+                label: "Graph Editor",
+                symbol: "point.topleft.down.to.point.bottomright.curvepath",
+              },
             ]}
             onChange={(view) =>
               send({
@@ -283,13 +297,22 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
   const show = row.hovered || row.focused || row.selected;
   return (
     <>
-      <div style={{ ...line, gap: t("metrics.gap"), overflow: "hidden" }}>
+      <div
+        style={{
+          ...line,
+          gap: t("metrics.gap"),
+          overflow: "hidden",
+          paddingLeft: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+        }}
+      >
         {row.index !== null && (
           <text
             style={{
               color: t("colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
+              flexShrink: 0,
             }}
           >
             {String(row.index).padStart(2, "0")}
@@ -306,7 +329,15 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
           />
         ) : (
           // The disclosure column stays reserved so badges and names align.
-          <div role="presentation" style={{ width: t("metrics.hit"), height: t("metrics.hit") }} />
+          <div
+            role="presentation"
+            style={{
+              width: t("metrics.hit"),
+              minWidth: t("metrics.hit"),
+              flexShrink: 0,
+              height: t("metrics.hit"),
+            }}
+          />
         )}
         <div
           role="presentation"
@@ -320,6 +351,8 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             alignItems: "center",
             justifyContent: "center",
             width: t("metrics.kind_badge"),
+            minWidth: t("metrics.kind_badge"),
+            flexShrink: 0,
             height: t("metrics.kind_badge"),
             borderRadius: t("metrics.inner_radius"),
             background: t(
@@ -338,12 +371,20 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             binding={row.nameEditor.binding}
             tabIndex={-1}
             metadata={{ cancelChange: true }}
-            onChange={(e) => send({ type: "editDone", value: String(e.value ?? "") })}
+            onChange={(e) =>
+              send({ type: "editDone", value: String(e.value ?? "") })
+            }
           />
         ) : (
           <text
             title={row.label}
-            style={{ ...text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+            style={{
+              ...text,
+              flexGrow: 1,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
             onDoubleClick={action(send, { type: "rename", id: row.id })}
           >
             {row.label}
@@ -501,11 +542,19 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
   );
 }
 const TimelineRow = memo(
-  function TimelineRow({ row: published, send }: { row: Row; send: Send; key?: string }) {
+  function TimelineRow({
+    row: published,
+    send,
+  }: {
+    row: Row;
+    send: Send;
+    key?: string;
+  }) {
     let clickModifiers: Modifiers = {};
     // Hover is the pointer's, local to the row: switches show without a host trip.
     const [hover, setHover] = useState(false);
-    const row = hover && !published.hovered ? { ...published, hovered: true } : published;
+    const row =
+      hover && !published.hovered ? { ...published, hovered: true } : published;
     return (
       <UI.TreeItem
         id={`timeline:row:${row.id}`}
@@ -664,65 +713,65 @@ export function TimelinePanel({
                   overflow: "hidden",
                 }}
               >
-              <UI.Tree
-                id="timeline:tracks"
-                label={f.mode}
-                tabIndex={0}
-                style={{
-                  minWidth: t("metrics.hit"),
-                  minHeight: t("metrics.hit"),
-                }}
-                metadata={{
-                  totalRows: f.window.total,
-                  firstRow: f.window.first,
-                  indexDigits: f.indexDigits,
-                  nativeFirstRow: f.window.rows[0]?.id ?? null,
-                  nativeWindow: [f.window.first, f.window.rows.length],
-                }}
-                onKeyDown={(event) => {
-                  event.stopPropagation();
-                  send({
-                    type: "keyDown",
-                    event: nativeEvent(event),
-                  });
-                }}
-                onRangeChange={(event) => {
-                  if (event.range && event.range[1] > event.range[0])
+                <UI.Tree
+                  id="timeline:tracks"
+                  label={f.mode}
+                  tabIndex={0}
+                  style={{
+                    minWidth: t("metrics.hit"),
+                    minHeight: t("metrics.hit"),
+                  }}
+                  metadata={{
+                    totalRows: f.window.total,
+                    firstRow: f.window.first,
+                    indexDigits: f.indexDigits,
+                    nativeFirstRow: f.window.rows[0]?.id ?? null,
+                    nativeWindow: [f.window.first, f.window.rows.length],
+                  }}
+                  onKeyDown={(event) => {
+                    event.stopPropagation();
                     send({
-                      type: "range",
-                      first: event.range[0],
-                      visible: event.range[1] - event.range[0],
+                      type: "keyDown",
+                      event: nativeEvent(event),
                     });
-                }}
-              >
-                {f.window.rows.map((row) => (
-                  <TimelineRow key={row.id} row={row} send={send} />
-                ))}
-                {f.window.total === 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <text style={reading}>
-                      Drag media here or import from your computer.
-                    </text>
-                    <Icon
-                      id="timeline:import"
-                      label="Import…"
-                      symbol=""
-                      tabIndex={-1}
-                      send={send}
-                      intent={{ type: "import" }}
+                  }}
+                  onRangeChange={(event) => {
+                    if (event.range && event.range[1] > event.range[0])
+                      send({
+                        type: "range",
+                        first: event.range[0],
+                        visible: event.range[1] - event.range[0],
+                      });
+                  }}
+                >
+                  {f.window.rows.map((row) => (
+                    <TimelineRow key={row.id} row={row} send={send} />
+                  ))}
+                  {f.window.total === 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
                     >
-                      <text>Import…</text>
-                    </Icon>
-                  </div>
-                )}
-              </UI.Tree>
+                      <text style={reading}>
+                        Drag media here or import from your computer.
+                      </text>
+                      <Icon
+                        id="timeline:import"
+                        label="Import…"
+                        symbol=""
+                        tabIndex={-1}
+                        send={send}
+                        intent={{ type: "import" }}
+                      >
+                        <text>Import…</text>
+                      </Icon>
+                    </div>
+                  )}
+                </UI.Tree>
               </div>
             </div>
             {f.view !== "DopeSheet" && f.graphEmpty && (

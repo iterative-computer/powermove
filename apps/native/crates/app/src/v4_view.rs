@@ -442,11 +442,13 @@ impl SurfaceView {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
+        let unit = view.unit.clone();
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
                 f.set_placeholder(&placeholder);
+                f.set_unit(unit);
                 f.set_value(&value, cx);
             });
             return;
@@ -474,6 +476,7 @@ impl SurfaceView {
         let field = cx.new(|cx| {
             let mut field = TextField::new(kind, label, &value, tokens, window, cx);
             field.set_placeholder(&placeholder);
+            field.set_unit(unit);
             field
         });
         self.subscriptions.entry(id).or_default().push(cx.subscribe(
@@ -1591,17 +1594,24 @@ impl SurfaceView {
                 }
             }
             Kit::Disclosure(open) => {
-                element = element.child(pm_shell::symbol::symbol(
-                    if *open {
-                        "chevron.down"
-                    } else {
-                        "chevron.right"
-                    },
-                    t.metrics.symbol_inline,
-                    pm_shell::symbol::Weight::Regular,
-                    t.colors.secondary,
-                    window,
-                ));
+                let group: SharedString = format!("disclosure-{}", node.id).into();
+                element = element.group(group.clone()).child(
+                    div()
+                        .when(*open, |d| {
+                            d.opacity(0.).group_hover(group, |s| s.opacity(1.))
+                        })
+                        .child(pm_shell::symbol::symbol(
+                            if *open {
+                                "chevron.down"
+                            } else {
+                                "chevron.right"
+                            },
+                            t.metrics.symbol_inline,
+                            pm_shell::symbol::Weight::Regular,
+                            t.colors.muted,
+                            window,
+                        )),
+                );
             }
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
@@ -1628,6 +1638,14 @@ impl SurfaceView {
                 .filter(|(id, _)| *id == node.id)
                 .map_or(number.value, |(_, value)| value);
             element = element.child(number.text(shown));
+            if let Some(unit) = &node.unit {
+                element = element.child(
+                    div()
+                        .ml(px(t.metrics.inner_radius))
+                        .text_color(rgb(t.colors.muted))
+                        .child(unit.clone()),
+                );
+            }
         }
         element
     }

@@ -273,8 +273,12 @@ export function ProjectView(props: ProjectViewProps) {
     const duration =
       comp?.duration ??
       (asset?.[0].kind === "image" ? null : asset?.[0].duration);
+    // A missing file reads as one quiet word; its path is in the tooltip
+    // and the relink flow, never in the row.
     const trailing = state?.overlay
-      ? state.overlay
+      ? state.overlay === "Media offline"
+        ? "Missing"
+        : state.overlay
       : duration !== null && duration !== undefined
         ? clock(duration)
         : "";
@@ -341,6 +345,7 @@ export function ProjectView(props: ProjectViewProps) {
           <text
             style={{
               ...text,
+              flexGrow: 1,
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -355,6 +360,7 @@ export function ProjectView(props: ProjectViewProps) {
           <text
             style={{
               ...muted,
+              flexShrink: 0,
               whiteSpace: "nowrap",
               color: token(
                 state?.overlay && state.tone !== "muted"

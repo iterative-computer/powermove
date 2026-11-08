@@ -13,6 +13,8 @@ pub struct TextField {
     kind: TextKind,
     value: String,
     placeholder: SharedString,
+    /// Drawn after the value in `muted` while not editing (`34 px`).
+    unit: Option<SharedString>,
     tokens: pm_design::Tokens,
     /// A composer's last submitted text, cleared once the model empties it.
     submitted: Option<String>,
@@ -71,11 +73,15 @@ impl TextField {
             kind,
             value: value.into(),
             placeholder: SharedString::default(),
+            unit: None,
             tokens,
             submitted: None,
         }
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
+    pub fn set_unit(&mut self, unit: Option<SharedString>) {
+        self.unit = unit;
+    }
     pub fn set_placeholder(&mut self, text: &str) {
         if self.placeholder != text {
             self.slot.set_placeholder(text);
@@ -160,6 +166,12 @@ impl Render for TextField {
             })
             .when(dense && !editing && !self.value.is_empty(), |d| {
                 d.child(self.value.clone())
+                    .children(self.unit.clone().map(|unit| {
+                        div()
+                            .ml(px(self.tokens.metrics.inner_radius))
+                            .text_color(rgb(self.tokens.colors.muted))
+                            .child(unit)
+                    }))
             })
             .child(
                 canvas(

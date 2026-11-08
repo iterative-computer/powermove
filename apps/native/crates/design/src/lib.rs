@@ -572,8 +572,8 @@ impl Tokens {
                 },
                 (Scheme::Light, false) => Translucency {
                     ground: 0xeeeef1,
-                    window: 0.8,
-                    panel: 0.72,
+                    window: 0.62,
+                    panel: 0.66,
                     edge: 0.08,
                     line: 0.09,
                 },

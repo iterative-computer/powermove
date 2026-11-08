@@ -165,6 +165,8 @@ pub struct NodeView {
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
+    /// A number field's unit, drawn after the value in `muted` (language §5).
+    pub unit: Option<SharedString>,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NumberFacts {
@@ -344,12 +346,15 @@ fn compile(
             Some(Component::InspectorRow | Component::ListItem | Component::TreeItem) => {
                 sheet.flex_row().items_center().min_h(px(t.metrics.row))
             }
-            // A section heading reads from the leading edge, chevron first.
+            // A section heading starts on the row-label inset; its chevron is
+            // trailing and shows on hover or while collapsed (language §9).
             Some(Component::DisclosureButton) => sheet
-                .flex_row()
+                .flex_row_reverse()
+                .justify_between()
                 .items_center()
                 .w_full()
                 .gap(px(t.metrics.inner_radius))
+                .px(px(t.metrics.inset))
                 .min_h(px(recipe.hit))
                 .rounded(px(radius)),
             Some(Component::ToolbarItem) => sheet
@@ -555,6 +560,11 @@ fn compile(
             .get("binding")
             .and_then(Value::as_str)
             .map(|s| s.to_owned().into()),
+        unit: (component == Some(Component::NumberField))
+            .then(|| node.props.get("unit").and_then(Value::as_str))
+            .flatten()
+            .filter(|u| !u.is_empty())
+            .map(|u| SharedString::from(u.to_owned())),
         number: (component == Some(Component::NumberField)).then(|| {
             let number = |key: &str, default| {
                 node.props

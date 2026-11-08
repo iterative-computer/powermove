@@ -70,7 +70,9 @@ test("panel styles have no visual literals; only kit tokens and structural keywo
   for (const style of styles)
     for (const p of style.properties) {
       if (!ts.isPropertyAssignment(p)) continue;
-      expect(ts.isNumericLiteral(p.initializer)).toBe(false);
+      // Flex factors are layout structure, not visuals (the kit validator agrees).
+      const flex = ["flexGrow", "flexShrink"].includes(p.name.getText(file));
+      expect(ts.isNumericLiteral(p.initializer) && !flex).toBe(false);
       if (ts.isStringLiteral(p.initializer))
         expect(structural.has(p.initializer.text)).toBe(true);
     }

@@ -1492,6 +1492,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -1550,10 +1551,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -1577,6 +1582,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -1598,6 +1604,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -2329,6 +2341,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -2387,10 +2400,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -2414,6 +2431,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -2435,6 +2453,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -3284,6 +3308,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -3342,10 +3367,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -3369,6 +3398,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -3390,6 +3420,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -4239,6 +4275,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -4297,10 +4334,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -4324,6 +4365,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -4345,6 +4387,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -5191,6 +5239,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -5249,10 +5298,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -5276,6 +5329,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -5297,6 +5351,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -6284,6 +6344,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -6342,10 +6403,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -6369,6 +6434,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -6390,6 +6456,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -7140,6 +7212,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -7198,10 +7271,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -7225,6 +7302,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -7246,6 +7324,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -8101,6 +8185,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -8159,10 +8244,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -8186,6 +8275,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -8207,6 +8297,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -8406,6 +8502,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -8464,10 +8561,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -8491,6 +8592,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -8512,6 +8614,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -9375,6 +9483,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -9433,10 +9542,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -9460,6 +9573,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -9481,6 +9595,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -10212,6 +10332,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -10270,10 +10391,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10297,6 +10422,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -10318,6 +10444,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -10399,6 +10531,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -10457,10 +10590,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10484,6 +10621,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -10505,6 +10643,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -10586,6 +10730,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -10644,10 +10789,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10671,6 +10820,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -10692,6 +10842,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -10773,6 +10929,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -10831,10 +10988,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10858,6 +11019,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -10879,6 +11041,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -10960,6 +11128,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -11018,10 +11187,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11045,6 +11218,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -11066,6 +11240,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -11147,6 +11327,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -11205,10 +11386,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11232,6 +11417,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -11253,6 +11439,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -11334,6 +11526,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -11392,10 +11585,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11419,6 +11616,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -11440,6 +11638,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -11521,6 +11725,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -11579,10 +11784,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11606,6 +11815,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -11627,6 +11837,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -11708,6 +11924,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -11766,10 +11983,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11793,6 +12014,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -11814,6 +12036,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -11895,6 +12123,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -11953,10 +12182,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11980,6 +12213,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -12001,6 +12235,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -12082,6 +12322,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -12140,10 +12381,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12167,6 +12412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -12188,6 +12434,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -12269,6 +12521,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -12327,10 +12580,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12354,6 +12611,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -12375,6 +12633,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -12456,6 +12720,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -12514,10 +12779,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12541,6 +12810,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -12562,6 +12832,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -12643,6 +12919,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -12701,10 +12978,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12728,6 +13009,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -12749,6 +13031,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -12830,6 +13118,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -12888,10 +13177,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12915,6 +13208,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -12936,6 +13230,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -13017,6 +13317,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -13075,10 +13376,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13102,6 +13407,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -13123,6 +13429,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -13204,6 +13516,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -13262,10 +13575,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13289,6 +13606,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -13310,6 +13628,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -13391,6 +13715,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -13449,10 +13774,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13476,6 +13805,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -13497,6 +13827,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -13578,6 +13914,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -13636,10 +13973,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13663,6 +14004,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -13684,6 +14026,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -13765,6 +14113,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -13823,10 +14172,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13850,6 +14203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -13871,6 +14225,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -13952,6 +14312,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -14010,10 +14371,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14037,6 +14402,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -14058,6 +14424,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -14139,6 +14511,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -14197,10 +14570,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14224,6 +14601,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -14245,6 +14623,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -14326,6 +14710,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -14384,10 +14769,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14411,6 +14800,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -14432,6 +14822,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -14513,6 +14909,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -14571,10 +14968,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14598,6 +14999,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -14619,6 +15021,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -14700,6 +15108,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -14758,10 +15167,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14785,6 +15198,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -14806,6 +15220,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -14887,6 +15307,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -14945,10 +15366,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14972,6 +15397,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -14993,6 +15419,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -15074,6 +15506,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -15132,10 +15565,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15159,6 +15596,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -15180,6 +15618,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -15261,6 +15705,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -15319,10 +15764,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15346,6 +15795,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -15367,6 +15817,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -15448,6 +15904,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -15506,10 +15963,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15533,6 +15994,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -15554,6 +16016,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -15635,6 +16103,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -15693,10 +16162,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15720,6 +16193,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -15741,6 +16215,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -16499,6 +16979,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -16557,10 +17038,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -16584,6 +17069,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -16605,6 +17091,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -17391,6 +17883,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -17449,10 +17942,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -17476,6 +17973,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -17497,6 +17995,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -19027,6 +19531,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -19085,10 +19590,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -19112,6 +19621,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "flexGrow": 1,
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
@@ -19133,6 +19643,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -19940,6 +20456,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.muted",
                                       },
+                                      "flexShrink": 0,
                                       "fontSize": {
                                         "token": "typography.minimum",
                                       },
@@ -19998,10 +20515,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "colors.text",
                                       },
                                       "display": "flex",
+                                      "flexShrink": 0,
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
                                       "justifyContent": "center",
+                                      "minWidth": {
+                                        "token": "metrics.kind_badge",
+                                      },
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -20059,6 +20580,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "token": "metrics.gap",
                                   },
                                   "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",

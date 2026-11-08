@@ -120,6 +120,21 @@ fn main() -> Result<()> {
             profile = Some(PathBuf::from(
                 args.get(i).context("--profile needs a directory")?,
             ));
+        } else if args[i] == "--appearance" || args[i] == "--accessibility" {
+            // Review captures: force a scheme or accessibility setting for this
+            // process only (the same overrides as PM_NATIVE_APPEARANCE and
+            // PM_NATIVE_ACCESSIBILITY), never the person's system settings.
+            let name = if args[i] == "--appearance" {
+                "PM_NATIVE_APPEARANCE"
+            } else {
+                "PM_NATIVE_ACCESSIBILITY"
+            };
+            i += 1;
+            let value = args
+                .get(i)
+                .context("--appearance/--accessibility need a value")?;
+            // SAFETY: single-threaded here; nothing has read the environment yet.
+            unsafe { std::env::set_var(name, value) };
         } else if args[i].to_string_lossy().starts_with('-') {
             anyhow::bail!("Unknown argument: {}", args[i].to_string_lossy());
         } else {
