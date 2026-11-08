@@ -88,4 +88,4 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Built-in sources ship embedded and are versioned `<package major.minor>.<content hash>`, so any change to a panel is a new version for `stage_fork_rebase`.
 - The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
 - Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
-- The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.
+- Isolate admission: all panel isolates in the process (every window's built-ins and v4 extensions, and publish checks) reserve 64 MiB each from one 2 GiB account (`Admission::panels`), the panels' share of the 4 GB cage. Compat pools still reserve 1 GiB per isolate on their own 2 GiB account, which can overcommit the cage with two windows open (compat lane). Idle isolates are not parked yet.

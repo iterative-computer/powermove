@@ -319,12 +319,23 @@ pub struct Admission {
     used: Arc<AtomicUsize>,
     budget: usize,
 }
+/// Panel isolates' share of the process's one 4 GB pointer-compression cage
+/// (plan §3.4): every window's built-ins and v4 extensions and every publish
+/// check reserve from it, so opening windows cannot overcommit the cage.
+pub const PANEL_ADMISSION: usize = 2 * 1024 * 1024 * 1024;
 impl Admission {
     pub fn new(budget: usize) -> Self {
         Self {
             used: Arc::new(AtomicUsize::new(0)),
             budget,
         }
+    }
+    /// The process-wide panel account.
+    pub fn panels() -> Self {
+        static PANELS: std::sync::OnceLock<Admission> = std::sync::OnceLock::new();
+        PANELS
+            .get_or_init(|| Admission::new(PANEL_ADMISSION))
+            .clone()
     }
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
