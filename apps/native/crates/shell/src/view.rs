@@ -1846,6 +1846,21 @@ impl Render for Editor {
             .text_size(px(t.typography.minimum))
             .text_color(rgb(c.muted))
             .child(div().flex_1().min_w(px(0.)).truncate().child(left))
+            .children(
+                self.integration
+                    .as_ref()
+                    .map(|i| i.status_trailing(cx))
+                    .filter(|s| !s.is_empty())
+                    .map(|facts| {
+                        div()
+                            .flex_none()
+                            .font_features(FontFeatures(std::sync::Arc::new(vec![(
+                                "tnum".into(),
+                                1,
+                            )])))
+                            .child(facts)
+                    }),
+            )
             .child(
                 div()
                     .id("status-workspace")

@@ -205,6 +205,13 @@ impl pm_shell::integration::Integration for Bridge {
     fn status(&self, cx: &App) -> String {
         self.0.read(cx).status_text()
     }
+    fn status_trailing(&self, cx: &App) -> String {
+        let c = self.0.read(cx);
+        if c.published.is_none() {
+            return String::new();
+        }
+        panels::format_facts(c.dimensions, c.rate.to_f64())
+    }
     fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
         self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
     }
