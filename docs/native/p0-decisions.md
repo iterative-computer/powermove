@@ -98,6 +98,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **`onPointerEnter` / `onPointerLeave` (2026-11-07, additive):** typed on every intrinsic element; the host already delivered `pointerenter`/`pointerleave` to listeners. Timeline rows use them to show their switches on hover.
 - **`EventPlan.semantic` (2026-11-08, additive, host↔renderer wire):** optional; the host sets it to the target's `id` when it planned an activation on an identified element, and the renderer then accepts the event even if a render restyled that element first (a hovered row stays clickable).
 
+- **`metadata.submitOnReturn` on `textarea` (2026-11-08, additive):** the host draws a native composer (`TextKind::Composer`, an NSTextView: IME, spelling, dictation, emoji and shifted punctuation are AppKit's). Return sends `input` with the text, then `keydown` Enter; Shift- or Option-Return inserts a line. The field clears after a send once the model empties it, unless the person typed on. The Agent panel's composer uses it.
+
 ## Look lane decisions (2026-11-08)
 
 - **The owner's GPUI demo is the visual reference.** Translucent window (`translucency.ground` at `translucency.window` over a behind-window blur), one shared panel material (`colors.panel` at `translucency.panel`) with a `text` hairline edge, 8 pt panel radius, 38 pt headers with a divider, 24 pt status line. Reduce Transparency makes both solid; Increase Contrast makes edges solid `separator`.

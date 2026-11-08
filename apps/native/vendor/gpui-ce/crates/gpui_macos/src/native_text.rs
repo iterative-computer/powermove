@@ -19,6 +19,10 @@ pub enum TextKind {
     Multiline,
     DenseText,
     DenseNumber,
+    /// A message composer: a multiline text view where Return submits and
+    /// Shift- or Option-Return starts a new line (IME, spelling, dictation
+    /// and emoji are AppKit's own).
+    Composer,
 }
 impl TextKind {
     fn dense(self) -> bool {
@@ -30,6 +34,8 @@ pub enum TextEvent {
     Changed(String),
     Committed(String),
     Cancelled,
+    /// Return in a composer, with the text as typed.
+    Submitted(String),
 }
 enum Editor {
     Field(Retained<NSTextField>),
@@ -144,6 +150,22 @@ impl TextDelegate {
         if unsafe { msg_send![view, hasMarkedText] } {
             return false;
         }
+        if command == objc2::sel!(insertNewline:) && self.ivars().kind == TextKind::Composer {
+            let flags = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
+                .currentEvent()
+                .map(|e| e.modifierFlags())
+                .unwrap_or(objc2_app_kit::NSEventModifierFlags::empty());
+            if flags.intersects(
+                objc2_app_kit::NSEventModifierFlags::Shift | objc2_app_kit::NSEventModifierFlags::Option,
+            ) {
+                // A new line, as typed.
+                unsafe { view.insertNewlineIgnoringFieldEditor(None) };
+                return true;
+            }
+            let s = self.ivars();
+            s.emit(TextEvent::Submitted(s.editor.value()));
+            return true;
+        }
         if command == objc2::sel!(cancelOperation:) && self.ivars().kind.dense() {
             self.ivars().finish(true);
             if let Some(w) = view.window() {
@@ -163,7 +185,7 @@ pub struct NativeTextSlot {
 impl NativeTextSlot {
     pub fn new(gpui: &NSView, kind: TextKind, label: &str, initial: &str) -> Self {
         let mtm = MainThreadMarker::new().expect("text slots require the main thread");
-        let editor = if kind == TextKind::Multiline {
+        let editor = if matches!(kind, TextKind::Multiline | TextKind::Composer) {
             let v = NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::ZERO);
             v.setRichText(false);
             v.setImportsGraphics(false);
@@ -309,6 +331,17 @@ impl NativeTextSlot {
     }
     pub fn take_events(&self) -> Vec<TextEvent> {
         std::mem::take(&mut *self.state.events.borrow_mut())
+    }
+    /// Replaces the text even while editing, unless an input method holds
+    /// marked text (a composer clearing after its message was sent).
+    pub fn replace_value(&self, value: &str) {
+        if let Editor::Multiline(v) = &self.state.editor
+            && unsafe { msg_send![&**v, hasMarkedText] }
+        {
+            return;
+        }
+        self.state.editor.set(value);
+        *self.state.original.borrow_mut() = value.into();
     }
     pub fn set_value(&self, value: &str) {
         if !self.is_editing() {

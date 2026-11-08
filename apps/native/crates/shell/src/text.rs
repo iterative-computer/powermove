@@ -14,6 +14,8 @@ pub struct TextField {
     value: String,
     placeholder: SharedString,
     tokens: pm_design::Tokens,
+    /// A composer's last submitted text, cleared once the model empties it.
+    submitted: Option<String>,
 }
 impl EventEmitter<TextEvent> for TextField {}
 impl TextField {
@@ -43,8 +45,15 @@ impl TextField {
                 if this
                     .update(cx, |this, cx| {
                         for event in this.slot.take_events() {
-                            if let TextEvent::Committed(value) = &event {
-                                this.value = value.clone();
+                            match &event {
+                                TextEvent::Committed(value) => this.value = value.clone(),
+                                TextEvent::Submitted(value) => {
+                                    this.submitted = Some(value.clone());
+                                }
+                                TextEvent::Changed(value) if this.kind == TextKind::Composer => {
+                                    this.value = value.clone();
+                                }
+                                _ => {}
                             }
                             cx.emit(event);
                         }
@@ -63,6 +72,7 @@ impl TextField {
             value: value.into(),
             placeholder: SharedString::default(),
             tokens,
+            submitted: None,
         }
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
@@ -90,6 +100,17 @@ impl TextField {
         self.tokens = tokens;
     }
     pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        // A sent message leaves the composer once the model has taken it,
+        // unless the person already typed on.
+        if value.is_empty()
+            && let Some(sent) = self.submitted.take()
+            && self.slot.value() == sent
+        {
+            self.slot.replace_value("");
+            self.value.clear();
+            cx.notify();
+            return;
+        }
         self.slot.set_value(value);
         if !self.slot.is_editing() {
             self.value = value.into();
@@ -106,7 +127,12 @@ impl Render for TextField {
             .id("native-text")
             .relative()
             .w_full()
-            .h(px(if self.kind == TextKind::Multiline {
+            .h(px(if self.kind == TextKind::Composer {
+                // Grows with its lines, up to the composer's limit.
+                let lines = (self.value.lines().count().max(1) as f32)
+                    .min(self.tokens.metrics.composer_max_lines);
+                (lines * self.tokens.typography.body * 1.35 + 10.).max(self.tokens.metrics.hit)
+            } else if self.kind == TextKind::Multiline {
                 self.tokens.metrics.row * 4.
             } else {
                 self.tokens.metrics.field

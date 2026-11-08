@@ -445,8 +445,14 @@ impl SurfaceView {
             .get("label")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let composer = node
+            .props
+            .get("metadata")
+            .is_some_and(|m| m.get("submitOnReturn") == Some(&Value::Bool(true)));
         let kind = if number {
             TextKind::DenseNumber
+        } else if node.r#type == "textarea" && composer {
+            TextKind::Composer
         } else if node.r#type == "textarea" {
             TextKind::Multiline
         } else {
@@ -497,6 +503,31 @@ impl SurfaceView {
                             json!(value)
                         };
                         this.change(id, value, cx);
+                    }
+                    // Return in a composer: the panel sees the text as typed,
+                    // then the key, as a keyboard would deliver them.
+                    TextEvent::Submitted(value) => {
+                        let listens = |event: &str| {
+                            this.publication
+                                .surface
+                                .node(id)
+                                .is_some_and(|n| n.listeners.contains_key(event))
+                        };
+                        let (input, keydown) = (listens("input"), listens("keydown"));
+                        if input {
+                            let detail = EventDetail {
+                                value: Some(json!(value)),
+                                ..Default::default()
+                            };
+                            this.send(id, "input", detail, cx);
+                        }
+                        if keydown {
+                            let detail = EventDetail {
+                                key: Some("Enter".into()),
+                                ..Default::default()
+                            };
+                            this.send(id, "keydown", detail, cx);
+                        }
                     }
                     TextEvent::Cancelled => {
                         if this.prepared.node(id).is_some_and(|n| n.cancel_change) {

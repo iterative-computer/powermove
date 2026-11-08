@@ -606,16 +606,8 @@ export function AgentView({
           maxLinesToken: "metrics.composer_max_lines",
           disabled,
         }}
-        state={{
-          keyboardFocus: n.keyboardFocus === "composer",
-          dropTarget: n.dropTarget,
-        }}
+        state={{ dropTarget: n.dropTarget }}
         title="Return to send · Shift-Return for a new line · / for shortcuts"
-        tabIndex={0}
-        onKeyDown={(event) => {
-          event.stopPropagation();
-          send(composerKey(event));
-        }}
         style={{
           ...vertical,
           background: t(n.dropTarget ? "colors.accent_wash" : "colors.field"),
@@ -647,19 +639,39 @@ export function AgentView({
             />
           </div>
         ))}
-        <Placeholder gap="composer" label="Message Powermove agent">
-          <text
-            style={
-              n.dropTarget
-                ? { ...body, color: t("colors.accent_text") }
-                : s.draft.text
-                  ? reading
-                  : muted
-            }
-          >
-            {n.dropTarget ? "Drop to attach" : s.draft.text || placeholder}
+        {n.dropTarget ? (
+          <text style={{ ...body, color: t("colors.accent_text") }}>
+            Drop to attach
           </text>
-        </Placeholder>
+        ) : (
+          <textarea
+            id="agent-composer-text"
+            label="Message Powermove agent"
+            value={s.draft.text}
+            disabled={disabled}
+            metadata={{ placeholder, submitOnReturn: true }}
+            state={{ keyboardFocus: n.keyboardFocus === "composer" }}
+            tabIndex={0}
+            onInput={(event) => {
+              const text = String(event.value ?? "");
+              send({
+                type: "draft",
+                text,
+                selection: [text.length, text.length],
+              });
+            }}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              send(composerKey(event));
+            }}
+            style={{
+              ...reading,
+              flexGrow: 1,
+              minHeight: t("metrics.hit"),
+              minWidth: t("metrics.hit"),
+            }}
+          />
+        )}
         <div
           style={{
             display: "flex",

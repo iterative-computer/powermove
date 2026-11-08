@@ -59,6 +59,7 @@ fn environment(profile: &Path, mode: &str) -> Environment {
 struct Agent {
     panels: Builtins,
     latest: Option<Publication>,
+    typed: String,
 }
 impl Agent {
     /// A browser that only remembers what it was asked to open.
@@ -80,6 +81,7 @@ impl Agent {
         Self {
             panels,
             latest: None,
+            typed: String::new(),
         }
     }
     fn mount(actor: &KernelActor, environment: Environment) -> Self {
@@ -99,6 +101,7 @@ impl Agent {
         Self {
             panels,
             latest: None,
+            typed: String::new(),
         }
     }
     /// Sign-in status arrives from a worker; a run needs it.
@@ -161,6 +164,7 @@ impl Agent {
     fn send(&mut self, text: &str) {
         self.type_text(text);
         self.key("Enter", false);
+        self.typed.clear();
     }
     fn surface(&mut self) -> &Publication {
         if let Some(latest) = self.panels.take_publications().pop() {
@@ -179,7 +183,7 @@ impl Agent {
     }
     fn key(&mut self, key: &str, shift: bool) {
         self.press(
-            "agent-composer",
+            "agent-composer-text",
             "keydown",
             EventDetail {
                 key: Some(key.into()),
@@ -188,10 +192,18 @@ impl Agent {
             },
         );
     }
+    /// The native composer reports its whole text as it changes.
     fn type_text(&mut self, text: &str) {
-        for letter in text.chars() {
-            self.key(&letter.to_lowercase().to_string(), letter.is_uppercase());
-        }
+        self.typed.push_str(text);
+        let value = self.typed.clone();
+        self.press(
+            "agent-composer-text",
+            "input",
+            EventDetail {
+                value: Some(json!(value)),
+                ..Default::default()
+            },
+        );
     }
     fn agent(&self) -> agent_host::SharedAgent {
         let entries = self.panels.broker.entries.lock().unwrap();
