@@ -1951,6 +1951,7 @@ fn an_extension_offers_a_theme_the_window_can_apply() {
             "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
                 export function activate({ themes }) {
                     themes.register({ id: 'warm', title: 'Warm', tokens: { 'colors.accent': '#ff8800', 'metrics.gap': 8 } });
+                    themes.activate('warm');
                 }
                 export function view() { return jsx('text', { children: 'Themed' }); }"
         },
@@ -1967,7 +1968,7 @@ fn an_extension_offers_a_theme_the_window_can_apply() {
     let (revision, list) = panels.themes_since(0).expect("registered");
     assert_eq!(
         list,
-        vec![json!({"panel":"synthetic-theme","id":"warm","title":"Warm",
+        vec![json!({"panel":"synthetic-theme","id":"warm","title":"Warm","active":true,
             "tokens":{"colors.accent":"#ff8800","metrics.gap":8}})]
     );
     assert!(panels.themes_since(revision).is_none());
