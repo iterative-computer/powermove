@@ -330,18 +330,20 @@ fn compile(
     if let Some(recipe) = panel.components.get(&node.id) {
         let radius = recipe.radius.unwrap_or(t.metrics.control_radius);
         sheet = match component {
-            Some(Component::InspectorRow) => {
-                sheet.flex_row().items_center().min_h(px(t.metrics.row))
-            }
             // Quiet source-list rows: selection and hover inset from the panel
             // edge by `gap`, text a further `gap` in (language §9 Lists).
-            Some(Component::ListItem | Component::TreeItem) => sheet
+            Some(Component::ListItem | Component::TreeItem) if panel_id != "timeline" => sheet
                 .flex_row()
                 .items_center()
                 .min_h(px(t.metrics.row))
                 .mx(px(t.metrics.gap))
                 .px(px(t.metrics.gap))
                 .gap(px(t.metrics.gap)),
+            // Timeline outline rows share their band with the native track rows:
+            // selection spans the whole row, as in After Effects.
+            Some(Component::InspectorRow | Component::ListItem | Component::TreeItem) => {
+                sheet.flex_row().items_center().min_h(px(t.metrics.row))
+            }
             // A section heading reads from the leading edge, chevron first.
             Some(Component::DisclosureButton) => sheet
                 .flex_row()
