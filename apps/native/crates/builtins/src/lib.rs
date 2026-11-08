@@ -137,6 +137,9 @@ struct Broker {
     carried: Mutex<Option<agent_host::SharedAgent>>,
     /// Set once `carry_agent` hands the runs on: closing no longer stops them.
     agent_released: std::sync::atomic::AtomicBool,
+    /// Commands each extension realm registered (`commands.register`), by panel,
+    /// with a revision that moves on every change.
+    commands: Mutex<(u64, BTreeMap<String, Value>)>,
 }
 impl Builtins {
     pub fn new(
@@ -204,6 +207,7 @@ impl Builtins {
             agent,
             carried: Mutex::new(carried),
             agent_released: Default::default(),
+            commands: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -269,6 +273,7 @@ impl Builtins {
         }
         self.broker.entries.lock().unwrap().remove(panel);
         self.broker.publications.lock().unwrap().remove(panel);
+        self.broker.forget_commands(panel);
     }
     /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
     /// it: same realm identity, routes and host operations, the fork's code.
@@ -340,6 +345,32 @@ impl Builtins {
         self.broker.extensions.lock().unwrap().remove(id);
         // Its surface and router go too; a late call from it is a stale generation.
         self.broker.entries.lock().unwrap().remove(id);
+        self.broker.forget_commands(id);
+    }
+    /// Every extension command in this window when they changed since `seen`:
+    /// `(revision, [{panel, id, title, key}])`.
+    pub fn commands_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let commands = self.broker.commands.lock().unwrap();
+        (commands.0 != seen).then(|| {
+            let list = commands
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |c| {
+                        json!({"panel": panel, "id": c["id"], "title": c["title"], "key": c["key"]})
+                    })
+                })
+                .collect();
+            (commands.0, list)
+        })
+    }
+    /// Runs a command an extension registered, in that extension's realm.
+    pub fn run_command(&self, panel: &str, id: &str, args: &[Value]) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval(format!(
+            "__pmBuiltin.runCommand({},{})",
+            json!(id),
+            json!(args)
+        ))
     }
     fn realm_of(&self, panel: &str) -> Result<Realm> {
         if let Some(realm) = self.realms.lock().unwrap().get(panel) {
@@ -875,6 +906,30 @@ impl EngineProxy for Broker {
                 entry.router.retire().map_err(Error::Host)?;
                 Ok(Value::Null)
             }
+            "commands.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 64
+                        && list.iter().all(|c| {
+                            c["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && c["title"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && (c["key"].is_null()
+                                    || c["key"].as_str().is_some_and(|k| k.len() <= 64))
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("commands need an id and a title"));
+                }
+                let mut commands = self.commands.lock().unwrap();
+                commands.0 += 1;
+                commands.1.insert(panel.into(), input.clone());
+                drop(commands);
+                (self.wake)();
+                Ok(Value::Null)
+            }
             "surface.commit" => {
                 let commit = serde_json::from_value(input.clone())
                     .map_err(|e| Error::Host(e.to_string()))?;
@@ -1061,6 +1116,14 @@ impl KernelHooks for Broker {
         }
     }
     fn seal_open_gestures(&self, _: &Generation) {}
+}
+impl Broker {
+    fn forget_commands(&self, panel: &str) {
+        let mut commands = self.commands.lock().unwrap();
+        if commands.1.remove(panel).is_some() {
+            commands.0 += 1;
+        }
+    }
 }
 impl HostProxy for Broker {
     fn fetch(

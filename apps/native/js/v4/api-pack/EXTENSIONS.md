@@ -36,8 +36,8 @@ when available, and say honestly what you could not check.
   extension API, documented in `v3/EXTENSIONS.md` with its types in `v3/`
   (Svelte panels, effects, transitions, layer types, commands, keybindings,
   menus, themes, status items). They load and publish the same way. Use them
-  for commands, keyboard shortcuts, context menus, effects and themes: v4 has
-  no registration API for those yet.
+  for context menus, effects and themes: v4 has no registration API for those
+  yet.
 - `replaces`: built-in ids this extension draws in place of (forks).
 - Credentials never go in source: declare `vars` and read them at runtime.
 
@@ -53,7 +53,13 @@ The entry is TypeScript/TSX and exports one of:
   panel, `env.platform` requests (menus, focus), and `env.root()` for a surface.
   Return `{ root, dispose, settle?, show?, publish? }`.
 
-An optional `activate({ host, id, hot })` runs before `view()` renders.
+An optional `activate({ host, id, hot, commands })` runs before `view()`
+renders.
+
+Commands: `commands.register({ id, title, key }, run)` adds `title` to the
+command palette and, with `key` (for example `"cmd+shift+n"`), to the keymap.
+`run(args)` executes in your extension; it returns a function that removes the
+command. Register in `activate` (in `mount(env)` use `env.commands`).
 
 State survives a publish only through `hot` (in `mount(env)` it is `env.hot`).
 Each publish runs the new version in a fresh runtime. The old version first

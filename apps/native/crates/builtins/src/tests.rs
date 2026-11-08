@@ -1735,3 +1735,65 @@ mod effect_registry;
 mod text_animators;
 
 mod precomp_delta;
+#[test]
+fn an_extension_registers_a_command_the_window_can_run() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                import { useState } from 'powermove/hooks';
+                let bump = () => {};
+                export function activate({ commands }) {
+                    commands.register({ id: 'bump', title: 'Bump Count', key: 'cmd+shift+b' }, () => bump());
+                }
+                export function view() {
+                    const [n, setN] = useState(0);
+                    bump = () => setN((v) => v + 1);
+                    return jsx('text', { children: 'Count ' + n });
+                }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {
+                "powermove/jsx-runtime":"runtime:powermove/jsx-runtime",
+                "powermove/hooks":"runtime:powermove/hooks"
+            }
+        }
+    });
+    finish(
+        panels
+            .mount_extension("synthetic-cmd", &graph, None)
+            .unwrap(),
+    );
+    assert!(text_of(&panels, "synthetic-cmd").contains(&"Count 0".to_owned()));
+    let (revision, list) = panels.commands_since(0).expect("registered");
+    assert_eq!(
+        list,
+        vec![json!({"panel":"synthetic-cmd","id":"bump","title":"Bump Count","key":"cmd+shift+b"})]
+    );
+    assert!(panels.commands_since(revision).is_none());
+    finish(panels.run_command("synthetic-cmd", "bump", &[]).unwrap());
+    assert!(text_of(&panels, "synthetic-cmd").contains(&"Count 1".to_owned()));
+    assert!(
+        panels
+            .run_command("synthetic-cmd", "missing", &[])
+            .is_ok_and(|t| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(result) = t.try_take() {
+                        break result.is_err();
+                    }
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(2));
+                }
+            })
+    );
+    // Its commands leave with it.
+    panels.unmount_extension("synthetic-cmd");
+    let (_, list) = panels.commands_since(revision).expect("removed");
+    assert!(list.is_empty());
+    panels.close();
+    actor.shutdown();
+}

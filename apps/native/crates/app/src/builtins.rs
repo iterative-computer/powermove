@@ -390,6 +390,7 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
+        self.sync_v4_commands(&runtime);
         self.builtins
             .requests
             .extend(runtime.take_platform_requests());

@@ -27,6 +27,20 @@ export interface BuiltinEnv {
   report(error: unknown): void;
   /** Extensions only: state handed across a reload (see `Hot`). */
   hot?: Hot;
+  /** Extensions only: commands in the palette and keymap (see `Commands`). */
+  commands?: Commands;
+}
+
+/**
+ * Commands an extension adds to the command palette, optionally with a
+ * shortcut (`"cmd+shift+n"`). `run` executes in the extension's own runtime.
+ * `register` returns a function that removes the command again.
+ */
+export interface Commands {
+  register(
+    command: { id: string; title: string; key?: string },
+    run: (args: Json[]) => unknown,
+  ): () => void;
 }
 
 /**

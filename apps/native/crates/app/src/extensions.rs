@@ -37,6 +37,9 @@ const UNDO: &str = "extension.undo";
 const HOT_HANDOFF: std::time::Duration = std::time::Duration::from_millis(500);
 const MENU_DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
 const OWNER: &str = "extension:";
+/// Commands v4 extensions register at run time: `extension.v4:<panel>:<id>`.
+const V4_COMMAND: &str = "extension.v4:";
+const V4_OWNER: &str = "v4-extension:";
 /// Keys this window's list of contributed panels in the shell.
 static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -149,6 +152,11 @@ pub struct Extensions {
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
     commands: BTreeSet<String>,
+    /// Palette entries from v1–3 contributions and from v4 `commands.register`,
+    /// and the v4 registry revision they reflect.
+    compat_choices: Vec<Choice>,
+    v4_choices: Vec<Choice>,
+    v4_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
     surfaces: BTreeMap<String, (String, String)>,
     /// Forks drawing a built-in panel in its place: id to (panel, source).
@@ -180,6 +188,9 @@ impl Default for Extensions {
             placed: BTreeMap::new(),
             seen: 0,
             commands: BTreeSet::new(),
+            compat_choices: vec![],
+            v4_choices: vec![],
+            v4_seen: 0,
             surfaces: BTreeMap::new(),
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
@@ -194,6 +205,13 @@ impl Drop for Extensions {
     }
 }
 impl Extensions {
+    fn palette_choices(&self) -> Vec<Choice> {
+        self.compat_choices
+            .iter()
+            .chain(&self.v4_choices)
+            .cloned()
+            .collect()
+    }
     pub fn owns_panel(&self, id: &str) -> bool {
         self.known_panels.contains(id)
     }
@@ -670,8 +688,9 @@ impl Controller {
                 })
             })
             .collect();
+        self.extensions.compat_choices = choices;
         let mut shell = self.host.borrow_mut();
-        shell.contributed_choices = choices;
+        shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(OWNER, bindings);
         drop(shell);
         let definitions: Vec<_> = value["definitions"]
@@ -727,6 +746,31 @@ impl Controller {
             }
             return true;
         }
+        if let Some(target) = cmd.name.strip_prefix(V4_COMMAND) {
+            if let (Some(runtime), Some((panel, id))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, id, args) = (panel.to_owned(), id.to_owned(), cmd.args.clone());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_command(&panel, &id, &args) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("The command failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
         let Some(id) = cmd.name.strip_prefix(COMMAND) else {
             return false;
         };
@@ -734,6 +778,46 @@ impl Controller {
             host.run_command(id, Value::Array(cmd.args.clone()));
         }
         true
+    }
+    /// Commands v4 extensions registered since the last look go into the
+    /// palette and, with a `key`, the keymap.
+    pub fn sync_v4_commands(&mut self, runtime: &pm_builtins::Builtins) {
+        let Some((revision, list)) = runtime.commands_since(self.extensions.v4_seen) else {
+            return;
+        };
+        self.extensions.v4_seen = revision;
+        let target = |c: &Value| {
+            format!(
+                "{V4_COMMAND}{}:{}",
+                c["panel"].as_str().unwrap_or_default(),
+                c["id"].as_str().unwrap_or_default()
+            )
+        };
+        self.extensions.v4_choices = list
+            .iter()
+            .map(|c| Choice {
+                label: c["title"].as_str().unwrap_or_default().to_owned(),
+                command: target(c),
+            })
+            .collect();
+        let bindings: Vec<Binding> = list
+            .iter()
+            .filter_map(|c| {
+                Some(Binding {
+                    id: format!("{V4_OWNER}{}", target(c)),
+                    chord: c["key"].as_str()?.to_owned(),
+                    command: target(c),
+                    args: vec![],
+                    priority: 300,
+                    in_fields: false,
+                    repeat: false,
+                    loose: false,
+                })
+            })
+            .collect();
+        let mut shell = self.host.borrow_mut();
+        shell.contributed_choices = self.extensions.palette_choices();
+        shell.set_contributed_bindings(V4_OWNER, bindings);
     }
     /// Puts back what the newest agent extension change replaced, for this
     /// project or an app-wide run. Files move on a worker; windows reload.

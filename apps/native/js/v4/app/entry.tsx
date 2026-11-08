@@ -17,7 +17,13 @@ import {
   type HostPublication,
 } from "../src/host-api";
 import { type Json, type NativeEvent, type Transport } from "../src/protocol";
-import type { BuiltinEnv, Hot, Mount, Mounted } from "../src/builtin";
+import type {
+  BuiltinEnv,
+  Commands,
+  Hot,
+  Mount,
+  Mounted,
+} from "../src/builtin";
 import { mount as layerEffects } from "../panels/effect-controls/mount";
 import { mount as fxbrowser } from "../panels/effects/mount";
 import { mount as timeline } from "../panels/timeline/mount";
@@ -122,6 +128,30 @@ const hot = {
   data: {} as Record<string, Json>,
   disposers: [] as ((data: Record<string, Json>) => void)[],
 };
+/** Commands this realm added; the window lists them in its palette and keymap. */
+const commands = new Map<
+  string,
+  { title: string; key?: string; run: (args: Json[]) => unknown }
+>();
+const publishCommands = () =>
+  native(
+    "commands.set",
+    [...commands].map(([id, c]) => ({ id, title: c.title, key: c.key ?? null })),
+  );
+const commandApi: Commands = {
+  register({ id, title, key }, run) {
+    if (typeof id !== "string" || !id || typeof title !== "string" || !title)
+      throw new Error("A command needs an id and a title");
+    commands.set(id, { title, key, run });
+    publishCommands();
+    return () => {
+      if (commands.get(id)?.run === run) {
+        commands.delete(id);
+        publishCommands();
+      }
+    };
+  },
+};
 async function mountExtension(
   id: string,
   text: string,
@@ -136,7 +166,7 @@ async function mountExtension(
       hot.disposers.push(callback);
     },
   };
-  const env = { ...environment(replaces ?? id), hot: api };
+  const env = { ...environment(replaces ?? id), hot: api, commands: commandApi };
   (globalThis as any).__powermove_runtime = RUNTIME;
   const graph = JSON.parse(text);
   const url = (name: string) =>
@@ -178,7 +208,7 @@ async function mountExtension(
   if (typeof namespace.view !== "function")
     throw new Error("A v4 extension exports view() or mount(env)");
   const root = env.root();
-  await namespace.activate?.({ host, id, hot: api });
+  await namespace.activate?.({ host, id, hot: api, commands: commandApi });
   // A component, so the view's hooks have one to belong to.
   const View = namespace.view;
   await root.render(<View />);
@@ -210,6 +240,14 @@ async function mountExtension(
   async command(name: string, args: Json) {
     await host.command(name, args);
     await this.publish();
+    return true;
+  },
+  /** The palette or a shortcut ran a command this extension registered. */
+  async runCommand(id: string, args: Json[]) {
+    const command = commands.get(id);
+    if (!command) throw new Error(`No command ${id}`);
+    await command.run(args);
+    await settle();
     return true;
   },
   async write(handle: string, value: Json) {
