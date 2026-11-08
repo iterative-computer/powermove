@@ -39,6 +39,8 @@ pub struct ViewPlacement {
     pub pan: [f64; 2],
     /// The composition's scale as shown, which is what pointers map through.
     pub scale: Cell<f64>,
+    /// The viewer body the composition fits in, points.
+    pub stage: [f64; 2],
     local: bool,
 }
 impl Default for ViewPlacement {
@@ -47,6 +49,7 @@ impl Default for ViewPlacement {
             zoom: None,
             pan: [0., 0.],
             scale: Cell::new(1.),
+            stage: [640., 360.],
             local: false,
         }
     }

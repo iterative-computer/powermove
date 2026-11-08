@@ -1652,3 +1652,47 @@ mod effect_registry;
 mod text_animators;
 
 mod precomp_delta;
+
+/// Projects whose layers sit at the root (no `compId`) are the composition
+/// the shipped app calls `root`: the timeline shows it and names its tab.
+#[test]
+fn root_level_project_has_a_timeline_composition_and_tab() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(r##"{"id":"root-film","name":"Root Film","w":32,"h":18,"fps":29.97,"dur":2,"assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10},"fx":[]}]}"##).unwrap();
+    actor
+        .handle()
+        .open("root-film", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "root-timeline".into(),
+        generation: 1,
+        project: "root-film".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "timeline", false).unwrap();
+    let frame = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert_eq!(frame["hasComposition"], true);
+    assert_eq!(frame["tabs"][0]["id"], "root");
+    assert_eq!(frame["tabs"][0]["name"], "Root Film");
+    assert_eq!(frame["window"]["total"], 1);
+}
+
+/// A viewer pane shorter than two insets still publishes (fit edge to edge),
+/// and a 32 × 18 composition fits a real pane.
+#[test]
+fn viewer_publishes_for_tiny_panes_and_tiny_compositions() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "viewer-tiny".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "viewer", false).unwrap();
+    for stage in [[20., 10.], [1., 1.], [814., 467.]] {
+        backend.native.facts["stage"] = json!(stage);
+        backend.viewer_snapshot().unwrap();
+    }
+}
