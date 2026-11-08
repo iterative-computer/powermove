@@ -184,6 +184,8 @@
   // Blob, File and object URLs hold bytes in this realm. `__bytes` hands a
   // payload to the host without a JSON copy (image decode, file import).
   const blobData = new WeakMap(), hostFiles = new WeakMap(), objectURLs = new Map();
+  // A picked file's token goes when the last File for it is collected.
+  const heldFiles = new FinalizationRegistry(token => { try { native('engine', {operation: 'file.release', input: {token}}); } catch {} });
   // A file the host holds (one the user picked) reads its bytes only when asked.
   const blobBytes = {get(blob) { let b = blobData.get(blob); if (typeof b === 'function') blobData.set(blob, b = b()); return b; }, set: (blob, b) => blobData.set(blob, b)};
   let nextObjectURL = 0;
@@ -218,26 +220,57 @@
   const base64 = bytes => { const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; let out = ''; for (let i = 0; i < bytes.length; i += 3) { const n = bytes[i] << 16 | (bytes[i+1] ?? 0) << 8 | (bytes[i+2] ?? 0); out += a[n>>18&63] + a[n>>12&63] + (i+1 < bytes.length ? a[n>>6&63] : '=') + (i+2 < bytes.length ? a[n&63] : '='); } return out; };
   const unbase64 = text => { text = String(text).replace(/[\t\n\f\r ]/g, ''); if (text.length % 4 === 0) text = text.replace(/==?$/, ''); if (text.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(text)) throw new DOMException('The string to be decoded is not correctly encoded.', 'InvalidCharacterError'); const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; const out = []; let n = 0, bits = 0; for (const c of text) { n = n << 6 | a.indexOf(c); bits += 6; if (bits >= 8) { bits -= 8; out.push(n >> bits & 255); } } return new Uint8Array(out); };
   globalThis.btoa = text => { text = String(text); if (/[^\0-\xff]/.test(text)) throw new DOMException('The string to be encoded contains characters outside of the Latin1 range.', 'InvalidCharacterError'); return base64(Uint8Array.from(text, c => c.charCodeAt(0))); };
-  globalThis.atob = text => String.fromCharCode(...unbase64(text));
+  globalThis.atob = text => latin1(unbase64(text));
+  // Code units without one giant spread: media-sized payloads stay off the stack.
+  const latin1 = bytes => { let out = ''; for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return out; };
+  const cp1252 = [0x20ac,0x81,0x201a,0x192,0x201e,0x2026,0x2020,0x2021,0x2c6,0x2030,0x160,0x2039,0x152,0x8d,0x17d,0x8f,0x90,0x2018,0x2019,0x201c,0x201d,0x2022,0x2013,0x2014,0x2dc,0x2122,0x161,0x203a,0x153,0x9d,0x17e,0x178];
+  // readAsText's label: UTF-8, UTF-16 and the single-byte Western encodings;
+  // an unknown label decodes as UTF-8, as the Encoding standard says.
+  const decodeText = (bytes, label, type) => {
+    const charset = /charset=([^;]+)/i.exec(type ?? '')?.[1];
+    const name = String(label ?? charset ?? 'utf-8').trim().toLowerCase();
+    if (['utf-16le','utf-16'].includes(name)) { let out = ''; for (let i = 0; i + 1 < bytes.length; i += 0x8000) out += String.fromCharCode.apply(null, new Uint16Array(bytes.slice(i, Math.min(bytes.length & ~1, i + 0x8000)).buffer)); return out; }
+    if (['iso-8859-1','latin1','l1','ascii','us-ascii','windows-1252','cp1252'].includes(name)) return latin1(bytes).replace(/[\x80-\x9f]/g, c => String.fromCharCode(cp1252[c.charCodeAt(0) - 0x80]));
+    return new TextDecoder().decode(bytes);
+  };
   class FileReader extends EventTarget {
     readyState = 0; result = null; error = null; onload = null; onerror = null; onloadend = null; onloadstart = null; onabort = null; onprogress = null;
-    #read(blob, as) {
+    #read = 0;
+    #fire(type, loaded, total) { const e = new Event(type); Object.assign(e, {lengthComputable: total !== undefined, loaded: loaded ?? 0, total: total ?? 0}); this['on' + type]?.call(this, e); this.dispatchEvent(e); }
+    #start(blob, as, label) {
       if (!(blob instanceof Blob)) throw new TypeError('FileReader reads a Blob');
       if (this.readyState === 1) throw new DOMException('The object is already busy reading Blobs.', 'InvalidStateError');
-      this.readyState = 1; this.result = null;
-      const bytes = blobBytes.get(blob);
+      // Each read has its own identity: an aborted read never delivers.
+      const read = ++this.#read;
+      this.readyState = 1; this.result = null; this.error = null;
+      const total = blob.size;
       queueMicrotask(() => {
-        if (this.readyState !== 1) return;
-        this.result = as === 'buffer' ? bytes.slice().buffer : as === 'url' ? 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + base64(bytes) : as === 'binary' ? String.fromCharCode(...bytes) : new TextDecoder().decode(bytes);
-        this.readyState = 2;
-        for (const type of ['load', 'loadend']) { const e = new Event(type); this['on' + type]?.call(this, e); this.dispatchEvent(e); }
+        if (read !== this.#read) return;
+        this.#fire('loadstart', 0, total);
+        if (read !== this.#read) return;
+        let result;
+        try {
+          const bytes = blobBytes.get(blob);
+          result = as === 'buffer' ? bytes.slice().buffer : as === 'url' ? 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + base64(bytes) : as === 'binary' ? latin1(bytes) : decodeText(bytes, label, blob.type);
+        } catch (error) {
+          if (read !== this.#read) return;
+          this.readyState = 2; this.error = error instanceof DOMException ? error : new DOMException(String(error?.message ?? error), 'NotReadableError');
+          this.#fire('error', 0, total); if (read === this.#read) this.#fire('loadend', 0, total);
+          return;
+        }
+        if (read !== this.#read) return;
+        this.#fire('progress', total, total);
+        if (read !== this.#read) return;
+        this.readyState = 2; this.result = result;
+        this.#fire('load', total, total);
+        if (read === this.#read && this.readyState === 2) this.#fire('loadend', total, total);
       });
     }
-    readAsArrayBuffer(blob) { this.#read(blob, 'buffer'); }
-    readAsText(blob) { this.#read(blob, 'text'); }
-    readAsDataURL(blob) { this.#read(blob, 'url'); }
-    readAsBinaryString(blob) { this.#read(blob, 'binary'); }
-    abort() { if (this.readyState !== 1) return; this.readyState = 2; this.result = null; for (const type of ['abort', 'loadend']) { const e = new Event(type); this['on' + type]?.call(this, e); this.dispatchEvent(e); } }
+    readAsArrayBuffer(blob) { this.#start(blob, 'buffer'); }
+    readAsText(blob, encoding) { this.#start(blob, 'text', encoding); }
+    readAsDataURL(blob) { this.#start(blob, 'url'); }
+    readAsBinaryString(blob) { this.#start(blob, 'binary'); }
+    abort() { if (this.readyState !== 1) return; this.#read++; this.readyState = 2; this.result = null; this.#fire('abort'); this.#fire('loadend'); }
   }
   Object.assign(FileReader, {EMPTY: 0, LOADING: 1, DONE: 2});
   globalThis.Blob = Blob; globalThis.File = File; globalThis.FileReader = FileReader;
@@ -249,7 +282,14 @@
     if (input.startsWith('blob:')) { const blob = objectURLs.get(input.split('#')[0]); return blob ? {bytes: blobBytes.get(blob), type: blob.type} : undefined; }
     const data = /^data:([^,]*?)(;base64)?,(.*)$/is.exec(input);
     if (!data) return null;
-    const bytes = data[2] ? unbase64(decodeURIComponent(data[3])) : new TextEncoder().encode(decodeURIComponent(data[3]));
+    // Percent-escapes are bytes, not UTF-8: %FF%00 is two bytes.
+    const raw = data[3], out = [];
+    for (let i = 0; i < raw.length; i++) {
+      const hex = raw[i] === '%' && /^[0-9a-f]{2}$/i.test(raw.slice(i + 1, i + 3)) ? parseInt(raw.slice(i + 1, i + 3), 16) : null;
+      if (hex !== null) { out.push(hex); i += 2; } else { const code = raw.codePointAt(i); if (code > 0xffff) i++; out.push(...new TextEncoder().encode(String.fromCodePoint(code))); }
+    }
+    const percent = Uint8Array.from(out);
+    const bytes = data[2] ? unbase64(latin1(percent)) : percent;
     return {bytes, type: mimeType(data[1].split(';')[0] || 'text/plain')};
   };
   class Response {
@@ -291,7 +331,7 @@
     /** The bytes and type behind a realm blob: or data: URL; null for other URLs, undefined for a revoked one. */
     local: localBytes,
     /** A File the host holds under `token`; its bytes are read on first use. */
-    hostFile({token, name, type, size, lastModified}) { const file = new File([], name, {type, lastModified}); hostFiles.set(file, {token, size: Number(size)}); blobData.set(file, () => new Uint8Array(__read('file.read', JSON.stringify({token})))); return file; },
+    hostFile({token, name, type, size, lastModified}) { const file = new File([], name, {type, lastModified}); hostFiles.set(file, {token, size: Number(size)}); heldFiles.register(file, token); blobData.set(file, () => new Uint8Array(__read('file.read', JSON.stringify({token})))); return file; },
     /** The host's token for a File it holds, else undefined. */
     fileToken: file => hostFiles.get(file)?.token,
     stage(op) { const text=JSON.stringify(op), copy=JSON.parse(text); const bytes=new TextEncoder().encode(text).byteLength+(ops.length?1:0); if(ops.length>=__limits.max_ops || opBytes+bytes>__limits.max_op_bytes) throw new RangeError('Operation quota'); ops.push(copy); opBytes+=bytes; }
