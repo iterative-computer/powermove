@@ -49,7 +49,8 @@ impl CanvasResources {
         }
         self.next = self.next.checked_add(1).ok_or(Error::Backpressure)?;
         self.bytes += frame.png.len();
-        self.entries.insert(self.next, (frame.png.clone(), frame.mime.clone()));
+        self.entries
+            .insert(self.next, (frame.png.clone(), frame.mime.clone()));
         Ok(self.next)
     }
     pub fn get(&self, id: u64) -> Result<(Arc<[u8]>, Arc<str>)> {

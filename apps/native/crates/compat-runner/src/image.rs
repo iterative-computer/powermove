@@ -100,10 +100,52 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
         [0x89, b'P', b'N', b'G', ..] => "image/png",
         [0xff, 0xd8, 0xff, ..] => "image/jpeg",
         [b'G', b'I', b'F', b'8', ..] => "image/gif",
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => "image/webp",
         [b'B', b'M', ..] => "image/bmp",
-        [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', ..] => "image/avif",
-        [_, _, _, _, b'f', b't', b'y', b'p', b'h', b'e', b'i', b'c', ..] => "image/heic",
+        [
+            _,
+            _,
+            _,
+            _,
+            b'f',
+            b't',
+            b'y',
+            b'p',
+            b'a',
+            b'v',
+            b'i',
+            b'f',
+            ..,
+        ] => "image/avif",
+        [
+            _,
+            _,
+            _,
+            _,
+            b'f',
+            b't',
+            b'y',
+            b'p',
+            b'h',
+            b'e',
+            b'i',
+            b'c',
+            ..,
+        ] => "image/heic",
         [b'I', b'I', 42, 0, ..] | [b'M', b'M', 0, 42, ..] => "image/tiff",
         _ => return None,
     })
@@ -144,9 +186,12 @@ fn svg_options() -> usvg::Options<'static> {
 /// embedded colour profile, and draws into sRGB as a canvas sees it.
 #[cfg(target_os = "macos")]
 fn decode_raster(bytes: &[u8]) -> Option<ImageData> {
-    use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFString, CGPoint, CGRect, CGSize};
+    use objc2_core_foundation::{
+        CFBoolean, CFData, CFDictionary, CFString, CGPoint, CGRect, CGSize,
+    };
     use objc2_core_graphics::{
-        CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, kCGColorSpaceSRGB,
+        CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+        kCGColorSpaceSRGB,
     };
     use objc2_image_io::{
         CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways,
@@ -186,7 +231,10 @@ fn decode_raster(bytes: &[u8]) -> Option<ImageData> {
             CGImageAlphaInfo::PremultipliedLast.0,
         )
     }?;
-    let rect = CGRect::new(CGPoint::new(0., 0.), CGSize::new(width as f64, height as f64));
+    let rect = CGRect::new(
+        CGPoint::new(0., 0.),
+        CGSize::new(width as f64, height as f64),
+    );
     CGContext::draw_image(Some(&context), rect, Some(&image));
     drop(context);
     demultiply(&mut pixels);

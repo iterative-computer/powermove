@@ -242,8 +242,10 @@ fn bytes_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::
             .data()
             .map(|data| {
                 // SAFETY: the backing store is alive for this call and `byte_length` long.
-                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, store.byte_length()) }
-                    .to_vec()
+                unsafe {
+                    std::slice::from_raw_parts(data.as_ptr() as *const u8, store.byte_length())
+                }
+                .to_vec()
             })
             .unwrap_or_default()
     } else {
@@ -259,11 +261,13 @@ fn bytes_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::
     }
     let result = serde_json::from_str::<Value>(&input)
         .map_err(|e| e.to_string())
-        .and_then(|input| engine_call(&state, &op, |engine, generation, budget| {
-            engine
-                .call_bytes(generation, &op, &bytes, &input, budget)
-                .map(|value| value.to_string())
-        }));
+        .and_then(|input| {
+            engine_call(&state, &op, |engine, generation, budget| {
+                engine
+                    .call_bytes(generation, &op, &bytes, &input, budget)
+                    .map(|value| value.to_string())
+            })
+        });
     if state.lock().unwrap().cancellation.is_cancelled() {
         s.terminate_execution();
         return;

@@ -288,7 +288,8 @@ impl NativeHost {
                 .images
                 .remove(&id)
                 .ok_or(Error::Invalid("unknown image"))?;
-            state.image_bytes -= image.bytes.len() + image.width as usize * image.height as usize * 4;
+            state.image_bytes -=
+                image.bytes.len() + image.width as usize * image.height as usize * 4;
             return Ok(Value::Null);
         }
         if operation == "recorder.retainVersion" && state.images.contains_key(&id) {
@@ -296,7 +297,12 @@ impl NativeHost {
             let image = &images[&id];
             // Vector images rasterize at the scale they are drawn, in quarter steps.
             let version = if image.is_vector() {
-                (args.get(1).and_then(Value::as_f64).unwrap_or(1.).clamp(0.25, 64.) * SVG_STEPS)
+                (args
+                    .get(1)
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.)
+                    .clamp(0.25, 64.)
+                    * SVG_STEPS)
                     .ceil() as u64
             } else {
                 1
@@ -307,7 +313,10 @@ impl NativeHost {
                 let pixels = image.pixels(version as f64 / SVG_STEPS)?;
                 let number = id[id.find('-').map_or(0, |i| i + 1)..].parse().unwrap_or(0);
                 let source = Source {
-                    key: pm_recorder::SourceKey { id: number, version },
+                    key: pm_recorder::SourceKey {
+                        id: number,
+                        version,
+                    },
                     pixels,
                 };
                 pins.insert((id.clone(), version), (source, 1));
@@ -764,7 +773,12 @@ impl NativeHost {
                     ),
                     _ => return Err(Error::Invalid("drawImage arity")),
                 };
-                let src = Rect::new(src.x0 * factor, src.y0 * factor, src.x1 * factor, src.y1 * factor);
+                let src = Rect::new(
+                    src.x0 * factor,
+                    src.y0 * factor,
+                    src.x1 * factor,
+                    src.y1 * factor,
+                );
                 canvas.draw_image(source, src, dst).map_err(host_error)?;
                 Value::Null
             }
@@ -932,14 +946,19 @@ impl EngineProxy for NativeHost {
         budget.check()?;
         match operation {
             "image.load" => {
-                let image = crate::image::Encoded::load(bytes, input["type"].as_str().unwrap_or(""))?;
+                let image =
+                    crate::image::Encoded::load(bytes, input["type"].as_str().unwrap_or(""))?;
                 let cost = image.bytes.len() + image.width as usize * image.height as usize * 4;
                 let mut state = self.state.lock().unwrap();
                 if state.image_bytes + cost > IMAGE_BUDGET {
                     return Err(Error::Quota("image memory"));
                 }
                 state.next += 1;
-                let id = format!("{}-{}", if image.is_vector() { "svg" } else { "image" }, state.next);
+                let id = format!(
+                    "{}-{}",
+                    if image.is_vector() { "svg" } else { "image" },
+                    state.next
+                );
                 let reply = json!({"surface":id,"width":image.width,"height":image.height,"type":image.mime});
                 state.image_bytes += cost;
                 state.images.insert(id, image);
