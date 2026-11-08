@@ -712,6 +712,12 @@ impl Controller {
             return None;
         };
         let mut ui = p.ui_state.clone();
+        // A project saved without viewer or transport state still records them.
+        for value in [&mut ui.transport, &mut ui.viewer] {
+            if !matches!(value, pm_model::Value::Object(_)) {
+                *value = pm_model::Value::Object(Default::default());
+            }
+        }
         if let pm_model::Value::Object(m) = &mut ui.transport {
             m.insert("time", pm_model::Value::from(self.time()));
             m.insert(
