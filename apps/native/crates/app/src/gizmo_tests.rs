@@ -978,3 +978,79 @@ fn return_edits_the_selected_text_and_undo_reverts_it(cx: &mut TestAppContext) {
         Some("Hi")
     );
 }
+
+/// The Pen tool on a selected image: clicks draw a mask path (a drag pulls
+/// out mirrored tangents), a click on the first vertex closes it, and each
+/// press is its own undo step.
+#[gpui::test]
+fn the_pen_draws_a_closed_mask_path_on_the_selected_layer(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Pen));
+    let mut vertices = 0;
+    let press =
+        |s: &mut Stage, cx: &mut TestAppContext, at: [f64; 2], by: Option<Point<Pixels>>| {
+            let p = s.point_of(at);
+            match by {
+                Some(by) => s.drag(cx, p, by, Modifiers::none()),
+                None => {
+                    s.vcx.simulate_click(p, Modifiers::none());
+                    let surface = s.surface.clone();
+                    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+                }
+            }
+            s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+        };
+    for (at, by) in [
+        ([300., 100.], None),
+        ([400., 100.], Some(point(px(30.), px(0.)))),
+        ([400., 250.], None),
+    ] {
+        press(&mut s, cx, at, by);
+        vertices += 1;
+        let surface = s.surface.clone();
+        settle(cx, move |cx| {
+            surface.read_with(cx, |g, _| g.pen_vertices() == vertices)
+        });
+    }
+    press(&mut s, cx, [300., 100.], None);
+    let kernel = s.rig.kernel.clone();
+    let closed = move |kernel: &pm_kernel::KernelHandle| {
+        layer_value(kernel, "l0").and_then(|l| {
+            l.get("masks")?
+                .as_array()?
+                .first()?
+                .get("path")?
+                .get("p")?
+                .get("closed")?
+                .get("v")
+                .cloned()
+        }) == Some(pm_model::Value::Bool(true))
+    };
+    settle(cx, move |_| closed(&kernel));
+    let layer = layer_value(&s.rig.kernel, "l0").unwrap();
+    let path = layer.get("masks").unwrap().as_array().unwrap()[0]
+        .get("path")
+        .unwrap()
+        .clone();
+    let v = path.get("vertices").unwrap().as_array().unwrap();
+    assert_eq!(v.len(), 3);
+    let x = |i: usize, k: &str| v[i].get("p")?.get(k)?.get("v")?.as_f64();
+    assert_eq!(
+        x(0, "x"),
+        Some(100.),
+        "layer space: the image sits at 200,150 with anchor 0"
+    );
+    assert_eq!(x(1, "outX"), Some(30.));
+    assert_eq!(x(1, "inX"), Some(-30.));
+    // Undo reopens the path, then removes the third vertex.
+    let undo = || Request::new(Caller::native(), Call::History(HistoryCall::Undo));
+    s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
+    assert!(!closed(&s.rig.kernel));
+    s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
+    let layer = layer_value(&s.rig.kernel, "l0").unwrap();
+    let path = layer.get("masks").unwrap().as_array().unwrap()[0]
+        .get("path")
+        .unwrap()
+        .clone();
+    assert_eq!(path.get("vertices").unwrap().as_array().unwrap().len(), 2);
+}

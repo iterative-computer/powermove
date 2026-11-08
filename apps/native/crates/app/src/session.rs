@@ -1354,6 +1354,10 @@ impl Controller {
     ) -> bool {
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
             self.tool = cmd.name.clone();
+            // The Pen tool shows the selection's paths; others hide them.
+            if let Some(gizmos) = self.builtins.gizmos.clone() {
+                gizmos.update(cx, |g, cx| g.refresh(cx));
+            }
             return false;
         }
         if self.extension_command(cmd, cx) {

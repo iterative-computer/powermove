@@ -1027,6 +1027,7 @@ impl crate::gizmo::Host for ControllerDelegate {
             "toolAnchor" => Tool::Anchor,
             "toolShape" => Tool::Shape,
             "toolText" => Tool::Text,
+            "toolPen" => Tool::Pen,
             _ => Tool::Other,
         }
     }

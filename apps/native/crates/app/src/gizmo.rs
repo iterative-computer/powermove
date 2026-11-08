@@ -10,6 +10,8 @@ use pm_kernel::{
 use pm_model::Value;
 use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
 use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
+#[path = "pen_tool.rs"]
+pub mod pen;
 #[path = "text_edit.rs"]
 pub mod text;
 
@@ -21,6 +23,7 @@ pub enum Tool {
     Rotate,
     Anchor,
     Shape,
+    Pen,
     Text,
     Other,
 }
@@ -203,8 +206,11 @@ struct Press {
 }
 enum Job {
     Begin(&'static str),
-    Step(Vec<Command>),
+    /// `true`: supersedes the previous step (absolute, from-start values).
+    Step(Vec<Command>, bool),
     Finish(bool),
+    /// A one-step edit outside any gesture, then the layer to select.
+    Transact(&'static str, Vec<Command>, Option<String>),
 }
 pub struct GizmoSurface {
     kernel: KernelHandle,
@@ -231,6 +237,15 @@ pub struct GizmoSurface {
     text_sketch: Option<text::TextSketch>,
     /// The on-canvas text edit.
     text: Option<text::TextSession>,
+    /// The Pen tool's view of the selected layer's paths.
+    pen: Option<pen::PenPose>,
+    pen_reading: u64,
+    /// The open path new clicks extend.
+    pen_active: Option<String>,
+    /// Path and vertex whose tangents show.
+    pen_selected: Option<(String, String)>,
+    pen_drag: Option<pen::PenDrag>,
+    pen_pointer: Option<[f64; 2]>,
 }
 struct Sketch {
     origin: Point<Pixels>,
@@ -440,6 +455,12 @@ impl GizmoSurface {
             sketch: None,
             text_sketch: None,
             text: None,
+            pen: None,
+            pen_reading: 0,
+            pen_active: None,
+            pen_selected: None,
+            pen_drag: None,
+            pen_pointer: None,
         }
     }
     /// Selection, document or playhead moved. The Controller calls in during its
@@ -455,6 +476,7 @@ impl GizmoSurface {
                 s.refreshing = false;
                 s.reread(cx);
                 s.text_reread(cx);
+                s.pen_reread(cx);
             });
         });
     }
@@ -545,7 +567,7 @@ impl GizmoSurface {
             _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
             Tool::Text => CursorStyle::IBeam,
-            Tool::Anchor | Tool::Zoom | Tool::Shape => CursorStyle::Crosshair,
+            Tool::Anchor | Tool::Zoom | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
             _ => match self.handle_at(at, frame.scale) {
                 Some(Hit::Handle(index)) => self.poses[0].cursor(index),
                 _ => CursorStyle::Arrow,
@@ -613,6 +635,10 @@ impl GizmoSurface {
         };
         let drag = match tool {
             Tool::Other => return,
+            Tool::Pen => {
+                self.pen_down(event, at, frame.scale, cx);
+                return;
+            }
             Tool::Text => {
                 self.text_sketch = Some(text::TextSketch {
                     origin: event.position,
@@ -816,11 +842,15 @@ impl GizmoSurface {
             self.sketch_move(event, cx);
             return;
         }
-        if let Some(frame) = self.host.frame(self.bounds, cx)
-            && self.text_drag(self.to_comp(event.position, frame))
-        {
-            cx.notify();
-            return;
+        if let Some(frame) = self.host.frame(self.bounds, cx) {
+            let at = self.to_comp(event.position, frame);
+            if self.text_drag(at) {
+                cx.notify();
+                return;
+            }
+            if self.pen_move(event, at, cx) {
+                return;
+            }
         }
         if self.drag.is_none() {
             if self.bounds.contains(&event.position) {
@@ -857,13 +887,13 @@ impl GizmoSurface {
             snap: event.modifiers.platform || event.modifiers.control,
         };
         let commands = commands(drag, origin, at, mods);
-        self.queue.push_back(Job::Step(commands));
+        self.queue.push_back(Job::Step(commands, true));
         self.pump(cx);
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         self.panning = None;
-        if self.text_release() {
+        if self.text_release() || self.pen_up(commit, cx) {
             return;
         }
         if let Some(sketch) = self.text_sketch.take() {
@@ -892,6 +922,9 @@ impl GizmoSurface {
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         if self.finish_text(false, cx) {
+            return true;
+        }
+        if self.pen_up(false, cx) {
             return true;
         }
         if self.drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
@@ -989,7 +1022,10 @@ impl GizmoSurface {
         let Some(mut job) = self.queue.pop_front() else {
             return;
         };
-        while matches!(job, Job::Step(_)) && matches!(self.queue.front(), Some(Job::Step(_))) {
+        // Superseding steps coalesce; a step that accumulates never drops.
+        while matches!(job, Job::Step(_, true))
+            && matches!(self.queue.front(), Some(Job::Step(_, true)))
+        {
             job = self.queue.pop_front().unwrap();
         }
         self.busy = true;
@@ -999,14 +1035,38 @@ impl GizmoSurface {
                 .background_executor()
                 .spawn(async move {
                     let call: Call = match (job, gesture) {
+                        (Job::Transact(label, commands, select), _) => {
+                            let call = Call::Transact {
+                                label: Some(label.into()),
+                                body: WriteBody::Commands(commands),
+                                expected_revision: None,
+                            };
+                            let ack = kernel
+                                .call(&project, Request::new(Caller::native(), call))
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| format!("{e:?}"))?;
+                            if let (Some(id), false) =
+                                (select, matches!(ack.reply, Reply::Throw(_)))
+                            {
+                                let select = SelectionCall::Layers {
+                                    ids: vec![id],
+                                    add: false,
+                                };
+                                kernel
+                                    .call(&project, Request::new(Caller::native(), select))
+                                    .await;
+                            }
+                            return Ok(ack);
+                        }
                         (Job::Begin(label), _) => GestureCall::Begin {
                             label: label.into(),
                         }
                         .into(),
-                        (Job::Step(commands), Some(gesture)) => GestureCall::Step {
+                        (Job::Step(commands, replace), Some(gesture)) => GestureCall::Step {
                             gesture,
                             body: WriteBody::Commands(commands),
-                            replace: true,
+                            replace,
                         }
                         .into(),
                         (Job::Finish(true), Some(gesture)) => {
@@ -1034,13 +1094,19 @@ impl GizmoSurface {
                     },
                     Err(error) => s.host.report(error, cx),
                 }
-                if s.queue.is_empty() && s.drag.is_none() {
+                if s.queue.is_empty() && s.drag.is_none() && s.pen_drag.is_none() {
                     s.gesture = None;
                 }
                 s.pump(cx);
             });
         })
         .detach();
+    }
+    #[cfg(test)]
+    pub fn pen_vertices(&self) -> usize {
+        self.pen
+            .as_ref()
+            .map_or(0, |p| p.targets.iter().map(|t| t.vertices.len()).sum())
     }
     #[cfg(test)]
     pub fn text_open(&self) -> Option<&text::TextSession> {
@@ -1434,6 +1500,7 @@ impl Render for GizmoSurface {
                     move |_, _, window, cx| {
                         let _ = this.update(cx, |s, cx| {
                             if let Some(frame) = s.host.frame(s.bounds, cx) {
+                                s.pen_paint(frame, window);
                                 s.text_paint(frame, window);
                             }
                         });
