@@ -4,6 +4,7 @@
 //! `--project=COPY.pmv [--definitions=FILE] [--width=1920 --height=1080]`
 //! plays a real project (a private copy: its embedded media are extracted to
 //! a scratch folder) and then seeks it at random, as the viewer does.
+//! `--from=SECONDS` loops the window starting there instead of the start.
 use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
 use pm_protocol::{
     clock::TransportCommand,
@@ -155,12 +156,18 @@ pub fn run() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(2));
     }
     let first_frame_s = settle.elapsed().as_secs_f64();
-    let end = Ticks::from_whole_seconds(duration.min(seconds).ceil() as i32);
+    let from: f64 = arg("from", "0").parse()?;
+    anyhow::ensure!(
+        (0. ..duration).contains(&from),
+        "--from is outside the composition"
+    );
+    let start = Ticks::from_whole_seconds(from.floor() as i32);
+    let end = Ticks::from_whole_seconds((from.floor() + seconds).min(duration).ceil() as i32);
+    if start != Ticks::ZERO {
+        viewer.scrub(start)?;
+    }
     viewer.command(TransportCommand::SetLoop {
-        range: Some(TickRange {
-            start: Ticks::ZERO,
-            end,
-        }),
+        range: Some(TickRange { start, end }),
     })?;
     viewer.command(TransportCommand::Play {
         rate: PlaybackRate::NORMAL,
