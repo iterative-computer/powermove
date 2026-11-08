@@ -30,10 +30,10 @@ it('re-probes changed bytes even when sync preserves the file size and mtime', a
   await probe(); expect(run).toHaveBeenCalledTimes(2);
 });
 
-it('keeps media analysis after metadata churn and identical file replacement', async () => {
+it('keeps media analysis when only cloud metadata (ctime) changes', async () => {
   const { file, probe, run } = await fixture();
   await probe();
-  await utimes(file, new Date(), new Date()); await probe();
-  await writeFile(file + '.incoming', 'original video'); await rename(file + '.incoming', file); await probe();
+  const { chmod } = await import('node:fs/promises');
+  await chmod(file, 0o644); await probe();
   expect(run).toHaveBeenCalledTimes(1);
 });

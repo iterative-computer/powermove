@@ -8,14 +8,16 @@ interface CloudAccess {
   download(file: string): Promise<void>;
   version?(file: string): Promise<string>;
 }
-type Download = { provider: string; done: boolean; failed?: boolean; error?: unknown; version?: string };
+type Download = { provider: string; done: boolean; failed?: boolean; error?: unknown; version?: string; finished: Promise<void> };
 
 /** Opening a placeholder must not put a blocking data-fork read into the
  * project transaction queue. Hydration already runs in a bounded child process.
  * The existing open-error surface can show this state until a progress UI exists. */
 export class ProjectCloudAccess {
   private downloads = new Map<string, Download>();
-  constructor(private readonly cloud: CloudAccess, private readonly metadataTimeoutMs = 10_000) {}
+  // Most projects download within a minute: wait and open them without a
+  // second click. Larger ones keep downloading; the person reopens later.
+  constructor(private readonly cloud: CloudAccess, private readonly metadataTimeoutMs = 10_000, private readonly waitMs = 60_000) {}
 
   async prepare(file: string): Promise<void> {
     const pending = this.downloads.get(file);
@@ -35,15 +37,19 @@ export class ProjectCloudAccess {
     // Unclaimed completed results must not fill the active-download limit.
     for (const [path, download] of this.downloads) if (download.done) this.downloads.delete(path);
     if (this.downloads.size >= 4) throw new Error('Other projects are downloading. Try opening this project when they finish.');
-    const download: Download = { provider: state === 'icloud' ? 'iCloud' : 'cloud storage', done: false };
+    const download = { provider: state === 'icloud' ? 'iCloud' : 'cloud storage', done: false } as Download;
     this.downloads.set(file, download);
-    void Promise.resolve().then(async () => {
+    download.finished = Promise.resolve().then(async () => {
       await this.cloud.download(file);
       download.version = this.cloud.version ? await this.bounded(this.cloud.version(file)) : undefined;
     }).then(
       () => { download.done = true; },
       error => { download.failed = true; download.error = error; download.done = true; },
     );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([download.finished, new Promise<void>(resolve => { timer = setTimeout(resolve, this.waitMs); })]);
+    clearTimeout(timer);
+    if (download.done) return this.prepare(file);
     throw this.downloading(download.provider);
   }
   private downloading(provider: string): Error {

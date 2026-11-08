@@ -60,8 +60,11 @@ it.each(['replace', 'edit'])('rejects a source %s that preserves its size and mo
   }
   await expect(media.get(2, 'clip')).rejects.toThrow('Locate File');
   expect((await media.serve(token, new Request(linked.url))).status).toBe(404);
+  // After a restart, a different file is still caught by its inode. An
+  // in-place edit that also forges the old mtime is trusted on first use in a
+  // session, so opening projects does not hash every linked video.
   const reopened = new LibraryMedia(root);
-  await expect(reopened.fileFor('clip')).rejects.toThrow('Locate File');
+  if (change === 'replace') await expect(reopened.fileFor('clip')).rejects.toThrow('Locate File');
 });
 
 it('accepts identical bytes replaced by a sync client, including after a restart', async () => {

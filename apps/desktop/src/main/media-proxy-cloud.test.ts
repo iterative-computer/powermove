@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MediaProxyService } from './media-proxy';
-import { FileContentCache } from './file-content-version';
 
 const roots: string[] = [], services: MediaProxyService[] = [], resume: Array<() => void> = [];
 afterEach(async () => {
@@ -28,35 +27,24 @@ it.each(['video', 'still', 'sequence'])('blocks an offloaded %s before conversio
   expect(await readdir(root)).toEqual([]);
 });
 
-it.each(['metadata', 'content'])('shares conversion only when the bytes match after a %s change', async change => {
+it('never shares a conversion with a replaced file, even when sync preserves its size and mtime', async () => {
   const root = await fixture(), source = path.join(root, 'synthetic.mov');
   const timestamp = new Date('2026-01-01');
   await writeFile(source, 'old footage'); await utimes(source, timestamp, timestamp);
   let finish!: () => void;
   const wait = new Promise<void>(resolve => { finish = resolve; resume.push(resolve); });
-  const convert = vi.fn(async (input: string, output: string) => {
-    await copyFile(input, output);
-    await wait;
-  });
+  const convert = vi.fn(async (input: string, output: string) => { await copyFile(input, output); await wait; });
   const service = new MediaProxyService(root, convert, undefined, undefined, undefined, async () => {}); services.push(service);
-  const hash = vi.spyOn(FileContentCache.prototype, 'hash');
   const first = service.create(source);
   await vi.waitFor(() => expect(convert).toHaveBeenCalledTimes(1));
-  if (change === 'content') {
-    await writeFile(source + '.incoming', 'new footage');
-    await utimes(source + '.incoming', timestamp, timestamp);
-    await rename(source + '.incoming', source);
-  } else await utimes(source, new Date('2026-02-01'), new Date('2026-02-01'));
+  await writeFile(source + '.incoming', 'new footage');
+  await utimes(source + '.incoming', timestamp, timestamp);
+  await rename(source + '.incoming', source);
   const second = service.create(source);
-  if (change === 'content') await vi.waitFor(() => expect(convert).toHaveBeenCalledTimes(2));
-  // Let the second request finish fingerprinting before unblocking conversion.
-  await vi.waitFor(() => expect(hash).toHaveBeenCalledTimes(2));
-  await hash.mock.results[1]!.value;
-  await Promise.resolve();
+  await vi.waitFor(() => expect(convert).toHaveBeenCalledTimes(2));
   finish();
   const [a, b] = await Promise.all([first, second]);
-  expect(convert).toHaveBeenCalledTimes(change === 'content' ? 2 : 1);
   expect(Buffer.from(await service.read(a.token, 0, a.size)).toString()).toBe('old footage');
-  expect(Buffer.from(await service.read(b.token, 0, b.size)).toString()).toBe(change === 'content' ? 'new footage' : 'old footage');
-  expect(await readFile(source, 'utf8')).toBe(change === 'content' ? 'new footage' : 'old footage');
+  expect(Buffer.from(await service.read(b.token, 0, b.size)).toString()).toBe('new footage');
+  expect(await readFile(source, 'utf8')).toBe('new footage');
 });

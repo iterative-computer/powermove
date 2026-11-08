@@ -7,7 +7,7 @@ const tick = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); 
 it.each(['icloud', 'cloud'] as const)('starts one bounded download for a %s project without opening its data fork', async state => {
   let finish!: () => void;
   const cloud = { status: vi.fn().mockResolvedValue(state), download: vi.fn(() => new Promise<void>(resolve => { finish = resolve; })) };
-  const access = new ProjectCloudAccess(cloud);
+  const access = new ProjectCloudAccess(cloud, 10_000, 0);
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Downloading this project');
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Downloading this project');
   expect(cloud.download).toHaveBeenCalledExactlyOnceWith('/synthetic.pmv');
@@ -19,35 +19,42 @@ it.each(['icloud', 'cloud'] as const)('starts one bounded download for a %s proj
 
 it.each(['local', 'unknown', 'missing'] as const)('leaves %s files to the ordinary project validation', async state => {
   const cloud = { status: vi.fn().mockResolvedValue(state), download: vi.fn() };
-  await expect(new ProjectCloudAccess(cloud).prepare('/synthetic.pmv')).resolves.toBeUndefined();
+  await expect(new ProjectCloudAccess(cloud, 10_000, 0).prepare('/synthetic.pmv')).resolves.toBeUndefined();
   expect(cloud.download).not.toHaveBeenCalled();
 });
 
 it('reports an offline download clearly and permits another attempt', async () => {
-  const cloud = { status: vi.fn().mockResolvedValue('icloud'), download: vi.fn().mockRejectedValue(new Error('ENOTCONN')) };
-  const access = new ProjectCloudAccess(cloud);
+  let fail!: (error: Error) => void;
+  const cloud = { status: vi.fn().mockResolvedValue('icloud'), download: vi.fn(() => new Promise<void>((_, reject) => { fail = reject; })) };
+  const access = new ProjectCloudAccess(cloud, 10_000, 0);
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Downloading');
-  await tick();
+  fail(new Error('ENOTCONN')); await tick();
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Could not download this project. Check your connection');
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Downloading');
   expect(cloud.download).toHaveBeenCalledTimes(2);
 });
 
+const slowDownload = () => {
+  const finishes: Array<() => void> = [];
+  return { finishes, download: vi.fn(() => new Promise<void>(resolve => { finishes.push(resolve); })) };
+};
 it('does not reuse an old download after the file is replaced or evicted again', async () => {
-  const cloud = { status: vi.fn().mockResolvedValue('cloud'), download: vi.fn().mockResolvedValue(undefined), version: vi.fn().mockResolvedValue('downloaded-file') };
-  const access = new ProjectCloudAccess(cloud);
+  const slow = slowDownload();
+  const cloud = { status: vi.fn().mockResolvedValue('cloud'), download: slow.download, version: vi.fn().mockResolvedValue('downloaded-file') };
+  const access = new ProjectCloudAccess(cloud, 10_000, 0);
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Downloading');
-  await tick(); await tick();
+  slow.finishes[0]!(); await tick(); await tick();
   cloud.version.mockResolvedValue('replacement-placeholder');
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Downloading');
   expect(cloud.download).toHaveBeenCalledTimes(2);
 });
 
 it('accepts downloaded bytes with lagging cloud flags only while the file identity matches', async () => {
-  const cloud = { status: vi.fn().mockResolvedValue('cloud'), download: vi.fn().mockResolvedValue(undefined), version: vi.fn().mockResolvedValue('downloaded-file') };
-  const access = new ProjectCloudAccess(cloud);
+  const slow = slowDownload();
+  const cloud = { status: vi.fn().mockResolvedValue('cloud'), download: slow.download, version: vi.fn().mockResolvedValue('downloaded-file') };
+  const access = new ProjectCloudAccess(cloud, 10_000, 0);
   await expect(access.prepare('/synthetic.pmv')).rejects.toThrow('Downloading');
-  await tick(); await tick();
+  slow.finishes[0]!(); await tick(); await tick();
   await expect(access.prepare('/synthetic.pmv')).resolves.toBeUndefined();
   expect(cloud.version).toHaveBeenCalledTimes(2);
   expect(cloud.status).toHaveBeenCalledTimes(1);
@@ -65,7 +72,7 @@ it('bounds metadata checks on an unresponsive network volume', async () => {
 
 it('limits concurrent project downloads', async () => {
   const cloud = { status: vi.fn().mockResolvedValue('cloud'), download: vi.fn(() => new Promise<void>(() => {})) };
-  const access = new ProjectCloudAccess(cloud);
+  const access = new ProjectCloudAccess(cloud, 10_000, 0);
   for (let i = 0; i < 4; i++) await expect(access.prepare(`/synthetic-${i}.pmv`)).rejects.toThrow('Downloading');
   await expect(access.prepare('/synthetic-5.pmv')).rejects.toThrow('Other projects');
   expect(cloud.download).toHaveBeenCalledTimes(4);
@@ -73,7 +80,7 @@ it('limits concurrent project downloads', async () => {
 
 it('deduplicates opens whose metadata checks overlap', async () => {
   const cloud = { status: vi.fn().mockResolvedValue('cloud'), download: vi.fn(() => new Promise<void>(() => {})) };
-  const access = new ProjectCloudAccess(cloud);
+  const access = new ProjectCloudAccess(cloud, 10_000, 0);
   const results = await Promise.allSettled([access.prepare('/synthetic.pmv'), access.prepare('/synthetic.pmv')]);
   expect(results.every(result => result.status === 'rejected')).toBe(true);
   expect(cloud.download).toHaveBeenCalledTimes(1);
@@ -87,4 +94,18 @@ it('preserves checksum and parsing errors and explains a temporarily missing syn
   expect(projectReadError(new Error('Checksum does not match'))).toBe('Checksum does not match');
   expect(projectReadError({ code: 'ENOENT' })).toContain('Wait for syncing to finish');
   expect(projectReadError(null)).toBe('Could not open project.');
+});
+
+it('waits for a quick download and opens without a second attempt', async () => {
+  let finish!: () => void;
+  const cloud = { status: vi.fn().mockResolvedValue('icloud'), download: vi.fn(() => new Promise<void>(resolve => { finish = resolve; })), version: vi.fn().mockResolvedValue('downloaded-file') };
+  const opening = new ProjectCloudAccess(cloud, 10_000, 5_000).prepare('/synthetic.pmv');
+  await tick(); finish();
+  await expect(opening).resolves.toBeUndefined();
+  expect(cloud.download).toHaveBeenCalledTimes(1);
+});
+
+it('reports an offline failure on the first attempt when the download fails quickly', async () => {
+  const cloud = { status: vi.fn().mockResolvedValue('icloud'), download: vi.fn().mockRejectedValue(new Error('ENOTCONN')) };
+  await expect(new ProjectCloudAccess(cloud, 10_000, 5_000).prepare('/synthetic.pmv')).rejects.toThrow('Could not download this project');
 });

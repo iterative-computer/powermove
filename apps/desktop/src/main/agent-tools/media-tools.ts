@@ -195,7 +195,8 @@ export class AgentMediaTools {
     await requireLocalMedia(file);
     const info = await stat(file).catch(() => null);
     if (!info?.isFile()) throw new MediaToolError('The media file is no longer readable.');
-    const key = await this.contents.hash(file);
+    // A probe is cheap and read-only; hashing a multi-GB video first is not.
+    const key = `${file}|${info.dev}:${info.ino}|${info.size}|${info.mtimeMs}`;
     let pending = this.probes.get(key);
     if (!pending) {
       pending = (async () => {

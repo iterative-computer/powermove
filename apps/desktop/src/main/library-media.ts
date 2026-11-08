@@ -20,7 +20,7 @@ async function writeLibraryJSON(file: string, value: unknown): Promise<void> {
   } finally { await unlink(temporary).catch(() => undefined); }
 }
 
-type Record = { key: string; revision: string; size: number; type: string; file?: string; sourcePath?: string; sha256: string; mtime: number };
+type Record = { key: string; revision: string; size: number; type: string; file?: string; sourcePath?: string; sha256: string; mtime: number; ino?: number };
 type Upload = { owner: number; input: LibraryMediaInput; file: string; handle: FileHandle; hash: Hash; received: number; queue: Promise<void> };
 const KEY = /^[A-Za-z0-9:._-]{1,256}$/;
 const FILE = /^[a-f0-9]{64}\.(?:png|jpg|webp|gif|mp4|mov|webm|mp3|wav|ogg|flac|bin)$/;
@@ -90,6 +90,16 @@ export class LibraryMedia {
     if (!metadata.isFile() || metadata.size !== record.size) throw new Error('A media file was changed or removed.');
     const key = `${file}\0${record.sha256}`;
     if (this.validated.get(key) === contentIdentity(metadata)) return;
+    // First use this session and unchanged since it was recorded (same inode
+    // when known, size and mtime): trust it, so opening a project stays instant
+    // instead of hashing every linked video. Cloud metadata churn moves ctime
+    // only. A file seen changing during this session, or any other change,
+    // re-hashes every byte, retrying while sync settles.
+    if (!this.validated.has(key) && metadata.mtimeMs === record.mtime && (record.ino === undefined || record.ino === metadata.ino)) {
+      this.validated.set(key, contentIdentity(metadata));
+      if (this.validated.size > 256) this.validated.delete(this.validated.keys().next().value!);
+      return;
+    }
     const verified = await fileContentVersion(file);
     if (verified.info.size !== record.size || verified.sha256 !== record.sha256) throw new Error('A media file was changed outside Powermove.');
     this.validated.delete(key);
@@ -142,7 +152,7 @@ export class LibraryMedia {
       const { sha256 } = verified;
       if (previous && (previous.sha256 !== sha256 || previous.size !== input.size)) throw new Error('The source does not match the stored media.');
       const record: Record = { key: input.key, sourcePath, size: input.size, type: input.type,
-        revision: input.revision || randomUUID(), sha256, mtime: verified.info.mtimeMs };
+        revision: input.revision || randomUUID(), sha256, mtime: verified.info.mtimeMs, ino: verified.info.ino };
       await writeLibraryJSON(path.join(this.root, 'Index', indexName(record.key)), record);
       for (const grant of this.grants.values()) {
         if (grant.record.key === record.key && grant.record.sha256 === record.sha256) grant.record = record;

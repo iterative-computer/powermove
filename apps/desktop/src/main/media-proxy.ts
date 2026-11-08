@@ -6,7 +6,6 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { requireLocalMedia } from './file-cloud-state';
-import { FileContentCache } from './file-content-version';
 
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 
@@ -241,7 +240,6 @@ export function stillImageConverter(binary: string): ConvertStill {
 }
 
 export class MediaProxyService {
-  private readonly sourceContent = new FileContentCache();
   readonly #entries = new Map<string, ProxyEntry>();
   readonly #releases = new Map<string, Promise<void>>();
   readonly #releaseListeners = new Set<(token: string) => void>();
@@ -357,7 +355,8 @@ export class MediaProxyService {
     }
 
     signal?.throwIfAborted();
-    const key = `${resolved}\0${await this.sourceContent.hash(resolved)}`;
+    // Dedupe concurrent conversions only; FFmpeg reads the whole file anyway.
+    const key = `${resolved}\0${source.dev}:${source.ino}\0${source.size}\0${source.mtimeMs}`;
     let conversion = this.#conversions.get(key);
     if (!conversion) {
       const controller = new AbortController();
