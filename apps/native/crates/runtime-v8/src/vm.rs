@@ -206,13 +206,18 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
     }
 }
 fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<Value, String> {
+    let operation = input["operation"]
+        .as_str()
+        .ok_or("Invalid engine operation")?;
     let (engine, generation, budget, _reservation) = {
         let mut n = state.lock().unwrap();
-        if n.sync_calls >= n.limits.max_host_ops {
-            return Err("Engine operation quota".into());
-        }
-        n.sync_calls += 1;
         let engine = n.engine.clone().ok_or("Engine service is not attached")?;
+        if engine.metered(operation) {
+            if n.sync_calls >= n.limits.max_host_ops {
+                return Err("Engine operation quota".into());
+            }
+            n.sync_calls += 1;
+        }
         let reserve = n.limits.max_response_bytes.min(n.limits.external_bytes);
         if !n.admits_response(reserve) {
             return Err("External memory reservation quota".into());
@@ -233,21 +238,12 @@ fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Resu
         )
     };
     budget.check().map_err(|e| e.to_string())?;
-    let operation = input["operation"]
-        .as_str()
-        .ok_or("Invalid engine operation")?;
     let value = engine
         .call(&generation, operation, &input["input"], budget.clone())
         .map_err(|e| e.to_string())?;
     budget.check().map_err(|e| e.to_string())?;
     if value.to_string().len() > budget.max_response_bytes {
         return Err("Engine response quota".into());
-    }
-    // A poll that finds nothing ready did no engine work; awaiting a slow host
-    // reply must not spend the task's operation quota.
-    if operation.ends_with(".poll") && value.is_null() {
-        let mut n = state.lock().unwrap();
-        n.sync_calls = n.sync_calls.saturating_sub(1);
     }
     Ok(value)
 }

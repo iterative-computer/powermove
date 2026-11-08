@@ -985,6 +985,9 @@ impl EngineProxy for Engine {
             _ => Ok(json!({"operation":operation,"input":input,"owner":thread::current().name()})),
         }
     }
+    fn metered(&self, operation: &str) -> bool {
+        operation != "host.poll"
+    }
 }
 #[test]
 fn engine_hook_runs_on_owner_and_preserves_arguments() {
@@ -1042,10 +1045,10 @@ fn engine_hook_obeys_cancellation_timeout_and_byte_limits() {
     assert_eq!(eval(&r, "42"), "42");
     close(&r);
 }
-/// Awaiting a slow host reply polls until it lands; empty polls are not
-/// engine work and must not exhaust the task's operation quota.
+/// Unmetered queue plumbing (a host's poll) never exhausts the task's quota;
+/// every other operation still does.
 #[test]
-fn empty_polls_do_not_spend_the_engine_operation_quota() {
+fn unmetered_operations_do_not_spend_the_engine_operation_quota() {
     let engine = Arc::new(Engine::default());
     engine.mode.store(3, Ordering::Relaxed);
     let f = fixture_with(|c| {

@@ -621,6 +621,14 @@ impl Broker {
     }
 }
 impl EngineProxy for Broker {
+    /// Request queues are bounded here (256 host, 128 platform), so a panel
+    /// awaiting one reply per property row stays within its task quota.
+    fn metered(&self, operation: &str) -> bool {
+        !matches!(
+            operation,
+            "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll"
+        )
+    }
     fn call(
         &self,
         generation: &Generation,
