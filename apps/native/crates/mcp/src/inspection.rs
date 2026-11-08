@@ -176,6 +176,8 @@ fn groups<'a>(l: &'a Value, layers: &'a [Value]) -> Vec<&'a Value> {
     out
 }
 pub fn check(host: &Automation, id: &str) -> Result<Value> {
+    // The kernel's id for the open project (layer loops below shadow `id`).
+    let project = id;
     let p = host.read_document(id)?;
     let mut ev = Evaluation::new(&p);
     let layers = p["layers"]
@@ -231,7 +233,7 @@ pub fn check(host: &Automation, id: &str) -> Result<Value> {
             continue;
         }
         if let Some(registry) = registry {
-            let runtime = registry.state(p["id"].as_str().unwrap_or(""), asset);
+            let runtime = registry.state(project, asset);
             if runtime.available || runtime.loading {
                 continue;
             }
@@ -298,7 +300,7 @@ pub fn check(host: &Automation, id: &str) -> Result<Value> {
                 continue;
             }
             let runtime = registry
-                .map(|r| r.state(p["id"].as_str().unwrap_or(""), asset))
+                .map(|r| r.state(project, asset))
                 .unwrap_or_default();
             let Some(length) = runtime
                 .duration
@@ -483,10 +485,7 @@ pub fn check(host: &Automation, id: &str) -> Result<Value> {
             {
                 continue;
             }
-            let runtime = registry.state(
-                p["id"].as_str().unwrap_or(""),
-                l["d"]["asset"].as_str().unwrap_or(""),
-            );
+            let runtime = registry.state(project, l["d"]["asset"].as_str().unwrap_or(""));
             let Some(length) = runtime
                 .audio_duration
                 .or(runtime.duration)

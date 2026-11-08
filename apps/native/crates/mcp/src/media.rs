@@ -111,13 +111,15 @@ pub fn references(p: &Value, asset: &str) -> Vec<Value> {
     walk(p, asset, &mut out);
     out
 }
-pub fn list(p: &Value, args: &Value, registry: Option<&dyn MediaRegistry>) -> Value {
+/// `project`: the kernel's id for the open project (a file's session id is
+/// not the document's own `id`).
+pub fn list(p: &Value, project: &str, args: &Value, registry: Option<&dyn MediaRegistry>) -> Value {
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = args["limit"].as_u64().unwrap_or(100) as usize;
     let assets=crate::assets_in_order(p).into_iter().map(|meta| {
         let id=meta["id"].as_str().unwrap_or("");
         let refs=references(p,id);
-        let runtime=registry.map(|r|r.state(p["id"].as_str().unwrap_or(""),id)).unwrap_or_default();
+        let runtime=registry.map(|r|r.state(project,id)).unwrap_or_default();
         let status=if runtime.loading {"loading"} else if runtime.error.is_some() {"failed"} else if runtime.available {"available"} else if runtime.cloud {"cloud"} else {"missing"};
         let mut row=json!({"folder":valid_folder(p,&meta["folder"]),"sourcePath":meta["sourcePath"].as_str().filter(|s|!s.is_empty()).or_else(||meta["path"].as_str().filter(|s|!s.is_empty())),"fingerprint":meta.get("fingerprint").filter(|v|!v.is_null()).cloned().unwrap_or(Value::Null),"persisted":meta["persisted"] == true,"status":status,"referenceCount":refs.len(),"lockedReferences":refs.iter().filter(|r|r["locked"] == true).count(),"references":refs.into_iter().take(50).collect::<Vec<_>>()});
         for (to,from) in [("id","id"),("name","name"),("kind","kind"),("size","size"),("width","w"),("height","h"),("duration","dur")] { if let Some(v)=meta.get(from) {row[to]=v.clone();} }

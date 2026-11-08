@@ -332,6 +332,7 @@ impl McpSession {
             } else if name == "list_media" {
                 crate::media::list(
                     &host.read_document(&id)?,
+                    &id,
                     args,
                     host.media_registry.as_deref(),
                 )
@@ -512,6 +513,7 @@ impl McpSession {
                 let video = if name == "edit_video" {
                     Some(crate::video::plan(
                         &p,
+                        &id,
                         args,
                         host.media_registry.as_deref(),
                     )?)
