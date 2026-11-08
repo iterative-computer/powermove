@@ -914,6 +914,9 @@ pub struct Host {
     pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
     /// Native views to expose in reading order after GPUI's.
     pub native_accessibility: Vec<Retained<NSView>>,
+    /// The project this window showed when the app last ran, and whether the
+    /// system keeps documents open across quits (NSQuitAlwaysKeepsWindows).
+    pub restored_project: Option<(String, bool)>,
     menu_state: RefCell<Option<MenuState>>,
     /// The open Save Workspace sheet (kept alive while attached).
     sheet: RefCell<Option<Sheet>>,
@@ -1091,6 +1094,7 @@ impl Host {
             native_panels: Rc::default(),
             native_present: None,
             native_accessibility: vec![],
+            restored_project: None,
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
             title,

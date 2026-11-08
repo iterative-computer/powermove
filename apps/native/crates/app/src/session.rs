@@ -40,8 +40,11 @@ pub struct Controller {
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     pub opening: bool,
-    /// The project an open is reading, shown until it lands or fails.
+    /// The project an open is reading, shown until it lands or fails, and
+    /// then until the panels have drawn it (`settling`).
     pub opening_name: Option<String>,
+    /// The project whose panels haven't published since it landed.
+    pub settling: Option<String>,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
@@ -291,6 +294,7 @@ impl Controller {
             media_refresh: Default::default(),
             opening: false,
             opening_name: None,
+            settling: None,
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
@@ -343,7 +347,48 @@ impl Controller {
             .detach();
         if let Some(path) = launch {
             self.open_file(path, cx);
+        } else {
+            self.reopen_restored(cx);
         }
+    }
+    /// A window restored at launch reopens its project when that project has
+    /// unsaved work from a crash (so the person is asked about it at once) or
+    /// when the system keeps documents open across quits.
+    fn reopen_restored(&mut self, cx: &mut Context<Self>) {
+        let Some((project, keep)) = self.host.borrow().restored_project.clone() else {
+            return;
+        };
+        let profile = self.profile.clone();
+        let found = cx.background_executor().spawn(async move {
+            let unsaved =
+                !pm_kernel::journal::sessions(&profile.join("journals").join(&project)).is_empty();
+            if !(unsaved || keep) {
+                return None;
+            }
+            let row = pm_kernel::library::LibraryStore::open(&profile)
+                .projects()
+                .ok()?
+                .into_iter()
+                .find(|row| row.id == project)?;
+            Some((row.id, row.name))
+        });
+        cx.spawn(async move |this, cx| {
+            if let Some((id, name)) = found.await {
+                let _ = this.update(cx, |v, cx| {
+                    if v.session.is_none() && !v.opening {
+                        v.open_named(
+                            SessionSource::Library {
+                                profile: v.profile.clone(),
+                                project: id,
+                            },
+                            Some(name),
+                            cx,
+                        );
+                    }
+                });
+            }
+        })
+        .detach();
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let _span = crate::diag::span("refresh");
@@ -757,6 +802,9 @@ impl Controller {
         );
     }
     fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
+        self.open_named(source, None, cx);
+    }
+    fn open_named(&mut self, source: SessionSource, name: Option<String>, cx: &mut Context<Self>) {
         if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
@@ -772,7 +820,7 @@ impl Controller {
             SessionSource::File(p) => stable_id(p),
             SessionSource::New(_) => pm_kernel::new_id("app"),
         };
-        let name = match &source {
+        let name = name.unwrap_or_else(|| match &source {
             SessionSource::File(path) => path
                 .file_stem()
                 .map_or("Untitled".into(), |n| n.to_string_lossy().into_owned()),
@@ -782,7 +830,7 @@ impl Controller {
                 .find(|(id, _)| id == project)
                 .map_or("Untitled".into(), |(_, name)| name.clone()),
             SessionSource::New(_) => "Untitled".into(),
-        };
+        });
         let path = match &source {
             SessionSource::File(path) => Some(path.clone()),
             _ => None,
@@ -907,8 +955,15 @@ impl Controller {
             }
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
-                v.opening_name = None;
                 v.recovery_pending = false;
+                // Panels say it's opening until they've mounted for the project.
+                v.settling = match &result {
+                    Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
+                    _ => None,
+                };
+                if v.settling.is_none() {
+                    v.opening_name = None;
+                }
                 match result {
                     Some(Ok(ShellReply::Opened {
                         session,
@@ -1522,9 +1577,6 @@ fn open_failure_code(error: &KernelFailure) -> &'static str {
     }
 }
 pub const SAVING: &str = "Saving…";
-/// Status note for a save in flight, including saves started by MCP or the
-/// kernel. Returns a replacement message on a transition only, so other
-/// notes (refusals, errors) set during the save are kept until it ends.
 /// `fpsRational`, else the stored float snapped to its exact rate: a project
 /// saved at 29.97 plays on the 30000/1001 grid the engine draws.
 fn composition_rate(composition: &pm_model::Node) -> pm_time::Rate {
@@ -1536,6 +1588,9 @@ fn composition_rate(composition: &pm_model::Node) -> pm_time::Rate {
     .map_or(pm_time::Rate::FPS_30, |r| r.rate)
 }
 
+/// Status note for a save in flight, including saves started by MCP or the
+/// kernel. Returns a replacement message on a transition only, so other
+/// notes (refusals, errors) set during the save are kept until it ends.
 pub fn save_note(was: bool, now: bool, dirty: bool, message: &str) -> Option<&'static str> {
     // Close/quit refusals explain why the window stayed open; keep them.
     let refusal = message.starts_with("Saving in progress")
