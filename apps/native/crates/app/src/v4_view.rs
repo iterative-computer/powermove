@@ -319,7 +319,16 @@ impl SurfaceView {
     ) {
         let id = view.id;
         let value = node.props.get("value").cloned().unwrap_or(Value::Null);
+        // A pop-up may title itself apart from its rows (`Fit (54 %)`).
+        let display = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("pmKit"))
+            .and_then(|m| m.get("display"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if let Some(control) = self.controls.get(&id) {
+            control.update(cx, |v, _| v.display(display.as_deref()));
             let options = node
                 .props
                 .get("options")
@@ -396,6 +405,7 @@ impl SurfaceView {
                 }
             },
         ));
+        control.update(cx, |v, _| v.display(display.as_deref()));
         self.controls.insert(id, control);
     }
     fn mount_field(
@@ -494,6 +504,8 @@ impl SurfaceView {
                             this.change(id, json!(""), cx);
                         }
                     }
+                    // Canvas editors only.
+                    TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
                 }
             },
         ));

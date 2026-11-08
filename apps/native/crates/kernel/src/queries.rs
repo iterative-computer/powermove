@@ -363,6 +363,31 @@ impl QueryContext {
         matrix6(self.layer_query("worldMatrix", comp_id, layer_id, t, &[])?)
     }
 
+    /// A text layer's caret geometry at `t` (`PM.textLayout` / raster.ts
+    /// `textCaretLayout`): lines with UTF-16 caret boundaries in layer
+    /// space. May answer *needs fonts*.
+    pub fn text_layout(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+    ) -> Result<Value, QueryError> {
+        self.layer_query("textLayout", comp_id, layer_id, t, &[])
+    }
+
+    /// How far typography anchoring shifts the layer's glyphs (`[x, y]`,
+    /// layer space; zero without `fontAnchorBounds`). May need fonts.
+    pub fn text_font_offset(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+    ) -> Result<[f64; 2], QueryError> {
+        let v = self.layer_query("textFontOffset", comp_id, layer_id, t, &[])?;
+        let n = |k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(0.);
+        Ok([n("x"), n("y")])
+    }
+
     // ── geometry ───────────────────────────────────────────────────────────
 
     /// The layer's bounds, or `None` when it has none at `t` (inactive or

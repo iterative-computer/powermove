@@ -249,14 +249,7 @@ pub const PLANNED: [&str; 24] = [
     "splitTextLines",
 ];
 /// Menu rows with no working path yet. They stay visible and disabled.
-pub const UNAVAILABLE: [&str; 6] = [
-    "help",
-    "text.editSelected",
-    "toolPen",
-    "toolText",
-    "importSequence",
-    "importFolder",
-];
+pub const UNAVAILABLE: [&str; 3] = ["help", "importSequence", "importFolder"];
 fn selection_plan(ids: Vec<String>) -> Plan {
     Plan {
         label: "Select".into(),
@@ -579,6 +572,7 @@ pub fn disabled(
         off.extend(PLANNED.iter().map(|c| (*c).to_owned()));
         off.extend(DOCUMENT.iter().map(|c| (*c).to_owned()));
         off.extend(SELECTION.iter().map(|c| (*c).to_owned()));
+        off.insert("text.editSelected".into());
         return off;
     };
     // Runs on every publication, so the selection is looked up, never scanned for.
@@ -603,6 +597,11 @@ pub fn disabled(
     for name in SELECTION {
         set(name, chosen);
     }
+    // Return edits exactly one unlocked text layer in place.
+    set(
+        "text.editSelected",
+        matches!(selected.as_slice(), [l] if l.kind == "text" && !l.effectively_locked),
+    );
     for name in ["copyLayers", "cutLayers", "delete"] {
         set(name, chosen || keys);
     }

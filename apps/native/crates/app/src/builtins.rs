@@ -969,6 +969,16 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                 v.clipboard = crate::layer_commands::Clipboard::Keys(tracks);
                 v.update_disabled();
             }
+            // The keyframe sheets on the keys the right-click was on.
+            E::EditKeyValues(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Value, keys, cx)
+            }
+            E::EditVelocity(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Velocity, keys, cx)
+            }
+            E::ScaleKeys(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Scale, keys, cx)
+            }
             other => v.message = format!("Not available yet: {other:?}"),
         });
     }
@@ -1027,6 +1037,8 @@ impl crate::gizmo::Host for ControllerDelegate {
             "toolRotate" => Tool::Rotate,
             "toolAnchor" => Tool::Anchor,
             "toolShape" => Tool::Shape,
+            "toolText" => Tool::Text,
+            "toolPen" => Tool::Pen,
             _ => Tool::Other,
         }
     }
@@ -1064,6 +1076,29 @@ impl crate::gizmo::Host for ControllerDelegate {
     }
     fn report(&self, message: String, cx: &mut App) {
         crate::timeline_surface::Delegate::report(self, message, cx);
+    }
+    fn shape_variant(&self, cx: &App) -> String {
+        self.0
+            .upgrade()
+            .map_or_else(|| "rect".into(), |c| c.read(cx).shape_variant.clone())
+    }
+    fn pause(&self, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(viewer) = &controller.read(cx).viewer
+        {
+            let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
+        }
+    }
+    fn command(&self, name: &str, cx: &mut App) {
+        crate::timeline_surface::Delegate::command(self, name, cx);
+    }
+    fn text_input(
+        &self,
+        initial: &str,
+        window: &mut Window,
+        _: &mut App,
+    ) -> Option<Rc<dyn crate::gizmo::text::TextInput>> {
+        crate::gizmo::text::native_input(initial, window)
     }
 }
 struct SurfaceWindow {

@@ -1027,14 +1027,9 @@ impl TimelineSurface {
             }
         };
         let mut items = self.model.menu(&context);
-        // Keyframe dialogs run from the Animation menu on the selection; these
-        // rows would target the clicked keys, which no sheet takes yet. Graph
-        // Fit and Merge have no host. Never offer them live.
+        // Graph Fit and Merge have no host. Never offer them live.
         for item in &mut items {
-            item.enabled &= !matches!(
-                item.id,
-                "keys.value" | "keys.velocity" | "keys.scale" | "graph.fit" | "graph.merge"
-            );
+            item.enabled &= !matches!(item.id, "graph.fit" | "graph.merge");
         }
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
         let rows = items

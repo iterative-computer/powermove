@@ -865,6 +865,9 @@ struct Runtime {
     /// Frames in a row the layer gave no drawable (`nextDrawable` returned
     /// nil). Each retry renders a whole frame, so they back off until one lands.
     drawable_misses: u32,
+    /// Transient refusals in a row (fonts, GPU watchdog); retries back off
+    /// the same way, so a frame that keeps failing never renders at full rate.
+    refusals: u32,
     /// When the frames started being refused as transient, while they are.
     waiting_since: Option<f64>,
     prepared: f64,
@@ -1219,6 +1222,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     auto: Default::default(),
                     not_before: 0.,
                     drawable_misses: 0,
+                    refusals: 0,
                     waiting_since: None,
                     prepared: 0.,
                 }
@@ -1513,6 +1517,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         if let Some(r) = runtime.get_mut(&id) {
                             r.stand_in = s.stand_ins.then_some(landed_before);
                             r.drawable_misses = 0;
+                            r.refusals = 0;
                             r.waiting_since = None;
                         }
                         let completed = Arc::downgrade(&shared);
@@ -1556,7 +1561,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         v.input = input;
                         if let Some(r) = runtime.get_mut(&id) {
                             let now = trace::now();
-                            r.not_before = now + RETRY_SECONDS;
+                            r.refusals = r.refusals.saturating_add(1);
+                            r.not_before = now + drawable_retry(r.refusals - 1);
                             // Retried for good, but never silently: past a few
                             // seconds the viewer says what it waits for.
                             let since = *r.waiting_since.get_or_insert(now);

@@ -93,6 +93,8 @@ export function ViewerPanel({
         label={`Zoom, ${m.fit ? "Fit, " : ""}${percent(m.shownZoom)} percent`}
         title="Zoom"
         value={zoomValue}
+        display={zoomTitle(m)}
+        widthSample="Fit (100 %)"
         options={zoomOptions}
         style={popupStyle}
         onChange={(event) => {

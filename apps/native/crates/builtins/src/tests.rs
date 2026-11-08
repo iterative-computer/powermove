@@ -1941,3 +1941,87 @@ fn an_extension_registers_a_command_the_window_can_run() {
     panels.close();
     actor.shutdown();
 }
+
+/// Properties lists a Masks section: Add Mask adds one, its rows write the
+/// mask's channels, and Remove takes it away.
+#[test]
+fn the_masks_section_adds_edits_and_removes_masks() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let select = SelectionCall::Layers {
+        ids: vec!["a".into()],
+        add: false,
+    };
+    kernel
+        .call("synthetic", Request::new(Caller::native(), select))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let masks = |presenter: &mut properties::Properties,
+                 model: &mut pm_panel_inspector::Inspector| {
+        let snapshot = presenter.snapshot(model, 0., false).unwrap();
+        snapshot["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "masks")
+            .expect("masks section")["masks"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(masks(&mut presenter, &mut model).is_empty());
+    let run = |request: Request| {
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+    };
+    let add = json!({"type":"section-action","section":"masks","action":"mask"});
+    run(presenter
+        .intent(&mut model, Caller::native(), &add, 0.)
+        .unwrap()
+        .unwrap());
+    model.sync(kernel.published("synthetic").unwrap());
+    let list = masks(&mut presenter, &mut model);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["name"], "Mask 1");
+    let rows = list[0]["rows"].as_array().unwrap();
+    let labels: Vec<_> = rows.iter().map(|r| r["label"].as_str().unwrap()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Enabled", "Shape", "Mode", "X", "Y", "Width", "Height", "Rotation", "Feather"
+        ]
+    );
+    let feather = rows.iter().find(|r| r["label"] == "Feather").unwrap();
+    let handle = feather["control"]["axes"][0]["binding"]["handle"]
+        .as_str()
+        .unwrap();
+    run(presenter
+        .write(&mut model, Caller::native(), handle, 12.into(), 0.)
+        .unwrap());
+    model.sync(kernel.published("synthetic").unwrap());
+    let id = list[0]["id"].as_str().unwrap().to_owned();
+    let layer = model.layer("a").unwrap();
+    let mask = &layer.get("masks").unwrap().as_array().unwrap()[0];
+    let feather = mask
+        .get("p")
+        .and_then(|p| p.get("feather"))
+        .and_then(|f| f.get("v"));
+    assert_eq!(feather.and_then(pm_model::Value::as_f64), Some(12.));
+    let remove = json!({"type":"remove-mask","mask":id});
+    run(presenter
+        .intent(&mut model, Caller::native(), &remove, 0.)
+        .unwrap()
+        .unwrap());
+    model.sync(kernel.published("synthetic").unwrap());
+    assert!(masks(&mut presenter, &mut model).is_empty());
+}
