@@ -132,3 +132,9 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
 - Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
 - The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.
+- Text coverage geometry is resolved in the outline's own space per quarter-octave scale bucket (flattened at the device tolerance over the bucket top, at most 2^(1/8) more lines); the path cache is 32 MiB, since a text-heavy 1080p frame needs about 10 MB at the coverage tolerance (wave 16 perf).
+- Level 1 text measurements are memoized per font setup and text for a session (cleared with it), as Blink's per-font shape cache; `CanvasMeasurer::shape` returns `Arc<Measured>`.
+- Pro media settings (Create Proxies, size, format, storage location) live in `<profile>/Pro Media/settings.json`, not the v1.2.0 profile keys; Always Play Original is per project and asset in the pro media index (machine-local intent).
+- Background Tasks exposes priority through a right-click NSMenu (High/Normal/Low), as plan section 1 asks; rows keep queue order (the design review's "don't reorder" stands).
+- Automatic plays optimized media in place of originals (Final Cut's optimized media); Originals and exports never read it; Export › Use Proxies (Draft) is the only way an export reads proxies.
+- `pm_protocol::priority` gains `ProxySize::Full` and `ProxyFormat::ProResHq` (additive; bindings regenerated).
