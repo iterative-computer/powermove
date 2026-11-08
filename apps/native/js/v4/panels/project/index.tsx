@@ -201,6 +201,174 @@ export function ProjectView(props: ProjectViewProps) {
       });
     },
   });
+  const actionButtons = (
+    actions: ReturnType<typeof cardActions>,
+    ink: "colors.selected_text" | "colors.secondary",
+  ) => (
+    <div style={{ display: "flex", flexDirection: "row" }}>
+      {actions.map((action) => (
+        <ToolbarItem
+          key={action.label}
+          label={action.label}
+          title={action.label}
+          attr={{ symbol: action.symbol }}
+          tabIndex={-1}
+          disabled={props.transportFailed || action.disabled}
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onDragStart={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!props.transportFailed && !action.disabled) input(action.input);
+          }}
+          style={{
+            color: token(action.disabled ? "colors.muted" : ink),
+          }}
+        />
+      ))}
+    </div>
+  );
+  const renameField = (folderId: string, name: string) => (
+    <TextField
+      label={name}
+      value={rename}
+      id={`media-rename:${folderId}`}
+      binding={native.renameBinding}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      focusRequest={`media-rename:${folderId}`}
+      onInput={(e) => {
+        if (typeof e.value === "string") setRename(e.value);
+      }}
+      preventDefault={{ keydown: ["Enter", "Escape"] }}
+      onKeyDown={(e) => {
+        if (e.composing) return;
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          input("CancelRename");
+        }
+        if (e.key === "Enter") {
+          e.stopPropagation();
+          input({ CommitRename: { folder: folderId, value: rename } });
+        }
+      }}
+      onBlur={() =>
+        input({ CommitRename: { folder: folderId, value: rename } })
+      }
+    />
+  );
+  /** One-column layout: a quiet source-list row (language §9 Lists). The name
+   * leads; the trailing column holds the duration, or the media status in its
+   * tone when the file needs attention. No thumbnail, badge or glyph. */
+  const renderRow = (row: Row) => {
+    const name = itemName(row);
+    const asset = "Asset" in row.data ? row.data.Asset : null;
+    const comp = "Composition" in row.data ? row.data.Composition : null;
+    const folderId = "Folder" in row.data ? row.data.Folder.id : null;
+    const loading = !!asset && !!props.unknownLoading?.has(asset[0].id);
+    const state = asset
+      ? status(loading ? "Loading" : asset[1].availability, asset[0])
+      : null;
+    const duration =
+      comp?.duration ??
+      (asset?.[0].kind === "image" ? null : asset?.[0].duration);
+    const trailing = state?.overlay
+      ? state.overlay
+      : duration !== null && duration !== undefined
+        ? clock(duration)
+        : "";
+    const hover = !view?.drag && (hovered === itemKey(row.id) || row.focused);
+    const actions = hover ? cardActions(row, view!.composition_count) : [];
+    const detail = [meta(row), state?.detail, row.folder_path?.join(" / ")]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      <div
+        key={itemKey(row.id)}
+        id={`media:${itemKey(row.id)}`}
+        role="cell"
+        label={accessibleName(row)}
+        title={detail ? `${name}\n${detail}` : name}
+        tabIndex={-1}
+        aria-selected={row.selected}
+        attr={{ item: row.id }}
+        aria-disabled={!!props.transportFailed}
+        state={{
+          selected: row.selected,
+          focused: row.focused,
+          dragging: !!view?.drag,
+          disabled: !!props.transportFailed,
+          hovered: hovered === itemKey(row.id),
+          loading,
+          dropTarget:
+            folderId !== null &&
+            !!view?.drop_target &&
+            view.drop_target.folder === folderId,
+        }}
+        style={{
+          ...text,
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          height: token("metrics.row"),
+          gap: token("metrics.gap"),
+          paddingLeft: token("metrics.gap"),
+          paddingRight: token("metrics.gap"),
+          borderRadius: token("metrics.control_radius"),
+          background: row.selected
+            ? token("colors.selected_fill")
+            : view?.drop_target && view.drop_target.folder === folderId
+              ? token("colors.accent_wash")
+              : null,
+        }}
+        onPointerDown={(e) => pointer(row, "Down", e)}
+        onClick={(e) => pointer(row, "Click", e)}
+        onDoubleClick={(e) => pointer(row, "DoubleClick", e)}
+        onPointerMove={() => setHovered(itemKey(row.id))}
+        onPointerCancel={() => setHovered(null)}
+        onDragStart={(e) => {
+          if (e.target === e.currentTarget)
+            input({ DragStart: { id: row.id, nested_control: false } });
+        }}
+        onDragEnd={() => input("DragEnd")}
+        {...(folderId ? dropHandlers(folderId) : {})}
+      >
+        {folderId && view?.renaming === folderId ? (
+          renameField(folderId, name)
+        ) : (
+          <text
+            style={{
+              ...text,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {name}
+          </text>
+        )}
+        {actions.length ? (
+          actionButtons(actions, "colors.secondary")
+        ) : trailing ? (
+          <text
+            style={{
+              ...muted,
+              whiteSpace: "nowrap",
+              color: token(
+                state?.overlay && state.tone !== "muted"
+                  ? `colors.${state.tone}`
+                  : "colors.muted",
+              ),
+            }}
+          >
+            {trailing}
+          </text>
+        ) : null}
+      </div>
+    );
+  };
   const renderCard = (row: Row) => {
     const name = itemName(row);
     const asset = "Asset" in row.data ? row.data.Asset : null;
@@ -290,63 +458,12 @@ export function ProjectView(props: ProjectViewProps) {
               {overlay.overlay}
             </text>
           ) : null}
-          {!view?.drag && (hovered === itemKey(row.id) || row.focused) ? (
-            <div style={{ display: "flex", flexDirection: "row" }}>
-              {actions.map((action) => (
-                <ToolbarItem
-                  key={action.label}
-                  label={action.label}
-                  title={action.label}
-                  attr={{ symbol: action.symbol }}
-                  tabIndex={-1}
-                  disabled={props.transportFailed || action.disabled}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                  onDragStart={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (!props.transportFailed && !action.disabled)
-                      input(action.input);
-                  }}
-                  style={{
-                    color: token(
-                      action.disabled ? "colors.muted" : "colors.selected_text",
-                    ),
-                  }}
-                />
-              ))}
-            </div>
-          ) : null}
+          {!view?.drag && (hovered === itemKey(row.id) || row.focused)
+            ? actionButtons(actions, "colors.selected_text")
+            : null}
         </div>
         {folderId && view?.renaming === folderId ? (
-          <TextField
-            label={name}
-            value={rename}
-            id={`media-rename:${folderId}`}
-            binding={native.renameBinding}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
-            onDoubleClick={(e) => e.stopPropagation()}
-            focusRequest={`media-rename:${folderId}`}
-            onInput={(e) => {
-              if (typeof e.value === "string") setRename(e.value);
-            }}
-            preventDefault={{ keydown: ["Enter", "Escape"] }}
-            onKeyDown={(e) => {
-              if (e.composing) return;
-              if (e.key === "Escape") {
-                e.stopPropagation();
-                input("CancelRename");
-              }
-              if (e.key === "Enter") {
-                e.stopPropagation();
-                input({ CommitRename: { folder: folderId, value: rename } });
-              }
-            }}
-            onBlur={() =>
-              input({ CommitRename: { folder: folderId, value: rename } })
-            }
-          />
+          renameField(folderId, name)
         ) : (
           <text
             title={name}
@@ -596,8 +713,13 @@ export function ProjectView(props: ProjectViewProps) {
         attr={{ rowCount: view?.page.total ?? 0, multiselectable: true }}
         style={{
           ...target,
-          paddingLeft: token("metrics.inset"),
-          paddingRight: token("metrics.inset"),
+          // List rows inset their own selection by `gap`; grid cards sit at `inset`.
+          paddingLeft: token(
+            layout.columns === 1 ? "metrics.gap" : "metrics.inset",
+          ),
+          paddingRight: token(
+            layout.columns === 1 ? "metrics.gap" : "metrics.inset",
+          ),
           paddingTop: token("metrics.gap"),
         }}
         preventDefault={{ keydown: [...gridKeys, "F2"] }}
@@ -691,13 +813,14 @@ export function ProjectView(props: ProjectViewProps) {
                 key={start + index}
                 style={{
                   display: "flex",
-                  flexDirection: "row",
+                  // One column stacks full-width list rows; more columns lay cards out.
+                  flexDirection: layout.columns === 1 ? "column" : "row",
                   gap: token("metrics.inset"),
                 }}
               >
                 {view.page.rows
                   .slice(index * layout.columns, (index + 1) * layout.columns)
-                  .map(renderCard)}
+                  .map(layout.columns === 1 ? renderRow : renderCard)}
               </div>
             ))}
           </virtual-list>

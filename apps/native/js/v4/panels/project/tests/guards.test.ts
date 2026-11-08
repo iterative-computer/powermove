@@ -64,6 +64,7 @@ test("panel styles have no visual literals; only kit tokens and structural keywo
     "space-between",
     "nowrap",
     "hidden",
+    "ellipsis",
     "tabular-nums",
   ]);
   for (const style of styles)
