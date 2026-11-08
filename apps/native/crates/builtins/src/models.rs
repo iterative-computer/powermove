@@ -1097,6 +1097,16 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "attach" {
+                        // The window shows its file picker; chosen files come back
+                        // through `Builtins::agent_attach`.
+                        drop(state);
+                        self.native
+                            .platform
+                            .push(("agent.attach".into(), Value::Null));
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     crate::agent_host::admit(action, link.available(provider), live)?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;

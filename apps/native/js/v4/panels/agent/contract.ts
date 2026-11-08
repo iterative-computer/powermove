@@ -79,6 +79,7 @@ export type Action =
   | { type: "key"; key: EventDetail }
   | {
       type:
+        | "attach"
         | "submit"
         | "stop"
         | "newThread"

@@ -70,6 +70,7 @@ test("native supported focus order follows header, conversation and composer bar
     "agent-presentation",
     "agent-conversation",
     "agent-composer-text",
+    "agent-attach",
     "agent-access",
     "agent-provider",
     "agent-model",

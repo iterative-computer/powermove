@@ -85,7 +85,7 @@ impl Window {
         }
         let mut value = panel.inspect(&self.thread)?;
         let text = session.draft.text();
-        let selection = session.draft.selection();
+        let selection = session.draft.text_selection();
         value["draft"] = json!({"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
         value["threadTitle"] = json!(
@@ -246,7 +246,7 @@ pub fn dispatch(
             let range = index(&selection[0])?..index(&selection[1])?;
             let mut draft = panel.session(thread)?.draft.clone();
             draft.set_text(text, now)?;
-            draft.select(range)?;
+            draft.select_text(range)?;
             *panel.draft_mut(thread)? = draft;
             None
         }

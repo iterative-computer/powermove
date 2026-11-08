@@ -494,6 +494,60 @@ impl Builtins {
         }
         Ok(result)
     }
+    /// Files the person chose with Add Attachments, as attachment records
+    /// (`{id, name, type, size, dataUrl | content | dataBase64}`), into the
+    /// visible thread's message. At most six per message, as on main.
+    pub fn agent_attach(&self, records: Vec<Value>) -> std::result::Result<(), String> {
+        let (agent, link) = {
+            let entries = self.broker.entries.lock().unwrap();
+            let backend = entries
+                .get("agent")
+                .ok_or("The Agent panel closed.")?
+                .backend
+                .lock()
+                .unwrap();
+            (
+                backend
+                    .native
+                    .agent
+                    .clone()
+                    .ok_or("The Agent panel closed.")?,
+                backend.native.agent_link.clone(),
+            )
+        };
+        let files = records
+            .into_iter()
+            .map(pm_panel_agentpanel::composer::Attachment::from_record)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| format!("{e:?}"))?;
+        {
+            let mut state = agent.lock().unwrap();
+            let thread = state.panel.active_id().to_owned();
+            state
+                .panel
+                .add_attachments(&thread, files, agent_host::now_ms())
+                .map_err(|e| match e {
+                    pm_panel_agentpanel::Error::Invalid("six attachments per message") => {
+                        "A message can carry six attachments.".to_owned()
+                    }
+                    e => format!("{e:?}"),
+                })?;
+            // Called off the main thread: the archive write happens here.
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        link.touch();
+        link.publish_now();
+        Ok(())
+    }
     /// What `thread_read` adds from this window's live Agent panel: the
     /// running trace as text, open questions, and the run. `None` when the
     /// panel holds no session for the thread.

@@ -6,6 +6,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     7,
     8,
     16,
+    18,
     19,
     20,
     21,
@@ -302,16 +303,20 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "children": [],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -895,7 +900,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -959,6 +964,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     7,
     8,
     16,
+    18,
     19,
     20,
     21,
@@ -1255,16 +1261,20 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "children": [],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -1848,7 +1858,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -1912,6 +1922,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     7,
     8,
     16,
+    18,
     19,
     20,
     21,
@@ -2208,16 +2219,20 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "children": [],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -2801,7 +2816,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -2864,6 +2879,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
   "focusOrder": [
     7,
     8,
+    15,
     16,
     17,
     18,
@@ -3110,16 +3126,20 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "children": [],
       "id": 15,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 14,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -3694,7 +3714,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -3758,6 +3778,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     7,
     8,
     12,
+    17,
     18,
     19,
     20,
@@ -4059,16 +4080,20 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       "children": [],
       "id": 17,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 16,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -4655,7 +4680,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -4720,6 +4745,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     8,
     15,
     17,
+    22,
     23,
     24,
     25,
@@ -5161,16 +5187,20 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "children": [],
       "id": 22,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 21,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -5743,7 +5773,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -5808,6 +5838,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     8,
     12,
     21,
+    23,
     24,
     25,
     26,
@@ -6265,16 +6296,20 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "children": [],
       "id": 23,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 22,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -6852,7 +6887,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -6916,6 +6951,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     7,
     8,
     18,
+    20,
     24,
   ],
   "nodes": {
@@ -7282,16 +7318,20 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "children": [],
       "id": 20,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 19,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -7854,7 +7894,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -7919,6 +7959,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     7,
     8,
     18,
+    20,
   ],
   "nodes": {
     "0": {
@@ -8284,16 +8325,20 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "children": [],
       "id": 20,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 19,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -8856,7 +8901,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -8922,6 +8967,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     8,
     10,
     20,
+    22,
     23,
     24,
     25,
@@ -9377,16 +9423,20 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "children": [],
       "id": 22,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 21,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -9962,7 +10012,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -10029,6 +10079,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     12,
     17,
     20,
+    22,
     23,
     24,
     25,
@@ -10493,16 +10544,20 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "children": [],
       "id": 22,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 21,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -11081,7 +11136,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -11146,6 +11201,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     8,
     10,
     19,
+    21,
     22,
     23,
     24,
@@ -11564,16 +11620,20 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "children": [],
       "id": 21,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 20,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -12140,7 +12200,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -12205,6 +12265,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     8,
     10,
     19,
+    21,
     22,
     23,
     24,
@@ -12623,16 +12684,20 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "children": [],
       "id": 21,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 20,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -13199,7 +13264,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -13554,16 +13619,20 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "children": [],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -14147,7 +14216,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -14212,6 +14281,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     8,
     13,
     23,
+    25,
     26,
     27,
     28,
@@ -14692,16 +14762,20 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "children": [],
       "id": 25,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 24,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -15288,7 +15362,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -15351,6 +15425,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
   "focusOrder": [
     7,
     8,
+    19,
     20,
     21,
     22,
@@ -15614,16 +15689,20 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "children": [],
       "id": 19,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 18,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -16201,7 +16280,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -16266,6 +16345,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     8,
     10,
     19,
+    21,
     22,
     23,
     24,
@@ -16684,16 +16764,20 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "children": [],
       "id": 21,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 20,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -17260,7 +17344,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -17325,6 +17409,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     8,
     10,
     19,
+    21,
     22,
     23,
     24,
@@ -17743,16 +17828,20 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "children": [],
       "id": 21,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 20,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -18319,7 +18408,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -18384,6 +18473,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     8,
     10,
     19,
+    21,
     22,
     23,
     24,
@@ -18798,16 +18888,20 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "children": [],
       "id": 21,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 20,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -19373,7 +19467,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -19438,6 +19532,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     8,
     10,
     19,
+    21,
     22,
     23,
     24,
@@ -19852,16 +19947,20 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "children": [],
       "id": 21,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 20,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -20427,7 +20526,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -20491,6 +20590,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     7,
     8,
     16,
+    18,
     19,
     20,
     21,
@@ -20787,16 +20887,20 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "children": [],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -21380,7 +21484,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -21444,6 +21548,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     7,
     8,
     16,
+    18,
     19,
     20,
     21,
@@ -21740,16 +21845,20 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "children": [],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -22333,7 +22442,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",
@@ -22397,6 +22506,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     7,
     8,
     16,
+    18,
     19,
     20,
     21,
@@ -22693,16 +22803,20 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "children": [],
       "id": 18,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
-        "disabled": true,
+        "disabled": false,
         "id": "agent-attach",
         "label": "Add Attachments",
-        "metadata": {
-          "apiGap": "composer",
-        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -23286,7 +23400,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "insertBefore",

@@ -207,6 +207,49 @@ impl Draft {
         let pos = |n: usize| self.state.units[..n].iter().map(Unit::width).sum();
         pos(self.state.selection.start)..pos(self.state.selection.end)
     }
+    /// The selection in `text()` coordinates, where attachments take no room
+    /// (the native composer shows text only; attachments sit above it).
+    pub fn text_selection(&self) -> Range<usize> {
+        let pos = |n: usize| -> usize {
+            self.state.units[..n]
+                .iter()
+                .map(|u| match u {
+                    Unit::Char(c) => c.len_utf16(),
+                    Unit::File(_) => 0,
+                })
+                .sum()
+        };
+        pos(self.state.selection.start)..pos(self.state.selection.end)
+    }
+    /// Selects a `text()` range; a boundary next to attachments lands after them.
+    pub fn select_text(&mut self, range: Range<usize>) -> Result<()> {
+        if range.start > range.end {
+            return Err(Error::Invalid("selection order"));
+        }
+        let unit = |offset: usize| -> Result<usize> {
+            let mut at = 0;
+            let mut found = None;
+            for (i, u) in self.state.units.iter().enumerate() {
+                if at == offset {
+                    found = Some(i);
+                }
+                if let Unit::Char(c) = u {
+                    if at == offset {
+                        return Ok(i);
+                    }
+                    at += c.len_utf16();
+                }
+            }
+            match (at == offset, found) {
+                (true, _) => Ok(self.state.units.len()),
+                (false, Some(i)) => Ok(i),
+                _ => Err(Error::Invalid("v4 text range")),
+            }
+        };
+        self.state.selection = unit(range.start)?..unit(range.end)?;
+        self.disarm();
+        Ok(())
+    }
     fn index(&self, offset: usize) -> Result<usize> {
         let mut at = 0;
         for (i, u) in self.state.units.iter().enumerate() {

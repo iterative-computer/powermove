@@ -795,6 +795,39 @@ impl Controller {
                     self.show_builtin("settings", window, cx);
                     Ok(Value::Null)
                 }
+                "agent.attach" => {
+                    let target = crate::platform::ns_window(window)
+                        .unwrap_or_else(|| self.host.borrow().window.clone());
+                    let chosen = crate::platform::attach_paths(&target);
+                    let runtime = self.builtins.runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        let Ok(paths) = chosen.recv().await else {
+                            return;
+                        };
+                        if paths.is_empty() {
+                            return;
+                        }
+                        // Reading and encoding the files stays off the main thread.
+                        let outcome = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let records = crate::media::attachment_records(&paths)?;
+                                match runtime {
+                                    Some(runtime) => runtime.agent_attach(records),
+                                    None => Err("The Agent panel closed.".into()),
+                                }
+                            })
+                            .await;
+                        if let Err(message) = outcome {
+                            let _ = this.update(cx, |v, cx| {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
                 "agent.open" => {
                     self.show_builtin("agent", window, cx);
                     Ok(Value::Null)

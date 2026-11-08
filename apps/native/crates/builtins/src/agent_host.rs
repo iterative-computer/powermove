@@ -162,6 +162,10 @@ impl AgentLink {
             claude: provider == Provider::Claude,
         }
     }
+    /// Republishes the panel's realms (a change made outside an action).
+    pub(crate) fn publish_now(&self) {
+        self.publish();
+    }
     fn publish(&self) {
         for realm in self.realms.lock().unwrap().iter() {
             let _ = realm.eval("__pmBuiltin.publish()");
@@ -261,8 +265,10 @@ pub fn admit_send(state: &AgentState, thread: &str) -> Result<(), String> {
     if !session.draft.sendable() {
         return Ok(());
     }
-    if session.draft.attachments().next().is_some() {
-        return Err("Attachments can't reach the agent in this build. Remove them to send.".into());
+    if session.run.is_some() && session.draft.attachments().next().is_some() {
+        return Err(
+            "Attachments can't join a running turn yet. Send them with your next message.".into(),
+        );
     }
     match &session.run {
         None if state.runs.active() >= 8 => {
@@ -356,17 +362,103 @@ fn launch_request(
     let thread = &effect.target.thread;
     let directory = workspace(&environment.profile, &effect.target.project, thread)
         .map_err(|e| Error::Host(format!("The agent's workspace could not be created: {e}")))?;
+    let attached = match &effect.kind {
+        pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } => attachments.as_slice(),
+        _ => &[],
+    };
+    let run = effect.target.run.clone().unwrap_or_default();
+    let (images, files) = lay_out(&directory.join("attachments").join(safe(&run)), attached)
+        .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
-        prompt: prompt(&state.panel, thread, text)?,
+        prompt: with_files(prompt(&state.panel, thread, text)?, &files),
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
         effort: Some(settings.effort.clone()).filter(|e| !e.is_empty()),
         access: settings.access,
         approval: settings.approval,
         workspace: directory,
+        images,
     };
     Ok((environment, request))
+}
+fn safe(name: &str) -> String {
+    pm_agents::workspace::safe_component(name)
+}
+/// Main's attachment layout: images become files in the run's workspace for
+/// the provider to look at; other files travel in the prompt (ATTACHED FILES).
+fn lay_out(
+    directory: &std::path::Path,
+    attached: &[Value],
+) -> std::io::Result<(Vec<String>, Vec<Value>)> {
+    let (mut images, mut files) = (vec![], vec![]);
+    for (index, record) in attached.iter().enumerate() {
+        let name = record["name"].as_str().unwrap_or("attachment");
+        let mime = record["type"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let encoded = record["dataUrl"]
+            .as_str()
+            .and_then(|url| url.split_once(";base64,").map(|(_, data)| data))
+            .or_else(|| record["dataBase64"].as_str());
+        let extension = match mime.as_str() {
+            "image/png" => Some("png"),
+            "image/jpeg" => Some("jpg"),
+            "image/webp" => Some("webp"),
+            "image/gif" => Some("gif"),
+            _ => None,
+        };
+        match (extension, encoded.and_then(decode_base64)) {
+            (Some(extension), Some(bytes)) => {
+                std::fs::create_dir_all(directory)?;
+                let file = directory.join(format!("reference-{index}.{extension}"));
+                std::fs::write(&file, bytes)?;
+                images.push(file.to_string_lossy().into_owned());
+            }
+            _ => {
+                let content = record["content"].as_str().map(str::to_owned).or_else(|| {
+                    encoded
+                        .and_then(decode_base64)
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                });
+                files.push(serde_json::json!({"name":name,"type":mime,"content":content}));
+            }
+        }
+    }
+    Ok((images, files))
+}
+fn with_files(prompt: String, files: &[Value]) -> String {
+    if files.is_empty() {
+        return prompt;
+    }
+    format!(
+        "{prompt}\n\nATTACHED FILES\n{}",
+        Value::Array(files.to_vec())
+    )
+}
+/// Standard base64 (attachment payloads); `None` for anything malformed.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for byte in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        } as u32;
+        acc = acc << 6 | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 /// Start the delivery worker if runs or deferred saves need one.
 pub(crate) fn ensure_worker(

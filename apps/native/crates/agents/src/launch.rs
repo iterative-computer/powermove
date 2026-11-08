@@ -195,6 +195,8 @@ pub struct Request {
     pub approval: ApprovalMode,
     /// Existing private directory the run works in.
     pub workspace: PathBuf,
+    /// Attached images, written inside `workspace`, for the provider to see.
+    pub images: Vec<String>,
 }
 pub fn launch(environment: &Environment, request: Request) -> Result<Handle, String> {
     let authority = Authority::new(request.access, request.approval, false)?;
@@ -225,7 +227,7 @@ fn claude(env: &Environment, request: Request, authority: Authority) -> Result<H
     let options = claude_launch::Options {
         schema: reply_schema(),
         prompt: request.prompt,
-        image_paths: vec![],
+        image_paths: request.images.clone(),
         model: request.model,
         effort: request.effort,
         session_id: None,
@@ -265,7 +267,7 @@ fn codex_app(env: &Environment, request: Request) -> Result<Handle, String> {
         model: request.model,
         reasoning_effort: request.effort,
         schema: None,
-        image_paths: vec![],
+        image_paths: request.images.clone(),
         config: json!({"mcp_servers":{"powermove":{
             "command":command,"args":args,"required":true,"startup_timeout_sec":30,
             "tool_timeout_sec":TOOL_TIMEOUT_SECONDS,"enabled_tools":env.composition_tools,
@@ -313,7 +315,7 @@ fn codex_project(
         model: request.model,
         effort: request.effort,
         session: None,
-        image_paths: vec![],
+        image_paths: request.images.clone(),
         shell_network: true,
         mcp_config,
     };

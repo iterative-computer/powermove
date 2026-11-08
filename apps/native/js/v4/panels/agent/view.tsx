@@ -684,8 +684,8 @@ export function AgentView({
             id="agent-attach"
             label="Add Attachments"
             title="Add Attachments"
-            disabled
-            metadata={{ apiGap: "composer" }}
+            disabled={s.composerDisabled || s.attachments.length >= 6}
+            onClick={() => send({ type: "attach" })}
           />
           <UI.PopUpButton
             id="agent-access"

@@ -812,3 +812,46 @@ fn reconfiguring_a_running_thread_restarts_it_and_cancel_stops_it() {
     panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
     panel.panels.close();
 }
+#[test]
+fn attached_files_reach_the_provider_run() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // A 1×1 PNG and a text note, as Add Attachments records them.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    panel
+        .panels
+        .agent_attach(vec![
+            json!({"id":"a1","name":"frame.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}")}),
+            json!({"id":"a2","name":"notes.txt","type":"text/plain","size":5,"content":"hello"}),
+        ])
+        .unwrap();
+    panel.send("Use these");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(text.contains("notes.txt"), "{text}");
+    let written: Vec<_> = walk(root.path())
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "reference-0.png"))
+        .collect();
+    assert_eq!(
+        written.len(),
+        1,
+        "the image is a file the provider can open"
+    );
+    assert_eq!(&std::fs::read(&written[0]).unwrap()[1..4], b"PNG");
+    panel.panels.close();
+}
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}

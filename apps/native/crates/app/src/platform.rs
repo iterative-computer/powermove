@@ -83,6 +83,19 @@ pub fn import_paths(
     multiple: bool,
     extensions: &[&str],
 ) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, folders, multiple, extensions, "Import")
+}
+/// Files for the Agent panel's Add Attachments.
+pub fn attach_paths(window: &NSWindow) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, false, true, &[], "Attach")
+}
+fn choose_paths(
+    window: &NSWindow,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+    prompt: &str,
+) -> async_channel::Receiver<Vec<PathBuf>> {
     use objc2::{msg_send, runtime::AnyObject};
     use objc2_foundation::NSArray;
     let (tx, rx) = async_channel::bounded(1);
@@ -91,7 +104,7 @@ pub fn import_paths(
     panel.setCanChooseFiles(!folders);
     panel.setCanChooseDirectories(folders);
     panel.setAllowsMultipleSelection(multiple);
-    panel.setPrompt(Some(&NSString::from_str("Import")));
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
     let types: Vec<Retained<AnyObject>> = extensions
         .iter()
         .filter_map(|extension| unsafe {
@@ -305,4 +318,16 @@ pub fn export_destination(
     });
     panel.beginSheetModalForWindow_completionHandler(window, &done);
     rx
+}
+
+/// The AppKit window behind a GPUI window (a panel's own window, for sheets).
+pub fn ns_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    let view: Retained<objc2_app_kit::NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast())? };
+    view.window()
 }
