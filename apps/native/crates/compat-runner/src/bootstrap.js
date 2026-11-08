@@ -48,6 +48,8 @@ globalThis.__compat = {
             ? cancelAnimationFrame
             : (id) => clearTimeout(id),
           reportError: (error) => host.reportError(error),
+          pageAttribute: (node, name, value) =>
+            this.pageAttribute ? this.pageAttribute(node, name, value) : value,
         })
       : undefined;
     // AppKit answers on the main thread, so the realm asks and carries on.

@@ -181,11 +181,82 @@
     [Symbol.iterator]() { return this.entries(); }
     forEach(fn,thisArg) { for(const [k,v] of this) fn.call(thisArg,v,k,this); }
   }
+  // Blob, File and object URLs hold bytes in this realm. `__bytes` hands a
+  // payload to the host without a JSON copy (image decode, file import).
+  const blobBytes = new WeakMap(), objectURLs = new Map();
+  let nextObjectURL = 0;
+  const viewBytes = part => part instanceof ArrayBuffer ? new Uint8Array(part) : ArrayBuffer.isView(part) ? new Uint8Array(part.buffer, part.byteOffset, part.byteLength) : null;
+  const mimeType = type => { type = String(type ?? ''); return /^[\x20-\x7e]*$/.test(type) ? type.toLowerCase() : ''; };
+  class Blob {
+    constructor(parts = [], options = {}) {
+      if (parts === null || typeof parts !== 'object' || typeof parts[Symbol.iterator] !== 'function') throw new TypeError("Blob parts must be a sequence");
+      const chunks = [];
+      for (const part of parts) chunks.push(part instanceof Blob ? blobBytes.get(part) : viewBytes(part) ?? new TextEncoder().encode(String(part)));
+      const bytes = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
+      let at = 0; for (const c of chunks) { bytes.set(c, at); at += c.byteLength; }
+      blobBytes.set(this, bytes); this._type = mimeType(options?.type);
+    }
+    get size() { return blobBytes.get(this).byteLength; }
+    get type() { return this._type; }
+    slice(start = 0, end = this.size, type = '') {
+      const b = blobBytes.get(this), clamp = v => { v = Math.trunc(Number(v) || 0); return v < 0 ? Math.max(b.byteLength + v, 0) : Math.min(v, b.byteLength); };
+      return new Blob([b.subarray(clamp(start), Math.max(clamp(start), clamp(end)))], {type});
+    }
+    async arrayBuffer() { return blobBytes.get(this).slice().buffer; }
+    async bytes() { return blobBytes.get(this).slice(); }
+    async text() { return new TextDecoder().decode(blobBytes.get(this)); }
+    get [Symbol.toStringTag]() { return 'Blob'; }
+  }
+  class File extends Blob {
+    constructor(parts, name, options = {}) { super(parts, options); this._name = String(name); this._lastModified = options?.lastModified === undefined ? Date.now() : Number(options.lastModified); }
+    get name() { return this._name; }
+    get lastModified() { return this._lastModified; }
+    get [Symbol.toStringTag]() { return 'File'; }
+  }
+  const base64 = bytes => { const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; let out = ''; for (let i = 0; i < bytes.length; i += 3) { const n = bytes[i] << 16 | (bytes[i+1] ?? 0) << 8 | (bytes[i+2] ?? 0); out += a[n>>18&63] + a[n>>12&63] + (i+1 < bytes.length ? a[n>>6&63] : '=') + (i+2 < bytes.length ? a[n&63] : '='); } return out; };
+  const unbase64 = text => { text = String(text).replace(/[\t\n\f\r ]/g, ''); if (text.length % 4 === 0) text = text.replace(/==?$/, ''); if (text.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(text)) throw new DOMException('The string to be decoded is not correctly encoded.', 'InvalidCharacterError'); const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; const out = []; let n = 0, bits = 0; for (const c of text) { n = n << 6 | a.indexOf(c); bits += 6; if (bits >= 8) { bits -= 8; out.push(n >> bits & 255); } } return new Uint8Array(out); };
+  globalThis.btoa = text => { text = String(text); if (/[^\0-\xff]/.test(text)) throw new DOMException('The string to be encoded contains characters outside of the Latin1 range.', 'InvalidCharacterError'); return base64(Uint8Array.from(text, c => c.charCodeAt(0))); };
+  globalThis.atob = text => String.fromCharCode(...unbase64(text));
+  class FileReader extends EventTarget {
+    readyState = 0; result = null; error = null; onload = null; onerror = null; onloadend = null; onloadstart = null; onabort = null; onprogress = null;
+    #read(blob, as) {
+      if (!(blob instanceof Blob)) throw new TypeError('FileReader reads a Blob');
+      if (this.readyState === 1) throw new DOMException('The object is already busy reading Blobs.', 'InvalidStateError');
+      this.readyState = 1; this.result = null;
+      const bytes = blobBytes.get(blob);
+      queueMicrotask(() => {
+        if (this.readyState !== 1) return;
+        this.result = as === 'buffer' ? bytes.slice().buffer : as === 'url' ? 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + base64(bytes) : as === 'binary' ? String.fromCharCode(...bytes) : new TextDecoder().decode(bytes);
+        this.readyState = 2;
+        for (const type of ['load', 'loadend']) { const e = new Event(type); this['on' + type]?.call(this, e); this.dispatchEvent(e); }
+      });
+    }
+    readAsArrayBuffer(blob) { this.#read(blob, 'buffer'); }
+    readAsText(blob) { this.#read(blob, 'text'); }
+    readAsDataURL(blob) { this.#read(blob, 'url'); }
+    readAsBinaryString(blob) { this.#read(blob, 'binary'); }
+    abort() { if (this.readyState !== 1) return; this.readyState = 2; this.result = null; for (const type of ['abort', 'loadend']) { const e = new Event(type); this['on' + type]?.call(this, e); this.dispatchEvent(e); } }
+  }
+  Object.assign(FileReader, {EMPTY: 0, LOADING: 1, DONE: 2});
+  globalThis.Blob = Blob; globalThis.File = File; globalThis.FileReader = FileReader;
+  URL.createObjectURL = blob => { if (!(blob instanceof Blob)) throw new TypeError('createObjectURL takes a Blob'); const url = 'blob:powermove/' + (++nextObjectURL).toString(36) + '-' + Math.floor(Math.random() * 2 ** 48).toString(36); objectURLs.set(url, blob); return url; };
+  URL.revokeObjectURL = url => { objectURLs.delete(String(url)); };
+  // Realm-local: the bytes behind a blob: or data: URL, or null for anything else.
+  const localBytes = input => {
+    input = String(input);
+    if (input.startsWith('blob:')) { const blob = objectURLs.get(input.split('#')[0]); return blob ? {bytes: blobBytes.get(blob), type: blob.type} : undefined; }
+    const data = /^data:([^,]*?)(;base64)?,(.*)$/is.exec(input);
+    if (!data) return null;
+    const bytes = data[2] ? unbase64(decodeURIComponent(data[3])) : new TextEncoder().encode(decodeURIComponent(data[3]));
+    return {bytes, type: mimeType(data[1].split(';')[0] || 'text/plain')};
+  };
   class Response {
     #bytes;
-    constructor(body = null, init = {}) { this.#bytes=body===null?new Uint8Array():typeof body==='string'?new TextEncoder().encode(body):new Uint8Array(body); this.status=init.status??200; this.url=init.url??''; this.headers=new Headers(init.headers); this.bodyUsed=false; }
+    constructor(body = null, init = {}) { this.#bytes=body===null?new Uint8Array():typeof body==='string'?new TextEncoder().encode(body):body instanceof Blob?blobBytes.get(body).slice():new Uint8Array(viewBytes(body) ?? body); this.status=init.status??200; this.url=init.url??''; this.headers=new Headers(init.headers); this.bodyUsed=false; if(body instanceof Blob && body.type && !this.headers.has('content-type')) this.headers.set('content-type', body.type); }
     get ok() { return this.status>=200 && this.status<300; }
     async arrayBuffer() { if(this.bodyUsed) throw new TypeError('Body already consumed'); this.bodyUsed=true; return this.#bytes.slice().buffer; }
+    async bytes() { return new Uint8Array(await this.arrayBuffer()); }
+    async blob() { return new Blob([await this.arrayBuffer()], {type: (this.headers.get('content-type') ?? '').split(';')[0].trim()}); }
     async text() { return new TextDecoder().decode(await this.arrayBuffer()); }
     async json() { return JSON.parse(await this.text()); }
     clone() { if(this.bodyUsed) throw new TypeError('Body already consumed'); return new Response(this.#bytes,{status:this.status,url:this.url,headers:this.headers}); }
@@ -195,10 +266,13 @@
     if (retired) return Promise.reject(new Error('Generation retired'));
     const signal=init.signal;
     if(signal?.aborted) return Promise.reject(signal.reason);
+    const local=localBytes(input?.url ?? input);
+    if(local) return Promise.resolve(new Response(local.bytes,{status:200,url:String(input),headers:{'content-type':local.type}}));
+    if(local===undefined) return Promise.reject(new TypeError('Failed to fetch'));
     const url=new URL(String(input));
     if(!['http:','https:'].includes(url.protocol)) return Promise.reject(new TypeError('Unsupported fetch protocol'));
     let body=init.body ?? [];
-    body=typeof body==='string'?new TextEncoder().encode(body):body instanceof ArrayBuffer?new Uint8Array(body):body;
+    body=typeof body==='string'?new TextEncoder().encode(body):body instanceof Blob?blobBytes.get(body):viewBytes(body)??body;
     return new Promise((resolve,reject) => {
       const id=native('fetch',{url:url.href,method:String(init.method??'GET').toUpperCase(),headers:[...new Headers(init.headers)],body:Array.from(body)});
       const abort=()=>{ native('abort',id); requests.delete(id); reject(signal.reason); };
@@ -210,6 +284,10 @@
   globalThis.hot = {data:{}};
   globalThis.runtime = Object.freeze({
     engine(operation, input = null) { return native('engine', {operation:String(operation), input}); },
+    /** One engine call with a byte payload: a Blob, ArrayBuffer or view. */
+    bytes(operation, payload, input = null) { const bytes = payload instanceof Blob ? blobBytes.get(payload) : viewBytes(payload); if (!bytes) throw new TypeError('runtime.bytes takes a Blob or bytes'); return JSON.parse(__bytes(String(operation), bytes, JSON.stringify(input))); },
+    /** The bytes and type behind a realm blob: or data: URL; null for other URLs, undefined for a revoked one. */
+    local: localBytes,
     stage(op) { const text=JSON.stringify(op), copy=JSON.parse(text); const bytes=new TextEncoder().encode(text).byteLength+(ops.length?1:0); if(ops.length>=__limits.max_ops || opBytes+bytes>__limits.max_op_bytes) throw new RangeError('Operation quota'); ops.push(copy); opBytes+=bytes; }
   });
   globalThis.__pm = Object.freeze({

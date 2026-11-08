@@ -14,6 +14,7 @@ import { CompatKeymap } from "./keymap";
 import { installModelFactories } from "./legacy/model";
 import {
   RecorderCanvas,
+  NativeImage,
   type RecorderHost,
   type NativeSurface,
 } from "./canvas";
@@ -674,6 +675,21 @@ export class CompatRealm {
     const canvas = new RecorderCanvas(this.options.recorder, width, height);
     this.canvases.add(canvas);
     return canvas;
+  }
+  /** An image the host decoded (`image.load`), drawable on this realm's canvases. */
+  createImage(
+    surface: string,
+    width: number,
+    height: number,
+    vector: boolean,
+  ): NativeImage {
+    this.live();
+    if (!this.options.recorder)
+      throw new HostError(
+        "Unavailable",
+        "Native recorder-canvas host is not attached",
+      );
+    return new NativeImage(this.options.recorder, surface, width, height, vector);
   }
   private renderQuery(method: string, args: any[]): any {
     this.flush();

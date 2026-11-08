@@ -21,7 +21,14 @@ struct State {
     dom: Vec<Value>,
     bindings: BTreeMap<u64, String>,
     dom_sequence: u64,
+    /// Decoded images by id (`image-N`, `svg-N` for vector sources).
+    images: BTreeMap<String, crate::image::Encoded>,
+    image_bytes: usize,
 }
+/// Decoded image memory one realm may hold at once.
+const IMAGE_BUDGET: usize = 1 << 30;
+/// SVG rasters are cached in quarter-scale steps: version `q` is `q / 4` scale.
+const SVG_STEPS: f64 = 4.;
 /// Everything a host owner hears from its realm, without waiting on it.
 pub trait RealmEvents: Send + Sync + 'static {
     fn health(&self, _id: &str, _health: &Value) {}
@@ -59,7 +66,7 @@ pub struct NativeHost {
     events: Box<dyn RealmEvents>,
     text: Mutex<Option<CanvasText>>,
 }
-fn host_error(error: pm_recorder::Error) -> Error {
+pub(crate) fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
 }
 fn num(args: &[Value], index: usize) -> Result<f64> {
@@ -180,7 +187,24 @@ impl NativeHost {
             return Err(Error::Invalid("canvas DOM batch is not flushed"));
         }
         let mut changed = vec![];
+        let mut images = vec![];
         for (node, id) in bindings {
+            if let Some(image) = state.images.get(&id) {
+                if known.get(&(node, id.clone())) != Some(&1) {
+                    images.push(pm_compat_host::CanvasFrame {
+                        generation: 1,
+                        node,
+                        dom_sequence: sequence,
+                        surface: id,
+                        version: 1,
+                        width: image.width,
+                        height: image.height,
+                        png: image.bytes.clone(),
+                        mime: image.mime.as_str().into(),
+                    });
+                }
+                continue;
+            }
             let canvas = state
                 .surfaces
                 .get_mut(&id)
@@ -214,8 +238,10 @@ impl NativeHost {
                     width,
                     height,
                     png: png.into(),
+                    mime: "image/png".into(),
                 })
             })
+            .chain(images.into_iter().map(Ok))
             .collect()
     }
     fn recorder(&self, operation: &str, input: &Value) -> Result<Value> {
@@ -257,6 +283,37 @@ impl NativeHost {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid("surface id"))?
             .to_string();
+        if operation == "recorder.release" && id.starts_with(['i', 's']) {
+            let image = state
+                .images
+                .remove(&id)
+                .ok_or(Error::Invalid("unknown image"))?;
+            state.image_bytes -= image.bytes.len() + image.width as usize * image.height as usize * 4;
+            return Ok(Value::Null);
+        }
+        if operation == "recorder.retainVersion" && state.images.contains_key(&id) {
+            let State { images, pins, .. } = &mut *state;
+            let image = &images[&id];
+            // Vector images rasterize at the scale they are drawn, in quarter steps.
+            let version = if image.is_vector() {
+                (args.get(1).and_then(Value::as_f64).unwrap_or(1.).clamp(0.25, 64.) * SVG_STEPS)
+                    .ceil() as u64
+            } else {
+                1
+            };
+            if let Some(pin) = pins.get_mut(&(id.clone(), version)) {
+                pin.1 += 1;
+            } else {
+                let pixels = image.pixels(version as f64 / SVG_STEPS)?;
+                let number = id[id.find('-').map_or(0, |i| i + 1)..].parse().unwrap_or(0);
+                let source = Source {
+                    key: pm_recorder::SourceKey { id: number, version },
+                    pixels,
+                };
+                pins.insert((id.clone(), version), (source, 1));
+            }
+            return Ok(json!({"surface":id,"version":version}));
+        }
         if operation == "recorder.release" {
             state
                 .surfaces
@@ -367,10 +424,18 @@ impl NativeHost {
                     Value::Null
                 }
             },
+            // Hints a CPU recorder already meets (willReadFrequently,
+            // desynchronized) and the default sRGB, alpha, unorm8 context.
             ("recorder.command", "context")
-                if values
-                    .first()
-                    .is_some_and(|v| v.as_object().is_some_and(|v| v.is_empty())) =>
+                if values.first().and_then(Value::as_object).is_some_and(|o| {
+                    o.iter().all(|(key, value)| match key.as_str() {
+                        "willReadFrequently" | "desynchronized" => true,
+                        "alpha" => value.as_bool() != Some(false),
+                        "colorSpace" => value == "srgb",
+                        "colorType" => value == "unorm8",
+                        _ => false,
+                    })
+                }) =>
             {
                 Value::Null
             }
@@ -662,7 +727,16 @@ impl NativeHost {
             }
             ("recorder.command", "drawImage") => {
                 let source = source.unwrap();
-                let (sw, sh) = (source.pixels.width() as f64, source.pixels.height() as f64);
+                // A vector source's raster is `factor` times its intrinsic size;
+                // the caller's coordinates are intrinsic, as in a browser.
+                let factor = values[0]["surface"]
+                    .as_str()
+                    .filter(|id| id.starts_with("svg-"))
+                    .map_or(1., |_| source.key.version as f64 / SVG_STEPS);
+                let (sw, sh) = (
+                    source.pixels.width() as f64 / factor,
+                    source.pixels.height() as f64 / factor,
+                );
                 let (src, dst) = match values.len() {
                     3 => (
                         Rect::new(0., 0., sw, sh),
@@ -690,6 +764,7 @@ impl NativeHost {
                     ),
                     _ => return Err(Error::Invalid("drawImage arity")),
                 };
+                let src = Rect::new(src.x0 * factor, src.y0 * factor, src.x1 * factor, src.y1 * factor);
                 canvas.draw_image(source, src, dst).map_err(host_error)?;
                 Value::Null
             }
@@ -846,6 +921,33 @@ impl NativeHost {
     }
 }
 impl EngineProxy for NativeHost {
+    fn call_bytes(
+        &self,
+        _: &Generation,
+        operation: &str,
+        bytes: &[u8],
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<Value> {
+        budget.check()?;
+        match operation {
+            "image.load" => {
+                let image = crate::image::Encoded::load(bytes, input["type"].as_str().unwrap_or(""))?;
+                let cost = image.bytes.len() + image.width as usize * image.height as usize * 4;
+                let mut state = self.state.lock().unwrap();
+                if state.image_bytes + cost > IMAGE_BUDGET {
+                    return Err(Error::Quota("image memory"));
+                }
+                state.next += 1;
+                let id = format!("{}-{}", if image.is_vector() { "svg" } else { "image" }, state.next);
+                let reply = json!({"surface":id,"width":image.width,"height":image.height,"type":image.mime});
+                state.image_bytes += cost;
+                state.images.insert(id, image);
+                Ok(reply)
+            }
+            _ => Err(Error::Host(format!("{operation} is unavailable"))),
+        }
+    }
     fn call_text(
         &self,
         generation: &Generation,
@@ -960,7 +1062,9 @@ impl EngineProxy for NativeHost {
                 let id = input["surface"]
                     .as_str()
                     .ok_or(Error::Invalid("canvas surface"))?;
-                if !state.surfaces.contains_key(id) || bindings.insert(node, id.into()).is_some() {
+                if !(state.surfaces.contains_key(id) || state.images.contains_key(id))
+                    || bindings.insert(node, id.into()).is_some()
+                {
                     return Err(Error::Invalid("canvas binding conflict"));
                 }
             }

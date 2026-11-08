@@ -209,7 +209,7 @@ define_class!(
             match route {
                 Ok((route,Some(q))) if route=="canvas"=>{
                     let resource = q.parse::<u64>().ok().and_then(|id|s.canvases.borrow().get(id).ok());
-                    match resource {Some(bytes)=>reply_bytes(task,&bytes,"image/png"),None=>fail_task(task)}
+                    match resource {Some((bytes,mime))=>reply_bytes(task,&bytes,&mime),None=>fail_task(task)}
                 },
                 Ok((route,Some(q))) if route=="call"=>{
                     let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||s.handle(&q))).unwrap_or(Err(Error::InvalidRequest));

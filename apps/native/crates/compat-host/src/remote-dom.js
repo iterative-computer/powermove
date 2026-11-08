@@ -8,6 +8,11 @@
     applied = 0,
     stopped = false;
   const waiting = [];
+  const resourceImages = new WeakMap();
+  for (const type of ["load", "error"])
+    window.addEventListener(type, (event) => {
+      if (resourceImages.has(event.target)) event.stopImmediatePropagation();
+    }, true);
   const call = (value) => {
     const request = new XMLHttpRequest();
     request.open(
@@ -29,8 +34,22 @@
     while (waiting.length && waiting[0].dom_sequence <= applied) {
       const event = waiting.shift();
       const node = applier?.node(event.node);
-      let failed = !!node && node.localName !== "canvas";
-      if (node?.localName === "canvas") {
+      let failed = !!node && node.localName !== "canvas" && node.localName !== "img";
+      if (node?.localName === "img") {
+        // The realm's image: its own bytes under a page-local URL. Its load is
+        // the realm's, so the page's load and error never reach the extension.
+        try {
+          const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
+          if (!response.ok) throw Error(String(response.status));
+          const previous = resourceImages.get(node);
+          const url = URL.createObjectURL(await response.blob());
+          resourceImages.set(node, url);
+          node.src = url;
+          if (previous) URL.revokeObjectURL(previous);
+        } catch (_) {
+          failed = true;
+        }
+      } else if (node?.localName === "canvas") {
         node.width = event.width;
         node.height = event.height;
         if (event.width && event.height) {

@@ -16,7 +16,7 @@ export interface RecorderHost {
   reset(surface: string, width: number, height: number): void;
   command(surface: string, name: string, args: any[]): void;
   /** Pin the current source pixels/commands, not a mutable canvas reference. */
-  retainVersion(surface: string): SurfaceVersion;
+  retainVersion(surface: string, scale?: number): SurfaceVersion;
   releaseVersion(version: SurfaceVersion): void;
   read(surface: string, name: string, args: any[]): any;
   release(surface: string): void;
@@ -102,6 +102,30 @@ class Paint {
     this.canvas.paint(this.handle, "setTransform", [matrix]);
   }
 }
+/** A decoded image the host holds (`<img>`, `ImageBitmap`): drawn like a canvas
+ * source. `scale` is how much larger than intrinsic a vector image is drawn. */
+export class NativeImage {
+  constructor(
+    readonly host: RecorderHost,
+    readonly surface: string,
+    readonly width: number,
+    readonly height: number,
+    readonly vector: boolean,
+  ) {}
+  retain(scale = 1): SurfaceVersion {
+    return this.host.retainVersion(this.surface, this.vector ? scale : 1);
+  }
+}
+/** The scale a drawImage call draws its source at, from its geometry. */
+function drawScale(source: NativeImage, geometry: any[]): number {
+  const [dw, dh] =
+    geometry.length === 8
+      ? [geometry[6] / (geometry[2] || 1), geometry[7] / (geometry[3] || 1)]
+      : geometry.length === 4
+        ? [geometry[2] / (source.width || 1), geometry[3] / (source.height || 1)]
+        : [1, 1];
+  return Math.max(Math.abs(dw), Math.abs(dh), 0) || 1;
+}
 export class RecorderCanvas {
   readonly surface: string;
   private context?: Data;
@@ -152,7 +176,7 @@ export class RecorderCanvas {
         throw new TypeError("Paint belongs to another recorder host");
       return { paint: value.handle, surface: value.canvas.surface };
     }
-    if (value instanceof RecorderCanvas)
+    if (value instanceof RecorderCanvas || value instanceof NativeImage)
       throw new TypeError("Canvas source requires a pinned drawImage version");
     return value;
   }
@@ -172,14 +196,23 @@ export class RecorderCanvas {
           this.live();
           if (name === "drawImage") {
             const [source, ...geometry] = args;
-            if (!(source instanceof RecorderCanvas))
-              return this.host.command(this.surface, "drawImageResource", args);
-            source.live();
+            if (
+              !(source instanceof RecorderCanvas) &&
+              !(source instanceof NativeImage)
+            )
+              throw new TypeError(
+                "drawImage: the source is not an image, ImageBitmap or canvas",
+              );
+            if (source instanceof RecorderCanvas) source.live();
             if (source.host !== this.host)
               throw new TypeError(
                 "Canvas source belongs to another recorder host",
               );
-            const version = source.host.retainVersion(source.surface);
+            // Retina scale (2) so vector images stay sharp on the page.
+            const version =
+              source instanceof NativeImage
+                ? source.retain(drawScale(source, geometry) * 2)
+                : source.host.retainVersion(source.surface);
             try {
               this.host.command(this.surface, "drawImage", [
                 version,
@@ -192,14 +225,20 @@ export class RecorderCanvas {
             }
             return;
           }
-          if (name === "createPattern" && args[0] instanceof RecorderCanvas) {
-            const source = args[0] as RecorderCanvas;
-            source.live();
+          if (
+            name === "createPattern" &&
+            (args[0] instanceof RecorderCanvas || args[0] instanceof NativeImage)
+          ) {
+            const source = args[0] as RecorderCanvas | NativeImage;
+            if (source instanceof RecorderCanvas) source.live();
             if (source.host !== this.host)
               throw new TypeError(
                 "Canvas source belongs to another recorder host",
               );
-            const version = this.host.retainVersion(source.surface);
+            const version =
+              source instanceof NativeImage
+                ? source.retain(1)
+                : this.host.retainVersion(source.surface);
             try {
               const handle = this.host.read(this.surface, name, [
                 version,

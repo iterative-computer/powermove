@@ -14,6 +14,7 @@ pub mod adapter;
 pub mod compile;
 pub mod discovery;
 pub mod host;
+mod image;
 pub mod manifest;
 pub mod net;
 mod recorder;
@@ -435,6 +436,40 @@ mod tests {
         assert_eq!(runner.json("ctx===canvas.getContext('2d')").unwrap(), true);
         runner.eval("canvas.remove()").unwrap();
         assert!(runner.canvas_frames().unwrap().is_empty());
+    }
+    #[test]
+    fn images_decode_natively_draw_into_canvases_and_reach_the_page_as_bytes() {
+        let runner = dom_runner();
+        // A logo check as Commons Logos does it: a half-transparent PNG blob,
+        // decoded, scaled into a canvas and read back.
+        let checked = runner.json("(async()=>{const c=document.createElement('canvas');c.width=4;c.height=2;const x=c.getContext('2d');x.fillStyle='#ff0000';x.fillRect(0,0,2,2);
+            const blob=await (await fetch(c.toDataURL())).blob();const url=URL.createObjectURL(blob);
+            const image=new Image();let loaded=0;image.onload=()=>loaded++;image.src=url;await image.decode();
+            const d=document.createElement('canvas');d.width=image.naturalWidth*2;d.height=image.naturalHeight*2;const y=d.getContext('2d',{willReadFrequently:true});
+            y.drawImage(image,0,0,d.width,d.height);const p=y.getImageData(0,0,d.width,d.height).data;
+            return [blob.type,blob.size>0,image.naturalWidth,image.naturalHeight,image.complete,loaded,p[3],p[p.length-1],[p[0],p[1],p[2]]]})()").unwrap();
+        assert_eq!(checked, json!(["image/png", true, 4, 2, true, 1, 255, 0, [255, 0, 0]]));
+        // SVG stays vector: drawn 8x it is rasterized at that size, not stretched.
+        let svg = runner.json(r##"(async()=>{const image=new Image();image.src='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><rect width="1" height="1" fill="#00f"/></svg>');await image.decode();
+            const c=document.createElement('canvas');c.width=16;c.height=8;const x=c.getContext('2d');x.drawImage(image,0,0,16,8);const p=x.getImageData(0,0,16,8).data;
+            return [image.naturalWidth,image.naturalHeight,[p[2],p[3]],[p[7*4+2],p[7*4+3]],p[8*4+3]]})()"##).unwrap();
+        assert_eq!(svg, json!([2, 1, [255, 255], [255, 255], 0]));
+        // Broken bytes fire error and refuse to draw; createImageBitmap decodes a Blob.
+        let broken = runner.json("(async()=>{const image=new Image();let error=0;image.onerror=()=>error++;image.src=URL.createObjectURL(new Blob(['nope'],{type:'image/png'}));
+            const failed=await image.decode().then(()=>false,e=>e.name);const x=document.createElement('canvas').getContext('2d');
+            let draw;try{x.drawImage(image,0,0)}catch(e){draw=e.name}
+            const c=document.createElement('canvas');c.width=3;c.height=5;const bitmap=await createImageBitmap(await (await fetch(c.toDataURL())).blob());
+            return [failed,error,draw,bitmap.width,bitmap.height]})()").unwrap();
+        assert_eq!(broken, json!(["EncodingError", 1, "InvalidStateError", 3, 5]));
+        // A connected <img> with a realm URL: the page never gets the blob: URL,
+        // it gets the image's bytes as a resource.
+        runner.json("(async()=>{const c=document.createElement('canvas');c.width=1;c.height=1;globalThis.shown=new Image();shown.src=URL.createObjectURL(await (await fetch(c.toDataURL())).blob());document.body.append(shown);await shown.decode();return 1})()").unwrap();
+        let batches = serde_json::to_string(&runner.take_dom_batches()).unwrap();
+        assert!(!batches.contains("blob:"), "{batches}");
+        let frames = runner.canvas_frames().unwrap();
+        let image = frames.iter().find(|f| f.surface.starts_with("image-")).unwrap();
+        assert_eq!((&*image.mime, image.width, image.height), ("image/png", 1, 1));
+        assert!(image.png.starts_with(b"\x89PNG"));
     }
     #[test]
     fn native_png_encoding_matches_pixel_readback_and_zero_size_contract() {

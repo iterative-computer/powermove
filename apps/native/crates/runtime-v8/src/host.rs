@@ -202,6 +202,18 @@ pub trait EngineProxy: Send + Sync + 'static {
     fn metered(&self, _generation: &Generation, _operation: &str) -> bool {
         true
     }
+    /// An operation carrying one byte payload (`__bytes` in the realm): an
+    /// encoded image or file the realm holds. Hosts without one refuse it.
+    fn call_bytes(
+        &self,
+        _generation: &Generation,
+        operation: &str,
+        _bytes: &[u8],
+        _input: &Value,
+        _budget: HostBudget,
+    ) -> Result<Value> {
+        Err(crate::Error::Host(format!("{operation} is unavailable")))
+    }
     /// The reply as JSON text. A host that already holds the text (a large
     /// document it serialized ahead of time) returns it without a second pass.
     fn call_text(

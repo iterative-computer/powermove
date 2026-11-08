@@ -52,7 +52,9 @@ events there, and the realm positions the panel's root at the shell's rectangle.
 The root stays hidden until placed; the extension builds into a body inside it,
 which it may style. The page carries the compat theme edition for the window's
 appearance, so `--tx`, `--bg-field` and the rest resolve as in the shipped app. Recorder canvases reach the page as immutable
-PNG resources. Inspector sections share a contributed `extension-properties` panel,
+PNG resources, and an `<img>` whose source is realm-local (`blob:`, `data:`) as its own
+bytes. Images decode natively in the realm (`image.rs`: ImageIO, resvg for SVG), so
+`decode()`, `naturalWidth` and `drawImage` of an image or `ImageBitmap` work. Inspector sections share a contributed `extension-properties` panel,
 because the v4 Inspector has no DOM slot.
 
 ## Failure
@@ -128,8 +130,6 @@ window is open is shown in it.
 
 ## Known limits
 
-- Images do not decode in the realm (`Image.decode`, `naturalWidth`, `drawImage` of an
-  image), so checks such as Commons Logos' transparency test fail.
 - `PM.proj` hands out views: a project record read back is a view (its identity is
   stable), not the stored object. `structuredClone` accepts views; other natives that
   refuse proxies would not.

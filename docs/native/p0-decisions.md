@@ -132,3 +132,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
 - Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
 - The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.
+
+## Extension backends (compat lane, wave 16)
+
+- Realm images decode natively on the realm worker: ImageIO for rasters (embedded profile to sRGB, EXIF orientation, as WebKit shows them), resvg for SVG, rasterized at the scale it is drawn (×2 for Retina) instead of stretched. An SVG's intrinsic size is usvg's (`viewBox` when width/height are missing), not Chromium's 300×150 fallback.
+- The realm gains the web platform's `Blob`, `File`, `FileReader`, `URL.createObjectURL`, `atob`/`btoa`, `Image`, `ImageBitmap` and `createImageBitmap`; a realm `blob:`/`data:` image reaches the page as its bytes, never as a URL.
