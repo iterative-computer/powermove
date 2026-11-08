@@ -311,6 +311,11 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
     let mut poses = vec![];
     for id in p.selection.layers() {
         let q = mirror.queries();
+        // A selected layer the playhead is outside of has nothing on screen to
+        // box (viewer.ts visibleSelectionLayers).
+        if !q.active(None, id, time).unwrap_or(false) {
+            continue;
+        }
         let (Ok(world), Ok(local), Ok(Some(bounds))) = (
             q.world_matrix(None, id, time),
             q.local_matrix(None, id, time),

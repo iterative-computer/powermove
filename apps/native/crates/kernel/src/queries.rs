@@ -332,6 +332,17 @@ impl QueryContext {
         number(self.layer_query("worldOpacity", comp_id, layer_id, t, &[])?)
     }
 
+    /// `PM.active`: inside its time range (with the shipped boundary
+    /// tolerance) and switched on, its group ancestors included.
+    pub fn active(
+        &mut self,
+        comp_id: Option<&str>,
+        layer_id: &str,
+        t: f64,
+    ) -> Result<bool, QueryError> {
+        Ok(self.layer_query("active", comp_id, layer_id, t, &[])? == Value::Bool(true))
+    }
+
     /// The 2D affine matrix `[a, b, c, d, e, f]` of the layer alone.
     pub fn local_matrix(
         &mut self,

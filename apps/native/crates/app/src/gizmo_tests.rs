@@ -669,3 +669,24 @@ fn the_resolution_popup_changes_the_render_scale(cx: &mut TestAppContext) {
     });
     assert_eq!(quality(&rig), pm_engine_service::Quality::Half);
 }
+/// A selected layer the playhead is outside of draws no box (viewer.ts
+/// visibleSelectionLayers); the active one keeps its own.
+#[gpui::test]
+fn a_selected_layer_outside_the_playhead_has_no_box(cx: &mut TestAppContext) {
+    let later = pair().replace(
+        r#""name":"Other","from":0,"dur":2"#,
+        r#""name":"Other","from":1,"dur":1"#,
+    );
+    let mut s = stage_on(cx, &later);
+    let both = SelectionCall::Layers {
+        ids: vec!["l0".into(), "l1".into()],
+        add: false,
+    };
+    let call = Request::new(Caller::native(), both);
+    s.rig.kernel.call(PROJECT, call).wait().unwrap().unwrap();
+    s.refresh(cx);
+    let ids: Vec<String> = s.surface.read_with(&s.vcx, |g, _| {
+        g.poses().iter().map(|p| p.id.clone()).collect()
+    });
+    assert_eq!(ids, ["l0".to_string()]);
+}
