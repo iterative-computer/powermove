@@ -600,12 +600,14 @@ impl Drop for Builtins {
     }
 }
 impl Broker {
-    fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
-        let id = generation
+    fn realm_id(generation: &Generation) -> Option<&str> {
+        generation
             .realm
             .rsplit_once("V4Extension(\"")
             .and_then(|(_, s)| s.strip_suffix("\")"))
-            .ok_or(Error::Invalid("not a v4 built-in realm"))?;
+    }
+    fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
+        let id = Self::realm_id(generation).ok_or(Error::Invalid("not a v4 built-in realm"))?;
         if !LIVE_PANELS.contains(&id) && !self.extensions.lock().unwrap().contains(id) {
             return Err(Error::Invalid("unknown panel"));
         }
@@ -621,13 +623,15 @@ impl Broker {
     }
 }
 impl EngineProxy for Broker {
-    /// Request queues are bounded here (256 host, 128 platform), so a panel
-    /// awaiting one reply per property row stays within its task quota.
-    fn metered(&self, operation: &str) -> bool {
-        !matches!(
+    /// Request queues are bounded here (256 host, 128 platform), so a
+    /// built-in panel awaiting one reply per property row stays within its
+    /// task quota. Extensions mounted through this broker stay metered.
+    fn metered(&self, generation: &Generation, operation: &str) -> bool {
+        let queue = matches!(
             operation,
             "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll"
-        )
+        );
+        !(queue && Self::realm_id(generation).is_some_and(|id| LIVE_PANELS.contains(&id)))
     }
     fn call(
         &self,

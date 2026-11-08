@@ -212,7 +212,7 @@ fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Resu
     let (engine, generation, budget, _reservation) = {
         let mut n = state.lock().unwrap();
         let engine = n.engine.clone().ok_or("Engine service is not attached")?;
-        if engine.metered(operation) {
+        if engine.metered(&n.generation, operation) {
             if n.sync_calls >= n.limits.max_host_ops {
                 return Err("Engine operation quota".into());
             }

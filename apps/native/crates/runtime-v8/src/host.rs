@@ -185,10 +185,10 @@ pub trait EngineProxy: Send + Sync + 'static {
         input: &Value,
         budget: HostBudget,
     ) -> Result<Value>;
-    /// Whether `operation` spends the task's synchronous operation quota.
-    /// Queue plumbing the host bounds itself (enqueue a request, poll for its
-    /// reply) can opt out, so awaiting many replies in one task cannot fail.
-    fn metered(&self, _operation: &str) -> bool {
+    /// Whether `operation` from `generation`'s realm spends the task's
+    /// synchronous operation quota. A host may exempt queue plumbing it bounds
+    /// itself for realms it trusts (its own built-ins), never for extensions.
+    fn metered(&self, _generation: &Generation, _operation: &str) -> bool {
         true
     }
 }

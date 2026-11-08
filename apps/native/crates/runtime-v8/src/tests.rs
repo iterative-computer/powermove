@@ -985,7 +985,7 @@ impl EngineProxy for Engine {
             _ => Ok(json!({"operation":operation,"input":input,"owner":thread::current().name()})),
         }
     }
-    fn metered(&self, operation: &str) -> bool {
+    fn metered(&self, _generation: &Generation, operation: &str) -> bool {
         operation != "host.poll"
     }
 }
