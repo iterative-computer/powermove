@@ -8,11 +8,13 @@ pub fn scopes(v: &mut Controller, id: &str, cx: &mut Context<Controller>) -> Opt
     (id == "scopes").then(|| v.scopes_panel(cx))
 }
 
-/// While the first project is read, the panels it fills say so instead of
-/// offering to open one.
+/// While the first project is read, and until each panel has mounted for it,
+/// the panels it fills say so instead of offering to open one.
 pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
-    let name = v.opening_name.as_ref().filter(|_| v.session.is_none())?;
-    if !matches!(id, "assets" | "viewer" | "timeline") {
+    let name = v.opening_name.as_ref()?;
+    if !matches!(id, "assets" | "viewer" | "timeline")
+        || (v.session.is_some() && (v.settling.is_none() || v.builtins.ready.contains(id)))
+    {
         return None;
     }
     let t = v.host.borrow().tokens.clone();

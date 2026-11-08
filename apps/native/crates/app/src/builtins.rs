@@ -27,7 +27,7 @@ pub struct Host {
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
     clock: crate::playback::PanelClock,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
-    ready: BTreeSet<String>,
+    pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
     requests: VecDeque<PlatformRequest>,
     windows: BTreeMap<String, AnyWindowHandle>,
@@ -127,6 +127,7 @@ impl Controller {
             Ok(runtime) => runtime,
             Err(e) => {
                 self.message = format!("Panels could not start: {e}");
+                self.settled(&project);
                 return;
             }
         };
@@ -148,6 +149,7 @@ impl Controller {
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
         let check = runtime.clone();
+        let mounting = project.clone();
         cx.spawn(async move |this, cx| {
             for (id, ticket) in tickets {
                 let result = match ticket {
@@ -177,6 +179,10 @@ impl Controller {
                     v.drain_builtins(cx);
                 });
             }
+            let _ = this.update(cx, |v, cx| {
+                v.settled(&mounting);
+                cx.notify();
+            });
         })
         .detach();
         cx.spawn(async move |this, cx| {
@@ -198,6 +204,13 @@ impl Controller {
             }
         })
         .detach();
+    }
+    /// Every panel of `project` has mounted or failed: the open is over.
+    fn settled(&mut self, project: &str) {
+        if self.settling.as_deref() == Some(project) {
+            self.settling = None;
+            self.opening_name = None;
+        }
     }
     /// A surface extension's first commit landed; its panel can render.
     pub fn surface_ready(&mut self, id: String) {
