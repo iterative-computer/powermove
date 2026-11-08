@@ -33,6 +33,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The window's extension definitions, for captures and exports agents start.
+static RESOURCES: Mutex<Option<Arc<pm_engine_service::resources::ResourceSnapshot>>> =
+    Mutex::new(None);
+pub(crate) fn set_resources(resources: Arc<pm_engine_service::resources::ResourceSnapshot>) {
+    *RESOURCES.lock().unwrap() = Some(resources);
+}
 /// Install the production engine hosts. Call on a worker before serving.
 pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()> {
     let jobs = EngineJobs::new(
@@ -132,7 +138,7 @@ impl EngineJobs {
             &crate::media::cache_root(&self.profile),
         )?
         .catalog;
-        let request = ExportRequest::new(
+        let mut request = ExportRequest::new(
             pm_kernel::new_id("export").as_str().into(),
             &published.snapshot,
             JobSpec::Export {
@@ -143,6 +149,10 @@ impl EngineJobs {
             media,
             destination,
         )?;
+        // An agent's capture draws the effects the window's extensions define.
+        if let Some(resources) = RESOURCES.lock().unwrap().clone() {
+            request.resources = (*resources).clone();
+        }
         ExportHandle::start_scheduled(&self.executable, request, self.activity.clone())
     }
 }

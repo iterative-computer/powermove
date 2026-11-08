@@ -909,6 +909,7 @@ impl Controller {
                 definitions,
                 ..Default::default()
             });
+            crate::mcp_services::set_resources(self.extensions.resources.clone());
             self.apply_extension_resources();
         }
         self.update_builtins(cx);
