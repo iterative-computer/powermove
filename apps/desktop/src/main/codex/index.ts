@@ -379,7 +379,7 @@ export function registerCodexIpc(
   const steerProvider = async (request: CodexSteerRequest): Promise<boolean> =>
     await appServerRunner.steer(request) || await claudeRunner.steer(request) || compatible.steer(request);
   const approvals = new AgentApprovals();
-  const runner = new CodexRunner();
+  const runner = new CodexRunner(appServerRunner);
   const claudeRunner = new ClaudeRunner();
   const owners = new Map<string, WebContents>();
   let forkUpdateQueue: Promise<unknown> = Promise.resolve();

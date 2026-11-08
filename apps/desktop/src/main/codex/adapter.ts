@@ -162,10 +162,17 @@ export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
   // Positionals follow `--`, so neither the session id nor the prompt can read as a flag.
   argv.push('--');
   if (sessionId !== null) argv.push(sessionId);
+  argv.push(autonomousPrompt(options));
+  return argv;
+}
+
+/** Keep exec and App Server's model-visible task and authority instructions identical. */
+export function autonomousPrompt(options: Pick<AutonomousArgvOptions,
+  'access' | 'shellNetwork' | 'approval' | 'nativeTools' | 'instructions' | 'prompt'>): string {
+  const sandboxed = options.access !== 'computer';
   const network = sandboxed && options.shellNetwork ? `\n\nSHELL NETWORK\n${AGENT_SHELL_NETWORK_INSTRUCTIONS}` : '';
   const approvals = sandboxed && options.approval === 'supervised' && options.nativeTools ? `\n\n${SUPERVISED_INSTRUCTIONS}` : '';
-  argv.push(`${options.instructions}${network}${approvals}\n\nUSER REQUEST\n${options.prompt}`);
-  return argv;
+  return `${options.instructions}${network}${approvals}\n\nUSER REQUEST\n${options.prompt}`;
 }
 
 export interface AdapterCapabilities {

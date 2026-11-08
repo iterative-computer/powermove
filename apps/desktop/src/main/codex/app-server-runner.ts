@@ -24,6 +24,10 @@ import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-to
 import { mediaToolSubject } from '../../shared/media-tools';
 import { imageExtension } from '../image-extension';
 import { loadUserMcpServers, type UserMcpServers } from '../agent-tools/user-mcp';
+import type { RequestApproval } from '../agent-approvals';
+import type { AgentWorkspace } from './workspace';
+import { PROJECT_PERMISSION_PROFILE } from './adapter';
+import { progressForCodexEvent, traceForCodexEvent } from './events';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const TURN_TIMEOUT_MS = 3_600_000;
@@ -41,6 +45,19 @@ interface AppServerRunOptions extends RunCallbacks {
   externalMcpServers?: UserMcpServers;
 }
 
+/** Workspace preparation and all result handling belong to CodexRunner. */
+export interface AutonomousAppServerOptions extends AppServerRunOptions {
+  layout: AgentWorkspace;
+  sessionId: string | null;
+  prompt: string;
+  outputSchema: Record<string, unknown>;
+  timeoutMs?: number;
+  requestApproval?: RequestApproval;
+  onSession: (threadId: string) => Promise<void>;
+  onTurnStarted: () => void;
+  onTimeout: () => void;
+}
+
 interface ActiveTurn extends RunCallbacks {
   requestId: string;
   threadId: string;
@@ -56,6 +73,11 @@ interface ActiveTurn extends RunCallbacks {
   questions: Map<string, string | number>;
   /** Async question messages already shown as a question card. */
   questionMessageIds: Set<string>;
+  access: CodexRunRequest['access'];
+  requestApproval?: RequestApproval;
+  approvals: Map<string | number, { controller: AbortController; denied: Record<string, unknown> }>;
+  onTurnStarted?: () => void;
+  autonomous: boolean;
   resolve(result: CodexRunResult): void;
   timer: NodeJS.Timeout;
 }
@@ -73,6 +95,8 @@ interface AppServerRunnerDependencies {
     env: NodeJS.ProcessEnv;
     stdio: ['pipe', 'pipe', 'pipe'];
     windowsHide: true;
+    detached?: boolean;
+    cwd?: string;
   }): ChildProcessWithoutNullStreams;
   requestTimeoutMs: number;
   turnTimeoutMs: number;
@@ -95,7 +119,7 @@ const COLLAB_LABELS: Readonly<Record<string, string>> = {
   closeAgent: 'Close subagent', interruptAgent: 'Stop subagent', listAgents: 'List subagents'
 };
 
-function liveInspectionConfig(nativeTools?: NativeMcpServerConfig, externalMcpServers: UserMcpServers = {}): Record<string, unknown> {
+function liveInspectionConfig(nativeTools?: NativeMcpServerConfig, externalMcpServers: UserMcpServers = {}, autonomous = false): Record<string, unknown> {
   return {
     mcp_servers: {
       ...Object.fromEntries(Object.entries(externalMcpServers).filter(([name]) => name !== 'powermove')),
@@ -104,9 +128,9 @@ function liveInspectionConfig(nativeTools?: NativeMcpServerConfig, externalMcpSe
         args: nativeTools.args,
         env: nativeTools.env,
         startup_timeout_sec: 30,
-        tool_timeout_sec: 120,
+        tool_timeout_sec: nativeTools.toolTimeoutSec ?? 120,
         required: true,
-        enabled_tools: [...POWERMOVE_LIVE_INSPECTION_TOOL_NAMES],
+        ...(!autonomous ? { enabled_tools: [...POWERMOVE_LIVE_INSPECTION_TOOL_NAMES] } : {}),
         default_tools_approval_mode: 'approve'
       } } : {})
     }
@@ -274,18 +298,21 @@ function methodIs(method: string, suffix: string): boolean {
 }
 
 /**
- * Rich Codex transport used by the editor agent. Unlike `codex exec`, App
+ * Rich Codex transport used by editor and autonomous agents. Unlike `codex exec`, App
  * Server exposes the active thread and turn ids required by `turn/steer`.
  */
 export class CodexAppServerRunner {
   private readonly deps: AppServerRunnerDependencies;
   private child: ChildProcessWithoutNullStreams | null = null;
   private ready: Promise<void> | null = null;
+  private stopping: Promise<void> | null = null;
+  private autonomousProcess = false;
   private nextRpcId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly active = new Map<string, ActiveTurn>();
   private stderr = '';
-  private readonly preparing = new Map<string, { cancelled: boolean }>();
+  private readonly preparing = new Map<string, { cancelled: boolean; queuedSteering: CodexSteerRequest[] }>();
+  private readonly autonomous = new Map<string, CodexAppServerRunner>();
 
   constructor(dependencies: Partial<AppServerRunnerDependencies> = {}) {
     this.deps = {
@@ -303,54 +330,101 @@ export class CodexAppServerRunner {
     options: AppServerRunOptions
   ): Promise<CodexRunResult> {
     if (req.mode !== 'editor') return { ok: false, error: 'App Server editor transport received a non-editor run.', cancelled: false };
+    return this.runTurn(req, options);
+  }
+
+  async runAutonomous(req: CodexRunRequest, options: AutonomousAppServerOptions): Promise<CodexRunResult> {
+    if (this.autonomous.has(req.id)) return { ok: false, error: `A Codex run with id ${req.id} is already active.`, cancelled: false };
+    // Like exec, each attempt gets a fresh process. Run-scoped MCP credentials,
+    // staging paths and permissions must never leak into another resumed turn.
+    // The persisted thread stays in the same isolated Codex home across attempts.
+    const worker = new CodexAppServerRunner(this.deps);
+    worker.autonomousProcess = true;
+    this.autonomous.set(req.id, worker);
+    // Bound startup as well as generation, including a stalled initialize or
+    // thread/resume request before the active turn exists.
+    const timer = setTimeout(() => {
+      options.onTimeout();
+      void worker.shutdown();
+    }, Math.max(1, options.timeoutMs ?? this.deps.turnTimeoutMs));
+    timer.unref();
+    try {
+      return await worker.runTurn(req, options, options);
+    } finally {
+      clearTimeout(timer);
+      await worker.shutdown();
+      this.autonomous.delete(req.id);
+    }
+  }
+
+  private async runTurn(req: CodexRunRequest, options: AppServerRunOptions, autonomous?: AutonomousAppServerOptions): Promise<CodexRunResult> {
     if (this.active.has(req.id) || this.preparing.has(req.id)) return { ok: false, error: `A Codex run with id ${req.id} is already active.`, cancelled: false };
 
-    const preparation = { cancelled: false };
+    const preparation = { cancelled: false, queuedSteering: [] as CodexSteerRequest[] };
     this.preparing.set(req.id, preparation);
     let directory: string | null = null;
     const cancelled = (): CodexRunResult => ({ ok: false, error: 'The Codex run was cancelled.', cancelled: true });
     try {
-      await this.ensureStarted(options.userData, options.codexBinaryPref ?? null);
+      await this.ensureStarted(options.userData, options.codexBinaryPref ?? null, autonomous?.layout.root);
       const externalMcpServers = options.externalMcpServers ?? await loadUserMcpServers('chatgpt');
       if (preparation.cancelled) return cancelled();
       directory = await mkdtemp(path.join(tmpdir(), 'powermove-codex-app-'));
-      const input: Array<Record<string, string>> = [{ type: 'text', text: req.prompt }];
-      for (const [index, image] of req.images.entries()) {
+      const input: Array<Record<string, string>> = [{ type: 'text', text: autonomous?.prompt ?? req.prompt }];
+      if (autonomous) {
+        for (const imagePath of autonomous.layout.imagePaths) input.push({ type: 'localImage', path: imagePath });
+      }
+      for (const [index, image] of (autonomous ? [] : req.images).entries()) {
         const extension = imageExtension(image);
         const imagePath = path.join(directory, `frame-${index}.${extension}`);
         await writeFile(imagePath, image);
         input.push({ type: 'localImage', path: imagePath });
       }
 
-      /* The renderer prompt already carries Powermove's bounded conversation
-         history. A fresh ephemeral App Server thread prevents that history
-         from being duplicated across turns while still enabling live steering
-         inside this run. */
+      // Editor history is already in the prompt; autonomous history lives in
+      // a durable Codex thread, resumed by CodexRunner's saved session id.
       if (preparation.cancelled) return cancelled();
-      const startedThread = await this.request('thread/start', {
-        cwd: directory,
-        approvalPolicy: 'never',
-        sandbox: 'read-only',
-        ephemeral: true,
-        config: { ...liveInspectionConfig(options.nativeTools, externalMcpServers), ...(options.additionalInstructions ? { developer_instructions: options.additionalInstructions } : {}) },
+      const project = autonomous && req.access !== 'computer';
+      const approvalPolicy = project ? 'on-request' : 'never';
+      const approvalsReviewer = project && (req.approval ?? 'auto') === 'auto' ? 'auto_review' : 'user';
+      const cwd = autonomous?.layout.root ?? directory;
+      const permissions = project ? { permissions: PROJECT_PERMISSION_PROFILE } : {};
+      const config = {
+        ...liveInspectionConfig(options.nativeTools, externalMcpServers, Boolean(autonomous)),
+        ...(options.additionalInstructions && !autonomous ? { developer_instructions: options.additionalInstructions } : {}),
+        ...(autonomous ? { web_search: 'live' } : {}),
+        ...(project ? { default_permissions: PROJECT_PERMISSION_PROFILE, permissions: { [PROJECT_PERMISSION_PROFILE]: {
+          extends: ':workspace', ...(req.access === 'project' ? { network: { enabled: true } } : {})
+        } } } : {})
+      };
+      const startedThread = await this.request(autonomous?.sessionId ? 'thread/resume' : 'thread/start', {
+        ...(autonomous?.sessionId ? { threadId: autonomous.sessionId } : {}),
+        cwd,
+        approvalPolicy,
+        approvalsReviewer,
+        ...permissions,
+        ...(!project ? { sandbox: autonomous ? 'danger-full-access' : 'read-only' } : {}),
+        ...(!autonomous ? { ephemeral: true } : {}),
+        config,
         ...(req.model ? { model: req.model } : {}),
-        serviceName: 'powermove'
+        ...(!autonomous ? { serviceName: 'powermove' } : {})
       });
       if (!isRecord(startedThread) || !isRecord(startedThread.thread) || !isString(startedThread.thread.id, 200)) {
         throw new Error('Codex App Server did not return a thread id.');
       }
       const threadId = startedThread.thread.id;
+      await autonomous?.onSession(threadId);
       if (preparation.cancelled) return cancelled();
       const turnDirectory = directory;
 
       return await new Promise<CodexRunResult>((resolve) => {
         const timer = setTimeout(() => {
           turn.cancelRequested = true;
+          autonomous?.onTimeout();
           if (turn.turnId !== null) {
             void this.request('turn/interrupt', { threadId, turnId: turn.turnId }).catch(() => undefined);
           }
           this.finish(turn, { ok: false, error: 'The coding agent took too long to respond.', cancelled: false });
-        }, this.deps.turnTimeoutMs);
+        }, autonomous?.timeoutMs ?? this.deps.turnTimeoutMs);
         timer.unref();
         const turn: ActiveTurn = {
           requestId: req.id,
@@ -358,28 +432,36 @@ export class CodexAppServerRunner {
           turnId: null,
           finalText: '',
           directory: turnDirectory,
-          queuedSteering: [],
+          queuedSteering: preparation.queuedSteering,
           cancelRequested: false,
           reconnecting: false,
           agentMessageDeltaItemIds: new Set(),
           sawUnscopedAgentMessageDelta: false,
           questions: new Map(),
           questionMessageIds: new Set(),
+          access: autonomous ? req.access === 'computer' ? 'computer' : 'project' : 'editor',
+          requestApproval: project ? autonomous?.requestApproval : undefined,
+          approvals: new Map(),
+          onTurnStarted: autonomous?.onTurnStarted,
+          autonomous: Boolean(autonomous),
           resolve,
           timer,
           onProgress: options.onProgress,
           onTrace: options.onTrace
         };
         this.active.set(req.id, turn);
+        this.preparing.delete(req.id);
         void this.request('turn/start', {
           threadId,
           input,
-          cwd: directory,
-          approvalPolicy: 'never',
-          sandboxPolicy: { type: 'readOnly' },
+          cwd,
+          approvalPolicy,
+          approvalsReviewer,
+          ...permissions,
+          ...(!project ? { sandboxPolicy: { type: autonomous ? 'dangerFullAccess' : 'readOnly' } } : {}),
           ...(req.model ? { model: req.model } : {}),
           ...(req.reasoningEffort ? { effort: req.reasoningEffort } : {}),
-          outputSchema: req.schema ?? { type: 'object' }
+          outputSchema: autonomous?.outputSchema ?? req.schema ?? { type: 'object' }
         }).then(async (started) => {
           if (!isRecord(started) || !isRecord(started.turn) || !isString(started.turn.id, 200)) {
             if (!this.active.has(req.id)) return;
@@ -387,6 +469,7 @@ export class CodexAppServerRunner {
             return;
           }
           turn.turnId = started.turn.id;
+          autonomous?.onTurnStarted();
           if (turn.cancelRequested) {
             await this.request('turn/interrupt', { threadId: turn.threadId, turnId: turn.turnId }).catch(() => undefined);
             return;
@@ -407,18 +490,34 @@ export class CodexAppServerRunner {
   }
 
   async steer(req: CodexSteerRequest): Promise<boolean> {
+    const worker = this.autonomous.get(req.id);
+    if (worker) return worker.steer(req);
     const turn = this.active.get(req.id);
-    if (!turn) return false;
+    if (!turn) {
+      const preparation = this.preparing.get(req.id);
+      if (!preparation || preparation.cancelled) return false;
+      preparation.queuedSteering.push(req);
+      return true;
+    }
+    if (turn.cancelRequested) return false;
     if (turn.turnId === null) {
       turn.queuedSteering.push(req);
       return true;
     }
-    await this.sendSteering(turn, req);
-    return true;
+    try {
+      await this.sendSteering(turn, req);
+      return true;
+    } catch {
+      // The turn can finish between lookup and turn/steer. Let the renderer
+      // use its existing stop/restart fallback for any rejected steering.
+      return false;
+    }
   }
 
   /** Settles a held `request_user_input` call with the user's answers. */
   answer(req: CodexAnswerRequest): boolean {
+    const worker = this.autonomous.get(req.id);
+    if (worker) return worker.answer(req);
     const turn = this.active.get(req.id);
     const rpcId = turn?.questions.get(req.itemId);
     if (!turn || rpcId === undefined) return false;
@@ -430,6 +529,12 @@ export class CodexAppServerRunner {
   }
 
   async cancel(id: string): Promise<boolean> {
+    const worker = this.autonomous.get(id);
+    if (worker) {
+      const accepted = await worker.cancel(id);
+      await worker.shutdown();
+      return accepted;
+    }
     const preparation = this.preparing.get(id);
     if (preparation) preparation.cancelled = true;
     const turn = this.active.get(id);
@@ -447,16 +552,47 @@ export class CodexAppServerRunner {
   }
 
   async cancelAll(): Promise<void> {
-    await Promise.all([...new Set([...this.preparing.keys(), ...this.active.keys()])].map((id) => this.cancel(id)));
+    await Promise.all([...new Set([...this.autonomous.keys(), ...this.preparing.keys(), ...this.active.keys()])].map((id) => this.cancel(id)));
   }
 
   async shutdown(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    this.stopping = this.stop().finally(() => { this.stopping = null; });
+    return this.stopping;
+  }
+
+  private async stop(): Promise<void> {
     await this.cancelAll();
     const child = this.child;
     this.child = null;
     this.ready = null;
     this.failPending(new Error('Codex App Server stopped.'));
-    if (child && !child.killed) child.kill();
+    if (child && !child.killed) {
+      // A resumed attempt must not race the previous process's rollout writer.
+      // Also stop file writes before CodexRunner snapshots cancelled work.
+      await new Promise<void>(resolve => {
+        const finish = () => {
+          clearTimeout(timer);
+          child.removeListener('exit', finish);
+          child.removeListener('close', finish);
+          resolve();
+        };
+        const timer = setTimeout(() => { this.terminateProcess(child, 'SIGKILL'); finish(); }, 3_000);
+        timer.unref();
+        child.once('exit', finish);
+        child.once('close', finish);
+        this.terminateProcess(child, 'SIGTERM');
+      });
+    }
+  }
+
+  private terminateProcess(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+    // Autonomous shells share this group. Stop them too if interruption cannot
+    // be delivered (for example while turn/start is still waiting for its id).
+    if (this.autonomousProcess && process.platform !== 'win32' && child.pid) {
+      try { process.kill(-child.pid, signal); return; } catch { /* already exited */ }
+    }
+    child.kill(signal);
   }
 
   private async sendSteering(turn: ActiveTurn, req: CodexSteerRequest): Promise<void> {
@@ -482,19 +618,24 @@ export class CodexAppServerRunner {
     // An unanswered question must not keep App Server waiting on this client.
     for (const rpcId of turn.questions.values()) this.respond(rpcId, { answers: {} });
     turn.questions.clear();
+    for (const [id, { controller, denied }] of turn.approvals) {
+      controller.abort();
+      this.respond(id, denied);
+    }
+    turn.approvals.clear();
     turn.resolve(result);
   }
 
-  private async ensureStarted(userData: string, preference: string | null): Promise<void> {
+  private async ensureStarted(userData: string, preference: string | null, cwd?: string): Promise<void> {
     if (this.ready !== null) return this.ready;
-    this.ready = this.launch(userData, preference).catch((error) => {
+    this.ready = this.launch(userData, preference, cwd).catch((error) => {
       this.ready = null;
       throw error;
     });
     return this.ready;
   }
 
-  private async launch(userData: string, preference: string | null): Promise<void> {
+  private async launch(userData: string, preference: string | null, cwd?: string): Promise<void> {
     const [binary, runtimeHome] = await Promise.all([
       this.deps.discoverBinary(preference),
       this.deps.prepareHome(userData)
@@ -502,7 +643,9 @@ export class CodexAppServerRunner {
     const child = this.deps.spawnProcess(binary, ['app-server', '--stdio'], {
       env: isolatedCodexEnvironment(runtimeHome),
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      ...(cwd ? { cwd } : {}),
+      ...(this.autonomousProcess && process.platform !== 'win32' ? { detached: true } : {})
     });
     this.child = child;
     this.stderr = '';
@@ -597,8 +740,42 @@ export class CodexAppServerRunner {
       this.respond(id, { action: 'decline', content: null, _meta: null });
       return;
     }
-    // Approvals cannot arrive under `approvalPolicy: never`; anything else is
-    // a capability this client does not offer.
+    if (methodIs(method, 'item/commandExecution/requestApproval') || methodIs(method, 'item/fileChange/requestApproval')
+      || methodIs(method, 'item/permissions/requestApproval')) {
+      const permissions = methodIs(method, 'item/permissions/requestApproval');
+      const denied = permissions ? { permissions: {}, scope: 'turn' } : { decision: 'decline' };
+      // RequestPermissionProfile has nullable fields; GrantedPermissionProfile
+      // requires absent fields instead of null in the approval response.
+      const granted = isRecord(params.permissions) ? Object.fromEntries(
+        Object.entries(params.permissions).filter(([key, value]) =>
+          (key === 'network' || key === 'fileSystem') && isRecord(value))
+      ) : {};
+      if (!turn?.requestApproval || turn.cancelRequested) {
+        this.respond(id, denied);
+        return;
+      }
+      const controller = new AbortController();
+      turn.approvals.set(id, { controller, denied });
+      const command = methodIs(method, 'item/commandExecution/requestApproval');
+      void Promise.resolve().then(() => turn.requestApproval!({
+        title: command ? 'Run a command outside the project sandbox?' : 'Allow access outside the project sandbox?',
+        detail: clip(params.command ?? params.grantRoot ?? JSON.stringify(params.permissions ?? {}), 2_000),
+        ...(typeof params.reason === 'string' ? { reason: clip(params.reason, 2_000) } : {})
+      }, controller.signal)).then(decision => {
+        if (!turn.approvals.delete(id)) return;
+        this.respond(id, decision.allowed && !controller.signal.aborted && this.active.get(turn.requestId) === turn
+          ? permissions ? { permissions: granted, scope: 'turn' } : { decision: 'accept' }
+          : denied);
+      }).catch(() => {
+        if (turn.approvals.delete(id)) this.respond(id, denied);
+      });
+      return;
+    }
+    if (methodIs(method, 'currentTime/read')) {
+      this.respond(id, { currentTimeAt: Math.floor(Date.now() / 1000) });
+      return;
+    }
+    // Always answer unsupported capabilities rather than leaving the turn stalled.
     this.respondError(id, `Powermove does not handle ${method}.`);
   }
 
@@ -639,6 +816,10 @@ export class CodexAppServerRunner {
       const requestId = params.requestId;
       for (const candidate of this.active.values()) {
         if (candidate.threadId !== threadId) continue;
+        if (typeof requestId === 'number' || typeof requestId === 'string') {
+          candidate.approvals.get(requestId)?.controller.abort();
+          candidate.approvals.delete(requestId);
+        }
         for (const [itemId, rpcId] of candidate.questions) {
           if (rpcId !== requestId) continue;
           candidate.questions.delete(itemId);
@@ -648,12 +829,17 @@ export class CodexAppServerRunner {
       return;
     }
     const topLevelTurnId = isString(params.turnId, 200) ? params.turnId : null;
-    const turnId = topLevelTurnId ?? (methodIs(method, 'turn/completed') && isRecord(params.turn) && isString(params.turn.id, 200)
+    const turnId = topLevelTurnId ?? ((methodIs(method, 'turn/completed') || methodIs(method, 'turn/started')) && isRecord(params.turn) && isString(params.turn.id, 200)
       ? params.turn.id
       : null);
     if (threadId === null || turnId === null) return;
     const turn = this.turnFor(threadId, turnId);
     if (!turn) return;
+    // Notifications can arrive before the turn/start reply. A failed turn
+    // that already ran tools must never be retried as a fresh task.
+    if (methodIs(method, 'turn/started') || methodIs(method, 'item/started') || methodIs(method, 'item/completed')) {
+      turn.onTurnStarted?.();
+    }
 
     if (methodIs(method, 'item/commandExecution/outputDelta')) return;
 
@@ -684,9 +870,23 @@ export class CodexAppServerRunner {
       if (this.questionMessage(turn, params.item)) return;
       const trace = appServerToolStart(params.item);
       if (trace) turn.onTrace?.(trace);
+      if (turn.autonomous) {
+        const types: Record<string, string> = {
+          commandexecution: 'command_execution', filechange: 'file_change', websearch: 'web_search',
+          imagegeneration: 'image_generation', computeruse: 'computer_use', mcptoolcall: 'mcp_tool_call'
+        };
+        const progress = progressForCodexEvent({ type: 'item.started', item: {
+          ...params.item, type: types[normalizedItemType(params.item.type)]
+        } });
+        if (progress) turn.onProgress?.(progress);
+      }
       return;
     }
     if (methodIs(method, 'item/agentMessage/delta') && isString(params.delta)) {
+      // Exec only exposed completed messages, filtering structured reports to
+      // their display fields. Buffer autonomous deltas to preserve that boundary:
+      // a partial JSON report can contain commands and private action details.
+      if (turn.autonomous) return;
       // A question's text is shown by its card, not repeated as prose.
       if (isString(params.itemId, TRACE_ITEM_ID_CHARS * 2)
         && turn.questionMessageIds.has(params.itemId.slice(0, TRACE_ITEM_ID_CHARS))) return;
@@ -721,6 +921,14 @@ export class CodexAppServerRunner {
         /* An async message (a mid-run update) is never the structured final
            answer, even when it lands last before the JSON. */
         if (item.delivery !== 'async') turn.finalText = item.text;
+        if (turn.autonomous) {
+          const event = { type: 'item.completed', item: { ...item, type: 'agent_message' } };
+          const trace = traceForCodexEvent(event);
+          const progress = progressForCodexEvent(event);
+          if (trace) turn.onTrace?.(trace);
+          if (progress) turn.onProgress?.(progress);
+          return;
+        }
         const alreadyStreamed = turn.sawUnscopedAgentMessageDelta || (itemId !== null && turn.agentMessageDeltaItemIds.has(itemId));
         if (!alreadyStreamed) {
           const text = fragmentText(item.text);
@@ -733,7 +941,7 @@ export class CodexAppServerRunner {
     const status = params.turn.status;
     if (status === 'completed') {
       this.finish(turn, turn.finalText
-        ? { ok: true, text: turn.finalText, access: 'editor' }
+        ? { ok: true, text: turn.finalText, access: turn.access }
         : { ok: false, error: 'ChatGPT generation completed without a result.', cancelled: false });
     } else if (status === 'interrupted') {
       this.finish(turn, { ok: false, error: 'The Codex run was cancelled.', cancelled: true });
