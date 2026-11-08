@@ -712,7 +712,10 @@ impl McpSession {
             (Some(root), Some(extensions)) => {
                 for (name, text) in extensions.api_pack() {
                     let path = root.join("api").join(&name);
-                    if name.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
+                    if name
+                        .split('/')
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                    {
                         continue;
                     }
                     if let Some(parent) = path.parent() {
@@ -991,7 +994,9 @@ fn publish(
     let next = crate::extensions::prepare(extensions, &stage.staging, &stage.project, &run)?;
     let staging = next.staging.clone();
     session.stage = Some(next);
-    Ok(json!({"changeSetId":record.map(|r| r["id"].clone()),"extensions":declared,"stagingDirectory":staging}))
+    Ok(
+        json!({"changeSetId":record.map(|r| r["id"].clone()),"extensions":declared,"stagingDirectory":staging}),
+    )
 }
 
 /// N4: retiring an agent workspace must preserve its authored files. Moving

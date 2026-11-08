@@ -116,7 +116,10 @@ mod tests {
             merge(base, "a\nX\nc\nd\ne\n", "a\nX\nc\nd\ne\n").as_deref(),
             Some("a\nX\nc\nd\ne\n")
         );
-        assert_eq!(merge(base, "a\nc\nd\ne\n", "a\nb\nc\nd\ne\n").as_deref(), Some("a\nc\nd\ne\n"));
+        assert_eq!(
+            merge(base, "a\nc\nd\ne\n", "a\nb\nc\nd\ne\n").as_deref(),
+            Some("a\nc\nd\ne\n")
+        );
         assert_eq!(merge_text(None, b"x", b"y"), None);
         assert_eq!(merge_text(Some(b"a"), &[0xff], b"a"), None);
     }

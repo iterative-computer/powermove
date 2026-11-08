@@ -81,3 +81,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **First-run animation** plays inside the Welcome window.
 - **Going back:** there is no reverse migration. The old app must refuse a native file it can't read, safely and clearly, instead of opening it wrongly.
 
+
+## Extension authoring (moat lane, 2026-11-07)
+
+- **v4 additive API:** an extension may export `mount(env)` (`BuiltinEnv`, the built-ins' own entry) as well as `view()`; it may import `powermove/{runtime,protocol,host-api,components,memo,renderer,builtin}`; `activate({hot})` and `env.hot` carry `api.hot.data` across reloads; a v4 manifest's `replaces` naming a built-in panel makes it a fork drawn in that panel's place.
+- Built-in sources ship embedded and are versioned `<package major.minor>.<content hash>`, so any change to a panel is a new version for `stage_fork_rebase`.
+- The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
+- Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
+- The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.

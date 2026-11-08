@@ -436,10 +436,14 @@ impl Controller {
                 continue;
             };
             // A new version: the old one hands over `api.hot.data`, then goes.
-            let title = rebuilt["manifest"]["name"].as_str().unwrap_or(id).to_owned();
+            let title = rebuilt["manifest"]["name"]
+                .as_str()
+                .unwrap_or(id)
+                .to_owned();
             let hash = source(rebuilt).unwrap_or_default();
             self.extensions.surfaces.insert(id.clone(), (title, hash));
-            let (runtime, extension, graph) = (runtime.clone(), id.clone(), rebuilt["graph"].clone());
+            let (runtime, extension, graph) =
+                (runtime.clone(), id.clone(), rebuilt["graph"].clone());
             let ticket = cx.background_executor().spawn(async move {
                 let hot = runtime.hot(&extension).ok().and_then(|ticket| {
                     let deadline = std::time::Instant::now() + HOT_HANDOFF;
@@ -470,7 +474,8 @@ impl Controller {
             // A rebuilt fork takes its panel straight back below.
             let refork = wanted.iter().any(|s| {
                 s["id"] == id.as_str()
-                    && crate::extension_authoring::replaced_panel(&s["manifest"]) == Some(panel.as_str())
+                    && crate::extension_authoring::replaced_panel(&s["manifest"])
+                        == Some(panel.as_str())
             });
             if !refork {
                 self.builtins.forget_surface(&panel);
@@ -485,18 +490,25 @@ impl Controller {
             let Some(id) = surface["id"].as_str().map(str::to_owned) else {
                 continue;
             };
-            if self.extensions.surfaces.contains_key(&id) || self.extensions.forks.contains_key(&id) {
+            if self.extensions.surfaces.contains_key(&id) || self.extensions.forks.contains_key(&id)
+            {
                 continue;
             }
             let hash = source(&surface).unwrap_or_default();
             if let Some(panel) = crate::extension_authoring::replaced_panel(&surface["manifest"]) {
-                if let Some((other, _)) = self.extensions.forks.iter().find(|(_, (p, _))| p == panel) {
-                    self.message = format!("{id} and {other} both replace {panel}; {other} is kept.");
+                if let Some((other, _)) =
+                    self.extensions.forks.iter().find(|(_, (p, _))| p == panel)
+                {
+                    self.message =
+                        format!("{id} and {other} both replace {panel}; {other} is kept.");
                     continue;
                 }
-                self.extensions.forks.insert(id.clone(), (panel.into(), hash));
+                self.extensions
+                    .forks
+                    .insert(id.clone(), (panel.into(), hash));
                 self.builtins.forget_surface(panel);
-                let (runtime, fork, graph) = (runtime.clone(), id.clone(), surface["graph"].clone());
+                let (runtime, fork, graph) =
+                    (runtime.clone(), id.clone(), surface["graph"].clone());
                 let ticket = cx
                     .background_executor()
                     .spawn(async move { runtime.replace(panel, &fork, &graph) });
@@ -730,14 +742,20 @@ impl Controller {
                 .into_iter()
                 .flatten()
                 .filter_map(|p| {
-                    let set = change_sets(&history_for(&extensions, p)).into_iter().next()?;
+                    let set = change_sets(&history_for(&extensions, p))
+                        .into_iter()
+                        .next()?;
                     Some((p.to_owned(), set))
                 })
                 .max_by(|a, b| a.1["createdAt"].as_str().cmp(&b.1["createdAt"].as_str()));
             let Some((project, set)) = newest else {
                 return "No extension change to undo.".to_owned();
             };
-            match restore(&extensions, &project, set["id"].as_str().unwrap_or_default()) {
+            match restore(
+                &extensions,
+                &project,
+                set["id"].as_str().unwrap_or_default(),
+            ) {
                 Ok(record) => {
                     let names: Vec<&str> = record["changes"]
                         .as_array()

@@ -127,13 +127,23 @@ pub struct Tree {
     pub files: BTreeMap<String, Vec<u8>>,
 }
 fn read_tree(root: &Path, skip_top: Option<&str>, budget: &mut Budget) -> Result<Tree> {
-    fn walk(dir: &Path, prefix: &str, skip: Option<&str>, tree: &mut Tree, budget: &mut Budget) -> Result<()> {
+    fn walk(
+        dir: &Path,
+        prefix: &str,
+        skip: Option<&str>,
+        tree: &mut Tree,
+        budget: &mut Budget,
+    ) -> Result<()> {
         for entry in sorted(dir)? {
             let name = name(&entry)?;
             if prefix.is_empty() && Some(name.as_str()) == skip {
                 continue;
             }
-            let relative = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
             let meta = fs::symlink_metadata(entry.path())?;
             if meta.file_type().is_symlink() {
                 return Err(invalid(format!(
@@ -197,7 +207,11 @@ fn tree_hash(root: &Path) -> Result<String> {
         .directories
         .iter()
         .map(|d| (d.as_str(), None))
-        .chain(tree.files.iter().map(|(p, d)| (p.as_str(), Some(d.as_slice()))))
+        .chain(
+            tree.files
+                .iter()
+                .map(|(p, d)| (p.as_str(), Some(d.as_slice()))),
+        )
         .collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     let mut hash = Sha256::new();
@@ -286,14 +300,27 @@ impl Stage {
 pub fn history_for(host: &dyn ExtensionHost, project: &str) -> PathBuf {
     let safe: String = project
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(120)
         .collect();
     host.history().join(safe)
 }
-pub fn prepare(host: &dyn ExtensionHost, staging: &Path, project: &str, run: &str) -> Result<Stage> {
+pub fn prepare(
+    host: &dyn ExtensionHost,
+    staging: &Path,
+    project: &str,
+    run: &str,
+) -> Result<Stage> {
     let roots = host.roots();
-    let live = roots.last().ok_or_else(|| invalid("No user extension folder."))?;
+    let live = roots
+        .last()
+        .ok_or_else(|| invalid("No user extension folder."))?;
     let history = history_for(host, project);
     locked(|| {
         recover_locked(&history, live)?;
@@ -324,7 +351,11 @@ pub fn record_json(id: &str, project: &str, before: &str, after: &str, changes: 
 
 /// Validate, then atomically promote the declared changes. `Ok(None)` means
 /// nothing changed. Errors carry main's agent-facing wording.
-pub fn publish(host: &dyn ExtensionHost, stage: &Stage, declared: &[Value]) -> Result<Option<Value>> {
+pub fn publish(
+    host: &dyn ExtensionHost,
+    stage: &Stage,
+    declared: &[Value],
+) -> Result<Option<Value>> {
     let ids: Vec<&str> = declared.iter().filter_map(|c| c["id"].as_str()).collect();
     fs::create_dir_all(&stage.history)?;
     let snapshot = stage
@@ -335,8 +366,8 @@ pub fn publish(host: &dyn ExtensionHost, stage: &Stage, declared: &[Value]) -> R
         fs::create_dir_all(&copy)?;
         // Only what publishing reads; unchanged folders publish as their baseline.
         let mut unchanged = BTreeSet::new();
-        for (id, dir) in folders(&[stage.staging.clone()]) {
-            if stage.baseline.get(&id).is_some()
+        for (id, dir) in folders(std::slice::from_ref(&stage.staging)) {
+            if stage.baseline.contains_key(&id)
                 && !ids.contains(&id.as_str())
                 && tree_hash(&dir).ok().as_ref() == stage.baseline.get(&id)
             {
@@ -371,14 +402,18 @@ fn validate(host: &dyn ExtensionHost, copy: &Path, declared: &[Value]) -> Result
             .manifest(&raw)
             .map_err(|e| invalid(format!("{id}: {e}. Nothing was published.")))?;
         if manifest["id"] != id {
-            return Err(invalid(format!("{id}: the manifest id must match its folder. Nothing was published.")));
+            return Err(invalid(format!(
+                "{id}: the manifest id must match its folder. Nothing was published."
+            )));
         }
         let blocked = scan_extension(id, &dir)?;
         if !blocked.is_empty() {
             return Err(invalid(blocked.join("\n")));
         }
         host.check(&dir, &manifest).map_err(|e| {
-            invalid(format!("{id} failed compilation: {e}. Repair its staged source. Nothing was published."))
+            invalid(format!(
+                "{id} failed compilation: {e}. Repair its staged source. Nothing was published."
+            ))
         })?;
     }
     Ok(())
@@ -408,17 +443,31 @@ fn promote(
         .filter(|id| stage.baseline.get(*id) != staged.get(*id))
         .cloned()
         .collect();
-    let expected: Vec<Value> = actual.iter().map(|id| json!({"id":id,"action":action(id)})).collect();
+    let expected: Vec<Value> = actual
+        .iter()
+        .map(|id| json!({"id":id,"action":action(id)}))
+        .collect();
     let report = |message: String| {
-        invalid(format!("{message} Nothing was applied. Actual staged extension changes: {}. Inspect these changes and return each once in extensions with the indicated action, or revert unintended staged edits before completing.", Value::Array(expected.clone())))
+        invalid(format!(
+            "{message} Nothing was applied. Actual staged extension changes: {}. Inspect these changes and return each once in extensions with the indicated action, or revert unintended staged edits before completing.",
+            Value::Array(expected.clone())
+        ))
     };
     let mut declared_ids: Vec<&str> = declared.iter().filter_map(|c| c["id"].as_str()).collect();
     declared_ids.sort_unstable();
     if declared_ids.windows(2).any(|w| w[0] == w[1]) {
-        return Err(report("The agent reported the same extension change more than once.".into()));
+        return Err(report(
+            "The agent reported the same extension change more than once.".into(),
+        ));
     }
-    if actual.iter().map(String::as_str).ne(declared_ids.iter().copied()) {
-        return Err(report("The agent change report did not match its staged files.".into()));
+    if actual
+        .iter()
+        .map(String::as_str)
+        .ne(declared_ids.iter().copied())
+    {
+        return Err(report(
+            "The agent change report did not match its staged files.".into(),
+        ));
     }
     if actual.is_empty() {
         return Ok(None);
@@ -431,19 +480,31 @@ fn promote(
         .map(String::as_str)
         .collect();
     if !conflicts.is_empty() {
-        return Err(Error::conflict(format!("Newer changes exist in these extensions: {}. No extension files were overwritten. Completed project edits were kept. Review the retained staged edits against the current versions before publishing; repeating the request cannot resolve this conflict.", conflicts.join(", "))));
+        return Err(Error::conflict(format!(
+            "Newer changes exist in these extensions: {}. No extension files were overwritten. Completed project edits were kept. Review the retained staged edits against the current versions before publishing; repeating the request cannot resolve this conflict.",
+            conflicts.join(", ")
+        )));
     }
     for id in &actual {
         let reported = declared.iter().find(|c| c["id"] == id.as_str());
-        let said = reported.and_then(|c| c["action"].as_str()).unwrap_or("missing");
+        let said = reported
+            .and_then(|c| c["action"].as_str())
+            .unwrap_or("missing");
         if said != action(id) {
-            return Err(report(format!("The agent reported {id} as {said}, but it was {}.", action(id))));
+            return Err(report(format!(
+                "The agent reported {id} as {said}, but it was {}.",
+                action(id)
+            )));
         }
         if action(id) == "removed" && !live.join(id).exists() {
-            return Err(invalid(format!("{id} comes from the shipped app's extension folder and cannot be removed here. Disable it in Settings › Extensions instead. Nothing was applied.")));
+            return Err(invalid(format!(
+                "{id} comes from the shipped app's extension folder and cannot be removed here. Disable it in Settings › Extensions instead. Nothing was applied."
+            )));
         }
     }
-    let pending = stage.history.join(fresh(&format!("{PENDING}{}-", stage.run)));
+    let pending = stage
+        .history
+        .join(fresh(&format!("{PENDING}{}-", stage.run)));
     let (before, next) = (pending.join("before"), pending.join("next"));
     fs::create_dir_all(&before)?;
     fs::create_dir_all(&next)?;
@@ -463,7 +524,13 @@ fn promote(
         .iter()
         .map(|c| json!({"id":c["id"],"action":c["action"],"summary":c["summary"]}))
         .collect();
-    let record = record_json(&stage.run, &stage.project, &root_hash(&current), &root_hash(&after), &changes);
+    let record = record_json(
+        &stage.run,
+        &stage.project,
+        &root_hash(&current),
+        &root_hash(&after),
+        &changes,
+    );
     write_file(&pending.join(RECORD), format!("{:#}\n", record).as_bytes())?;
     let swap = || -> Result<()> {
         for id in &actual {
@@ -514,7 +581,10 @@ fn rollback(pending: &Path, live: &Path, record: &Value) -> Result<()> {
                 fs::remove_dir_all(&target)?;
             }
             fs::rename(&restored, &target)?;
-        } else if change["action"] != "removed" && !pending.join("next").join(id).exists() && target.exists() {
+        } else if change["action"] != "removed"
+            && !pending.join("next").join(id).exists()
+            && target.exists()
+        {
             fs::remove_dir_all(&target)?;
         }
     }
@@ -576,12 +646,17 @@ pub fn change_sets(history: &Path) -> Vec<Value> {
 pub fn restore(host: &dyn ExtensionHost, project: &str, change_set: &str) -> Result<Value> {
     if change_set.is_empty()
         || change_set.len() > 160
-        || !change_set.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        || !change_set
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
         return Err(invalid("Invalid extension change-set id."));
     }
     let roots = host.roots();
-    let live = roots.last().ok_or_else(|| invalid("No user extension folder."))?.clone();
+    let live = roots
+        .last()
+        .ok_or_else(|| invalid("No user extension folder."))?
+        .clone();
     let history = history_for(host, project);
     let record = locked(|| {
         recover_locked(&history, &live)?;
@@ -592,7 +667,9 @@ pub fn restore(host: &dyn ExtensionHost, project: &str, change_set: &str) -> Res
             return Err(invalid("This extension change was already undone."));
         }
         if root_hash(&hashes(&roots)?) != record["afterRootHash"].as_str().unwrap_or_default() {
-            return Err(invalid("Newer extension changes exist. Restore newer change sets first."));
+            return Err(invalid(
+                "Newer extension changes exist. Restore newer change sets first.",
+            ));
         }
         let (before, redo) = (directory.join("before"), directory.join("redo"));
         if redo.exists() {
@@ -602,7 +679,10 @@ pub fn restore(host: &dyn ExtensionHost, project: &str, change_set: &str) -> Res
         let mut touched = vec![];
         let result = (|| -> Result<()> {
             for change in record["changes"].as_array().into_iter().flatten() {
-                let id = change["id"].as_str().filter(|id| extension_id(id)).ok_or_else(|| invalid("Invalid extension id."))?;
+                let id = change["id"]
+                    .as_str()
+                    .filter(|id| extension_id(id))
+                    .ok_or_else(|| invalid("Invalid extension id."))?;
                 let target = live.join(id);
                 if target.exists() {
                     fs::rename(&target, redo.join(id))?;
@@ -622,7 +702,10 @@ pub fn restore(host: &dyn ExtensionHost, project: &str, change_set: &str) -> Res
             return Err(error);
         }
         record["restored"] = json!(true);
-        write_file(&directory.join(RECORD), format!("{:#}\n", record).as_bytes())?;
+        write_file(
+            &directory.join(RECORD),
+            format!("{:#}\n", record).as_bytes(),
+        )?;
         Ok(record)
     })?;
     let ids: Vec<String> = record["changes"]
@@ -645,7 +728,12 @@ fn manifest_object(data: Option<&Vec<u8>>, label: &str) -> Result<serde_json::Ma
         Err(_) => Err(invalid(format!("Invalid {label} manifest JSON."))),
     }
 }
-fn parsed(host: &dyn ExtensionHost, raw: &serde_json::Map<String, Value>, id: &str, label: &str) -> Result<Value> {
+fn parsed(
+    host: &dyn ExtensionHost,
+    raw: &serde_json::Map<String, Value>,
+    id: &str,
+    label: &str,
+) -> Result<Value> {
     let manifest = host
         .manifest(&Value::Object(raw.clone()))
         .map_err(|e| invalid(format!("Invalid {label} manifest: {e}")))?;
@@ -663,13 +751,20 @@ fn pretty(value: &Value) -> Vec<u8> {
 
 /// Copy a shipped built-in into the stage as a user extension that replaces
 /// it, with a pristine copy in `.forked-from` as the future merge base.
-pub fn fork(host: &dyn ExtensionHost, id: &str, fork_id: Option<&str>, staging: &Path) -> Result<Value> {
+pub fn fork(
+    host: &dyn ExtensionHost,
+    id: &str,
+    fork_id: Option<&str>,
+    staging: &Path,
+) -> Result<Value> {
     let fork_id = fork_id.map_or_else(|| format!("{id}-fork"), str::to_owned);
     if !extension_id(id) || !extension_id(&fork_id) {
         return Err(invalid("Invalid extension id."));
     }
     if fork_id == id {
-        return Err(invalid("Fork id must differ from the built-in extension id."));
+        return Err(invalid(
+            "Fork id must differ from the built-in extension id.",
+        ));
     }
     let builtins = host
         .builtins()
@@ -684,14 +779,24 @@ pub fn fork(host: &dyn ExtensionHost, id: &str, fork_id: Option<&str>, staging: 
     let forked_from = format!("{id}@{}", manifest["version"].as_str().unwrap_or_default());
     let mut rewritten = raw.clone();
     rewritten.insert("id".into(), json!(fork_id));
-    rewritten.insert("name".into(), json!(format!("{} (fork)", raw["name"].as_str().unwrap_or(id))));
-    let mut replaces: Vec<Value> = raw.get("replaces").and_then(Value::as_array).cloned().unwrap_or_default();
+    rewritten.insert(
+        "name".into(),
+        json!(format!("{} (fork)", raw["name"].as_str().unwrap_or(id))),
+    );
+    let mut replaces: Vec<Value> = raw
+        .get("replaces")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if !replaces.contains(&json!(id)) {
         replaces.push(json!(id));
     }
     rewritten.insert("replaces".into(), json!(replaces));
     rewritten.insert("forkedFrom".into(), json!(forked_from));
-    rewritten.insert("author".into(), raw.get("author").cloned().unwrap_or(json!("user")));
+    rewritten.insert(
+        "author".into(),
+        raw.get("author").cloned().unwrap_or(json!("user")),
+    );
     parsed(host, &rewritten, &fork_id, "fork")?;
     fs::create_dir_all(staging)?;
     let dest = fs::canonicalize(staging)?.join(&fork_id);
@@ -707,11 +812,16 @@ pub fn fork(host: &dyn ExtensionHost, id: &str, fork_id: Option<&str>, staging: 
     write_tree(&dest, &work)?;
     write_tree(&dest.join(FORK_BASE), &tree)?;
     // The manifest goes last: an incomplete copy never looks like an extension.
-    write_file(&dest.join("manifest.json"), &pretty(&Value::Object(rewritten)))?;
+    write_file(
+        &dest.join("manifest.json"),
+        &pretty(&Value::Object(rewritten)),
+    )?;
     File::open(&dest)?.sync_all()?;
-    Ok(json!({"dir":dest,"forkId":fork_id,"files":tree.files.keys().collect::<Vec<_>>(),
+    Ok(
+        json!({"dir":dest,"forkId":fork_id,"files":tree.files.keys().collect::<Vec<_>>(),
         "forkedFrom":forked_from,
-        "reminder":format!("List {fork_id} in the result's extensions array with action created.")}))
+        "reminder":format!("List {fork_id} in the result's extensions array with action created.")}),
+    )
 }
 
 fn changed(a: &BTreeMap<String, Vec<u8>>, b: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
@@ -737,13 +847,17 @@ pub fn rebase(host: &dyn ExtensionHost, fork_id: &str, staging: &Path) -> Result
     let folders = folders(&roots);
     let Some(user_dir) = folders.get(fork_id) else {
         if builtins.join(fork_id).exists() {
-            return Err(invalid(format!("Only user extensions can be rebased: {fork_id}")));
+            return Err(invalid(format!(
+                "Only user extensions can be rebased: {fork_id}"
+            )));
         }
         return Err(invalid(format!("Unknown extension: {fork_id}")));
     };
     let base_dir = user_dir.join(FORK_BASE);
     if !base_dir.is_dir() {
-        return Err(invalid(format!("Fork {fork_id} is missing its {FORK_BASE} base.")));
+        return Err(invalid(format!(
+            "Fork {fork_id} is missing its {FORK_BASE} base."
+        )));
     }
     let mut budget = Budget { files: 0, bytes: 0 };
     let user = read_tree(user_dir, Some(FORK_BASE), &mut budget)?;
@@ -756,12 +870,17 @@ pub fn rebase(host: &dyn ExtensionHost, fork_id: &str, staging: &Path) -> Result
         .rsplit_once('@')
         .filter(|(id, _)| extension_id(id))
         .ok_or_else(|| invalid(format!("Malformed forkedFrom value: {forked}")))?;
-    if !user_manifest["replaces"].as_array().is_some_and(|r| r.iter().any(|v| v == origin)) {
+    if !user_manifest["replaces"]
+        .as_array()
+        .is_some_and(|r| r.iter().any(|v| v == origin))
+    {
         return Err(invalid(format!("Fork {fork_id} must replace {origin}.")));
     }
     let shipped = builtins.join(origin);
     if !shipped.is_dir() {
-        return Err(invalid(format!("Fork {fork_id} references an unknown built-in: {origin}")));
+        return Err(invalid(format!(
+            "Fork {fork_id} references an unknown built-in: {origin}"
+        )));
     }
     let base = read_tree(&base_dir, None, &mut budget)?;
     let current = read_tree(&shipped, None, &mut budget)?;
@@ -786,7 +905,11 @@ pub fn rebase(host: &dyn ExtensionHost, fork_id: &str, staging: &Path) -> Result
     // Manifest: keep the fork's identity; take upstream changes the fork left alone.
     let identity = ["id", "name", "author", "version", "forkedFrom"];
     let with_origin = |mut m: serde_json::Map<String, Value>| {
-        let mut r: Vec<Value> = m.get("replaces").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut r: Vec<Value> = m
+            .get("replaces")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if !r.contains(&json!(origin)) {
             r.push(json!(origin));
         }
@@ -820,7 +943,11 @@ pub fn rebase(host: &dyn ExtensionHost, fork_id: &str, staging: &Path) -> Result
     }
     let upstream = changed(&base.files, &current.files);
     for relative in upstream.iter().filter(|r| *r != "manifest.json") {
-        let (b, u, c) = (base.files.get(relative), user.files.get(relative), current.files.get(relative));
+        let (b, u, c) = (
+            base.files.get(relative),
+            user.files.get(relative),
+            current.files.get(relative),
+        );
         if u == c {
             continue;
         }
@@ -844,7 +971,10 @@ pub fn rebase(host: &dyn ExtensionHost, fork_id: &str, staging: &Path) -> Result
         let parts: Vec<&str> = path.split('/').collect();
         (1..parts.len()).any(|i| files.contains_key(&parts[..i].join("/")))
     });
-    let mut tree = Tree { directories: user.directories.clone(), files };
+    let mut tree = Tree {
+        directories: user.directories.clone(),
+        files,
+    };
     if structural {
         tree = user.clone();
         manifest = user_raw.clone();
@@ -860,7 +990,9 @@ pub fn rebase(host: &dyn ExtensionHost, fork_id: &str, staging: &Path) -> Result
     for root in roots.iter().chain([&builtins]) {
         let root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
         if staging.starts_with(&root) || root.starts_with(&staging) {
-            return Err(invalid("Extension rebase staging must not overlap an extension source root."));
+            return Err(invalid(
+                "Extension rebase staging must not overlap an extension source root.",
+            ));
         }
     }
     let working = staging.join(fork_id);
@@ -876,12 +1008,20 @@ pub fn rebase(host: &dyn ExtensionHost, fork_id: &str, staging: &Path) -> Result
     write_tree(&base_out, &base)?;
     write_tree(&ours_out, &current)?;
     write_tree(&working.join(FORK_BASE), &current)?;
-    manifest.insert("forkedFrom".into(), json!(format!("{origin}@{current_version}")));
-    write_file(&working.join("manifest.json"), &pretty(&Value::Object(manifest)))?;
-    Ok(json!({"forkId":fork_id,"workingDir":working,"baseDir":base_out,"oursDir":ours_out,
+    manifest.insert(
+        "forkedFrom".into(),
+        json!(format!("{origin}@{current_version}")),
+    );
+    write_file(
+        &working.join("manifest.json"),
+        &pretty(&Value::Object(manifest)),
+    )?;
+    Ok(
+        json!({"forkId":fork_id,"workingDir":working,"baseDir":base_out,"oursDir":ours_out,
         "changedByUser":changed(&base.files, &user.files),"changedUpstream":upstream,
         "conflicts":conflicts,"mergedFiles":merged,"forkedFrom":origin,
-        "base":base_version,"current":current_version}))
+        "base":base_version,"current":current_version}),
+    )
 }
 
 #[cfg(test)]

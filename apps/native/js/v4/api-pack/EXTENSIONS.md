@@ -33,7 +33,11 @@ when available, and say honestly what you could not check.
 
 - `id`: 2–64 characters, `a-z`, `0-9`, `-`. `version`: `x.y.z`.
 - `apiVersion` 4 is the native API below. Versions 1–3 are the shipped
-  extension API (Svelte panels, `PM`, effects, commands); they keep working.
+  extension API, documented in `v3/EXTENSIONS.md` with its types in `v3/`
+  (Svelte panels, effects, transitions, layer types, commands, keybindings,
+  menus, themes, status items). They load and publish the same way. Use them
+  for commands, keyboard shortcuts, context menus, effects and themes: v4 has
+  no registration API for those yet.
 - `replaces`: built-in ids this extension draws in place of (forks).
 - Credentials never go in source: declare `vars` and read them at runtime.
 

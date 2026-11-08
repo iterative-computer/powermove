@@ -79,6 +79,33 @@ on a cross-origin redirect. The palette's Install Extension from Store appears o
 once a Store key is pinned; until the Store signs releases there is none (see
 [store-host.md](store-host.md)).
 
+## Agent authoring
+
+An agent changes the app through extensions, as on main. `start_session` copies
+every extension folder (later roots win) into a run-private stage and writes the
+API pack (`js/v4/api-pack`) to `api/`. `publish_extensions` checks the declared
+changes against a snapshot of the stage, scans text for credentials, then
+`extension_authoring::check` compiles each one with the native compiler and
+activates it on a synthetic project: v1–3 in a trusted realm, v4 in a panel
+isolate, a fork in place of its built-in. Promotion into the profile's folder
+goes through a journal in `<profile>/agent-change-history/<project>` that a crash
+rolls back at the next start; `rescan_all` reloads every window at once. The
+palette's **Undo Extension Change** restores the newest change set.
+
+Built-in panels mount through `panels/<id>/mount.tsx` and the `BuiltinEnv`
+contract (`src/builtin.ts`). The build writes each built-in's source as an
+extension tree (`scripts/builtin-sources.ts`, shared imports become
+`powermove/*`), which the app writes once to `<profile>/builtin-extensions/`.
+`fork_builtin_extension` copies one with a `.forked-from` base;
+`stage_fork_rebase` merges a newer built-in line by line. A v4 extension whose
+`replaces` names a built-in runs in that panel's realm (`Builtins::replace`) with
+the built-in's routes; removing it restores the built-in. A reloaded v4
+extension gets the previous version's `api.hot.data`. A panel published while a
+window is open is shown in it.
+
+`pm-mcp/src/extensions` holds the transaction, scanner and three-way merge;
+`app/src/extension_authoring_tests.rs` drives the agent flow headless.
+
 ## Known limits
 
 - `render.raster`, `renderFrameTo` and `snapshot` have no engine backend, and raster
@@ -91,4 +118,10 @@ once a Store key is pinned; until the Store signs releases there is none (see
 - Contributed layer types render and label their timeline row, but their parameters
   have no Properties rows until per-kind controls are designed.
 - Layout reads in the realm are cached from the last page report (`remote-dom.md`).
+- A v4 extension adds a panel or replaces a whole built-in panel. It cannot yet
+  slot into part of another panel (a viewer overlay or timeline column without a
+  fork), register commands, menus or keybindings, or add toolbar items; v1–3
+  extensions can do the latter through the compat realm.
+- Each window reserves 64 MiB per isolate for up to 64 isolates; idle isolates are
+  not parked yet.
 - Store panels have no recorder canvases, and `ui.*` from a helper is not attached.

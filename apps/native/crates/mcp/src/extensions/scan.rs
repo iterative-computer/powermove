@@ -98,7 +98,8 @@ fn quoted(line: &str) -> Vec<&str> {
             i += 1;
             continue;
         }
-        let close = (i + 1..chars.len()).find(|&k| quote(chars[k].1) || matches!(chars[k].1, '\r' | '\n'));
+        let close =
+            (i + 1..chars.len()).find(|&k| quote(chars[k].1) || matches!(chars[k].1, '\r' | '\n'));
         match close {
             Some(k) if chars[k].1 == q => {
                 out.push(&line[start + 1..chars[k].0]);
@@ -124,10 +125,14 @@ fn suspicious(value: &str) -> bool {
 }
 /// Blocking findings of one text file, as `(line, label)`.
 pub fn scan_text(path: &str, text: &str) -> Vec<(usize, &'static str)> {
-    if !patterns().text_file.is_match(path) || text.as_bytes()[..text.len().min(8192)].contains(&0) {
+    if !patterns().text_file.is_match(path) || text.as_bytes()[..text.len().min(8192)].contains(&0)
+    {
         return vec![];
     }
-    let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
     let mut findings = vec![];
     for (i, line) in lines.iter().enumerate() {
         if let Some(label) = hard(line) {
@@ -143,7 +148,12 @@ pub fn scan_text(path: &str, text: &str) -> Vec<(usize, &'static str)> {
 }
 /// Every blocking credential in an extension folder, as agent-facing lines.
 pub fn scan_extension(id: &str, root: &Path) -> std::io::Result<Vec<String>> {
-    fn walk(dir: &Path, prefix: &str, seen: &mut usize, out: &mut Vec<(String, String)>) -> std::io::Result<()> {
+    fn walk(
+        dir: &Path,
+        prefix: &str,
+        seen: &mut usize,
+        out: &mut Vec<(String, String)>,
+    ) -> std::io::Result<()> {
         let mut entries = fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
@@ -158,11 +168,18 @@ pub fn scan_extension(id: &str, root: &Path) -> std::io::Result<Vec<String>> {
                     dir.display()
                 )));
             }
-            let relative = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let relative = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
             let meta = fs::symlink_metadata(entry.path())?;
             if meta.is_dir() {
                 walk(&entry.path(), &relative, seen, out)?;
-            } else if meta.is_file() && meta.len() <= FILE_BYTES && patterns().text_file.is_match(&relative) {
+            } else if meta.is_file()
+                && meta.len() <= FILE_BYTES
+                && patterns().text_file.is_match(&relative)
+            {
                 let bytes = fs::read(entry.path())?;
                 if !bytes[..bytes.len().min(8192)].contains(&0) {
                     out.push((relative, String::from_utf8_lossy(&bytes).into_owned()));
@@ -194,9 +211,16 @@ mod tests {
         assert_eq!(scan_text("index.ts", &line), vec![(1, "an OpenAI API key")]);
         let anthropic = format!("x = '{}{}'", "sk-ant-", "Zz9".repeat(8));
         assert_eq!(scan_text("a.js", &anthropic)[0].1, "an Anthropic API key");
-        let alphabet: Vec<char> = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMN0123456789".chars().collect();
-        let random: String = (0..32).map(|i| alphabet[(i * 7) % alphabet.len()]).collect();
-        assert_eq!(scan_text("a.ts", &format!("t = `{random}`")), vec![(1, "a secret")]);
+        let alphabet: Vec<char> = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMN0123456789"
+            .chars()
+            .collect();
+        let random: String = (0..32)
+            .map(|i| alphabet[(i * 7) % alphabet.len()])
+            .collect();
+        assert_eq!(
+            scan_text("a.ts", &format!("t = `{random}`")),
+            vec![(1, "a secret")]
+        );
         let waived = format!("t = '{random}' // powermove-secret-ok: public fixture id");
         assert!(scan_text("a.ts", &waived).is_empty());
         assert!(scan_text("logo.png", &line).is_empty());

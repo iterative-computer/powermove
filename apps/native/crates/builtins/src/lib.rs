@@ -240,7 +240,10 @@ impl Builtins {
         {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
-        self.start(panel, format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)))
+        self.start(
+            panel,
+            format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)),
+        )
     }
     fn start(&self, panel: &str, source: String) -> Result<Ticket<Evaluation>> {
         let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
@@ -271,7 +274,9 @@ impl Builtins {
     /// it: same realm identity, routes and host operations, the fork's code.
     /// Waits for the old isolate to close, so call it off the main thread.
     pub fn replace(&self, panel: &str, fork: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
-        if !LIVE_PANELS.contains(&panel) || (self.broker.application && !matches!(panel, "settings" | "agent")) {
+        if !LIVE_PANELS.contains(&panel)
+            || (self.broker.application && !matches!(panel, "settings" | "agent"))
+        {
             return Err(Error::Invalid("unregistered built-in"));
         }
         self.retire(panel);
@@ -472,9 +477,9 @@ impl Builtins {
             .elapsed()
             .as_millis() as u64;
         self.realm_of("timeline")?.eval(format!(
-                "__pmBuiltin.command('panel.timeline',{})",
-                json!({"type":"keyDown","millis":millis,"event":{"key":"m","repeat":false}})
-            ))
+            "__pmBuiltin.command('panel.timeline',{})",
+            json!({"type":"keyDown","millis":millis,"event":{"key":"m","repeat":false}})
+        ))
     }
     pub fn timeline_key(
         &self,
@@ -489,12 +494,14 @@ impl Builtins {
     /// platform acknowledgements; the main thread only polls it. Drivers can
     /// include decimal document/revision stamps from the inspected frame.
     pub fn timeline_action(&self, intent: Value) -> Result<Ticket<Evaluation>> {
-        self.realm_of("timeline")?.eval(format!("__pmBuiltin.command('panel.timeline',{})", intent))
+        self.realm_of("timeline")?
+            .eval(format!("__pmBuiltin.command('panel.timeline',{})", intent))
     }
 
     /// Inspect exact library source and CAS revision on the panel worker.
     pub fn timeline_easing_library(&self) -> Result<Ticket<Evaluation>> {
-        self.realm_of("timeline")?.eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
+        self.realm_of("timeline")?
+            .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?
@@ -681,7 +688,13 @@ impl Builtins {
             self.broker.agent.close();
         }
         let extensions = self.extension_realms.lock().unwrap();
-        for realm in self.realms.lock().unwrap().values().chain(extensions.values()) {
+        for realm in self
+            .realms
+            .lock()
+            .unwrap()
+            .values()
+            .chain(extensions.values())
+        {
             realm.close();
         }
     }

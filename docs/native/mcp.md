@@ -26,10 +26,13 @@ no production caller.
   aren't converted and videos get no playback proxy.
   3D models import but aren't placed; use `edit_3d`. `list_media` reports
   availability from the kernel's media table.
+- `publish_extensions`, `fork_builtin_extension` and `stage_fork_rebase` follow
+  main's contract through `pm_mcp::extensions` and the app's
+  `extension_authoring.rs`; see [extensions-app.md](extensions-app.md#agent-authoring).
 - `thread_list` and `thread_read` read the durable thread archive. `activity` and
   `questions` stay empty, because a live session isn't reachable from an MCP worker.
 
-Of the 68 tools, 36 have bodies in the app. The other 32 refuse with
+Of the 68 tools, 39 have bodies in the app. The other 29 refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
@@ -38,7 +41,6 @@ the running binary in both directions.
 |---|---|
 | `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A bridge from MCP workers to the main-thread shell and v4 surfaces. |
 | `generate_captions`, `transcribe_media` | A local transcription runtime. |
-| `publish_extensions`, `stage_fork_rebase`, `fork_builtin_extension` | Extension activation; the app has no compat realm. Also a shipped source root for forks. |
 | `publish_visual_reply` | A safe viewer and its input validator. |
 | `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |
 | `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | The signed Store envelope and install host. |
