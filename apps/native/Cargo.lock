@@ -3724,6 +3724,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32b0446e98cf4a784cc7a0177715ff317eeaa8463841c616cfc78aa4f953c4ea"
 dependencies = [
+ "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -4742,7 +4743,10 @@ dependencies = [
  "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-image-io",
  "objc2-web-kit",
  "pm-compat-host",
  "pm-kernel",
@@ -4754,6 +4758,7 @@ dependencies = [
  "pm-runtime-v8",
  "pm-store-host",
  "png",
+ "resvg",
  "serde_json",
  "sha2",
  "tar",
@@ -5093,6 +5098,7 @@ dependencies = [
  "gpui_ce_apple",
  "gpui_ce_macos",
  "gpui_ce_parley",
+ "libc",
  "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -5121,6 +5127,7 @@ dependencies = [
  "pm-panel-viewerchrome",
  "pm-promedia",
  "pm-protocol",
+ "pm-proxy",
  "pm-recorder",
  "pm-render",
  "pm-runtime-v8",
@@ -5130,6 +5137,7 @@ dependencies = [
  "pm-time",
  "png",
  "raw-window-handle",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -5384,6 +5392,22 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-proxy"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "pm-color",
+ "pm-media",
+ "pm-protocol",
+ "png",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

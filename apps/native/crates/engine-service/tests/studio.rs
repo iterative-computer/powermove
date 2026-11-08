@@ -243,7 +243,7 @@ fn encoded_repeat_with_witness(
             },
             pm_engine_service::MediaCatalog {
                 originals: media.paths.clone(),
-                proxies: Default::default(),
+                ..Default::default()
             },
             destination.clone(),
         )

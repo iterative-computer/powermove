@@ -94,6 +94,8 @@ export function ViewerPanel({
         label={`Zoom, ${m.fit ? "Fit, " : ""}${percent(m.shownZoom)} percent`}
         title="Zoom"
         value={zoomValue}
+        display={zoomTitle(m)}
+        widthSample="Fit (100 %)"
         options={zoomOptions}
         style={popupStyle}
         onChange={(event) => {
@@ -235,6 +237,12 @@ export function ViewerPanel({
           pendingRecipe: "viewer-chrome.md §§2–3,6–7",
         }}
       >
+        <canvas
+          id="viewer.overlays"
+          surface="viewer.overlays"
+          label="Extension overlays"
+          style={{ position: "absolute", inset: "fill" }}
+        />
         <canvas
           id="viewer.gizmos"
           surface="viewer.gizmos"

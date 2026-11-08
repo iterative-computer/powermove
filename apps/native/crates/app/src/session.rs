@@ -39,7 +39,16 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
+    /// What the media resolver found; `media` adds the renditions.
+    pub(crate) media_base: MediaCatalog,
+    /// Proxies, optimized media and their Background Tasks.
+    pub pro_media: Arc<crate::pro_media::ProMedia>,
+    /// Window ▸ Background Tasks, while open.
+    pub tasks_window: Option<Entity<crate::tasks_window::TasksWindow>>,
     pub opening: bool,
+    /// Held while a project opens and its panels settle: no App Nap or
+    /// background throttling.
+    pub(crate) busy: Option<crate::platform::Busy>,
     /// The project an open is reading, shown until it lands or fails, and
     /// then until the panels have drawn it (`settling`).
     pub opening_name: Option<String>,
@@ -82,6 +91,8 @@ pub struct Controller {
     pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
     /// The toolbar tool, mirrored from shell commands for native surfaces.
     pub tool: String,
+    /// The Shape tool's variant (`rect`, `rounded`, `ellipse`, `polygon`, `star`).
+    pub shape_variant: String,
     pub view: crate::gizmo::ViewPlacement,
     /// The pending or running write of `view`.
     pub(crate) view_write: Option<gpui::Task<()>>,
@@ -91,7 +102,10 @@ pub struct Controller {
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
     /// Queued batches and the cancel flag of the running one.
-    pub(crate) imports: std::collections::VecDeque<pm_builtins::media_import::ImportRequest>,
+    pub(crate) imports: std::collections::VecDeque<(
+        pm_builtins::media_import::ImportRequest,
+        Option<crate::media_import::ExtensionImport>,
+    )>,
     pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Arrow-key nudges less than [`NUDGE_IDLE`] apart are one undo step
     /// (keymap.ts): the history mark taken before the first, and the timer
@@ -153,7 +167,10 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).extensions.owns_panel(id)
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
-        self.0.update(cx, |v, _| v.sync_extension_panels(open));
+        self.0.update(cx, |v, cx| {
+            v.sync_extension_panels(open);
+            v.sync_parking(open, cx);
+        });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
         self.0.update(cx, |v, _| v.hide_extension_panels(shown));
@@ -217,6 +234,28 @@ impl Controller {
         host: Rc<RefCell<Host>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let pro_media = Arc::new(crate::pro_media::ProMedia::new(
+            profile.clone(),
+            crate::media::objects_dir(&profile),
+            engine.export_activity(),
+        ));
+        pro_media.refresh_usage();
+        let pro_events = pro_media.event_receiver.clone();
+        cx.spawn(async move |this, cx| {
+            while let Ok(first) = pro_events.recv().await {
+                let mut renditions = matches!(first, crate::pro_media::Event::Renditions);
+                while let Ok(e) = pro_events.try_recv() {
+                    renditions |= matches!(e, crate::pro_media::Event::Renditions);
+                }
+                if this
+                    .update(cx, |v, cx| v.pro_media_changed(renditions, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let events = kernel.subscribe();
         let (tx, rx) = async_channel::unbounded();
         std::thread::spawn(move || {
@@ -299,7 +338,11 @@ impl Controller {
             viewer: None,
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
+            media_base: MediaCatalog::default(),
+            pro_media,
+            tasks_window: None,
             opening: false,
+            busy: None,
             opening_name: None,
             settling: None,
             rows: Default::default(),
@@ -332,6 +375,7 @@ impl Controller {
             close_operation: None,
             gizmo_lines: vec![],
             tool: "toolSelect".into(),
+            shape_variant: "rect".into(),
             view: Default::default(),
             view_write: None,
             clipboard: Default::default(),
@@ -452,6 +496,8 @@ impl Controller {
             self.seek(time);
         }
         self.refresh_media(cx);
+        // Raster override answers are for one revision; frames ask afresh.
+        crate::raster_overrides::published(&self.engine, &p);
         if let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
@@ -540,7 +586,21 @@ impl Controller {
             Plan::Inline => {
                 let _span = crate::diag::span("refresh.rows");
                 if self.rows.accept(key, rows::list(&p.snapshot), Some(key)) {
-                    self.keyframes = rows::keyframe_count(&p.snapshot);
+                    // O(keyframes): a baked project holds hundreds of thousands.
+                    let snapshot = p.snapshot.clone();
+                    cx.spawn(async move |this, cx| {
+                        let count = cx
+                            .background_executor()
+                            .spawn(async move { rows::keyframe_count(&snapshot) })
+                            .await;
+                        let _ = this.update(cx, |v, cx| {
+                            if v.published.as_ref().map(|p| rows::key(&p.snapshot)) == Some(key) {
+                                v.keyframes = count;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                 }
             }
             Plan::Worker => {
@@ -952,8 +1012,8 @@ impl Controller {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
-        let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
+        self.busy = Some(crate::platform::Busy::begin("Opening a project"));
         self.message = format!("Opening “{name}”…");
         self.opening_name = Some(name.clone());
         cx.notify();
@@ -984,6 +1044,7 @@ impl Controller {
                                 v.errors.borrow_mut().push("Project", &prompt.alert.message);
                             }
                             v.recovery_pending = true;
+                            v.mcp.awaiting_recovery(Some(name.clone()));
                             crate::surfaces::recovery_macos::sheet(
                                 &prompt,
                                 &v.host.borrow().window,
@@ -993,6 +1054,7 @@ impl Controller {
                             Ok(rx) => rx.recv().await.ok(),
                             Err(_) => None,
                         };
+                        let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
                         let call = response
                             .and_then(|r| r.action)
                             .and_then(|action| recovery.decision(action));
@@ -1002,15 +1064,6 @@ impl Controller {
                     }
                 }
             }
-            let media = if let Some(Ok(ShellReply::Opened { session, .. })) = &result {
-                let published = kernel.published(&session.project).unwrap();
-                cx.background_executor()
-                    .spawn(async move { crate::media_refresh::resolve(&published, &cache) })
-                    .await
-                    .map(Some)
-            } else {
-                Ok(None)
-            };
             let mut previous_save_failed = false;
             if matches!(&result, Some(Ok(ShellReply::Opened { .. })))
                 && let Some(old) = old
@@ -1028,8 +1081,10 @@ impl Controller {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
                     _ => None,
                 };
+                // Held until the panels have drawn the project (`settled`).
                 if v.settling.is_none() {
                     v.opening_name = None;
+                    v.busy = None;
                 }
                 match result {
                     Some(Ok(ShellReply::Opened {
@@ -1038,14 +1093,8 @@ impl Controller {
                         decision,
                         info,
                     })) => {
-                        let media = match media {
-                            Ok(m) => m,
-                            Err(e) => {
-                                v.message = format!("Media could not be resolved: {e}");
-                                None
-                            }
-                        };
-                        v.adopt(session, decision, info.history_rejected, media, cx);
+                        // Media resolves on a worker after the project shows.
+                        v.adopt(session, decision, info.history_rejected, cx);
                         if previous_save_failed {
                             v.message.push_str(
                                 " · Previous project could not be saved; its recovery journal is retained",
@@ -1099,7 +1148,6 @@ impl Controller {
         session: SessionHandle,
         decision: pm_kernel::locks::OpenDecision,
         history_rejected: bool,
-        media: Option<crate::media_refresh::Resolved>,
         cx: &mut Context<Self>,
     ) {
         if let Some(viewer) = self.viewer.take() {
@@ -1110,18 +1158,7 @@ impl Controller {
         self.session = Some(session);
         self.media_refresh.reset();
         self.media = MediaCatalog::default();
-        let mut offline = 0;
-        if let Some(resolved) = media
-            && self
-                .session
-                .as_ref()
-                .and_then(|s| self.kernel.published(&s.project))
-                .is_some_and(|p| resolved.inputs.matches(&p))
-        {
-            offline = resolved.resolution.failed.len();
-            self.media = resolved.resolution.catalog;
-            self.media_refresh.adopt(resolved.inputs);
-        }
+        self.media_base = MediaCatalog::default();
         self.mirror = None;
         self.selected = None;
         self.refresh(cx);
@@ -1131,7 +1168,6 @@ impl Controller {
             copy_notice(&decision).map(str::to_owned),
             history_rejected
                 .then(|| "Undo history from the last session couldn’t be restored.".to_owned()),
-            (offline > 0).then(|| crate::media::failure_note(offline)),
             notice,
         ]
         .into_iter()
@@ -1204,36 +1240,11 @@ impl Controller {
         let Some(session) = current else {
             return;
         };
-        let Some(p) = self.kernel.published(&session.project) else {
+        if self.kernel.published(&session.project).is_none() {
             return;
-        };
-        let cache = crate::media::cache_root(&self.profile);
-        self.opening = true;
-        cx.spawn(async move |this, cx| {
-            let history_rejected = false;
-            let media = cx
-                .background_executor()
-                .spawn(async move { crate::media_refresh::resolve(&p, &cache) })
-                .await;
-            let _ = this.update(cx, |v, cx| {
-                v.opening = false;
-                if v.mcp.current().as_ref() == Some(&session) {
-                    match media {
-                        Ok(media) => v.adopt(
-                            session,
-                            pm_kernel::locks::OpenDecision::Writable,
-                            history_rejected,
-                            Some(media),
-                            cx,
-                        ),
-                        Err(e) => v.message = format!("Media could not be resolved: {e}"),
-                    }
-                    cx.notify();
-                }
-                v.follow_mcp(cx);
-            });
-        })
-        .detach();
+        }
+        self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
+        cx.notify();
     }
     pub fn load_recent(&mut self, cx: &mut Context<Self>) {
         let pending = self.kernel.shell(ShellCall::Recent);
@@ -1352,8 +1363,35 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if cmd.name == "toolShape" {
+            // The segment menu names a variant; Q again on the Shape tool
+            // cycles them; a toolbar click keeps the current one.
+            let variants = pm_shell::SHAPES.map(|(v, _, _)| v);
+            let at = variants
+                .iter()
+                .position(|v| *v == self.shape_variant)
+                .unwrap_or(0);
+            if let Some(v) = cmd.args.first().and_then(|v| v.as_str())
+                && variants.contains(&v)
+            {
+                self.shape_variant = v.into();
+            } else if cmd.token.is_some() && self.tool == "toolShape" {
+                self.shape_variant = variants[(at + 1) % variants.len()].into();
+            }
+            self.host.borrow().select_shape(&self.shape_variant);
+        }
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
             self.tool = cmd.name.clone();
+            // The Pen tool shows the selection's paths; others hide them.
+            if let Some(gizmos) = self.builtins.gizmos.clone() {
+                gizmos.update(cx, |g, cx| g.refresh(cx));
+            }
+            // The `tool` service names it as v1 did: toolSelect is "select".
+            if let Some(host) = &self.extensions.host {
+                let name = &cmd.name[4..];
+                let tool = name[..1].to_lowercase() + &name[1..];
+                host.shell_state(serde_json::json!({ "tool": tool }));
+            }
             return false;
         }
         if self.extension_command(cmd, cx) {
@@ -1383,6 +1421,12 @@ impl Controller {
         }
         match cmd.name.as_str() {
             "v4.platform" => self.builtin_platform(window, cx),
+            "text.editSelected" => {
+                let Some(gizmos) = self.builtins.gizmos.clone() else {
+                    return false;
+                };
+                return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+            }
             "toggleLayerControls" => {
                 if let Some(gizmos) = self.builtins.gizmos.clone() {
                     gizmos.update(cx, |g, cx| g.toggle_controls(cx));

@@ -149,6 +149,8 @@ pub struct Metrics {
     pub property_row: f32,
     pub ruler: f32,
     pub layer_column: f32,
+    /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
+    pub clip_radius: f32,
     pub playhead: f32,
     /// SF Symbol point sizes: toolbar items, panel header buttons, inline row glyphs.
     pub symbol_toolbar: f32,
@@ -472,6 +474,7 @@ impl Tokens {
                 property_row: 22.,
                 ruler: 24.,
                 layer_column: 266.,
+                clip_radius: 4.,
                 playhead: 1.5,
                 symbol_toolbar: 15.,
                 symbol_panel: 13.,

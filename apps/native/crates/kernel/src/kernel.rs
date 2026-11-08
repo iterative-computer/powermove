@@ -181,6 +181,16 @@ impl Kernel {
 
     /// Opens a project under `id` (the library id, or any unique id).
     pub fn open(&mut self, id: &str, source: OpenSource) -> Result<OpenInfo, KernelFailure> {
+        self.open_known(id, source, None)
+    }
+    /// [`Kernel::open`] given the canonical hash of `source`'s document,
+    /// which a large project should not pay for twice.
+    pub(crate) fn open_known(
+        &mut self,
+        id: &str,
+        source: OpenSource,
+        known_base: Option<String>,
+    ) -> Result<OpenInfo, KernelFailure> {
         if crate::library::parse_key(&format!("project.{id}")).is_none() {
             return Err(KernelFailure::Storage("Invalid project id".into()));
         }
@@ -188,6 +198,11 @@ impl Kernel {
             return Err(KernelFailure::AlreadyOpen(id.to_owned()));
         }
         let mut supersedes = Vec::new();
+        // The opened state is exactly its file or slot (not recovered work).
+        let mut saved = matches!(
+            source,
+            OpenSource::File(_) | OpenSource::Library(_) | OpenSource::LibraryWithFile { .. }
+        );
         let mut workspace = Value::Null;
         let mut history_error = None;
         let associated_file = match &source {
@@ -257,11 +272,17 @@ impl Kernel {
         if let Some(file) = associated_file {
             store.inherit_file(file);
         }
-        let base_hash = store
-            .current()
-            .root()
-            .map(pm_model::hash::canonical_hash)
-            .unwrap_or_default();
+        // An upgraded or history-rejected open differs from what its base
+        // holds; its first checkpoint is what recovery replays from.
+        saved &= supersedes.is_empty() && history_error.is_none() && !store.upgraded_on_open();
+        let base_hash = match known_base.filter(|_| !store.upgraded_on_open()) {
+            Some(hash) => hash,
+            None => store
+                .current()
+                .root()
+                .map(pm_model::hash::canonical_hash)
+                .unwrap_or_default(),
+        };
         if store
             .root()
             .is_some_and(|root| root.get(crate::media_versions::FIELD).is_some())
@@ -273,6 +294,13 @@ impl Kernel {
             let archive = crate::media_archive::Archive::open(profile)
                 .map_err(|e| KernelFailure::Storage(e.to_string()))?;
             store.hydrate_originals(&archive);
+        }
+        if let Some(profile) = self
+            .library
+            .as_ref()
+            .and_then(|writer| writer.store().dir().parent())
+        {
+            store.hydrate_library_media(&profile.join(crate::library_media::DIR));
         }
         let mut project = Project::new(store);
         project.set_workspace(workspace.clone());
@@ -287,7 +315,7 @@ impl Kernel {
                     workspace,
                 };
                 Some(
-                    Journal::create(durability, &dir, id, &base_hash, initial, supersedes)
+                    Journal::create(durability, &dir, id, &base_hash, initial, supersedes, saved)
                         .map_err(|e| KernelFailure::Journal(e.to_string()))?,
                 )
             }
@@ -379,6 +407,22 @@ impl Kernel {
         }
         match self.project_dir(id) {
             Some(dir) => journal::recover(&dir, current_base, base_document),
+            None => Recovery::Nothing,
+        }
+    }
+
+    /// [`Kernel::recover`] with the base's history and workspace.
+    pub fn recover_from(
+        &self,
+        id: &str,
+        current_base: Option<&str>,
+        base: Option<journal::Base>,
+    ) -> Recovery {
+        if let Some(d) = &self.durability {
+            d.wait_idle();
+        }
+        match self.project_dir(id) {
+            Some(dir) => journal::recover_from(&dir, current_base, base),
             None => Recovery::Nothing,
         }
     }
@@ -596,7 +640,8 @@ impl Kernel {
             {
                 old.push(j.dir().to_path_buf());
             }
-            let j = Journal::create(d, &dir, id, &hash, state, old)
+            // Called after the save is durable: the base holds this state.
+            let j = Journal::create(d, &dir, id, &hash, state, old, true)
                 .map_err(|e| KernelFailure::Journal(e.to_string()))?;
             slot.journal = Some(j);
         }

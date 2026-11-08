@@ -442,6 +442,9 @@ export type ShimOptions = {
   maxBatchOperations?: number;
   maxBatchBytes?: number;
   maxNodes?: number;
+  /** The value the page gets for an attribute; null keeps it realm-only
+   * (a realm `blob:` image URL the page receives as bytes instead). */
+  pageAttribute?: (node: N, name: string, value: string) => string | null;
 };
 
 export class RemoteDOM {
@@ -701,8 +704,11 @@ export class RemoteDOM {
     }
     if (node.nodeType === 1) {
       const attrs = new Map<string, { value: string; namespace: string | null }>();
-      for (const attr of node.attributes)
-        attrs.set(attr.name, { value: attr.value, namespace: attr.namespaceURI ?? null });
+      const page = this.options.pageAttribute;
+      for (const attr of node.attributes) {
+        const value = page ? page(node, attr.name, attr.value) : attr.value;
+        if (value !== null) attrs.set(attr.name, { value, namespace: attr.namespaceURI ?? null });
+      }
       for (const [name, attr] of attrs)
         if (
           old.attributes.get(name)?.value !== attr.value ||

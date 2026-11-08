@@ -2,11 +2,18 @@
 //! probing, byte retention and the kernel's reply all wait on a worker.
 use crate::{platform, session::Controller};
 use gpui::Context;
-use pm_builtins::media_import::{ImportRequest, extensions};
+use pm_builtins::media_import::{ImportRequest, Outcome, extensions};
+use serde_json::json;
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
+
+/// An extension's `assets.import`: the realm promise to answer and the held file.
+pub(crate) struct ExtensionImport {
+    pub answer: u64,
+    pub file: u64,
+}
 
 impl Controller {
     /// File ▸ Import…, Project panel Import and Replace. `place` adds a layer
@@ -127,8 +134,136 @@ impl Controller {
     }
     /// Batches run in order: user order and project identity both depend on it.
     pub(crate) fn import(&mut self, request: ImportRequest, cx: &mut Context<Self>) {
-        self.imports.push_back(request);
+        self.imports.push_back((request, None));
         self.next_import(cx);
+    }
+    /// `assets.import` from an extension: the held file into the Project panel,
+    /// no layer, answering the realm with the new asset's id.
+    /// `assets.importUrl`: main's media download (public HTTPS, five
+    /// redirects, 512 MiB, type from the bytes) on a worker, then the import.
+    pub(crate) fn download_for_extension(
+        &mut self,
+        answer: u64,
+        url: String,
+        cx: &mut Context<Self>,
+    ) {
+        let download = cx.background_executor().spawn(async move {
+            let response = pm_compat_runner::net::download(&url, 512 << 20, 600)
+                .map_err(|e| format!("The download failed: {e}"))?;
+            if !(200..300).contains(&response.status) {
+                return Err(format!("The download returned {}", response.status));
+            }
+            let extension = pm_compat_runner::files::media_extension(&response.body)
+                .ok_or("The download isn't an image, video, audio or 3D file")?;
+            let name = pm_compat_runner::files::download_name(&url, extension);
+            pm_compat_runner::files::stage(&response.body, &name).map_err(|e| e.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let staged = download.await;
+            let _ = this.update(cx, |v, cx| match staged {
+                Ok(file) => v.import_for_extension(answer, file, None, cx),
+                Err(error) => {
+                    if let Some(host) = &v.extensions.host {
+                        host.answer(answer, json!({ "error": error }));
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+    pub(crate) fn import_for_extension(
+        &mut self,
+        answer: u64,
+        file: u64,
+        layer_definition: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = pm_compat_runner::files::path(file) else {
+            self.answer_import(
+                &ExtensionImport { answer, file },
+                Err("The file is no longer available"),
+            );
+            return;
+        };
+        if self.session.is_none() {
+            self.answer_import(
+                &ExtensionImport { answer, file },
+                Err("Open a project before importing media"),
+            );
+            return;
+        }
+        // As main's assets.import: 3D models too, and the layer definition kept.
+        let request = ImportRequest {
+            paths: vec![path],
+            models: true,
+            layer_definition,
+            ..Default::default()
+        };
+        self.imports
+            .push_back((request, Some(ExtensionImport { answer, file })));
+        self.next_import(cx);
+    }
+    fn answer_import(&self, import: &ExtensionImport, result: Result<&Outcome, &str>) {
+        let value = match result {
+            Ok(outcome) => match outcome.assets.first() {
+                Some(id) => json!({ "id": id }),
+                None => json!({ "error": outcome.summary() }),
+            },
+            Err(error) => json!({ "error": error }),
+        };
+        let file = import.file;
+        // Deleting a staged copy is disk work: never on the main thread.
+        std::thread::spawn(move || pm_compat_runner::files::release_staged(file));
+        if let Some(host) = &self.extensions.host {
+            host.answer(import.answer, value);
+        }
+    }
+    /// Abandons queued batches; an extension waiting on one hears why.
+    fn drop_imports(&mut self, reason: &str) {
+        for (_, extension) in std::mem::take(&mut self.imports) {
+            if let Some(extension) = extension {
+                self.answer_import(&extension, Err(reason));
+            }
+        }
+    }
+    /// `assets.pick`: the open panel, the chosen files held for the realm.
+    pub(crate) fn pick_for_extension(
+        &mut self,
+        answer: u64,
+        accept: &str,
+        multiple: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let extensions = pm_builtins::media_import::accept_extensions(accept);
+        let extensions: Vec<&str> = extensions.iter().map(String::as_str).collect();
+        let rx = platform::import_paths(&self.host.borrow().window, false, multiple, &extensions);
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let paths = rx.recv().await.unwrap_or_default();
+            // File facts come from disk (maybe a network volume): on a worker.
+            let files: Vec<_> = executor.spawn(async move { paths
+                .into_iter()
+                .filter_map(|path| {
+                    let meta = std::fs::metadata(&path).ok()?;
+                    let name = path.file_name()?.to_string_lossy().into_owned();
+                    let kind = pm_builtins::media_import::classify(&path).map(|(_, mime)| mime);
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_millis() as u64);
+                    let token = pm_compat_runner::files::hold_picked(path);
+                    Some(json!({"token":token.to_string(),"name":name,"type":kind.unwrap_or_default(),
+                        "size":meta.len(),"lastModified":modified}))
+                })
+                .collect::<Vec<_>>() }).await;
+            let _ = this.update(cx, |v, _| {
+                if let Some(host) = &v.extensions.host {
+                    host.answer(answer, files.into());
+                }
+            });
+        })
+        .detach();
     }
     fn next_import(&mut self, cx: &mut Context<Self>) {
         if self.importing.is_some() {
@@ -137,15 +272,18 @@ impl Controller {
         let (Some(published), Some(runtime)) =
             (self.published.clone(), self.builtins.runtime.clone())
         else {
-            self.imports.clear();
+            self.drop_imports("Open a project before importing media");
             return;
         };
-        let Some(request) = self.imports.pop_front() else {
+        let Some((request, extension)) = self.imports.pop_front() else {
             return;
         };
         // Close and quit wait for this fence, so an import never lands half way.
         let Some(operation) = self.mcp.try_operation() else {
-            self.imports.clear();
+            self.imports.push_front((request, extension));
+            self.drop_imports(
+                "A project operation is in progress. Try importing again when it finishes.",
+            );
             self.message =
                 "A project operation is in progress. Try importing again when it finishes.".into();
             cx.notify();
@@ -166,8 +304,16 @@ impl Controller {
             drop(operation);
             let _ = this.update(cx, |v, cx| {
                 v.importing = None;
+                if let Some(extension) = &extension {
+                    v.answer_import(extension, result.as_ref().map_err(String::as_str));
+                }
                 v.message = match result {
-                    Ok(outcome) => outcome.summary(),
+                    Ok(outcome) => {
+                        // Settings › Media › Create Proxies, once the
+                        // catalog resolves the new files.
+                        v.pro_media.after_import(outcome.assets.clone());
+                        outcome.summary()
+                    }
                     Err(error) => error,
                 };
                 v.refresh(cx);

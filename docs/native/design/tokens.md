@@ -126,6 +126,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.capsule_radius` | Toolbar capsule radius (height ÷ 2) | 17 | 17 | 17 | 17 |
 | `metrics.channel_strip` | Mixer channel strip width | 72 | 72 | 72 | 72 |
 | `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
+| `metrics.clip_radius` | Timeline clip bar corner radius | 4 | 4 | 4 | 4 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 6 | 6 | 6 | 6 |

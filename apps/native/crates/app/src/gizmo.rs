@@ -10,6 +10,14 @@ use pm_kernel::{
 use pm_model::Value;
 use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
 use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
+#[path = "marquee.rs"]
+mod marquee;
+#[path = "pen_tool.rs"]
+pub mod pen;
+#[path = "snap.rs"]
+mod snap;
+#[path = "text_edit.rs"]
+pub mod text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -19,6 +27,8 @@ pub enum Tool {
     Rotate,
     Anchor,
     Shape,
+    Pen,
+    Text,
     Other,
 }
 /// Viewer navigation the pointer asks for.
@@ -132,8 +142,21 @@ pub trait Host: 'static {
     fn overlay(&self, lines: Vec<OverlayLine>, cx: &mut App);
     fn navigate(&self, change: Navigate, cx: &mut App);
     /// The shared layer menu, on the selection the press made.
-    fn layer_menu(&self, window: &mut Window, cx: &mut App);
+    /// The right-click menu over `layer`, or over empty canvas.
+    fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
+    /// The Shape tool's variant.
+    fn shape_variant(&self, _: &App) -> String {
+        "rect".into()
+    }
+    /// Editing tools stop playback first.
+    fn pause(&self, _: &mut App) {}
+    /// A shell command (the tool returning to Select).
+    fn command(&self, _: &str, _: &mut App) {}
+    /// The native editor an on-canvas text session types into.
+    fn text_input(&self, _: &str, _: &mut Window, _: &mut App) -> Option<Rc<dyn text::TextInput>> {
+        None
+    }
 }
 /// One selected layer's pose at the current time, in composition pixels.
 #[derive(Clone, Debug)]
@@ -153,6 +176,9 @@ pub struct Pose {
     bounds: [f64; 4],
     /// A parametric shape resizes its content, not its scale.
     shape: Option<ShapeSize>,
+    /// A text layer's font size: the common box resizes type by it.
+    text_size: Option<f64>,
+    has_skew: bool,
     pub corners: [[f64; 2]; 4],
     /// Where the anchor lands in the composition.
     pub anchor: [f64; 2],
@@ -182,6 +208,8 @@ struct Drag {
     time: f64,
     /// A press on the selection that never moves is a click: it picks.
     click: Option<Press>,
+    /// What a move snaps to, once read off the main thread.
+    snaps: Option<Arc<Vec<[f64; 2]>>>,
 }
 #[derive(Clone, Copy)]
 struct Press {
@@ -192,8 +220,13 @@ struct Press {
 }
 enum Job {
     Begin(&'static str),
-    Step(Vec<Command>),
+    /// `true`: supersedes the previous step (absolute, from-start values).
+    Step(Vec<Command>, bool),
     Finish(bool),
+    /// A one-step edit outside any gesture, then the layer to select.
+    Transact(&'static str, Vec<Command>, Option<String>),
+    /// Select one layer, or nothing (not an edit).
+    Select(Option<String>),
 }
 pub struct GizmoSurface {
     kernel: KernelHandle,
@@ -216,6 +249,27 @@ pub struct GizmoSurface {
     refreshing: bool,
     /// A Shape tool drag: where it started and the box drawn so far.
     sketch: Option<Sketch>,
+    /// A Text tool press, until its release decides what it makes.
+    text_sketch: Option<text::TextSketch>,
+    /// The on-canvas text edit.
+    text: Option<text::TextSession>,
+    /// The Pen tool's view of the selected layer's paths.
+    pen: Option<pen::PenPose>,
+    pen_reading: u64,
+    /// The layer and open path new clicks extend.
+    pen_active: Option<(String, String)>,
+    /// A pen read has landed since the tool was chosen.
+    pen_ready: bool,
+    /// A press that came before the read, replayed when it lands.
+    pen_waiting: Option<(MouseDownEvent, [f64; 2], f64)>,
+    /// Path and vertex whose tangents show.
+    pen_selected: Option<(String, String)>,
+    pen_drag: Option<pen::PenDrag>,
+    pen_pointer: Option<[f64; 2]>,
+    /// A Select-tool drag from empty canvas.
+    marquee: Option<marquee::Marquee>,
+    /// Snapping guides of the move in progress, composition points.
+    guides: Vec<snap::Guide>,
 }
 struct Sketch {
     origin: Point<Pixels>,
@@ -327,7 +381,8 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
         let (Ok(world), Ok(local), Ok(Some(bounds))) = (
             q.world_matrix(None, id, time),
             q.local_matrix(None, id, time),
-            q.bounds(None, id, time),
+            // Text measures with the registry's fonts.
+            crate::text_host::query(p, |q| q.bounds(None, id, time)),
         ) else {
             continue;
         };
@@ -361,13 +416,30 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                 .and_then(|layer| layer.get("d"))
                 .and_then(|d| d.get("paths"))
                 .is_none_or(|paths| paths.to_value().as_array().is_none_or(|p| p.is_empty()));
+        // Static content reads as stored; animated content is evaluated.
+        let stored = |key: &str| {
+            let d = pm_kernel::model::find_layer(root, id)
+                .and_then(|at| pm_kernel::model::layer_at(root, &at))
+                .and_then(|layer| layer.get("d"))?
+                .to_value();
+            let v = d.get(key)?.clone();
+            let animated = v
+                .get("kf")
+                .and_then(Value::as_array)
+                .is_some_and(|k| !k.is_empty());
+            if animated {
+                return None;
+            }
+            v.as_f64().or_else(|| v.get("v").and_then(Value::as_f64))
+        };
+        let mut content = |key: &str| stored(key).or_else(|| number(&format!("c.{key}")));
         let shape = if parametric {
-            number("c.w")
-                .zip(number("c.h"))
+            content("w")
+                .zip(content("h"))
                 .map(|(width, height)| ShapeSize {
                     width,
                     height,
-                    stroke: number("c.stroke").unwrap_or(0.).max(0.),
+                    stroke: content("stroke").unwrap_or(0.).max(0.),
                 })
         } else {
             None
@@ -382,6 +454,12 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             to_parent,
             bounds: [bounds.x0, bounds.y0, bounds.x1, bounds.y1],
             shape,
+            text_size: if kind == "text" {
+                content("size")
+            } else {
+                None
+            },
+            has_skew: number("skew").is_some(),
             corners: [
                 transform(&world, [bounds.x0, bounds.y0]),
                 transform(&world, [bounds.x1, bounds.y0]),
@@ -423,6 +501,18 @@ impl GizmoSurface {
             cursor: CursorStyle::Arrow,
             refreshing: false,
             sketch: None,
+            text_sketch: None,
+            text: None,
+            pen: None,
+            pen_reading: 0,
+            pen_active: None,
+            pen_ready: false,
+            pen_waiting: None,
+            pen_selected: None,
+            pen_drag: None,
+            pen_pointer: None,
+            marquee: None,
+            guides: vec![],
         }
     }
     /// Selection, document or playhead moved. The Controller calls in during its
@@ -437,6 +527,8 @@ impl GizmoSurface {
             this.update(cx, |s, cx| {
                 s.refreshing = false;
                 s.reread(cx);
+                s.text_reread(cx);
+                s.pen_reread(cx);
             });
         });
     }
@@ -481,13 +573,24 @@ impl GizmoSurface {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
-        let poses: &[Pose] = if self.controls { &self.poses } else { &[] };
+        let editing = self.text_session().is_some();
+        let poses: &[Pose] = if self.controls && !editing {
+            &self.poses
+        } else {
+            &[]
+        };
         let mut lines = overlay(poses, frame, &self.tokens);
-        if let Some(shape) = self.sketch.as_ref().and_then(|s| s.shape) {
+        let drawn = self.sketch.as_ref().and_then(|s| s.shape);
+        if let Some(shape) = drawn.or(self.text_sketch.as_ref().and_then(|s| s.shape)) {
             let [w, h] = frame.size;
-            let c = shape.corners();
-            for i in 0..4 {
-                let (a, b) = (c[i], c[(i + 1) % 4]);
+            // The Ellipse variant previews its outline; the others their box.
+            let c = if drawn.is_some() && self.host.shape_variant(cx) == "ellipse" {
+                crate::shape_tool::ellipse_outline(shape, 32)
+            } else {
+                shape.corners().to_vec()
+            };
+            for i in 0..c.len() {
+                let (a, b) = (c[i], c[(i + 1) % c.len()]);
                 lines.push(OverlayLine {
                     ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
                     color: [1., 1., 1., 1.],
@@ -512,11 +615,20 @@ impl GizmoSurface {
             return;
         };
         let at = self.to_comp(position, frame);
-        let cursor = match self.host.tool(cx) {
+        let tool = self.host.tool(cx);
+        let in_text = !matches!(tool, Tool::Hand | Tool::Zoom)
+            && self
+                .text_session()
+                .is_some_and(|s| s.contains(at, frame.scale));
+        let cursor = match tool {
+            _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
-            Tool::Anchor | Tool::Zoom | Tool::Shape => CursorStyle::Crosshair,
+            Tool::Text => CursorStyle::IBeam,
+            Tool::Anchor | Tool::Zoom | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
             _ => match self.handle_at(at, frame.scale) {
-                Some(Hit::Handle(index)) => self.poses[0].cursor(index),
+                Some(Hit::Handle(index)) => self
+                    .handle_pose()
+                    .map_or(CursorStyle::Arrow, |p| p.cursor(index)),
                 _ => CursorStyle::Arrow,
             },
         };
@@ -529,10 +641,16 @@ impl GizmoSurface {
     fn transformable(&self) -> bool {
         !self.poses.is_empty() && self.poses.iter().all(|p| !p.locked)
     }
+    /// The box whose handles a press can take: the one layer's, or the
+    /// common box of an unlocked multiple selection.
+    fn handle_pose(&self) -> Option<Pose> {
+        match self.poses.as_slice() {
+            [pose] => Some(pose.clone()),
+            poses => group_pose(poses),
+        }
+    }
     fn handle_at(&self, at: [f64; 2], scale: f64) -> Option<Hit> {
-        let [pose] = self.poses.as_slice() else {
-            return None;
-        };
+        let pose = self.handle_pose()?;
         if pose.locked || !self.controls {
             return None;
         }
@@ -548,12 +666,23 @@ impl GizmoSurface {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| Hit::Handle(i))
     }
-    fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+    fn on_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
         let at = self.to_comp(event.position, frame);
         let time = self.host.time(cx);
+        let mut tool = self.host.tool(cx);
+        // An open text edit owns presses on its text; any other press commits
+        // it and then acts as a Select-tool click.
+        if self.text_session().is_some() && !matches!(tool, Tool::Hand | Tool::Zoom) {
+            if self.text_press(event, at, frame.scale) {
+                cx.notify();
+                return;
+            }
+            self.finish_text(false, cx);
+            tool = Tool::Select;
+        }
         let start = |hit, click| Drag {
             hit,
             origin: event.position,
@@ -561,6 +690,7 @@ impl GizmoSurface {
             poses: self.poses.clone(),
             time,
             click,
+            snaps: None,
         };
         let deep = event.modifiers.platform || event.modifiers.control;
         let press = Press {
@@ -569,8 +699,21 @@ impl GizmoSurface {
             deep,
             time,
         };
-        let drag = match self.host.tool(cx) {
+        let drag = match tool {
             Tool::Other => return,
+            Tool::Pen => {
+                self.pen_down(event, at, frame.scale, cx);
+                return;
+            }
+            Tool::Text => {
+                self.text_sketch = Some(text::TextSketch {
+                    origin: event.position,
+                    start: at,
+                    shift: event.modifiers.shift,
+                    shape: None,
+                });
+                return;
+            }
             Tool::Hand => {
                 self.panning = Some(event.position);
                 return;
@@ -603,6 +746,10 @@ impl GizmoSurface {
                 }
                 _ => None,
             },
+            Tool::Select if event.click_count == 2 => {
+                self.text_double_click(at, window, cx);
+                None
+            }
             Tool::Select => {
                 let inside_selection = self.poses.iter().any(|p| inside(&p.corners, at));
                 if let Some(hit) = self.handle_at(at, frame.scale) {
@@ -627,49 +774,59 @@ impl GizmoSurface {
             return;
         };
         let at = self.to_comp(event.position, frame);
+        cx.stop_propagation();
+        if self.text_context(at, frame.scale) {
+            return;
+        }
+        self.finish_text(false, cx);
         let press = Press {
             at,
             shift: false,
             deep: false,
             time: self.host.time(cx),
         };
-        cx.stop_propagation();
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
         let handle = window.window_handle();
         self.picks += 1;
         cx.spawn(async move |this, cx| {
-            let poses = cx
+            let picked = cx
                 .background_executor()
                 .spawn(async move {
                     let p = kernel.published(&project)?;
                     let options = pm_kernel::PickOptions {
                         include_locked: true,
                     };
-                    let hit = QueryMirror::new(&p)
-                        .queries()
-                        .pick(None, press.at[0], press.at[1], press.time, &options)
-                        .ok()?
-                        .layer_id?;
+                    let hit = crate::text_host::query(&p, |q| {
+                        q.pick(None, press.at[0], press.at[1], press.time, &options)
+                    })
+                    .ok()
+                    .and_then(|hit| hit.layer_id);
+                    // Empty canvas: the viewer's own menu, which only extensions fill.
+                    let Some(hit) = hit else {
+                        return Some((None, None));
+                    };
                     if !p.selection.layers().contains(&hit) {
-                        let ids = vec![hit];
+                        let ids = vec![hit.clone()];
                         let selection = SelectionCall::Layers { ids, add: false };
                         let request = Request::new(Caller::native(), selection);
                         kernel.call(&project, request).await?.ok()?;
                     }
                     let p = kernel.published(&project)?;
-                    read_at(&p, press.time)
+                    Some((Some(hit), read_at(&p, press.time)))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.picks -= 1;
-                let Some(poses) = poses else {
+                let Some((hit, poses)) = picked else {
                     return;
                 };
-                s.poses = Arc::new(poses);
-                s.draw(cx);
+                if let Some(poses) = poses {
+                    s.poses = Arc::new(poses);
+                    s.draw(cx);
+                }
                 let host = s.host.clone();
                 cx.defer(move |cx| {
-                    let _ = handle.update(cx, |_, window, cx| host.layer_menu(window, cx));
+                    let _ = handle.update(cx, |_, window, cx| host.layer_menu(hit, window, cx));
                 });
             });
         })
@@ -692,8 +849,10 @@ impl GizmoSurface {
                             selected.iter().filter(|s| *s != id).cloned().collect()
                         }
                         Some(id) => vec![id.clone()],
-                        None if press.shift => return None,
-                        None => vec![],
+                        // Empty canvas keeps the selection until the release
+                        // decides (a click clears it, a marquee replaces it,
+                        // Escape leaves it).
+                        None => return Some((read_at(&p, press.time)?, None, true)),
                     };
                     let add =
                         press.shift && target.is_some() && !selected.contains(target.as_ref()?);
@@ -701,17 +860,36 @@ impl GizmoSurface {
                     let request = Request::new(Caller::native(), selection);
                     kernel.call(&project, request).await?.ok()?;
                     let p = kernel.published(&project)?;
-                    Some((read_at(&p, press.time)?, target.filter(|_| !press.shift)))
+                    let empty = target.is_none();
+                    Some((
+                        read_at(&p, press.time)?,
+                        target.filter(|_| !press.shift),
+                        empty,
+                    ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.picks -= 1;
                 let held = s.picking.take();
-                let Some((poses, target)) = poses else {
+                let Some((poses, target, empty)) = poses else {
                     return;
                 };
                 s.poses = Arc::new(poses);
                 s.draw(cx);
+                // A press on empty canvas that is still held draws a marquee;
+                // one already released was a click that clears.
+                if empty && held.is_none() && !press.shift {
+                    s.queue.push_back(Job::Select(None));
+                    s.pump(cx);
+                }
+                if let Some(origin) = held.filter(|_| empty) {
+                    s.marquee = Some(marquee::Marquee {
+                        origin,
+                        start: press.at,
+                        shift: press.shift,
+                        shape: None,
+                    });
+                }
                 if let Some(origin) = held.filter(|_| target.is_some() && s.transformable()) {
                     s.drag = Some(Drag {
                         hit: Hit::Body,
@@ -720,6 +898,7 @@ impl GizmoSurface {
                         poses: s.poses.clone(),
                         time: press.time,
                         click: None,
+                        snaps: None,
                     });
                 }
             });
@@ -753,9 +932,22 @@ impl GizmoSurface {
             self.host.navigate(Navigate::Pan(event.position - last), cx);
             return;
         }
-        if self.sketch.is_some() {
+        if self.sketch.is_some() || self.text_sketch.is_some() {
             self.sketch_move(event, cx);
             return;
+        }
+        if self.marquee_move(event, cx) {
+            return;
+        }
+        if let Some(frame) = self.host.frame(self.bounds, cx) {
+            let at = self.to_comp(event.position, frame);
+            if self.text_drag(at) {
+                cx.notify();
+                return;
+            }
+            if self.pen_move(event, at, cx) {
+                return;
+            }
         }
         if self.drag.is_none() {
             if self.bounds.contains(&event.position) {
@@ -778,6 +970,30 @@ impl GizmoSurface {
                 return;
             }
             drag.active = true;
+            if drag.hit == Hit::Body {
+                let ids: Vec<String> = drag.poses.iter().map(|p| p.id.clone()).collect();
+                let (kernel, project, time) =
+                    (self.kernel.clone(), self.project.clone(), drag.time);
+                let started = drag.origin;
+                self.picks += 1;
+                cx.spawn(async move |this, cx| {
+                    let points = cx
+                        .background_executor()
+                        .spawn(
+                            async move { snap::points(&*kernel.published(&project)?, &ids, time) },
+                        )
+                        .await;
+                    let _ = this.update(cx, |s, _| {
+                        s.picks -= 1;
+                        if let (Some(drag), Some(points)) = (s.drag.as_mut(), points)
+                            && drag.origin == started
+                        {
+                            drag.snaps = Some(Arc::new(points));
+                        }
+                    });
+                })
+                .detach();
+            }
             self.queue.push_back(Job::Begin(match drag.hit {
                 Hit::Body => "Move",
                 Hit::Handle(_) if drag.poses.iter().any(|p| p.shape.is_some()) => "Resize Shape",
@@ -791,13 +1007,57 @@ impl GizmoSurface {
             alt: event.modifiers.alt,
             snap: event.modifiers.platform || event.modifiers.control,
         };
-        let commands = commands(drag, origin, at, mods);
-        self.queue.push_back(Job::Step(commands));
+        // Moves align with the composition and other layers; Command
+        // bypasses, and a Shift-locked axis stays put.
+        let mut offset = [0., 0.];
+        let mut guides = vec![];
+        if drag.hit == Hit::Body
+            && !mods.snap
+            && let Some(points) = drag.snaps.clone()
+        {
+            let delta = locked_delta(origin, at, mods.shift);
+            let axes = [!mods.shift || delta[0] != 0., !mods.shift || delta[1] != 0.];
+            let moving = snap::box_points(&drag.poses, delta);
+            let result = snap::snap(
+                &moving,
+                &points,
+                snap::DISTANCE / frame.scale.max(0.02),
+                axes,
+            );
+            offset = result.0;
+            guides = result.1;
+        }
+        let commands = commands(drag, origin, at, mods, offset);
+        // The alignment feedback marks catching something new, not each
+        // step that stays caught.
+        let caught = |g: &[snap::Guide]| g.iter().map(|(_, to)| *to).collect::<Vec<_>>();
+        if caught(&guides) != caught(&self.guides) && !guides.is_empty() {
+            snap::haptic();
+        }
+        if guides != self.guides {
+            self.guides = guides;
+            cx.notify();
+        }
+        self.queue.push_back(Job::Step(commands, true));
         self.pump(cx);
     }
-    fn on_up(&mut self, commit: bool, cx: &mut Context<Self>) {
+    fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         self.panning = None;
+        if !self.guides.is_empty() {
+            self.guides.clear();
+            cx.notify();
+        }
+        if self.text_release() || self.pen_up(commit, cx) || self.marquee_up(commit, cx) {
+            return;
+        }
+        if let Some(sketch) = self.text_sketch.take() {
+            self.draw(cx);
+            if let (true, Some(window)) = (commit, window) {
+                self.text_tool_release(sketch, window, cx);
+            }
+            return;
+        }
         if let Some(sketch) = self.sketch.take() {
             if let Some(shape) = sketch.shape.filter(|_| commit) {
                 self.create_shape(shape, cx);
@@ -816,10 +1076,16 @@ impl GizmoSurface {
         }
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.drag.is_none() && self.sketch.is_none() {
+        if self.finish_text(false, cx) {
+            return true;
+        }
+        if self.pen_up(false, cx) || self.marquee_up(false, cx) {
+            return true;
+        }
+        if self.drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
             return false;
         }
-        self.on_up(false, cx);
+        self.on_up(false, None, cx);
         true
     }
     /// The box follows the pointer once it passes the drag threshold;
@@ -830,19 +1096,21 @@ impl GizmoSurface {
         };
         let at = self.to_comp(event.position, frame);
         let threshold = self.tokens.metrics.drag_threshold;
-        let Some(sketch) = self.sketch.as_mut() else {
+        let m = event.modifiers;
+        let (origin, start, shape, square) = if let Some(s) = self.sketch.as_mut() {
+            (s.origin, s.start, &mut s.shape, m.shift)
+        } else if let Some(s) = self.text_sketch.as_mut() {
+            // A text box keeps its proportions free.
+            (s.origin, s.start, &mut s.shape, false)
+        } else {
             return;
         };
-        let moved = event.position - sketch.origin;
-        if sketch.shape.is_none() && f32::from(moved.x).hypot(f32::from(moved.y)) < threshold {
+        let moved = event.position - origin;
+        if shape.is_none() && f32::from(moved.x).hypot(f32::from(moved.y)) < threshold {
             return;
         }
-        let m = event.modifiers;
-        sketch.shape = Some(crate::shape_tool::ShapeBox::from_drag(
-            sketch.start,
-            at,
-            m.alt,
-            m.shift,
+        *shape = Some(crate::shape_tool::ShapeBox::from_drag(
+            start, at, m.alt, square,
         ));
         self.draw(cx);
     }
@@ -854,12 +1122,14 @@ impl GizmoSurface {
             self.project.clone(),
             self.host.time(cx),
         );
+        let variant = self.host.shape_variant(cx);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let published = kernel.published(&project).ok_or("No open project")?;
-                    let Some(plan) = crate::shape_tool::plan(&published, shape, time) else {
+                    let Some(plan) = crate::shape_tool::plan(&published, shape, time, &variant)
+                    else {
                         return Ok(());
                     };
                     let call = Call::Transact {
@@ -909,7 +1179,10 @@ impl GizmoSurface {
         let Some(mut job) = self.queue.pop_front() else {
             return;
         };
-        while matches!(job, Job::Step(_)) && matches!(self.queue.front(), Some(Job::Step(_))) {
+        // Superseding steps coalesce; a step that accumulates never drops.
+        while matches!(job, Job::Step(_, true))
+            && matches!(self.queue.front(), Some(Job::Step(_, true)))
+        {
             job = self.queue.pop_front().unwrap();
         }
         self.busy = true;
@@ -919,14 +1192,47 @@ impl GizmoSurface {
                 .background_executor()
                 .spawn(async move {
                     let call: Call = match (job, gesture) {
+                        (Job::Select(id), _) => {
+                            let ids = id.into_iter().collect();
+                            let select = SelectionCall::Layers { ids, add: false };
+                            return kernel
+                                .call(&project, Request::new(Caller::native(), select))
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| format!("{e:?}"));
+                        }
+                        (Job::Transact(label, commands, select), _) => {
+                            let call = Call::Transact {
+                                label: Some(label.into()),
+                                body: WriteBody::Commands(commands),
+                                expected_revision: None,
+                            };
+                            let ack = kernel
+                                .call(&project, Request::new(Caller::native(), call))
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| format!("{e:?}"))?;
+                            if let (Some(id), false) =
+                                (select, matches!(ack.reply, Reply::Throw(_)))
+                            {
+                                let select = SelectionCall::Layers {
+                                    ids: vec![id],
+                                    add: false,
+                                };
+                                kernel
+                                    .call(&project, Request::new(Caller::native(), select))
+                                    .await;
+                            }
+                            return Ok(ack);
+                        }
                         (Job::Begin(label), _) => GestureCall::Begin {
                             label: label.into(),
                         }
                         .into(),
-                        (Job::Step(commands), Some(gesture)) => GestureCall::Step {
+                        (Job::Step(commands, replace), Some(gesture)) => GestureCall::Step {
                             gesture,
                             body: WriteBody::Commands(commands),
-                            replace: true,
+                            replace,
                         }
                         .into(),
                         (Job::Finish(true), Some(gesture)) => {
@@ -954,13 +1260,35 @@ impl GizmoSurface {
                     },
                     Err(error) => s.host.report(error, cx),
                 }
-                if s.queue.is_empty() && s.drag.is_none() {
+                if s.queue.is_empty() && s.drag.is_none() && s.pen_drag.is_none() {
                     s.gesture = None;
                 }
                 s.pump(cx);
             });
         })
         .detach();
+    }
+    /// The common box's rotate handle and centre.
+    #[cfg(test)]
+    pub fn group_points(&self) -> Option<([f64; 2], [f64; 2], [f64; 2])> {
+        let g = group_pose(&self.poses)?;
+        Some((g.rotate_handle(self.stem(1.)), g.anchor, g.handle(4)))
+    }
+    #[cfg(test)]
+    pub fn pen_paths(&self) -> Vec<usize> {
+        self.pen.as_ref().map_or(vec![], |p| {
+            p.targets.iter().map(|t| t.vertices.len()).collect()
+        })
+    }
+    #[cfg(test)]
+    pub fn pen_vertices(&self) -> usize {
+        self.pen
+            .as_ref()
+            .map_or(0, |p| p.targets.iter().map(|t| t.vertices.len()).sum())
+    }
+    #[cfg(test)]
+    pub fn text_open(&self) -> Option<&text::TextSession> {
+        self.text.as_ref()
     }
     #[cfg(test)]
     pub fn idle(&self) -> bool {
@@ -979,6 +1307,246 @@ impl GizmoSurface {
             pose.rotate_handle(self.stem(1.)),
         ))
     }
+}
+/// The common box of an unlocked multiple selection, as a pose whose
+/// handles the shared scale and rotate drags use.
+fn group_pose(poses: &[Pose]) -> Option<Pose> {
+    if poses.len() < 2 || poses.iter().any(|p| p.locked) {
+        return None;
+    }
+    let points = poses.iter().flat_map(|p| p.corners);
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for [x, y] in points {
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+    }
+    let centre = [(x0 + x1) / 2., (y0 + y1) / 2.];
+    Some(Pose {
+        id: String::new(),
+        locked: false,
+        root: false,
+        keeps_aspect: false,
+        world: [1., 0., 0., 1., 0., 0.],
+        linear: [1., 0., 0., 1.],
+        to_parent: [1., 0., 0., 1.],
+        bounds: [x0, y0, x1, y1],
+        shape: None,
+        text_size: None,
+        has_skew: false,
+        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        anchor: centre,
+        local_anchor: centre,
+        position: centre,
+        scale: [100., 100.],
+        rotation: 0.,
+    })
+}
+/// A layer's local rotation, scale (as factors) and skew (degrees).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Decomposed {
+    pub rotation: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
+    pub skew: f64,
+}
+fn compose_linear(t: Decomposed) -> [f64; 4] {
+    let (sin, cos) = t.rotation.to_radians().sin_cos();
+    let skew = t.skew.to_radians().tan();
+    [
+        cos * t.scale_x,
+        sin * t.scale_x,
+        t.scale_y * (cos * skew - sin),
+        t.scale_y * (sin * skew + cos),
+    ]
+}
+/// The local rotation, scale and skew giving `desired` under `parent`
+/// (viewer.ts `solveLocalTransformForWorldLinear`); a mirrored layer keeps
+/// its mirror and the rotation stays near the one it had.
+pub(crate) fn solve_local(
+    parent: Option<[f64; 4]>,
+    desired: [f64; 4],
+    preferred_scale_x: f64,
+    preferred_rotation: f64,
+) -> Option<Decomposed> {
+    let local = match parent {
+        Some(p) => {
+            let inverse = inverse_linear(p)?;
+            let column = |x: f64, y: f64| apply(inverse, [x, y]);
+            let (a, b) = (
+                column(desired[0], desired[1]),
+                column(desired[2], desired[3]),
+            );
+            [a[0], a[1], b[0], b[1]]
+        }
+        None => desired,
+    };
+    let scale_x = local[0].hypot(local[1]);
+    if !scale_x.is_finite() || scale_x < 1e-8 {
+        return None;
+    }
+    let (cos, sin) = (local[0] / scale_x, local[1] / scale_x);
+    let skew_scale_y = cos * local[2] + sin * local[3];
+    let scale_y = -sin * local[2] + cos * local[3];
+    if !scale_y.is_finite() || scale_y.abs() < 1e-8 {
+        return None;
+    }
+    let mut skew = skew_scale_y.atan2(scale_y);
+    if skew > std::f64::consts::FRAC_PI_2 {
+        skew -= std::f64::consts::PI;
+    } else if skew < -std::f64::consts::FRAC_PI_2 {
+        skew += std::f64::consts::PI;
+    }
+    let mut rotation = local[1].atan2(local[0]).to_degrees();
+    let (mut sx, mut sy) = (scale_x, scale_y);
+    if preferred_scale_x < 0. {
+        rotation += 180.;
+        sx = -sx;
+        sy = -sy;
+    }
+    rotation += ((preferred_rotation - rotation) / 360.).round() * 360.;
+    let out = Decomposed {
+        rotation,
+        scale_x: sx,
+        scale_y: sy,
+        skew: skew.to_degrees(),
+    };
+    let check = compose_linear(out);
+    let magnitude = local.iter().fold(1f64, |m, v| m.max(v.abs()));
+    check
+        .iter()
+        .zip(local)
+        .all(|(c, l)| (c - l).abs() <= magnitude * 1e-7)
+        .then_some(out)
+}
+/// Resize or rotate the selected root layers about the common box
+/// (viewer.ts common transform). Resizing is proportional: type by its size,
+/// parametric shapes by their size, others by a signed scale (a mirrored
+/// layer stays mirrored), and each anchor follows the pivot (the opposite
+/// handle, the centre with Option). Rotating carries each anchor about the
+/// box centre and solves the layer's own rotation, scale and skew for the
+/// turned world matrix under its parent (Shift: 15° steps, Command: 45°).
+fn group_commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Vec<Command> {
+    let Some(group) = group_pose(&drag.poses) else {
+        return vec![];
+    };
+    let t = drag.time;
+    let centre = group.anchor;
+    let mut out = vec![];
+    let carry = |pose: &Pose, moved: [f64; 2], out: &mut Vec<Command>| {
+        let d = apply(
+            pose.to_parent,
+            [moved[0] - pose.anchor[0], moved[1] - pose.anchor[1]],
+        );
+        out.push(set(
+            &pose.id,
+            "position.x",
+            round(pose.position[0] + d[0], 3),
+            t,
+        ));
+        out.push(set(
+            &pose.id,
+            "position.y",
+            round(pose.position[1] + d[1], 3),
+            t,
+        ));
+    };
+    let roots = drag.poses.iter().filter(|p| p.root && !p.locked);
+    match drag.hit {
+        Hit::Handle(index) => {
+            let (u, v) = HANDLES[index];
+            let (active_x, active_y) = (u != 0.5, v != 0.5);
+            let handle = group.handle(index);
+            let pivot = if mods.alt {
+                centre
+            } else {
+                group.local(
+                    if active_x { 1. - u } else { 0.5 },
+                    if active_y { 1. - v } else { 0.5 },
+                )
+            };
+            let grabbed = [
+                at[0] - (origin[0] - handle[0]),
+                at[1] - (origin[1] - handle[1]),
+            ];
+            let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
+            let f = if active_x && active_y {
+                ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                    / (dx * dx + dy * dy).max(1e-9)
+            } else if active_x {
+                (grabbed[0] - pivot[0]) / dx.abs().max(1e-9).copysign(dx)
+            } else {
+                (grabbed[1] - pivot[1]) / dy.abs().max(1e-9).copysign(dy)
+            };
+            // calculateResize's floor: the box never turns inside out.
+            let f = f.max(0.01);
+            for pose in roots {
+                if let Some(size) = pose.text_size {
+                    out.push(set(&pose.id, "c.size", round((size * f).max(4.), 2), t));
+                } else if let Some(shape) = pose.shape {
+                    let side = |v: f64| round(((v + shape.stroke) * f - shape.stroke).max(1.), 3);
+                    out.push(set(&pose.id, "c.w", side(shape.width), t));
+                    out.push(set(&pose.id, "c.h", side(shape.height), t));
+                } else {
+                    out.push(set(&pose.id, "scale.x", round(pose.scale[0] * f, 3), t));
+                    out.push(set(&pose.id, "scale.y", round(pose.scale[1] * f, 3), t));
+                }
+                let moved = [
+                    pivot[0] + (pose.anchor[0] - pivot[0]) * f,
+                    pivot[1] + (pose.anchor[1] - pivot[1]) * f,
+                ];
+                carry(pose, moved, &mut out);
+            }
+        }
+        Hit::Rotate => {
+            let angle = |p: [f64; 2]| (p[1] - centre[1]).atan2(p[0] - centre[0]);
+            let mut turn =
+                ((angle(at) - angle(origin)).to_degrees() + 180.).rem_euclid(360.) - 180.;
+            if mods.snap {
+                turn = (turn / 45.).round() * 45.;
+            } else if mods.shift {
+                turn = (turn / 15.).round() * 15.;
+            }
+            let (s, c) = turn.to_radians().sin_cos();
+            for pose in roots {
+                let r = [pose.anchor[0] - centre[0], pose.anchor[1] - centre[1]];
+                let moved = [
+                    centre[0] + c * r[0] - s * r[1],
+                    centre[1] + s * r[0] + c * r[1],
+                ];
+                carry(pose, moved, &mut out);
+                let parent = inverse_linear(pose.to_parent).filter(|p| {
+                    p.iter()
+                        .zip([1., 0., 0., 1.])
+                        .any(|(a, b)| (a - b).abs() > 1e-9)
+                });
+                let Some(parent) = parent else {
+                    // No parent: turning the world turns only the rotation.
+                    out.push(set(&pose.id, "rotation", round(pose.rotation + turn, 3), t));
+                    continue;
+                };
+                let w = [pose.world[0], pose.world[1], pose.world[2], pose.world[3]];
+                let desired = [
+                    c * w[0] - s * w[1],
+                    s * w[0] + c * w[1],
+                    c * w[2] - s * w[3],
+                    s * w[2] + c * w[3],
+                ];
+                let Some(local) =
+                    solve_local(Some(parent), desired, pose.scale[0] / 100., pose.rotation)
+                else {
+                    continue;
+                };
+                out.push(set(&pose.id, "rotation", round(local.rotation, 4), t));
+                out.push(set(&pose.id, "scale.x", round(local.scale_x * 100., 4), t));
+                out.push(set(&pose.id, "scale.y", round(local.scale_y * 100., 4), t));
+                // A layer saved without a skew channel takes none it doesn't need.
+                if pose.has_skew || local.skew.abs() > 1e-6 {
+                    out.push(set(&pose.id, "skew", round(local.skew, 4), t));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
 }
 fn inside(corners: &[[f64; 2]; 4], p: [f64; 2]) -> bool {
     let mut sign = 0.;
@@ -1009,12 +1577,30 @@ struct Mods {
     /// Command or Control.
     snap: bool,
 }
-fn commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Vec<Command> {
+/// Shift locks a move's dominant axis.
+fn locked_delta(origin: [f64; 2], at: [f64; 2], shift: bool) -> [f64; 2] {
     let mut delta = [at[0] - origin[0], at[1] - origin[1]];
-    if mods.shift && matches!(drag.hit, Hit::Body) {
-        // Shift locks the dominant axis.
+    if shift {
         let axis = usize::from(delta[0].abs() > delta[1].abs());
         delta[axis] = 0.;
+    }
+    delta
+}
+fn commands(
+    drag: &Drag,
+    origin: [f64; 2],
+    at: [f64; 2],
+    mods: Mods,
+    snap: [f64; 2],
+) -> Vec<Command> {
+    let delta = if matches!(drag.hit, Hit::Body) {
+        let d = locked_delta(origin, at, mods.shift);
+        [d[0] + snap[0], d[1] + snap[1]]
+    } else {
+        [at[0] - origin[0], at[1] - origin[1]]
+    };
+    if drag.poses.len() > 1 && matches!(drag.hit, Hit::Handle(_) | Hit::Rotate) {
+        return group_commands(drag, origin, at, mods);
     }
     let t = drag.time;
     let mut out = vec![];
@@ -1230,16 +1816,16 @@ fn resize_shape(
 /// for their members; Command reaches the leaf (viewer.ts resolvePickTarget).
 fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>> {
     let root = p.snapshot.root()?;
-    let hit = QueryMirror::new(p)
-        .queries()
-        .pick(
+    let hit = crate::text_host::query(p, |q| {
+        q.pick(
             None,
             press.at[0],
             press.at[1],
             press.time,
             &Default::default(),
         )
-        .ok()?;
+    })
+    .ok()?;
     let Some(id) = hit.layer_id else {
         return Some(None);
     };
@@ -1300,6 +1886,17 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
             line(pose.corners[i], pose.corners[(i + 1) % 4]);
         }
     }
+    let common = (poses.len() > 1).then(|| group_pose(poses)).flatten();
+    if let Some(group) = &common {
+        for i in 0..4 {
+            line(group.corners[i], group.corners[(i + 1) % 4]);
+        }
+        for i in 0..8 {
+            square(group.handle(i), &mut line);
+        }
+        line(group.handle(1), group.rotate_handle(stem));
+        square(group.rotate_handle(stem), &mut line);
+    }
     if let [pose] = poses
         && !pose.locked
     {
@@ -1323,7 +1920,7 @@ impl Render for GizmoSurface {
             .cursor(self.cursor)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
+                cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),
             )
             .on_mouse_down(
                 MouseButton::Right,
@@ -1347,7 +1944,15 @@ impl Render for GizmoSurface {
                             let _ = this.update(cx, |s, _| s.bounds = bounds);
                         }
                     },
-                    move |_, _, window, _| {
+                    move |_, _, window, cx| {
+                        let _ = this.update(cx, |s, cx| {
+                            if let Some(frame) = s.host.frame(s.bounds, cx) {
+                                s.pen_paint(frame, window);
+                                s.marquee_paint(frame, window);
+                                s.guides_paint(frame, window);
+                                s.text_paint(frame, window);
+                            }
+                        });
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -1355,9 +1960,10 @@ impl Render for GizmoSurface {
                             }
                         });
                         let released = this.clone();
-                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
-                                let _ = released.update(cx, |s, cx| s.on_up(true, cx));
+                                let _ =
+                                    released.update(cx, |s, cx| s.on_up(true, Some(window), cx));
                             }
                         });
                     },

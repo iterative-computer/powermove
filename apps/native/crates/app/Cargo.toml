@@ -22,7 +22,7 @@ pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features
 pm-render = { path = "../../../../engine/crates/pm-render" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
-gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["frame-capture"] }
 metal = "0.33"
 foreign-types = "0.5"
 objc2 = "0.6"
@@ -31,7 +31,10 @@ objc2-foundation = "0.3"
 objc2-quartz-core = "0.3"
 block2 = "0.6"
 async-channel = "2"
+libc = "0.2"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+blake3 = "1"
 tempfile = "3"
 sha2 = "0.10"
 base64 = "0.22"
@@ -47,7 +50,8 @@ pm-surface = { path = "../surface" }
 pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
 raw-window-handle = "0.6"
 pm-promedia = { path = "../promedia" }
-gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos" }
+pm-proxy = { path = "../../../../engine/crates/pm-proxy" }
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", features = ["frame-capture"] }
 
 pm-panel-media = { path = "../panel-media" }
 pm-first-launch = { path = "../first-launch" }
@@ -68,10 +72,12 @@ package = "gpui-ce"
 path = "../../vendor/gpui-ce/crates/gpui"
 default-features = false
 features = ["test-support"]
+# The disk reserve override exists only in test builds (pm-proxy test-hooks).
+[dev-dependencies.pm-proxy]
+path = "../../../../engine/crates/pm-proxy"
+features = ["test-hooks"]
 [dev-dependencies.pm-native-migrate]
 path = "../migrate"
-[dev-dependencies.blake3]
-version = "1"
 [dev-dependencies.fs2]
 version = "0.4"
 [dev-dependencies.pm-export]

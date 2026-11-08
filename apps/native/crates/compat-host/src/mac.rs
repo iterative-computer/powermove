@@ -200,6 +200,23 @@ define_class!(
     #[ivars=Rc<Shared>]
     struct Bridge;
     unsafe impl NSObjectProtocol for Bridge {}
+    impl Bridge {
+        /// A ui.modal sheet button: click its twin in the realm's DOM, so the
+        /// action runs where the extension defined it.
+        #[unsafe(method(modalAction:))]
+        fn modal_action(&self, sender: &NSButton) {
+            let Some(window) = sender.window() else { return };
+            let children = self.ivars().popouts.borrow();
+            let Some((_, web)) = children.iter().find(|(w, _)| std::ptr::eq(&**w, &*window)) else { return };
+            let tag = sender.tag();
+            let script = if tag >= 0 {
+                format!("document.querySelector('[data-pm-modal-action=\"{tag}\"]')?.click()")
+            } else {
+                "document.querySelector('[data-pm-modal-dismiss]')?.click()".to_owned()
+            };
+            unsafe { web.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None) };
+        }
+    }
     unsafe impl WKURLSchemeHandler for Bridge {
         #[unsafe(method(webView:startURLSchemeTask:))]
         unsafe fn start(&self,_web:&WKWebView,task:&ProtocolObject<dyn WKURLSchemeTask>){
@@ -209,7 +226,7 @@ define_class!(
             match route {
                 Ok((route,Some(q))) if route=="canvas"=>{
                     let resource = q.parse::<u64>().ok().and_then(|id|s.canvases.borrow().get(id).ok());
-                    match resource {Some(bytes)=>reply_bytes(task,&bytes,"image/png"),None=>fail_task(task)}
+                    match resource {Some((bytes,mime))=>reply_bytes(task,&bytes,&mime),None=>fail_task(task)}
                 },
                 Ok((route,Some(q))) if route=="call"=>{
                     let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||s.handle(&q))).unwrap_or(Err(Error::InvalidRequest));
@@ -243,7 +260,8 @@ define_class!(
             let child=self.ivars().popouts.borrow().iter().any(|(_,v)|std::ptr::eq(&**v,web));
             // Only host-created about:blank loads; every external/file/data URL,
             // frame navigation and download is denied. Popouts are trusted only.
-            let allow=url=="about:blank" && (!self.ivars().ready.get() || child || (!self.ivars().trust.is_store() && unsafe{action.targetFrame()}.is_none()));
+            // A ui.modal sheet's child loads about:blank with its frame in the fragment.
+            let allow=(url=="about:blank" || (child && url.starts_with("about:blank#pm-modal="))) && (!self.ivars().ready.get() || child || (!self.ivars().trust.is_store() && unsafe{action.targetFrame()}.is_none()));
             done.call((if allow{WKNavigationActionPolicy::Allow}else{WKNavigationActionPolicy::Cancel},));
         }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
@@ -260,7 +278,8 @@ define_class!(
         #[unsafe(method(webViewDidClose:))]
         unsafe fn child_closed(&self,web:&WKWebView){
             let mut children=self.ivars().popouts.borrow_mut();
-            if let Some(i)=children.iter().position(|(_,v)|std::ptr::eq(&**v,web)) {let (w,v)=children.remove(i);unsafe{v.setUIDelegate(None);v.setNavigationDelegate(None)};if let Some(p)=w.parentWindow(){p.removeChildWindow(&w)}w.close();}
+            if let Some(i)=children.iter().position(|(_,v)|std::ptr::eq(&**v,web)) {let (w,v)=children.remove(i);unsafe{v.setUIDelegate(None);v.setNavigationDelegate(None)};if let Some(p)=w.sheetParent(){p.endSheet(&w)}
+                if let Some(p)=w.parentWindow(){p.removeChildWindow(&w)}w.close();}
         }
         #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
         unsafe fn capture(&self,_web:&WKWebView,_origin:&WKSecurityOrigin,_frame:&WKFrameInfo,_kind:WKMediaCaptureType,done:&DynBlock<dyn Fn(WKPermissionDecision)>){done.call((WKPermissionDecision::Deny,));}
@@ -289,6 +308,9 @@ impl Bridge {
             .URL()?
             .absoluteString()?
             .to_string();
+        if let Some(frame) = url.strip_prefix("about:blank#pm-modal=") {
+            return self.make_modal(web, cfg, frame);
+        }
         if url != "about:blank" {
             return None;
         }
@@ -330,6 +352,128 @@ impl Bridge {
     }
 }
 
+impl Bridge {
+    /// ui.modal: a sheet on the extension's window. Its title and buttons are
+    /// native; its body is the child web view the page moves the modal's DOM
+    /// into. Buttons right-aligned, the primary one last and on Return.
+    fn make_modal(
+        &self,
+        web: &WKWebView,
+        cfg: &WKWebViewConfiguration,
+        frame: &str,
+    ) -> Option<Retained<WKWebView>> {
+        let s = self.ivars();
+        if s.trust.is_store() || s.popouts.borrow().len() >= 8 {
+            return None;
+        }
+        let parent = web.window();
+        let mtm = self.mtm();
+        let frame: Value = NSString::from_str(frame)
+            .stringByRemovingPercentEncoding()
+            .and_then(|text| serde_json::from_str(&text.to_string()).ok())
+            .unwrap_or_default();
+        let width = frame["width"].as_f64().unwrap_or(420.).clamp(240., 1200.);
+        let (pad, title_h, body_h, buttons_h) = (20., 20., 280., 32.);
+        let height = pad + title_h + 12. + body_h + 16. + buttons_h + pad;
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Resizable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView()?;
+        let title = NSTextField::labelWithString(
+            &NSString::from_str(frame["title"].as_str().unwrap_or_default()),
+            mtm,
+        );
+        title.setFont(Some(&NSFont::boldSystemFontOfSize(13.)));
+        title.setFrame(NSRect::new(
+            NSPoint::new(pad, height - pad - title_h),
+            NSSize::new(width - 2. * pad, title_h),
+        ));
+        title.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        content.addSubview(&title);
+        let child = unsafe {
+            WKWebView::initWithFrame_configuration(
+                WKWebView::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(0., pad + buttons_h + 16.),
+                    NSSize::new(width, body_h),
+                ),
+                cfg,
+            )
+        };
+        unsafe {
+            child.setUIDelegate(Some(ProtocolObject::from_ref(self)));
+            child.setNavigationDelegate(Some(ProtocolObject::from_ref(self)));
+            child.setValue_forKey(
+                Some(&NSNumber::new_bool(false)),
+                &NSString::from_str("drawsBackground"),
+            );
+        }
+        child.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        content.addSubview(&child);
+        let mut actions: Vec<(String, bool, isize)> = frame["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, a)| {
+                (
+                    a["label"].as_str().unwrap_or("OK").to_owned(),
+                    a["pri"] == true,
+                    i as isize,
+                )
+            })
+            .collect();
+        if actions.is_empty() {
+            actions.push(("Close".into(), true, -1));
+        }
+        let mut right = width - pad;
+        for (label, primary, tag) in actions.iter().rev() {
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(
+                    &NSString::from_str(label),
+                    Some(self),
+                    Some(sel!(modalAction:)),
+                    mtm,
+                )
+            };
+            button.setTag(*tag);
+            if *primary {
+                button.setKeyEquivalent(&NSString::from_str("\r"));
+            }
+            button.sizeToFit();
+            let size = button.frame().size;
+            let w = size.width.max(80.);
+            right -= w;
+            button.setFrame(NSRect::new(
+                NSPoint::new(right, pad),
+                NSSize::new(w, size.height),
+            ));
+            button.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+            content.addSubview(&button);
+            right -= 12.;
+        }
+        s.popouts.borrow_mut().push((window.clone(), child.clone()));
+        // A page with no window (headless tests) keeps the sheet unshown; its
+        // body and actions still work.
+        if let Some(parent) = parent {
+            parent.beginSheet_completionHandler(&window, None);
+        }
+        s.handler.event(HostEvent::PopoutOpened);
+        Some(child)
+    }
+}
 fn reply(task: &ProtocolObject<dyn WKURLSchemeTask>, value: &Value) {
     let bytes = serde_json::to_vec(value).expect("JSON value");
     reply_bytes(task, &bytes, "application/json");
@@ -549,9 +693,11 @@ impl MacDomHost {
                 Some(ProtocolObject::from_ref(&*bridge)),
                 &NSString::from_str("pmcompat"),
             );
+            // A trusted page opens ui.modal sheets from code, not a click
+            // (children stay about:blank only); a Store page never opens one.
             config
                 .preferences()
-                .setJavaScriptCanOpenWindowsAutomatically(false);
+                .setJavaScriptCanOpenWindowsAutomatically(!trust.is_store());
         }
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(1., 1.));
         let web = unsafe {
@@ -596,6 +742,15 @@ impl MacDomHost {
     }
     pub fn web_view(&self) -> &WKWebView {
         &self.web
+    }
+    /// The page's open child web views (popouts and ui.modal sheet bodies).
+    pub fn child_web_views(&self) -> Vec<Retained<WKWebView>> {
+        self.shared
+            .popouts
+            .borrow()
+            .iter()
+            .map(|(_, web)| web.clone())
+            .collect()
     }
     /// Read exactly one rendered page node; no expression supplied by extension
     /// or caller executes in WebKit. Invoke on AppKit and poll on the worker.
@@ -958,8 +1113,9 @@ impl MacDomHost {
             }
         }
         // User-closed child windows are removed without retaining hidden pages.
+        // A ui.modal sheet has no close box: it goes when its page closes it.
         self.shared.popouts.borrow_mut().retain(|(w, v)| {
-            if w.isVisible() {
+            if w.isVisible() || !w.styleMask().contains(NSWindowStyleMask::Closable) {
                 true
             } else {
                 unsafe {

@@ -33,6 +33,9 @@ pub(crate) struct AgentLink {
     realms: Mutex<Vec<Realm>>,
     closing: AtomicBool,
     sequence: AtomicU64,
+    /// The last whole-text draft typing set, by thread: typing that arrives
+    /// after an unrelated republish still applies while the draft is unchanged.
+    typed: Mutex<Option<(String, String)>>,
 }
 impl Default for AgentLink {
     fn default() -> Self {
@@ -42,6 +45,7 @@ impl Default for AgentLink {
             realms: Mutex::default(),
             closing: AtomicBool::new(false),
             sequence: AtomicU64::new(1),
+            typed: Mutex::default(),
         }
     }
 }
@@ -86,6 +90,30 @@ impl AgentLink {
     }
     pub fn touch(&self) {
         self.sequence.fetch_add(1, Ordering::AcqRel);
+    }
+    /// The sequence a v4 action is admitted against. A whole-text draft
+    /// (`{type:"draft", text, base}`) from an older publication is admitted
+    /// when the host hasn't changed the draft since: it still reads `base`
+    /// (what the person saw), or what their own typing last set. A draft the
+    /// host cleared (a send) or replaced stays fenced.
+    pub fn admitted_sequence(&self, envelope: &Value, thread: &str, draft: &str) -> u64 {
+        let action = &envelope["action"];
+        let unchanged = action["type"] == "draft"
+            && (action["base"].as_str() == Some(draft)
+                || self
+                    .typed
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(t, text)| t == thread && text == draft));
+        match envelope["sequence"].as_u64() {
+            Some(sequence) if unchanged => sequence,
+            _ => self.sequence(),
+        }
+    }
+    /// Typing set `text` as `thread`'s draft.
+    pub fn typed(&self, thread: &str, text: &str) {
+        *self.typed.lock().unwrap() = Some((thread.into(), text.into()));
     }
     /// A run needs its runtime and a signed-in account.
     pub fn available(&self, provider: Provider) -> bool {
@@ -144,20 +172,27 @@ impl AgentLink {
             .map_or_else(Vec::new, |accounts| accounts.models(provider));
         let mut models = vec![(String::new(), "Default".to_owned())];
         let mut efforts = vec![String::new()];
+        let mut model_efforts = vec![];
         for model in listed {
-            models.push((model.id, model.label));
-            for effort in model.efforts {
-                if !efforts.contains(&effort) {
-                    efforts.push(effort);
+            for effort in &model.efforts {
+                if !efforts.contains(effort) {
+                    efforts.push(effort.clone());
                 }
             }
+            model_efforts.push((model.id.clone(), model.efforts));
+            models.push((model.id, model.label));
         }
         Catalog {
             models,
             providers,
             efforts,
+            model_efforts,
             claude: provider == Provider::Claude,
         }
+    }
+    /// Republishes the panel's realms (a change made outside an action).
+    pub(crate) fn publish_now(&self) {
+        self.publish();
     }
     fn publish(&self) {
         for realm in self.realms.lock().unwrap().iter() {
@@ -258,8 +293,10 @@ pub fn admit_send(state: &AgentState, thread: &str) -> Result<(), String> {
     if !session.draft.sendable() {
         return Ok(());
     }
-    if session.draft.attachments().next().is_some() {
-        return Err("Attachments can't reach the agent in this build. Remove them to send.".into());
+    if session.run.is_some() && session.draft.attachments().next().is_some() {
+        return Err(
+            "Attachments can't join a running turn yet. Send them with your next message.".into(),
+        );
     }
     match &session.run {
         None if state.runs.active() >= 8 => {
@@ -353,17 +390,103 @@ fn launch_request(
     let thread = &effect.target.thread;
     let directory = workspace(&environment.profile, &effect.target.project, thread)
         .map_err(|e| Error::Host(format!("The agent's workspace could not be created: {e}")))?;
+    let attached = match &effect.kind {
+        pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } => attachments.as_slice(),
+        _ => &[],
+    };
+    let run = effect.target.run.clone().unwrap_or_default();
+    let (images, files) = lay_out(&directory.join("attachments").join(safe(&run)), attached)
+        .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
-        prompt: prompt(&state.panel, thread, text)?,
+        prompt: with_files(prompt(&state.panel, thread, text)?, &files),
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
         effort: Some(settings.effort.clone()).filter(|e| !e.is_empty()),
         access: settings.access,
         approval: settings.approval,
         workspace: directory,
+        images,
     };
     Ok((environment, request))
+}
+fn safe(name: &str) -> String {
+    pm_agents::workspace::safe_component(name)
+}
+/// Main's attachment layout: images become files in the run's workspace for
+/// the provider to look at; other files travel in the prompt (ATTACHED FILES).
+fn lay_out(
+    directory: &std::path::Path,
+    attached: &[Value],
+) -> std::io::Result<(Vec<String>, Vec<Value>)> {
+    let (mut images, mut files) = (vec![], vec![]);
+    for (index, record) in attached.iter().enumerate() {
+        let name = record["name"].as_str().unwrap_or("attachment");
+        let mime = record["type"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let encoded = record["dataUrl"]
+            .as_str()
+            .and_then(|url| url.split_once(";base64,").map(|(_, data)| data))
+            .or_else(|| record["dataBase64"].as_str());
+        let extension = match mime.as_str() {
+            "image/png" => Some("png"),
+            "image/jpeg" => Some("jpg"),
+            "image/webp" => Some("webp"),
+            "image/gif" => Some("gif"),
+            _ => None,
+        };
+        match (extension, encoded.and_then(decode_base64)) {
+            (Some(extension), Some(bytes)) => {
+                std::fs::create_dir_all(directory)?;
+                let file = directory.join(format!("reference-{index}.{extension}"));
+                std::fs::write(&file, bytes)?;
+                images.push(file.to_string_lossy().into_owned());
+            }
+            _ => {
+                let content = record["content"].as_str().map(str::to_owned).or_else(|| {
+                    encoded
+                        .and_then(decode_base64)
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                });
+                files.push(serde_json::json!({"name":name,"type":mime,"content":content}));
+            }
+        }
+    }
+    Ok((images, files))
+}
+fn with_files(prompt: String, files: &[Value]) -> String {
+    if files.is_empty() {
+        return prompt;
+    }
+    format!(
+        "{prompt}\n\nATTACHED FILES\n{}",
+        Value::Array(files.to_vec())
+    )
+}
+/// Standard base64 (attachment payloads); `None` for anything malformed.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for byte in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        } as u32;
+        acc = acc << 6 | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 /// Start the delivery worker if runs or deferred saves need one.
 pub(crate) fn ensure_worker(
@@ -427,6 +550,24 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn typing_is_fenced_by_the_draft_not_by_unrelated_republishes() {
+        let link = AgentLink::default();
+        link.touch();
+        link.touch();
+        let typing = |text: &str, base: &str| json!({"sequence":1,"action":{"type":"draft","text":text,"selection":[0,0],"base":base}});
+        // The panel republished twice since the person's view; the draft is
+        // still what they saw, or what their typing set: admitted as is.
+        assert_eq!(link.admitted_sequence(&typing("Hi", ""), "t", ""), 1);
+        link.typed("t", "Hi");
+        assert_eq!(link.admitted_sequence(&typing("Hi!", ""), "t", "Hi"), 1);
+        // A send cleared it (or the host replaced it): the late typing is stale.
+        assert_eq!(link.admitted_sequence(&typing("Hi!", "Hi"), "t", ""), 3);
+        assert_eq!(link.admitted_sequence(&typing("Hi!", ""), "other", "Hi"), 3);
+        // Other actions keep the exact sequence.
+        let key = json!({"sequence":1,"action":{"type":"key","key":{}}});
+        assert_eq!(link.admitted_sequence(&key, "t", ""), 3);
+    }
     #[test]
     fn absent_provider_rejects_submission_but_still_reaches_a_live_run() {
         for action in [

@@ -4,6 +4,7 @@
 //! `--project=COPY.pmv [--definitions=FILE] [--width=1920 --height=1080]`
 //! plays a real project (a private copy: its embedded media are extracted to
 //! a scratch folder) and then seeks it at random, as the viewer does.
+//! `--from=SECONDS` starts the run there instead of at the start.
 use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
 use pm_protocol::{
     clock::TransportCommand,
@@ -155,12 +156,18 @@ pub fn run() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(2));
     }
     let first_frame_s = settle.elapsed().as_secs_f64();
-    let end = Ticks::from_whole_seconds(duration.min(seconds).ceil() as i32);
+    let from: f64 = arg("from", "0").parse()?;
+    anyhow::ensure!(
+        (0. ..duration).contains(&from),
+        "--from is outside the composition"
+    );
+    let start = Ticks::from_whole_seconds(from.floor() as i32);
+    let end = Ticks::from_whole_seconds((from.floor() + seconds).min(duration).ceil() as i32);
+    if start != Ticks::ZERO {
+        viewer.scrub(start)?;
+    }
     viewer.command(TransportCommand::SetLoop {
-        range: Some(TickRange {
-            start: Ticks::ZERO,
-            end,
-        }),
+        range: Some(TickRange { start, end }),
     })?;
     viewer.command(TransportCommand::Play {
         rate: PlaybackRate::NORMAL,
@@ -233,6 +240,43 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
     seeks.sort_by(f64::total_cmp);
+    // A playhead drag: every frame of two seconds forward, then back over
+    // them (media and glyphs warm), then among the last few (the service's
+    // frame cache): input to a completed frame at the new time each.
+    let mut sweep = |times: &mut dyn Iterator<Item = i64>| -> anyhow::Result<Vec<f64>> {
+        let mut out = Vec::new();
+        for t in times {
+            let at = Ticks::new(t)?;
+            let input = Instant::now();
+            viewer.scrub(at)?;
+            loop {
+                pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
+                viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+                let status = viewer.status();
+                if status
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.time == at && f.completion_host_seconds.is_some())
+                {
+                    out.push(input.elapsed().as_secs_f64() * 1000.);
+                    break;
+                }
+                anyhow::ensure!(
+                    input.elapsed() < Duration::from_secs(10),
+                    "scrub stuck at {t}"
+                );
+                std::thread::sleep(Duration::from_micros(100));
+            }
+        }
+        out.sort_by(f64::total_cmp);
+        Ok(out)
+    };
+    let scrub_from = (from * pm_protocol::common::TICKS_PER_SECOND as f64) as i64 / frame * frame;
+    let frames = (2. * rate.to_f64()).round() as i64;
+    let forward = sweep(&mut (0..frames).map(|i| scrub_from + i * frame))?;
+    let back = sweep(&mut (0..frames).rev().map(|i| scrub_from + i * frame))?;
+    let cached = sweep(&mut (0..24).map(|i| scrub_from + (i % 4) * frame))?;
+    let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
     let result = json!({
         "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
         "output":[width,height],"first_frame_s":first_frame_s,
@@ -243,6 +287,7 @@ pub fn run() -> anyhow::Result<()> {
         "stand_in_frames":stand_ins,"lowest_effective_quality":lowest_quality,
         "layer_failures":status.layer_failures.len(),
         "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"max":seeks.last(),"stuck":stuck},
+        "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"budget_120hz":9.333},
         "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(

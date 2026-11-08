@@ -28,6 +28,6 @@ pub use macos::{Finish, Gate, run, run_gated, run_integrated, run_with_device, s
 pub(crate) use macos::{open_editor, open_editor_tab, open_settings};
 #[cfg(target_os = "macos")]
 pub use native::{
-    Command, FlowchartRow, Host, MenuEntry, accent_color, document_subtitle, popover_frame,
-    system_accent, viewer_window, zoom_limit,
+    Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, document_subtitle,
+    popover_frame, system_accent, viewer_window, zoom_limit,
 };

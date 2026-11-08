@@ -1393,7 +1393,7 @@ fn native_content_quad<'d>(
         .map_or((f64::from(width), f64::from(height)), |(_, _, raster)| {
             (raster.bounds.width, raster.bounds.height)
         });
-    let d = scope.ev.resolve_content(scope.comp, layer, time)?;
+    let d = scope.ev.resolve_drawn_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
             if scope.is_3d_layer(layer)? {

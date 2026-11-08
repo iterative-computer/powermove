@@ -373,7 +373,8 @@ fn loading_and_unknown_are_not_declared_offline() {
             p.menu(&c, &r, Some(asset("a"))).unwrap().entries,
             vec![MenuEntry {
                 command: MenuCommand::DeleteAssets,
-                enabled: true
+                enabled: true,
+                checked: false,
             }]
         );
     }
@@ -674,7 +675,8 @@ fn menu_actions_are_semantic_and_disable_illegal_composition_actions() {
     ] {
         assert!(m.entries.contains(&MenuEntry {
             command,
-            enabled: true
+            enabled: true,
+            checked: false,
         }));
     }
     let m = p
@@ -682,25 +684,59 @@ fn menu_actions_are_semantic_and_disable_illegal_composition_actions() {
         .unwrap();
     assert!(m.entries.contains(&MenuEntry {
         command: MenuCommand::OpenComposition("C1".into()),
-        enabled: false
+        enabled: false,
+        checked: false,
     }));
     assert!(m.entries.contains(&MenuEntry {
         command: MenuCommand::NestComposition("C1".into()),
-        enabled: false
+        enabled: false,
+        checked: false,
     }));
 }
 #[test]
-fn batch_context_menu_only_deletes() {
-    let (c, mut p, r) = setup();
+fn batch_context_menu_manages_the_selected_videos_renditions_and_deletes() {
+    let (c, mut p, mut r) = setup();
     pointer(&mut p, &c, &r, "a", Modifiers::default());
     pointer(&mut p, &c, &r, "b", primary());
-    assert_eq!(
-        p.menu(&c, &r, Some(asset("a"))).unwrap().entries,
-        vec![MenuEntry {
-            command: MenuCommand::DeleteAssets,
-            enabled: true
-        }]
+    let videos: Vec<String> = ["a", "b"]
+        .into_iter()
+        .filter(|id| c.assets[*id].kind == "video")
+        .map(Into::into)
+        .collect();
+    let commands: Vec<MenuCommand> = p
+        .menu(&c, &r, Some(asset("a")))
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|e| e.command)
+        .collect();
+    assert_eq!(commands.last(), Some(&MenuCommand::DeleteAssets));
+    if videos.is_empty() {
+        assert_eq!(commands, vec![MenuCommand::DeleteAssets]);
+        return;
+    }
+    // A selection never offers Attach (one file per video).
+    assert!(!commands.contains(&MenuCommand::Rendition(RenditionAction::AttachProxy)));
+    let o = invoke(
+        &mut p,
+        &c,
+        &r,
+        MenuCommand::Rendition(RenditionAction::CreateProxy),
     );
+    assert!(o.effects.contains(&Effect::Renditions {
+        action: RenditionAction::CreateProxy,
+        assets: videos.clone(),
+    }));
+    // Always Play Original shows checked once every video has it.
+    for id in &videos {
+        r.states.get_mut(id.as_str()).unwrap().play_original = true;
+    }
+    let menu = p.menu(&c, &r, Some(asset("a"))).unwrap();
+    assert!(menu.entries.contains(&MenuEntry {
+        command: MenuCommand::Rendition(RenditionAction::PlayOriginal(false)),
+        enabled: true,
+        checked: true,
+    }));
 }
 #[test]
 fn context_menu_selection_emits_preview_cleanup() {
@@ -818,6 +854,7 @@ fn proxy_ready_never_promotes_offline_original() {
             },
             poster: Some("poster-v1".into()),
             progress: None,
+            ..Default::default()
         },
     );
     let o = key(&mut p, &c, &r, "a", Key::Enter, Modifiers::default());
@@ -1345,7 +1382,8 @@ fn folder_menu_actions_and_move_out_keep_parent_semantics() {
     ] {
         assert!(entries.contains(&MenuEntry {
             command,
-            enabled: true
+            enabled: true,
+            checked: false,
         }));
     }
     invoke(&mut p, &c, &r, MenuCommand::OpenFolder("f2".into()));

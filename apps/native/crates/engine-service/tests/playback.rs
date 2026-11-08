@@ -381,6 +381,38 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     assert!(!both.viewer_paths(MediaMode::ProxyOnly).contains_key("b"));
     assert_eq!(both.proxied(MediaMode::Automatic), 0);
     assert_eq!(both.proxied(MediaMode::ProxyPreferred), 1);
+    // Optimized media plays in Automatic in place of its original, never
+    // in Originals; Always Play Original wins in every mode, and a clip
+    // whose original is gone is then offline rather than proxied.
+    both.optimized.insert("b".into(), "/b-optimized.mov".into());
+    assert_eq!(
+        both.viewer_paths(MediaMode::Automatic)["b"].to_str(),
+        Some("/b-optimized.mov")
+    );
+    assert_eq!(
+        both.viewer_paths(MediaMode::Originals)["b"].to_str(),
+        Some("/b.mov")
+    );
+    both.play_original.insert("a".into());
+    both.play_original.insert("b".into());
+    for mode in [
+        MediaMode::Automatic,
+        MediaMode::Originals,
+        MediaMode::ProxyPreferred,
+        MediaMode::ProxyOnly,
+    ] {
+        assert_eq!(both.viewer_paths(mode)["a"].to_str(), Some("/original.mov"));
+        assert_eq!(both.viewer_paths(mode)["b"].to_str(), Some("/b.mov"));
+    }
+    let mut gone = both.clone();
+    gone.originals.remove("a");
+    assert!(
+        !gone
+            .viewer_paths(MediaMode::ProxyPreferred)
+            .contains_key("a")
+    );
+    both.play_original.clear();
+    both.optimized.clear();
     assert_eq!(
         both.export_paths(false).paths["a"].to_str(),
         Some("/original.mov")

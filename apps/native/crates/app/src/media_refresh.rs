@@ -22,9 +22,6 @@ impl Inputs {
             media: p.media.clone(),
         }
     }
-    pub(crate) fn matches(&self, published: &Published) -> bool {
-        self.same(&Self::published(published))
-    }
     pub(crate) fn same(&self, other: &Self) -> bool {
         fn same_node(a: Option<&Node>, b: Option<&Node>) -> bool {
             match (a.map(Node::kind), b.map(Node::kind)) {
@@ -90,20 +87,17 @@ impl Inputs {
         Some(changed)
     }
 }
-pub(crate) struct Resolved {
-    pub inputs: Inputs,
-    pub resolution: crate::media::Resolution,
-}
-/// Run only on a worker, carrying the exact inputs into initial adoption too.
-pub(crate) fn resolve(published: &Published, cache: &std::path::Path) -> anyhow::Result<Resolved> {
-    let inputs = Inputs::published(published);
-    let resolution = crate::media::for_session(
+/// Run only on a worker.
+fn resolve(
+    published: &Published,
+    cache: &std::path::Path,
+) -> anyhow::Result<crate::media::Resolution> {
+    crate::media::for_session(
         &published.snapshot,
         &published.media,
         published.path.as_deref(),
         cache,
-    )?;
-    Ok(Resolved { inputs, resolution })
+    )
 }
 #[derive(Default)]
 pub struct Refresh {
@@ -125,7 +119,8 @@ impl Refresh {
         self.settled = None;
         self.pending = None;
     }
-    /// Initial open already resolved these exact inputs on its open worker.
+    /// Settled at `inputs` (what a finished job leaves).
+    #[cfg(test)]
     pub fn adopt(&mut self, inputs: Inputs) {
         self.reset();
         self.visible = Some(inputs.clone());
@@ -187,15 +182,16 @@ impl Controller {
     }
     fn retire_media(&mut self, ids: Option<BTreeSet<String>>) {
         match ids {
-            None => self.media = Default::default(),
+            None => self.media_base = Default::default(),
             Some(ids) if ids.is_empty() => return,
             Some(ids) => {
                 for id in &ids {
-                    self.media.originals.remove(id);
-                    self.media.proxies.remove(id);
+                    self.media_base.originals.remove(id);
+                    self.media_base.proxies.remove(id);
                 }
             }
         }
+        self.decorate_media();
         self.publish_media_catalog();
     }
     pub(crate) fn refresh_media(&mut self, cx: &mut Context<Self>) {
@@ -229,7 +225,7 @@ impl Controller {
                     .finish(job, latest.as_deref().map(Inputs::published))
                 {
                     match result {
-                        Ok(resolved) => v.adopt_media(resolved.resolution),
+                        Ok(resolution) => v.adopt_media(resolution),
                         Err(error) => v.message = format!("Media could not be resolved: {error}"),
                     }
                     v.update_builtins(cx);
@@ -244,11 +240,45 @@ impl Controller {
         if !resolution.failed.is_empty() {
             self.message = crate::media::failure_note(resolution.failed.len());
         }
-        if resolution.catalog == self.media {
-            return;
+        self.media_base = resolution.catalog;
+        let before = std::mem::take(&mut self.media);
+        self.decorate_media();
+        self.identify_media();
+        if self.media != before {
+            self.publish_media_catalog();
         }
-        self.media = resolution.catalog;
-        self.publish_media_catalog();
+        let imported = self
+            .pro_media
+            .take_imported(|id| self.media_base.originals.contains_key(id));
+        if !imported.is_empty() {
+            self.proxies_on_import(&imported);
+        }
+    }
+    /// The catalog the viewer reads: the resolver's, with the open
+    /// project's proxies, optimized media and Always Play Original.
+    pub(crate) fn decorate_media(&mut self) {
+        let mut media = self.media_base.clone();
+        if let Some(project) = self.session.as_ref().map(|s| s.project.clone()) {
+            self.pro_media
+                .decorate(&project, &mut media, &self.project_assets());
+        }
+        self.media = media;
+    }
+    /// The pro media worker moved: renditions change the catalog; every
+    /// change redraws the Project panel's status and the tasks window.
+    pub(crate) fn pro_media_changed(&mut self, renditions: bool, cx: &mut Context<Self>) {
+        if renditions {
+            let before = self.media.clone();
+            self.decorate_media();
+            if self.media != before {
+                self.publish_media_catalog();
+            }
+        }
+        self.update_builtins(cx);
+        if let Some(tasks) = &self.tasks_window {
+            tasks.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
     }
 }
 

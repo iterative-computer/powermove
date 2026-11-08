@@ -18,6 +18,8 @@ rust-version = "1.95"                                                  # require
 workspace = true
 
 [features]
+# Window::render_to_image outside tests (agents capture their own panels).
+frame-capture = []
 default = ["font-kit", "wayland", "x11", "windows-manifest", "image-default-formats"]
 # Enables the opt-in custom WGPU control API on platforms that support shared
 # texture surfaces.

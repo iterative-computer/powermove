@@ -59,6 +59,7 @@ fn environment(profile: &Path, mode: &str) -> Environment {
 struct Agent {
     panels: Builtins,
     latest: Option<Publication>,
+    typed: String,
 }
 impl Agent {
     /// A browser that only remembers what it was asked to open.
@@ -80,6 +81,7 @@ impl Agent {
         Self {
             panels,
             latest: None,
+            typed: String::new(),
         }
     }
     fn mount(actor: &KernelActor, environment: Environment) -> Self {
@@ -99,6 +101,7 @@ impl Agent {
         Self {
             panels,
             latest: None,
+            typed: String::new(),
         }
     }
     /// Sign-in status arrives from a worker; a run needs it.
@@ -161,6 +164,7 @@ impl Agent {
     fn send(&mut self, text: &str) {
         self.type_text(text);
         self.key("Enter", false);
+        self.typed.clear();
     }
     fn surface(&mut self) -> &Publication {
         if let Some(latest) = self.panels.take_publications().pop() {
@@ -179,7 +183,7 @@ impl Agent {
     }
     fn key(&mut self, key: &str, shift: bool) {
         self.press(
-            "agent-composer",
+            "agent-composer-text",
             "keydown",
             EventDetail {
                 key: Some(key.into()),
@@ -188,14 +192,30 @@ impl Agent {
             },
         );
     }
+    /// The native composer reports its whole text as it changes.
     fn type_text(&mut self, text: &str) {
-        for letter in text.chars() {
-            self.key(&letter.to_lowercase().to_string(), letter.is_uppercase());
-        }
+        self.typed.push_str(text);
+        let value = self.typed.clone();
+        self.press(
+            "agent-composer-text",
+            "input",
+            EventDetail {
+                value: Some(json!(value)),
+                ..Default::default()
+            },
+        );
     }
     fn agent(&self) -> agent_host::SharedAgent {
-        let entries = self.panels.broker.entries.lock().unwrap();
-        let backend = entries["agent"].backend.lock().unwrap();
+        let backend = self
+            .panels
+            .broker
+            .entry("agent")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let backend = backend.lock().unwrap();
         backend.native.agent.clone().unwrap()
     }
     fn wait(&self, until: impl Fn(&agent_host::AgentState) -> bool) {
@@ -263,6 +283,37 @@ fn typed_message_runs_a_bundled_provider_and_its_reply_survives_reopen() {
     reopened.connected(Provider::Chatgpt);
     assert!(reopened.text().contains("Saw: Hi"));
     reopened.panels.close();
+}
+#[test]
+fn typing_lands_after_the_panel_republished_for_something_else() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.text();
+    // A status or a streaming run republishes before the keystroke arrives.
+    panel.panels.broker.agent.touch();
+    panel.press_seen(
+        "agent-composer-text",
+        "input",
+        EventDetail {
+            value: Some(json!("Hi")),
+            ..Default::default()
+        },
+    );
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    let text = agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .draft
+        .text();
+    assert_eq!(text, "Hi");
+    drop(agent);
+    panel.panels.close();
 }
 #[test]
 fn stop_cancels_a_held_run_through_the_provider() {
@@ -419,10 +470,28 @@ fn claude_question_is_answered_with_the_cards_own_buttons() {
         |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
     panel.wait(open);
     assert!(panel.text().contains("Choose a style?"));
+    // thread_read sees the live run: its trace and the open question.
+    let live = panel.panels.agent_thread_live(&thread).unwrap();
+    assert_eq!(live["busy"], true, "{live}");
+    assert!(live["runId"].is_string(), "{live}");
+    let question = &live["questions"][0];
+    assert_eq!(question["blocking"], true, "{live}");
+    assert!(question["itemId"].is_string(), "{live}");
+    assert!(
+        question["questions"]
+            .to_string()
+            .contains("Choose a style?"),
+        "{live}"
+    );
+    assert!(panel.panels.agent_thread_live("no-such-thread").is_none());
     panel.click("live:question-question-0-Soft");
     panel.click("live:question-answer");
     panel.wait(idle);
     assert!(panel.text().contains("Using Soft"));
+    let settled = panel.panels.agent_thread_live(&thread).unwrap();
+    assert_eq!(settled["busy"], false);
+    assert_eq!(settled["activity"], "");
+    assert_eq!(settled["questions"], json!([]));
     panel.panels.close();
 }
 #[test]
@@ -540,8 +609,16 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
     assert_eq!(read(&accounts).1, "Sign in to ChatGPT in Settings.");
     assert!(panel.text().contains("Connect Your Agent"));
     let settings = |panel: &Agent, action: Value| {
-        let entries = panel.panels.broker.entries.lock().unwrap();
-        let mut backend = entries["settings"].backend.lock().unwrap();
+        let backend = panel
+            .panels
+            .broker
+            .entry("settings")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut backend = backend.lock().unwrap();
         let revision = backend.settings_snapshot().unwrap()["revision"].clone();
         match backend
             .native_command(
@@ -603,4 +680,225 @@ fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
     let mut panel = Agent::mount(&actor, environment);
     assert!(panel.text().contains("runtime is missing"));
     panel.panels.close();
+}
+#[test]
+fn an_agent_tool_launches_sends_to_and_cancels_a_background_thread() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let visible = thread_id(&agent);
+    let launched = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"Side task","message":"Hi from a tool"}),
+        )
+        .unwrap();
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    assert_ne!(thread, visible, "launch never takes the visible thread");
+    let finished = |state: &agent_host::AgentState| {
+        state
+            .panel
+            .session(&thread)
+            .is_ok_and(|s| s.run.is_none() && s.conversation.len() > 1)
+    };
+    panel.wait(finished);
+    assert_eq!(thread_id(&agent), visible);
+    let reply = |state: &agent_host::AgentState, text: &str| {
+        state
+            .panel
+            .session(&thread)
+            .unwrap()
+            .conversation
+            .values()
+            .any(|m| m.to_string().contains(text))
+    };
+    assert!(reply(&agent.lock().unwrap(), "Saw: Hi from a tool"));
+    panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"And again"}),
+        )
+        .unwrap();
+    panel.wait(|state| {
+        reply(state, "Saw: And again") && state.panel.session(&thread).unwrap().run.is_none()
+    });
+    let idle_cancel = panel
+        .panels
+        .agent_thread_control("thread_cancel", &json!({"threadId":thread}))
+        .unwrap();
+    assert_eq!(idle_cancel["busy"], false);
+    let missing = panel
+        .panels
+        .agent_thread_control("thread_send", &json!({"threadId":"none","message":"x"}))
+        .unwrap_err();
+    assert_eq!(
+        missing,
+        "This thread does not exist in the current project."
+    );
+    panel.panels.close();
+}
+#[test]
+fn a_signed_out_provider_refuses_a_thread_launch_before_anything_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    // Once the bundled providers have answered, the compatible one (never
+    // configured here) is the signed-out provider.
+    panel.connected(Provider::Chatgpt);
+    assert!(!panel.panels.broker.agent.available(Provider::Compatible));
+    let agent = panel.agent();
+    let before = agent.lock().unwrap().panel.summaries().len();
+    let refused = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"t","message":"m","target":{"providerInstanceId":"compatible"},"callerAccess":"project"}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "Sign in to your compatible provider in Settings › Agents before starting a run."
+    );
+    assert_eq!(agent.lock().unwrap().panel.summaries().len(), before);
+    panel.panels.close();
+}
+#[test]
+fn a_planning_caller_launches_planning_threads_and_retries_are_deduplicated() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let request = json!({"title":"Plan","message":"Look only","callerAccess":"editor",
+        "callerRunId":"caller-1","clientRequestId":"req-1"});
+    let first = panel
+        .panels
+        .agent_thread_control("thread_launch", &request)
+        .unwrap();
+    assert_eq!(first["access"], "editor", "{first}");
+    let thread = first["threadId"].as_str().unwrap().to_owned();
+    let again = panel
+        .panels
+        .agent_thread_control("thread_launch", &request)
+        .unwrap();
+    assert_eq!(
+        again["threadId"], first["threadId"],
+        "a retry returns the first launch"
+    );
+    let mut reused = request.clone();
+    reused["message"] = json!("Something else");
+    assert_eq!(
+        panel
+            .panels
+            .agent_thread_control("thread_launch", &reused)
+            .unwrap_err(),
+        "This clientRequestId belongs to another thread launch."
+    );
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    // A planning caller's new turn stays at planning access.
+    let sent = panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"More","callerAccess":"editor"}),
+        )
+        .unwrap();
+    assert_eq!(sent["access"], "editor", "{sent}");
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}
+#[test]
+fn reconfiguring_a_running_thread_restarts_it_and_cancel_stops_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let launched = panel
+        .panels
+        .agent_thread_control("thread_launch", &json!({"title":"Hold","message":"Wait"}))
+        .unwrap();
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    let first_run = launched["runId"].as_str().unwrap().to_owned();
+    assert_eq!(launched["busy"], true, "{launched}");
+    // A different effort can't steer the live turn: it stops and restarts.
+    let effort = if agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .settings
+        .effort
+        == "high"
+    {
+        "low"
+    } else {
+        "high"
+    };
+    let sent = panel
+        .panels
+        .agent_thread_control(
+            "thread_send",
+            &json!({"threadId":thread,"message":"Go on","target":{"options":{"reasoningEffort":effort}}}),
+        )
+        .unwrap();
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    assert_eq!(sent["reasoningEffort"], effort, "{sent}");
+    assert_ne!(sent["runId"], json!(first_run), "{sent}");
+    assert_eq!(sent["busy"], true, "{sent}");
+    let cancelled = panel
+        .panels
+        .agent_thread_control("thread_cancel", &json!({"threadId":thread}))
+        .unwrap();
+    assert_eq!(cancelled["threadId"], json!(thread));
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}
+#[test]
+fn attached_files_reach_the_provider_run() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // A 1×1 PNG and a text note, as Add Attachments records them.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    panel
+        .panels
+        .agent_attach(vec![
+            json!({"id":"a1","name":"frame.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}")}),
+            json!({"id":"a2","name":"notes.txt","type":"text/plain","size":5,"content":"hello"}),
+        ])
+        .unwrap();
+    panel.send("Use these");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(text.contains("notes.txt"), "{text}");
+    let written: Vec<_> = walk(root.path())
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "reference-0.png"))
+        .collect();
+    assert_eq!(
+        written.len(),
+        1,
+        "the image is a file the provider can open"
+    );
+    assert_eq!(&std::fs::read(&written[0]).unwrap()[1..4], b"PNG");
+    panel.panels.close();
+}
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
 }

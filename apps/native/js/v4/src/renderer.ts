@@ -340,7 +340,9 @@ export class SurfaceRoot {
           composing: detail.composing ?? false,
           composition: detail.composition ?? null,
         },
-        plan.revision,
+        // Admitted above (same target, or unchanged since its plan): the
+        // field's whole text lands on the tree as it is now.
+        this.revision,
       );
     }
     let stoppedAt: number | null = null,

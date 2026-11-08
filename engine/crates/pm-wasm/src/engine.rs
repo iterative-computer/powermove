@@ -653,7 +653,12 @@ impl Engine {
 
     /// Adds a metrics-and-shaping subset for face `index` of `blob`.
     pub fn add_font(&mut self, blob: &str, index: u32, bytes: Vec<u8>) {
-        let data = FontBytes::new(bytes);
+        self.add_font_bytes(blob, index, FontBytes::new(bytes));
+    }
+
+    /// [`Engine::add_font`] with bytes shared with their owner (a host's
+    /// font registry), never copied.
+    pub fn add_font_bytes(&mut self, blob: &str, index: u32, data: FontBytes) {
         self.fonts
             .fonts
             .retain(|(b, i, _)| !(b == blob && *i == index));
@@ -703,6 +708,10 @@ impl Engine {
 
     /// Declares that the faces added are whole fonts with outlines, so
     /// ink-dependent answers (text bounds, raster placement) are native.
+    /// Whether ink queries may read glyph outlines.
+    pub fn font_outlines(&self) -> bool {
+        self.fonts.outlines
+    }
     pub fn set_font_outlines(&mut self, outlines: bool) {
         self.fonts.outlines = outlines;
     }

@@ -38,13 +38,24 @@ impl Connection {
     /// the main thread. Ordinary UI edits and gestures never take this fence.
     /// A running export reads a frozen snapshot, so it does not hold the fence
     /// through its long wait and the user can still close the project.
+    /// Library and Store reads never touch the open project, so they also run
+    /// while an open waits on a person (a recovery choice).
     fn admit(&self, name: &str) -> Result<Option<Operation>> {
-        let operation = if name == "export_video" {
+        const UNFENCED: [&str; 5] = [
+            "export_video",
+            "list_projects",
+            "store_search",
+            "store_extension",
+            "store_source",
+        ];
+        let operation = if UNFENCED.contains(&name) {
             None
         } else {
-            Some(self.host.try_operation().ok_or_else(|| {
-                Error::conflict("A project operation is in progress. Inspect and retry.")
-            })?)
+            Some(
+                self.host
+                    .try_operation()
+                    .ok_or_else(|| self.host.fenced())?,
+            )
         };
         if self.host.closing.load(Ordering::Acquire) {
             return Err(Error::conflict(

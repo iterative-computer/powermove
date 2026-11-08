@@ -165,6 +165,10 @@ fn a_command_that_cannot_run_is_disabled_and_lives_with_a_selection(cx: &mut Tes
         assert!(off(&s).contains(name), "{name}");
     }
     assert!(off(&s).contains("text.editSelected"));
+    // Every viewer tool has a gesture: the toolbar, menu, palette and keys run them.
+    for tool in ["toolPen", "toolText", "toolShape"] {
+        assert!(!off(&s).contains(tool), "{tool}");
+    }
     assert!(off(&s).contains("pasteLayers"));
     assert!(!off(&s).contains("newSolid"));
     select(&mut s, cx, &["l0"]);

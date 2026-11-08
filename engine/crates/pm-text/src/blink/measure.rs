@@ -418,7 +418,181 @@ fn apply_spacing(result: &mut ShapeResult, text: &[u16], item_start: usize, lett
 
 /// Measures `text` (UTF-16, as JavaScript holds it) like
 /// `CanvasRenderingContext2D.measureText(text).width`.
+/// `measure` remembered per font setup and text. A layout engine's face,
+/// fallback and prepared-face answers only ever stick within a session, so
+/// a repeated measurement equals the first (Blink keeps shaped words in the
+/// font's `ShapeCache` the same way). Text drawn every frame is shaped once.
 pub fn measure(
+    resolver: &mut dyn FontResolver,
+    cache: &mut PreparedCache,
+    setup: &FontSetup,
+    text: &[u16],
+) -> std::sync::Arc<Measured> {
+    if let Some(measured) = cache.measured.get(setup, text) {
+        return measured;
+    }
+    let measured = std::sync::Arc::new(measure_uncached(resolver, cache, setup, text));
+    cache.measured.insert(setup, text, measured.clone());
+    measured
+}
+
+/// Every field of `setup`, as bits, in a fixed order.
+fn setup_bits(setup: &FontSetup, mut out: impl FnMut(u64)) {
+    let FontSetup {
+        group,
+        desc,
+        specified,
+        seeded_opsz,
+        letter_spacing,
+        primary,
+    } = setup;
+    let FontDesc {
+        weight,
+        italic,
+        size,
+    } = desc;
+    for bits in [
+        u64::from(weight.to_bits()),
+        u64::from(*italic),
+        u64::from(size.to_bits()),
+        u64::from(specified.to_bits()),
+        u64::from(letter_spacing.to_bits()),
+        primary.map_or(u64::MAX, u64::from),
+        group.len() as u64,
+    ] {
+        out(bits);
+    }
+    for font in group {
+        match font {
+            GroupFont::Installed(face) => {
+                out(0);
+                out(u64::from(*face));
+            }
+            GroupFont::Custom { face, settings } => {
+                out(1);
+                out(u64::from(*face));
+                out(settings.len() as u64);
+                for (tag, value) in settings {
+                    out((u64::from(*tag) << 32) | u64::from(value.to_bits()));
+                }
+            }
+        }
+    }
+    for (face, size) in seeded_opsz {
+        out((u64::from(*face) << 32) | u64::from(size.to_bits()));
+    }
+}
+
+struct MemoEntry {
+    setup: Box<[u64]>,
+    text: Box<[u16]>,
+    measured: std::sync::Arc<Measured>,
+    used: u64,
+    bytes: usize,
+}
+
+impl MemoEntry {
+    fn is(&self, setup: &FontSetup, text: &[u16]) -> bool {
+        if *self.text != *text {
+            return false;
+        }
+        let (mut at, mut same) = (0, true);
+        setup_bits(setup, |bits| {
+            same &= self.setup.get(at) == Some(&bits);
+            at += 1;
+        });
+        same && at == self.setup.len()
+    }
+}
+
+/// Bounded LRU of measurements (see [`measure`]). Lookups allocate nothing.
+#[derive(Default)]
+pub struct MeasureMemo {
+    /// By hash of the setup and text; entries confirm the key.
+    entries: std::collections::HashMap<u64, Vec<MemoEntry>>,
+    /// Least recently used first: `used` tick to hash.
+    order: std::collections::BTreeMap<u64, u64>,
+    tick: u64,
+    bytes: usize,
+}
+
+/// Measurements kept per session.
+const MEASURE_MEMO_BYTES: usize = 8 * 1024 * 1024;
+
+fn memo_hash(setup: &FontSetup, text: &[u16]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    setup_bits(setup, |bits| bits.hash(&mut h));
+    text.hash(&mut h);
+    h.finish()
+}
+
+impl MeasureMemo {
+    fn get(&mut self, setup: &FontSetup, text: &[u16]) -> Option<std::sync::Arc<Measured>> {
+        let hash = memo_hash(setup, text);
+        let entry = self
+            .entries
+            .get_mut(&hash)?
+            .iter_mut()
+            .find(|e| e.is(setup, text))?;
+        self.tick += 1;
+        self.order.remove(&entry.used);
+        entry.used = self.tick;
+        self.order.insert(self.tick, hash);
+        Some(entry.measured.clone())
+    }
+
+    fn insert(&mut self, setup: &FontSetup, text: &[u16], measured: std::sync::Arc<Measured>) {
+        let mut bits = Vec::new();
+        setup_bits(setup, |b| bits.push(b));
+        let bytes = bits.len() * 8
+            + text.len() * 2
+            + measured
+                .items
+                .iter()
+                .flat_map(|item| &item.runs)
+                .map(|run| {
+                    std::mem::size_of_val(run)
+                        + run.glyphs.len() * std::mem::size_of::<super::shaper::GlyphData>()
+                        + run.coords.len() * 8
+                })
+                .sum::<usize>()
+            + std::mem::size_of::<MemoEntry>();
+        if bytes > MEASURE_MEMO_BYTES {
+            return;
+        }
+        while self.bytes + bytes > MEASURE_MEMO_BYTES {
+            let Some((used, hash)) = self.order.pop_first() else {
+                break;
+            };
+            if let Some(bucket) = self.entries.get_mut(&hash)
+                && let Some(at) = bucket.iter().position(|e| e.used == used)
+            {
+                self.bytes -= bucket.swap_remove(at).bytes;
+                if bucket.is_empty() {
+                    self.entries.remove(&hash);
+                }
+            }
+        }
+        let hash = memo_hash(setup, text);
+        self.tick += 1;
+        self.order.insert(self.tick, hash);
+        self.entries.entry(hash).or_default().push(MemoEntry {
+            setup: bits.into_boxed_slice(),
+            text: text.into(),
+            measured,
+            used: self.tick,
+            bytes,
+        });
+        self.bytes += bytes;
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn measure_uncached(
     resolver: &mut dyn FontResolver,
     cache: &mut PreparedCache,
     setup: &FontSetup,

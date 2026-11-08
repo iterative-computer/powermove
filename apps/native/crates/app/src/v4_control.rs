@@ -240,6 +240,27 @@ impl NativeControl {
     pub fn keep(&self) {
         self.slot.keep();
     }
+    /// A pop-up's own title, shown instead of its selected row; the row
+    /// keeps its checkmark. `None` shows the selected row.
+    pub fn display(&mut self, title: Option<&str>) {
+        let Control::Popup(v) = &self.control else {
+            return;
+        };
+        let Some(cell) = v.cell() else { return };
+        unsafe {
+            let _: () = objc2::msg_send![&*cell, setUsesItemFromMenu: title.is_none()];
+            if let Some(title) = title {
+                let mtm = MainThreadMarker::new().expect("main thread");
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    None,
+                    &NSString::from_str(""),
+                );
+                let _: () = objc2::msg_send![&*cell, setMenuItem: &*item];
+            }
+        }
+    }
     pub fn update(
         &mut self,
         value: &Value,

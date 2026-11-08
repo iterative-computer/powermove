@@ -301,6 +301,11 @@ impl BackgroundTasks {
     pub fn get(&self, id: TaskId) -> Option<&Task> {
         self.tasks.get(&id)
     }
+    /// Every task, in id (queue) order: the Background Tasks window lists
+    /// all of them, grouped by project.
+    pub fn all(&self) -> Vec<Task> {
+        self.tasks.values().cloned().collect()
+    }
     pub fn snapshot(&self, window: &str) -> Vec<Task> {
         self.tasks
             .values()

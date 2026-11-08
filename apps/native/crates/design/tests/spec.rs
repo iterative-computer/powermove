@@ -173,6 +173,7 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.property_row", "Timeline property sub-row"),
     ("metrics.ruler", "Timeline ruler height"),
     ("metrics.layer_column", "Timeline layer list column width"),
+    ("metrics.clip_radius", "Timeline clip bar corner radius"),
     ("metrics.playhead", "Playhead line width"),
     ("metrics.symbol_toolbar", "SF Symbol size in toolbar items"),
     ("metrics.symbol_panel", "SF Symbol size in panel headers"),

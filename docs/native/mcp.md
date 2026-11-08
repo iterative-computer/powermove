@@ -29,22 +29,32 @@ no production caller.
 - `publish_extensions`, `fork_builtin_extension` and `stage_fork_rebase` follow
   main's contract through `pm_mcp::extensions` and the app's
   `extension_authoring.rs`; see [extensions-app.md](extensions-app.md#agent-authoring).
-- `thread_list` and `thread_read` read the durable thread archive. `activity` and
-  `questions` stay empty, because a live session isn't reachable from an MCP worker.
+- Panel and workspace tools (`open_panel`, `get_panel_state`, `interact_panel`,
+  `capture_panel`, `computer_use_panel`, `set_panel_layout`,
+  `get_workspace_state`, and the live half of `get_panel_layout`) run on the
+  main thread through `app/src/panel_bridge.rs`, against the shell's live
+  layout and the v4 panels' compiled trees. Captures list what they omit (the
+  engine's viewer/scopes picture, WebKit extension bodies); WebKit panel
+  controls aren't in reads yet. App agents (no project) reach the application
+  window and its Agent archive.
+- `thread_list` and `thread_read` read the durable thread archive. In the app,
+  `thread_read` adds a live run's trace (`activity`, last 20,000 units) and open
+  questions from the window's Agent panel (`Builtins::agent_thread_live`).
 
-Of the 68 tools, 39 have bodies in the app. The other 29 refuse with
+Of the 68 tools, 49 have bodies in the app. The other 19 refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
 <!-- refused-tools -->
 | Tools | What is missing |
 |---|---|
-| `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A bridge from MCP workers to the main-thread shell and v4 surfaces. |
+| `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A window: only the headless `--powermove-mcp` host refuses these. The running app answers them on its main thread (`app/src/panel_bridge.rs`). |
 | `generate_captions`, `transcribe_media` | A local transcription runtime. |
 | `publish_visual_reply` | A safe viewer and its input validator. |
 | `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |
 | `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | The signed Store envelope and install host. |
-| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_launch`, `thread_send`, `thread_cancel`, `thread_watch`, `thread_unwatch` | A production `Threads` and orchestration host over `ProviderRuns`. |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_watch`, `thread_unwatch` | Root-owned task records and run watches that resume the calling agent. |
+| `thread_launch`, `thread_send`, `thread_cancel` | A window: only the headless host refuses these. The app runs them on the window's Agent panel (`Builtins::agent_thread_control`). |
 <!-- refused-tools -->
 
 The sections below are older dated notes. Where they differ, this section wins.

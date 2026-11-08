@@ -25,6 +25,7 @@ test("format support matches tagged contract and no web export is offered", () =
     "mblur",
     "audio",
     "alpha",
+    "useProxies",
   ]);
   expect(fields.mp4).toEqual(["codec", ...fields.webm]);
   expect(fields.still).toEqual(["depth", "scale", "mblur", "alpha"]);

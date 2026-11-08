@@ -723,6 +723,17 @@ fn transcode(
                 "lt",
             ]);
         }
+        "prores_hq" => {
+            command.args([
+                "p216le",
+                "-c:v",
+                "prores_videotoolbox",
+                "-allow_sw",
+                "1",
+                "-profile:v",
+                "hq",
+            ]);
+        }
         "hevc_10" => {
             command.args([
                 "p010le",
@@ -847,6 +858,7 @@ fn validate(
         "prores_4444" => "ap4h",
         "prores_proxy" => "apco",
         "prores_lt" => "apcs",
+        "prores_hq" => "apch",
         "hevc_10" => "hvc1",
         _ => "",
     };

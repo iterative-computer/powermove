@@ -108,7 +108,16 @@ impl Checkpoint {
                 let mut dirs = fs::read_dir(source.join("IndexedDB"))?
                     .map(|e| Ok(e?.path()))
                     .collect::<Result<Vec<_>>>()?;
-                dirs.sort();
+                // The shipped app's origin first: its records win over copies
+                // a development server's origin holds (closure.rs).
+                dirs.sort_by_key(|d| {
+                    let name = d
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    (!name.starts_with("app_powermove_"), name)
+                });
                 for dir in dirs {
                     let name = dir.file_name().unwrap().to_string_lossy();
                     if let Some(stem) = name.strip_suffix(".indexeddb.leveldb") {

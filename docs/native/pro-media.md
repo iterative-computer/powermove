@@ -15,6 +15,48 @@ The v1.2.0 `main/media-proxy.ts` preserves alpha, timing and optional audio;
 its VP9/Opus choice addresses Chromium decoding and is not a native codec rule.
 No Electron code is removed and no extension contract changes.
 
+## In the app (wave 16)
+
+`app/src/pro_media.rs` runs `pm_proxy::generate` on one worker thread into
+this Mac's media storage (`pm_promedia::storage`, default
+`<profile>/Media Storage`): proxies at Settings › Media's size and format,
+optimized media as full-size ProRes 422 HQ (4444 for alpha or deeper than 10
+bits). An index (`<profile>/Pro Media/index.json`) keys renditions by the
+original's content (the media cache's object name, or a BLAKE3 of the file
+hashed once per stamp on the pro media threads), so a touched or byte-identical
+copy shares them and an offline original keeps its proxy through the project's
+asset. Clear… never removes a file another original, an attached record, a
+running task or the open project uses; replaced or late renditions are
+retired, never left behind. Probes, hashes, deletes and settings writes run
+on the pro media file thread, never the main thread. Reachable from:
+
+- Project panel context menu on a video or a selection: Create, Rebuild,
+  Delete Proxy Media; Attach Proxy Media… (frames, rate, duration, start and
+  timecode, display aspect, alpha, audio and colour must match; a finishing
+  task never replaces an attached proxy); Create, Delete Optimized Media; Always Play Original
+  (checked). Rows show the state as quiet meta text with creation progress.
+- Window › Background Tasks (⌘9): exports and media tasks with frames,
+  Pause/Resume, Cancel, and a priority on right-click (an NSMenu, plan
+  section 1; the list keeps queue order). An export row offers Cancel, which
+  stops its encode; pause and priority are for media tasks. A paused task's encode stops and
+  starts again on Resume. An encode waiting on pm-proxy's disk guard (keeps
+  max(20 GiB, 10%) free) or on playback says so.
+- Settings › Media: Create Proxies (When Needed: larger than 1080p, or
+  deeper than 8 bits at 4K; For All Video; Only When I Ask) applied on
+  import, Proxy Size (Automatic, Full, Half, Quarter, 1080p, 720p), Proxy
+  Format; Storage: Location (Change…, refused unless empty or Powermove's;
+  existing files stay; the next task writes there), Space Used, Clear… (keeps originals, attached proxies
+  and the open project's media), Show in Finder. Kept in
+  `<profile>/Pro Media/settings.json`: the v1.2.0 profile keys are unchanged.
+- The viewer: Automatic plays optimized media in place of originals, Proxy
+  Preferred and Proxy Only read proxies; Always Play Original wins in every
+  mode. Movie exports read originals unless Export › Use Proxies (Draft);
+  a still export always reads originals.
+
+Not reachable yet: the disk render cache, its timeline render bar and Keep
+Rendered (the `pm_promedia::cache` model has no engine writer or timeline
+painter), and per-project storage locations.
+
 ## Decisions and selecting rules
 
 | Decision | Rule and reason |

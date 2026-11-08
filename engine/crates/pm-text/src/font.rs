@@ -387,10 +387,11 @@ pub fn prepare(
 /// (face, size bits, coordinate bits).
 type PreparedKey = (FaceId, u32, Vec<(u32, u32)>);
 
-/// Caches prepared faces by (face, size, coordinates).
+/// Caches prepared faces by (face, size, coordinates), and measurements.
 #[derive(Default)]
 pub struct PreparedCache {
     map: HashMap<PreparedKey, Arc<PreparedFace>>,
+    pub(crate) measured: crate::blink::measure::MeasureMemo,
 }
 
 impl PreparedCache {

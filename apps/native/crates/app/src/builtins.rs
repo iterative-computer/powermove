@@ -25,6 +25,13 @@ pub struct Host {
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
+    /// The window's open panels, and closed built-ins whose isolates are going.
+    open: BTreeSet<String>,
+    parking: BTreeSet<String>,
+    /// The clip painters' revision the timeline last asked for.
+    painters: u64,
+    /// v4 extensions' viewer overlays (`overlays.viewer`).
+    pub overlays: Option<Entity<crate::viewer_overlays::ViewerOverlays>>,
     clock: crate::playback::PanelClock,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     pub(crate) ready: BTreeSet<String>,
@@ -112,6 +119,16 @@ impl Controller {
                 .borrow_mut()
                 .insert("viewer.gizmos".into(), gizmos.clone().into());
             self.builtins.gizmos = Some(gizmos);
+            let host: Rc<dyn crate::gizmo::Host> =
+                Rc::new(ControllerDelegate(cx.entity().downgrade()));
+            let tokens = self.host.borrow().tokens.clone();
+            let overlays = cx.new(|_| crate::viewer_overlays::ViewerOverlays::new(host, tokens));
+            self.builtins
+                .natives
+                .views
+                .borrow_mut()
+                .insert("viewer.overlays".into(), overlays.clone().into());
+            self.builtins.overlays = Some(overlays);
         }
         self.start_extensions(cx);
         let (tx, rx) = async_channel::bounded(1);
@@ -210,6 +227,8 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
+            crate::diag::line(serde_json::json!({"open":"settled"}));
+            self.busy = None;
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
@@ -239,6 +258,40 @@ impl Host {
     }
 }
 impl Controller {
+    /// The observed media runtime with each video's proxy and optimized
+    /// media and Always Play Original, as the pro media service has them.
+    fn rendition_runtime(&self) -> pm_panel_media::readiness::ObservedRuntime {
+        use crate::pro_media::Status;
+        use pm_panel_media::ProxyStatus;
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return self.builtins.media_runtime.clone();
+        };
+        let status = |s: Status, observed: &ProxyStatus| match s {
+            Status::Absent => observed.clone(),
+            Status::Queued => ProxyStatus::Queued,
+            Status::Creating { percent } => ProxyStatus::Generating { percent },
+            Status::Ready => ProxyStatus::Ready {
+                version: "generated".into(),
+            },
+            Status::Failed => ProxyStatus::Failed("The task couldn’t be completed.".into()),
+        };
+        self.builtins
+            .media_runtime
+            .clone()
+            .with_states(|id, state| {
+                let (proxy, optimized) = self.pro_media.status(
+                    &project,
+                    id,
+                    self.media_base
+                        .originals
+                        .get(id)
+                        .map(std::path::PathBuf::as_path),
+                );
+                state.proxy = status(proxy, &state.proxy);
+                state.optimized = status(optimized, &state.optimized);
+                state.play_original = self.pro_media.plays_original(&project, id);
+            })
+    }
     /// Readiness depends only on the media inputs, so an edit that left them
     /// alone moves the observation to its revision without any worker.
     fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
@@ -307,7 +360,8 @@ impl Controller {
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
+        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+            "mediaSettings":self.media_settings_fact()})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
     /// the playhead and timecode are CALayers fed from the display link.
@@ -348,7 +402,7 @@ impl Controller {
         };
         let facts = self.facts();
         let originals = self.media.originals.clone();
-        let observed = self.builtins.media_runtime.clone();
+        let observed = self.rendition_runtime();
         self.builtins.updating = true;
         let check = runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -387,12 +441,91 @@ impl Controller {
         })
         .detach();
     }
+    /// Closed built-in panels park (their isolates leave the cage account);
+    /// reopened ones start again, the view keeping its tree until the new
+    /// generation publishes. Parking waits for the isolate, off the main thread.
+    pub fn sync_parking(&mut self, open: &[&str], cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        self.builtins.open = open.iter().map(|id| (*id).to_owned()).collect();
+        for id in pm_builtins::PARKABLE {
+            let shown = open.contains(id);
+            if shown && runtime.is_parked(id) {
+                self.unpark(id, cx);
+            } else if !shown
+                && self.builtins.ready.contains(*id)
+                && !runtime.is_parked(id)
+                && self.builtins.parking.insert((*id).to_owned())
+            {
+                self.builtins.ready.remove(*id);
+                self.builtins.keep_surface(id);
+                let (runtime, panel) = (runtime.clone(), (*id).to_owned());
+                cx.spawn(async move |this, cx| {
+                    let parked = {
+                        let runtime = runtime.clone();
+                        let panel = panel.clone();
+                        cx.background_executor()
+                            .spawn(async move { runtime.park(&panel) })
+                            .await
+                    };
+                    let _ = this.update(cx, |v, cx| {
+                        v.builtins.parking.remove(&panel);
+                        if !parked {
+                            v.builtins.ready.insert(panel.clone());
+                        } else if v.builtins.open.contains(&panel) {
+                            // Opened again while it was going.
+                            v.unpark(&panel, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+    fn unpark(&mut self, panel: &str, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        let Some(ticket) = runtime.unpark(panel) else {
+            return;
+        };
+        let id = panel.to_owned();
+        cx.spawn(async move |this, cx| {
+            let result = match ticket {
+                Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| match result {
+                Ok(generation) => {
+                    v.builtins.generations.insert(id.clone(), generation);
+                    v.builtins.ready.insert(id);
+                    v.drain_builtins(cx);
+                    cx.notify();
+                }
+                Err(error) => v.message = format!("Panel {id} could not start: {error}"),
+            });
+        })
+        .detach();
+    }
     pub(crate) fn drain_builtins(&mut self, cx: &mut Context<Self>) {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
         let mut mounted = false;
+        for id in runtime.take_cleared_overlays() {
+            if let Some(overlays) = &self.builtins.overlays {
+                overlays.update(cx, |o, cx| o.clear(&id, cx));
+            }
+        }
         for p in runtime.take_publications() {
+            if p.panel.ends_with(pm_builtins::VIEWER_OVERLAY) {
+                if let Some(overlays) = &self.builtins.overlays {
+                    let runtime = runtime.clone();
+                    overlays.update(cx, |o, cx| o.publish(runtime, p, cx));
+                }
+                continue;
+            }
             if let Some(view) = self.builtins.views.get(&p.panel) {
                 view.update(cx, |v, cx| v.publish(p, cx));
             } else {
@@ -404,6 +537,14 @@ impl Controller {
             eprintln!("v4: {error}");
         }
         self.sync_v4_commands(&runtime);
+        let painters = runtime.painters_revision();
+        if painters != self.builtins.painters
+            && let Some(timeline) = self.builtins.timeline.clone()
+        {
+            self.builtins.painters = painters;
+            timeline.update(cx, |t, cx| t.repaint_decorations(cx));
+        }
+        self.sync_v4_themes(&runtime, cx);
         self.builtins
             .requests
             .extend(runtime.take_platform_requests());
@@ -426,7 +567,18 @@ impl Controller {
             return None;
         }
         let runtime = self.builtins.runtime.clone()?;
-        let t = self.host.borrow().tokens.clone();
+        let mut t = self.host.borrow().tokens.clone();
+        if id == "timeline"
+            && let Some(p) = &self.published
+        {
+            let scheme = if t.scheme == pm_design::Scheme::Dark {
+                "dark"
+            } else {
+                "light"
+            };
+            let surface = self.extensions.v1_timeline[scheme].clone();
+            t = timeline_chrome(t, &p.workspace, &surface);
+        }
         if let Some(publication) = self.builtins.pending.remove(id) {
             let (tokens, natives) = (t.clone(), self.builtins.natives.clone());
             let outline = natives.outline.clone();
@@ -734,6 +886,9 @@ impl Controller {
                                         folder,
                                         cx,
                                     ),
+                                pm_panel_media::Effect::Renditions { action, assets } => {
+                                    self.renditions(action, assets, cx)
+                                }
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -745,6 +900,10 @@ impl Controller {
                         }
                         _ => Err("Media action belongs to a retired publication".into()),
                     }
+                }
+                "media.settings" => {
+                    self.media_settings(&request.input, cx);
+                    Ok(Value::Null)
                 }
                 "export.begin" | "export.retry" => {
                     self.begin_builtin_export(
@@ -801,6 +960,39 @@ impl Controller {
                 }
                 "agent.settings" => {
                     self.show_builtin("settings", window, cx);
+                    Ok(Value::Null)
+                }
+                "agent.attach" => {
+                    let target = crate::platform::ns_window(window)
+                        .unwrap_or_else(|| self.host.borrow().window.clone());
+                    let chosen = crate::platform::attach_paths(&target);
+                    let runtime = self.builtins.runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        let Ok(paths) = chosen.recv().await else {
+                            return;
+                        };
+                        if paths.is_empty() {
+                            return;
+                        }
+                        // Reading and encoding the files stays off the main thread.
+                        let outcome = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let records = crate::media::attachment_records(&paths)?;
+                                match runtime {
+                                    Some(runtime) => runtime.agent_attach(records),
+                                    None => Err("The Agent panel closed.".into()),
+                                }
+                            })
+                            .await;
+                        if let Err(message) = outcome {
+                            let _ = this.update(cx, |v, cx| {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
                     Ok(Value::Null)
                 }
                 "agent.open" => {
@@ -927,6 +1119,13 @@ impl Controller {
         after: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(host) = &self.extensions.host {
+            host.shell_state(serde_json::json!({
+                "zoom": self.view.zoom.unwrap_or(1.),
+                "fit": self.view.zoom.is_none(),
+                "pan": self.view.pan,
+            }));
+        }
         self.view_write = Some(cx.spawn(async move |this, cx| {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;
@@ -976,6 +1175,16 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                 v.clipboard = crate::layer_commands::Clipboard::Keys(tracks);
                 v.update_disabled();
             }
+            // The keyframe sheets on the keys the right-click was on.
+            E::EditKeyValues(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Value, keys, cx)
+            }
+            E::EditVelocity(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Velocity, keys, cx)
+            }
+            E::ScaleKeys(keys) => {
+                v.keyframe_sheet_for(crate::keyframe_sheets::Kind::Scale, keys, cx)
+            }
             other => v.message = format!("Not available yet: {other:?}"),
         });
     }
@@ -998,6 +1207,96 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
     ) {
         crate::v4_native::menu(window, &items, cx, choose);
+    }
+    fn painters_revision(&self, cx: &App) -> u64 {
+        self.0
+            .upgrade()
+            .and_then(|c| c.read(cx).builtins.runtime.clone())
+            .map_or(0, |runtime| runtime.painters_revision())
+    }
+    fn paint_clips(&self, clips: Value, done: crate::timeline_surface::PaintDone, cx: &mut App) {
+        let Some(runtime) = self
+            .0
+            .upgrade()
+            .and_then(|c| c.read(cx).builtins.runtime.clone())
+        else {
+            return;
+        };
+        cx.spawn(async move |cx| {
+            // One 100 ms deadline for the whole request: a realm that hasn't
+            // answered by then is left out of this paint. Answers are bounded
+            // here, on the worker, before they reach the main thread.
+            let shapes = cx
+                .background_executor()
+                .spawn(async move {
+                    let visible: std::collections::HashSet<String> = clips
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                        .collect();
+                    let tickets = runtime.paint_clips(&clips);
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(100);
+                    let mut shapes = pm_panel_timeline::render::Decorations::new();
+                    let mut complete = true;
+                    for (_, ticket) in tickets {
+                        let Ok(ticket) = ticket else { continue };
+                        // A painter that threw has answered; one still running
+                        // past the deadline makes this paint incomplete.
+                        let answer = loop {
+                            if let Some(result) = ticket.try_take() {
+                                break Some(result);
+                            }
+                            if std::time::Instant::now() > deadline {
+                                break None;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        };
+                        let Some(Ok(evaluation)) = answer else {
+                            complete &= answer.is_some();
+                            continue;
+                        };
+                        if let Some(answer) = painter_answer(&evaluation.value) {
+                            pm_panel_timeline::render::add_decorations(
+                                &mut shapes,
+                                &answer,
+                                &visible,
+                            );
+                        }
+                    }
+                    (shapes, complete)
+                })
+                .await;
+            cx.update(|cx| done(shapes.0, shapes.1, cx));
+        })
+        .detach();
+    }
+    fn extension_menu(
+        &self,
+        locations: Vec<(&'static str, Value)>,
+        items: Vec<Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    ) {
+        let Some(controller) = self.0.upgrade() else {
+            return;
+        };
+        if !controller.read(cx).extensions_listen() {
+            crate::v4_native::menu(window, &items, cx, choose);
+            return;
+        }
+        let at = window.mouse_position();
+        controller.update(cx, |v, cx| {
+            v.extension_rows_menu(
+                locations,
+                &items,
+                (f32::from(at.x), f32::from(at.y)),
+                choose,
+                cx,
+            )
+        });
     }
 }
 impl crate::gizmo::Host for ControllerDelegate {
@@ -1034,31 +1333,89 @@ impl crate::gizmo::Host for ControllerDelegate {
             "toolRotate" => Tool::Rotate,
             "toolAnchor" => Tool::Anchor,
             "toolShape" => Tool::Shape,
+            "toolText" => Tool::Text,
+            "toolPen" => Tool::Pen,
             _ => Tool::Other,
         }
     }
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
-    fn layer_menu(&self, window: &mut Window, cx: &mut App) {
+    fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App) {
         let host = self.0.clone();
-        crate::v4_native::menu(
-            window,
-            &crate::layer_commands::layer_menu_rows(),
-            cx,
-            move |index, cx| {
-                let rows = &crate::layer_commands::LAYER_MENU;
-                if let (Some((command, _)), Some(controller)) =
-                    (index.and_then(|i| rows.get(i)), host.upgrade())
-                {
-                    controller
-                        .read(cx)
-                        .host
-                        .borrow()
-                        .send_command(command, vec![]);
+        let Some(controller) = self.0.upgrade() else {
+            return;
+        };
+        let time = controller.read(cx).time();
+        let at = window.mouse_position();
+        let at = (f32::from(at.x), f32::from(at.y));
+        // Over nothing: the canvas's own menu (New, as the shipped app; Text
+        // and Null have no native command yet) and what extensions add to it.
+        let Some(id) = layer else {
+            controller.update(cx, |v, cx| {
+                let entries = vec![pm_shell::MenuEntry::submenu(
+                    "New",
+                    vec![
+                        pm_shell::MenuEntry::item("Solid", "newSolid"),
+                        pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+                        pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+                        pm_shell::MenuEntry::separator(),
+                        pm_shell::MenuEntry::item("Composition…", "newComposition"),
+                    ],
+                )];
+                let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
+                if let Some(entries) = v.extension_menu(locations, entries, at, cx) {
+                    v.host.borrow().context_menu(&entries, at.0, at.1);
                 }
-            },
-        );
+            });
+            return;
+        };
+        let choose: crate::timeline_surface::Choose = Box::new(move |index, cx| {
+            let rows = &crate::layer_commands::LAYER_MENU;
+            if let (Some((command, _)), Some(controller)) =
+                (index.and_then(|i| rows.get(i)), host.upgrade())
+            {
+                controller
+                    .read(cx)
+                    .host
+                    .borrow()
+                    .send_command(command, vec![]);
+            }
+        });
+        if !controller.read(cx).extensions_listen() {
+            crate::v4_native::menu(
+                window,
+                &crate::layer_commands::layer_menu_rows(),
+                cx,
+                choose,
+            );
+            return;
+        }
+        // The layer's menu with what extensions add for it, as the shipped
+        // viewer's layer menu (`layer:context`, then `viewer:context`).
+        let layers: Vec<String> = controller
+            .read(cx)
+            .published
+            .as_ref()
+            .map(|p| p.selection.layers().to_vec())
+            .filter(|layers| layers.contains(&id))
+            .unwrap_or_else(|| vec![id.clone()]);
+        let locations = vec![
+            ("layer:context", json!({"layerId": id, "layerIds": layers})),
+            (
+                "viewer:context",
+                json!({"kind":"layer","layerId":id,"time":time}),
+            ),
+        ];
+        controller.update(cx, |v, cx| {
+            v.extension_rows_menu(
+                locations,
+                &crate::layer_commands::layer_menu_rows(),
+                at,
+                choose,
+                cx,
+            )
+        });
     }
     fn navigate(&self, change: crate::gizmo::Navigate, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
@@ -1071,6 +1428,29 @@ impl crate::gizmo::Host for ControllerDelegate {
     }
     fn report(&self, message: String, cx: &mut App) {
         crate::timeline_surface::Delegate::report(self, message, cx);
+    }
+    fn shape_variant(&self, cx: &App) -> String {
+        self.0
+            .upgrade()
+            .map_or_else(|| "rect".into(), |c| c.read(cx).shape_variant.clone())
+    }
+    fn pause(&self, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(viewer) = &controller.read(cx).viewer
+        {
+            let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
+        }
+    }
+    fn command(&self, name: &str, cx: &mut App) {
+        crate::timeline_surface::Delegate::command(self, name, cx);
+    }
+    fn text_input(
+        &self,
+        initial: &str,
+        window: &mut Window,
+        _: &mut App,
+    ) -> Option<Rc<dyn crate::gizmo::text::TextInput>> {
+        crate::gizmo::text::native_input(initial, window)
     }
 }
 struct SurfaceWindow {
@@ -1108,4 +1488,90 @@ impl Render for SurfaceWindow {
             .when(self.panel != "agent", |d| d.bg(rgb(fill)))
             .children(body)
     }
+}
+
+/// A painter's answer: JSON text (the realm returns `JSON.stringify(…)`),
+/// refused past 4 MiB before parsing.
+fn painter_answer(text: &str) -> Option<Value> {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    if text.len() > LIMIT {
+        return None;
+    }
+    match serde_json::from_str::<Value>(text).ok()? {
+        Value::String(inner) => serde_json::from_str(&inner).ok(),
+        other => Some(other),
+    }
+}
+
+/// v1–3's timeline chrome (`workspace.chrome.timeline`, which extensions set
+/// through `workspace.mutate`) as the timeline's metrics, within v1's ranges:
+/// row height, layer column (gutter) width, ruler height and keyframe size.
+pub fn timeline_chrome(
+    mut t: pm_design::Tokens,
+    workspace: &pm_model::Value,
+    surface: &Value,
+) -> pm_design::Tokens {
+    // The theme's timeline surface (track, gutter, accent, text, line).
+    let colour = |key: &str| {
+        surface[key]
+            .as_u64()
+            .filter(|c| *c <= 0xFF_FFFF)
+            .map(|c| c as u32)
+    };
+    for (target, key) in [
+        (&mut t.colors.panel, "track"),
+        (&mut t.colors.panel_secondary, "gutter"),
+        (&mut t.colors.accent, "accent"),
+        (&mut t.colors.text, "text"),
+        (&mut t.colors.separator, "line"),
+    ] {
+        if let Some(c) = colour(key) {
+            *target = c;
+        }
+    }
+    let chrome = workspace
+        .get("chrome")
+        .and_then(|c| c.get("timeline"))
+        .map(|c| {
+            serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(c))
+                .unwrap_or(Value::Null)
+        })
+        .unwrap_or(Value::Null);
+    // Main rounds the three lengths and keeps fractional key and corner sizes.
+    let field = |key: &str, low: f64, high: f64, round: bool| {
+        chrome[key]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(|v| if round { v.round() } else { v }.clamp(low, high))
+    };
+    let m = &mut t.metrics;
+    for (target, value) in [
+        (&mut m.track_row, field("rowHeight", 22., 48., true)),
+        (&mut m.layer_column, field("gutterWidth", 160., 640., true)),
+        (&mut m.ruler, field("rulerHeight", 20., 42., true)),
+        (&mut m.keyframe, field("keyframeSize", 4., 12., false)),
+        // Main draws clip bars with at most a 5-point corner.
+        (
+            &mut m.clip_radius,
+            field("clipRadius", 0., 12., false).map(|r| r.min(5.)),
+        ),
+    ] {
+        if let Some(value) = value {
+            *target = value as f32;
+        }
+    }
+    // A reversed surface order swaps the track and gutter fills (T1).
+    let reversed = workspace
+        .get("chrome")
+        .and_then(|c| c.get("timelineSurfaceOrder"))
+        .and_then(|o| {
+            pm_model::json::to_canonical_string(o)
+                .parse::<String>()
+                .ok()
+        })
+        .is_some_and(|o| o == "\"reversed\"");
+    if reversed {
+        std::mem::swap(&mut t.colors.panel, &mut t.colors.panel_secondary);
+    }
+    t
 }

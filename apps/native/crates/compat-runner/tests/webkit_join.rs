@@ -38,7 +38,12 @@ mod mac {
             const out=document.createElement('output');out.id='echo';out.textContent=api.project.get().name;
             const canvas=document.createElement('canvas');canvas.id='art';canvas.width=4;canvas.height=4;
             const x=canvas.getContext('2d');x.fillStyle='#ff0000';x.fillRect(0,0,4,4);
-            input.addEventListener('input',()=>{out.textContent=input.value});
+            input.addEventListener('input',()=>{out.textContent=input.value;if(input.value==='open modal')openModal()});
+            // ui.modal: its body is a sheet's own document, its input and actions this realm's.
+            const openModal=()=>{const field=document.createElement('input');field.id='modal-name';
+              field.addEventListener('input',()=>{out.textContent='modal '+field.value});
+              PM.modal({title:'Check',body:field,actions:[{label:'Done',pri:true,run:()=>{out.textContent='action ran'}}],
+                onClose:()=>{out.textContent+=' and closed'}})};
             root.append(input,out,canvas);
           }});
         }";
@@ -232,6 +237,8 @@ mod mac {
             owner: None,
             text: None,
             wake: Arc::new(|| ()),
+            frames: None,
+            rasters: None,
         });
         let (feedback, messages) = mpsc::channel();
         let page = Rc::new(Page(feedback, RefCell::new(vec![])));
@@ -271,10 +278,10 @@ mod mac {
         let mut opened = false;
         let mut stage = 0;
         let mut ticket = None;
-        let script = |web: &MacDomHost, source: &str| unsafe {
-            web.web_view()
-                .evaluateJavaScript_completionHandler(&NSString::from_str(source), None);
+        let script_in = |web: &objc2_web_kit::WKWebView, source: &str| unsafe {
+            web.evaluateJavaScript_completionHandler(&NSString::from_str(source), None);
         };
+        let script = |web: &MacDomHost, source: &str| script_in(web.web_view(), source);
         while Instant::now() < deadline {
             if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
                 NSEventMask::Any,
@@ -335,6 +342,23 @@ mod mac {
                     }
                     2 if text == "[255,0,0,255]" => {
                         println!("recorder_canvas_painted_in_webkit=1");
+                        stage = 3;
+                        script(
+                            &web,
+                            "{const i=document.querySelector('#name');i.value='open modal';i.dispatchEvent(new InputEvent('input',{bubbles:true}))}0",
+                        );
+                    }
+                    4 if text == "modal typed in sheet" => {
+                        println!("modal_sheet_input_ran_v8_closure=1");
+                        stage = 5;
+                        let sheet = web.child_web_views().pop().ok_or("sheet closed early")?;
+                        script_in(
+                            &sheet,
+                            "document.querySelector('[data-pm-modal-action=\"0\"]').click();0",
+                        );
+                    }
+                    5 if text == "action ran and closed" && web.child_web_views().is_empty() => {
+                        println!("modal_action_ran_closed_and_called_on_close=1");
                         web.destroy(1)?;
                         store_view(&app, mtm, &host)?;
                         drop(host);
@@ -344,9 +368,19 @@ mod mac {
                     _ => (),
                 }
             }
-            if ready && opened && ticket.is_none() {
+            // The realm opened the sheet: type into its own document.
+            if stage == 3
+                && let Some(sheet) = web.child_web_views().pop()
+            {
+                stage = 4;
+                script_in(
+                    &sheet,
+                    "{const i=document.querySelector('#modal-name');if(!i)throw Error('no body');i.value='typed in sheet';i.dispatchEvent(new InputEvent('input',{bubbles:true}))}0",
+                );
+            }
+            if ready && opened && ticket.is_none() && stage != 3 {
                 let selector = match stage {
-                    0 | 1 => Some(("#echo", false)),
+                    0 | 1 | 4 | 5 => Some(("#echo", false)),
                     _ => None,
                 };
                 if let Some((selector, value)) = selector {

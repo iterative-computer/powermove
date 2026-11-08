@@ -62,12 +62,12 @@ impl Rasterizer {
                 self.context.push_clip_layer(&clip);
             }
             for p in paths {
-                let shape = self.paths.get(p);
+                let shape = self.paths.get(p).device();
                 let [_, _, _, _, x, y] = p.transform.as_coeffs();
                 self.context
                     .set_transform(to_page * kurbo::Affine::translate((x, y)));
                 self.context.set_fill_rule(vello_cpu::peniko::Fill::NonZero);
-                self.context.fill_path(shape.as_ref());
+                self.context.fill_path(&shape);
             }
             if cell.clip {
                 self.context.pop_layer();

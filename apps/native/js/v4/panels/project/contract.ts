@@ -71,6 +71,9 @@ export interface Row {
           {
             availability: Availability;
             proxy: Json;
+            /** Optimized media; absent before renditions were tracked. */
+            optimized?: Json;
+            play_original?: boolean;
             poster: string | null;
             progress?: { completed: number; total: number } | null;
           },
@@ -108,6 +111,7 @@ export type Command =
   | { OpenComposition: string }
   | { NestComposition: string }
   | { CompositionSettings: string }
+  | { Rendition: RenditionAction }
   | { DuplicateComposition: string }
   | { DeleteComposition: string };
 export type Key =
@@ -171,9 +175,19 @@ export type Input =
         direction: "Before" | "After";
       };
     };
+export type RenditionAction =
+  | "CreateProxy"
+  | "RebuildProxy"
+  | "DeleteProxy"
+  | "AttachProxy"
+  | "CreateOptimized"
+  | "DeleteOptimized"
+  | { PlayOriginal: boolean };
 export interface MenuEntry {
   command: Command;
   enabled: boolean;
+  /** A toggle that is on (Always Play Original). */
+  checked?: boolean;
 }
 export interface Projection {
   page: Page;

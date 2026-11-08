@@ -93,6 +93,7 @@ fn low_disk_during_transcode_pauses_then_resumes_the_same_generation() {
                         cancel: cancel_ref,
                         pause: &|| false,
                         on_pause: &on_pause,
+                        on_progress: &|_| {},
                     },
                 },
                 &disk_space,

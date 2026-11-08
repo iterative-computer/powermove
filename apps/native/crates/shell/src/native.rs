@@ -380,6 +380,17 @@ define_class!(
             REPLAYING.with(|guard|{guard.set(true);NSApplication::sharedApplication(self.mtm()).sendEvent(event);guard.set(false);});
             if let (Some(token),Some(sender))=(token,&self.ivars().sender){let _=sender.try_send(Command{name:"shellReplayComplete".into(),args:vec![],token:Some(token)});}
         }
+        /// A Shape variant from the Shape segment's menu.
+        #[unsafe(method(shapeVariant:))]
+        fn shape_variant(&self, sender: &NSMenuItem) {
+            let variant: Option<Retained<NSString>> = unsafe {
+                sender.representedObject().map(|o| Retained::cast_unchecked(o))
+            };
+            if let (Some(variant), Some(tx)) = (variant, &self.ivars().sender) {
+                let args = vec![serde_json::Value::from(variant.to_string())];
+                let _ = tx.try_send(Command { name: "toolShape".into(), args, token: None });
+            }
+        }
         #[unsafe(method(tool:))]
         fn tool(&self, sender: &NSSegmentedControl) {
             if let Some((command, _, _)) = TOOLS.get(sender.selectedSegment() as usize)
@@ -658,6 +669,15 @@ const TOOLS: [(&str, &str, &str); 8] = [
     ("toolPen", "pencil.tip", "Pen (G)"),
     ("toolText", "textformat", "Text (⌘T)"),
 ];
+/// The Shape tool's variants: id, menu label, symbol.
+pub const SHAPES: [(&str, &str, &str); 5] = [
+    ("rect", "Rectangle", "square"),
+    ("rounded", "Rounded Rectangle", "app"),
+    ("ellipse", "Ellipse", "circle"),
+    ("polygon", "Polygon", "hexagon"),
+    ("star", "Star", "star"),
+];
+const SHAPE_SEGMENT: isize = 5;
 const TOOLBAR: [&str; 6] = [
     "toggleSidebar",
     "title",
@@ -744,6 +764,34 @@ impl ToolbarDelegate {
             control.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tools")));
             for (i, (_, _, l)) in TOOLS.iter().enumerate() {
                 control.setToolTip_forSegment(Some(&NSString::from_str(l)), i as isize);
+            }
+            // Holding the Shape segment lists its variants.
+            let menu = NSMenu::new(mtm);
+            for (variant, label, glyph) in SHAPES {
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &NSString::from_str(label),
+                        Some(sel!(shapeVariant:)),
+                        &NSString::from_str(""),
+                    )
+                };
+                unsafe {
+                    item.setRepresentedObject(Some(&NSString::from_str(variant)));
+                    item.setTarget(Some(target));
+                }
+                item.setImage(Some(&symbol(glyph, label)));
+                item.setState(if variant == "rect" {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                menu.addItem(&item);
+            }
+            unsafe {
+                let _: () = msg_send![&*control, setMenu: &*menu, forSegment: SHAPE_SEGMENT];
+                let _: () =
+                    msg_send![&*control, setShowsMenuIndicator: true, forSegment: SHAPE_SEGMENT];
             }
             item.setView(Some(&control));
             item.setLabel(&NSString::from_str("Tools"));
@@ -1831,6 +1879,37 @@ impl Host {
                         let _: () = msg_send![&*view,setEnabled:on,forSegment:index as isize];
                     }
                 }
+            }
+        }
+    }
+    /// Checks the Shape variant in its segment menu and shows its symbol.
+    pub fn select_shape(&self, variant: &str) {
+        let Some((_, label, glyph)) = SHAPES.iter().find(|(v, _, _)| *v == variant) else {
+            return;
+        };
+        for item in self._toolbar.items().to_vec() {
+            if item.itemIdentifier().to_string() != "tools" {
+                continue;
+            }
+            let Some(view) = item.view() else { continue };
+            unsafe {
+                let menu: Option<Retained<NSMenu>> =
+                    msg_send![&*view, menuForSegment: SHAPE_SEGMENT];
+                for entry in menu.map(|m| m.itemArray().to_vec()).unwrap_or_default() {
+                    let id: Option<Retained<NSString>> = entry
+                        .representedObject()
+                        .map(|o| Retained::cast_unchecked(o));
+                    let on = id.is_some_and(|id| id.to_string() == variant);
+                    entry.setState(if on {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                }
+                let image = symbol(glyph, &format!("Shape: {label} (Q)"));
+                let _: () = msg_send![&*view, setImage: &*image, forSegment: SHAPE_SEGMENT];
+                let tip = NSString::from_str(&format!("{label} (Q)"));
+                let _: () = msg_send![&*view, setToolTip: &*tip, forSegment: SHAPE_SEGMENT];
             }
         }
     }

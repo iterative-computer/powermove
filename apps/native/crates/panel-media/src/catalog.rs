@@ -93,7 +93,9 @@ pub enum ProxyStatus {
     Unknown,
     Absent,
     Queued,
-    Generating,
+    Generating {
+        percent: u8,
+    },
     Ready {
         version: String,
     },
@@ -105,6 +107,12 @@ pub enum ProxyStatus {
 pub struct RuntimeState {
     pub availability: Availability,
     pub proxy: ProxyStatus,
+    /// Optimized media (Create Optimized Media).
+    #[serde(default)]
+    pub optimized: ProxyStatus,
+    /// Always Play Original.
+    #[serde(default)]
+    pub play_original: bool,
     /// Opaque host key; it may resolve even when original media is offline.
     pub poster: Option<String>,
     #[serde(default)]

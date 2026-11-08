@@ -747,3 +747,26 @@ fn app_memory_wire_keeps_split_utf16_emoji_through_reads_and_updates() {
         published.revision()
     );
 }
+#[test]
+fn a_recovery_choice_in_the_window_is_named_and_library_reads_still_run() {
+    let f = Fixture::new();
+    let mut c = f.connection();
+    start(&mut c);
+    let operation = f.host.try_operation().unwrap();
+    f.host.awaiting_recovery(Some("Synthetic".into()));
+    let refused = c
+        .dispatch("get_project_state", &json!({"indexOnly":true}))
+        .unwrap_err();
+    assert_eq!(refused.code, "revision_conflict");
+    assert!(
+        refused.message.contains("“Synthetic” has unsaved work"),
+        "{}",
+        refused.message
+    );
+    assert!(refused.message.contains("waiting for someone to choose"));
+    c.dispatch("list_projects", &json!({})).unwrap();
+    f.host.awaiting_recovery(None);
+    drop(operation);
+    c.dispatch("get_project_state", &json!({"indexOnly":true}))
+        .unwrap();
+}

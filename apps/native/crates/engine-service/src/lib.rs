@@ -1,6 +1,7 @@
 //! In-process native rendering. No Node, napi entrypoints, bridge or GPUI.
 //! Callers own below-slot placement and pump native layers on the main thread.
 pub mod color;
+pub mod compat;
 pub mod jobs;
 pub mod layers;
 pub mod policy;
@@ -115,6 +116,13 @@ pub type LockedOverlayProvider =
 pub struct MediaCatalog {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     pub proxies: BTreeMap<String, std::path::PathBuf>,
+    /// Optimized media: full-size high-quality transcodes the viewer plays
+    /// in Automatic in place of their originals (Final Cut's optimized
+    /// media). Exports never read them.
+    pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// Always Play Original: these assets never play a proxy or optimized
+    /// media, in any mode.
+    pub play_original: std::collections::BTreeSet<String>,
 }
 /// What the viewer plays for each clip (View › Media). Exports read
 /// originals whatever this says; only an explicit draft export uses proxies.
@@ -141,14 +149,23 @@ impl MediaCatalog {
     }
     /// The file the viewer reads for each asset in `mode`.
     pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
-        let (first, second) = match mode {
-            MediaMode::Automatic => (&self.originals, Some(&self.proxies)),
-            MediaMode::Originals => (&self.originals, None),
-            MediaMode::ProxyPreferred => (&self.proxies, Some(&self.originals)),
-            MediaMode::ProxyOnly => (&self.proxies, None),
+        // Most preferred last: each later map overrides the earlier ones.
+        let order: &[&BTreeMap<String, std::path::PathBuf>] = match mode {
+            MediaMode::Automatic => &[&self.proxies, &self.originals, &self.optimized],
+            MediaMode::Originals => &[&self.originals],
+            MediaMode::ProxyPreferred => &[&self.originals, &self.optimized, &self.proxies],
+            MediaMode::ProxyOnly => &[&self.proxies],
         };
-        let mut paths = second.cloned().unwrap_or_default();
-        paths.extend(first.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut paths = BTreeMap::new();
+        for map in order {
+            paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        for id in &self.play_original {
+            match self.originals.get(id) {
+                Some(original) => paths.insert(id.clone(), original.clone()),
+                None => paths.remove(id),
+            };
+        }
         paths
     }
     /// Assets the viewer draws from a proxy in `mode`.
@@ -677,6 +694,8 @@ impl Viewer {
 pub struct EngineService {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    compat: Arc<compat::CompatStores>,
+    layer_rasters: Option<Arc<compat::LayerRasters>>,
 }
 impl EngineService {
     /// Start off the UI thread: renderer/shader initialization may take time.
@@ -692,11 +711,30 @@ impl EngineService {
         shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
+        let layer_rasters = compat::LayerRasters::start(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            Some(fonts.clone()),
+        )?;
         let mut engine = render::Engine::with_shader_cache(gpu, shader_cache)?;
         engine.set_fonts(fonts);
-        Self::start_engine(device, engine)
+        let mut service = Self::start_engine(device, engine)?;
+        service.layer_rasters = Some(layer_rasters);
+        Ok(service)
     }
-    fn start_engine(device: metal::Device, engine: render::Engine) -> Result<Self> {
+    /// The base rasters raster overrides start from (`render.raster`).
+    pub fn layer_rasters(&self) -> Option<Arc<compat::LayerRasters>> {
+        self.layer_rasters.clone()
+    }
+    /// A document's raster override answers (`compat::CompatStore`).
+    pub fn compat(&self, doc_id: u64) -> Arc<compat::CompatStore> {
+        self.compat.document(doc_id)
+    }
+    /// A document closed: its answers go.
+    pub fn forget_compat(&self, doc_id: u64) {
+        self.compat.forget(doc_id);
+    }
+    fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -711,6 +749,20 @@ impl EngineService {
             #[cfg(test)]
             invalid_call: Default::default(),
         });
+        // Answers that land redraw every viewer, as a font change does.
+        let compat = Arc::new(compat::CompatStores::default());
+        let redraw = Arc::downgrade(&shared);
+        compat.set_redraw(Arc::new(move || {
+            if let Some(shared) = redraw.upgrade() {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+                drop(state);
+                shared.wake.try_send(()).ok();
+            }
+        }));
+        engine.set_compat(Some(compat.clone()));
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
@@ -718,6 +770,8 @@ impl EngineService {
         Ok(Self {
             shared,
             thread: Some(thread),
+            compat,
+            layer_rasters: None,
         })
     }
     /// Call after the main-thread font broker's generation changes.
@@ -865,9 +919,87 @@ struct Runtime {
     /// Frames in a row the layer gave no drawable (`nextDrawable` returned
     /// nil). Each retry renders a whole frame, so they back off until one lands.
     drawable_misses: u32,
+    /// Transient refusals in a row (fonts, GPU watchdog); retries back off
+    /// the same way, so a frame that keeps failing never renders at full rate.
+    refusals: u32,
     /// When the frames started being refused as transient, while they are.
     waiting_since: Option<f64>,
     prepared: f64,
+    lookahead: Lookahead,
+}
+/// Where media was last prepared ahead of the playhead, and the frames a
+/// video entering since then still needs prepared.
+#[derive(Default)]
+struct Lookahead {
+    /// The last look-ahead time and the video draws planned there.
+    last: Option<(Ticks, std::collections::HashSet<(String, u64)>)>,
+    /// Frames between two look-aheads where a video entered: its first
+    /// frame is among them, and the shared cache should hold it before the
+    /// playhead meets it. One is prepared per frame drawn.
+    refine: VecDeque<Ticks>,
+}
+impl Lookahead {
+    /// Notes what the look-ahead at `at` planned. A video new since the last
+    /// one entered between the two: queue every frame between them.
+    fn planned(&mut self, at: Ticks, videos: Vec<(String, u64)>, frame: i64) {
+        let videos: std::collections::HashSet<_> = videos.into_iter().collect();
+        if let Some((last, before)) = &self.last {
+            let (lo, hi) = (last.get().min(at.get()), last.get().max(at.get()));
+            let near = hi - lo
+                <= (2. * PREPARE_EVERY_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
+                    as i64;
+            if near && frame > 0 && !videos.is_subset(before) {
+                let mut t = lo - lo.rem_euclid(frame) + frame;
+                while t < hi && self.refine.len() < MAX_REFINE {
+                    self.refine.extend(Ticks::new(t).ok());
+                    t += frame;
+                }
+            }
+        }
+        self.last = Some((at, videos));
+    }
+}
+/// Entry frames queued at most (a quarter second at 120 fps).
+const MAX_REFINE: usize = 30;
+#[cfg(test)]
+mod lookahead_tests {
+    use super::*;
+    use pm_protocol::common::TICKS_PER_SECOND;
+
+    fn at(seconds: f64) -> Ticks {
+        Ticks::new((seconds * TICKS_PER_SECOND as f64) as i64).unwrap()
+    }
+
+    /// A video first planned at one look-ahead entered since the last: each
+    /// frame between them is queued, so its first frame is warmed. Known
+    /// videos, a jump, or the first look-ahead queue nothing.
+    #[test]
+    fn a_video_entering_between_look_aheads_queues_the_frames_between() {
+        let frame = TICKS_PER_SECOND / 24;
+        let clip = ("clip".to_owned(), 1);
+        let mut l = Lookahead::default();
+        l.planned(at(1.0), vec![], frame);
+        assert!(l.refine.is_empty());
+        l.planned(at(1.25), vec![clip.clone()], frame);
+        let queued: Vec<i64> = l.refine.drain(..).map(|t| t.get()).collect();
+        assert_eq!(
+            queued.len(),
+            5,
+            "the frames strictly between 1.0 s and 1.25 s"
+        );
+        assert!(
+            queued
+                .iter()
+                .all(|t| t % frame == 0 && *t > at(1.0).get() && *t < at(1.25).get())
+        );
+        l.planned(at(1.5), vec![clip.clone()], frame);
+        assert!(l.refine.is_empty(), "already planned");
+        l.planned(at(9.0), vec![clip, ("other".to_owned(), 1)], frame);
+        assert!(
+            l.refine.is_empty(),
+            "a jump says nothing about where it entered"
+        );
+    }
 }
 struct Flight {
     id: u64,
@@ -897,6 +1029,8 @@ struct Work {
     pipeline: trace::Pipeline,
     audio_host: Option<f64>,
     plan: Option<present::Plan>,
+    /// The composition's frame duration (0: not a whole number of ticks).
+    frame_ticks: i64,
 }
 /// How much of a frame's budget a video may wait for its exact frame.
 const DECODE_SHARE: f64 = 0.35;
@@ -1219,8 +1353,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     auto: Default::default(),
                     not_before: 0.,
                     drawable_misses: 0,
+                    refusals: 0,
                     waiting_since: None,
                     prepared: 0.,
+                    lookahead: Lookahead::default(),
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
@@ -1402,6 +1538,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
                 plan,
+                frame_ticks: v.config.rate.exact_frame_ticks().unwrap_or(0),
             });
             break;
         }
@@ -1437,6 +1574,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             pipeline,
             audio_host,
             plan,
+            frame_ticks,
         }) = work
         {
             drop(state);
@@ -1449,6 +1587,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             }));
             engine.mastering = mastering;
             engine.set_resources(resources);
+            engine.use_compat_document(stamp.doc_id);
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes
@@ -1469,15 +1608,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
             let mut prepare_at = None;
+            let mut refine_at = None;
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
-                && now - r.prepared >= PREPARE_EVERY_SECONDS
             {
-                r.prepared = now;
-                let ahead = (PREPARE_AHEAD_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
-                    * f64::from(r.transport.rate().num.signum());
-                let at = (spec.time.get() + ahead as i64).max(0);
-                prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
+                if now - r.prepared >= PREPARE_EVERY_SECONDS {
+                    r.prepared = now;
+                    let ahead = (PREPARE_AHEAD_SECONDS
+                        * pm_protocol::common::TICKS_PER_SECOND as f64)
+                        * f64::from(r.transport.rate().num.signum());
+                    let at = (spec.time.get() + ahead as i64).max(0);
+                    prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
+                } else {
+                    refine_at = r.lookahead.refine.pop_front();
+                }
+            } else if let Some(r) = runtime.get_mut(&id) {
+                r.lookahead = Lookahead::default();
             }
             #[cfg(test)]
             if let Some(hook) = shared.before_submit.lock().unwrap().take() {
@@ -1513,6 +1659,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         if let Some(r) = runtime.get_mut(&id) {
                             r.stand_in = s.stand_ins.then_some(landed_before);
                             r.drawable_misses = 0;
+                            r.refusals = 0;
                             r.waiting_since = None;
                         }
                         let completed = Arc::downgrade(&shared);
@@ -1554,9 +1701,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         v.capture |= capture;
                         v.dirty = true;
                         v.input = input;
+                        // A raster override's layers: asked of the realm; its
+                        // answers redraw (`CompatStore::answer_all`).
+                        let pending = match e.downcast_ref::<pm_render::RenderError>() {
+                            Some(pm_render::RenderError::CompatPending(needs)) => {
+                                Some(needs.clone())
+                            }
+                            _ => None,
+                        };
+                        if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
+                            store.request(needs, spec.moment == policy::Moment::Playing);
+                        }
                         if let Some(r) = runtime.get_mut(&id) {
                             let now = trace::now();
-                            r.not_before = now + RETRY_SECONDS;
+                            r.refusals = r.refusals.saturating_add(1);
+                            r.not_before = now + drawable_retry(r.refusals - 1);
                             // Retried for good, but never silently: past a few
                             // seconds the viewer says what it waits for.
                             let since = *r.waiting_since.get_or_insert(now);
@@ -1576,6 +1735,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             state.notify();
             drop(state);
             if let Some(at) = prepare_at {
+                let videos = engine.prepare(&scene, at, spec);
+                if let Some(r) = runtime.get_mut(&id) {
+                    r.lookahead.planned(at, videos, frame_ticks);
+                }
+            } else if let Some(at) = refine_at {
                 engine.prepare(&scene, at, spec);
             }
         } else {

@@ -79,13 +79,12 @@ pub trait EngineHook: Send + Sync {
         ))
     }
 }
-/// Stable ids are owned by each surface, never derived from child order. The
-/// same provider is used windowed and headless. Sensitive controls are omitted.
+/// The running app's panels and workspace (open_panel, get_panel_state,
+/// interact_panel, capture_panel, computer_use_panel, set_panel_layout and the
+/// live half of get_workspace_state/get_panel_layout). Runs on the main thread;
+/// the worker waits for its reply. `project` is the session's attached project.
 pub trait SurfaceHook: Send + Sync {
-    fn list_panels(&self) -> Result<Value>;
-    fn inspect(&self, panel_id: &str, element_id: Option<&str>) -> Result<Value>;
-    fn drive(&self, panel_id: &str, element_id: &str, action: &Value) -> Result<Value>;
-    fn capture(&self, panel_id: &str) -> Result<Value>;
+    fn call(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
 }
 /// Either the headless binary's own kernel or the running app's actor.
 enum Backend {
@@ -360,6 +359,51 @@ impl Automation {
         project["revision"] = json!(view.revision);
         Ok(project)
     }
+    /// The kernel half of `get_workspace_state`; the window adds viewport,
+    /// open projects, extension health, errors and unsaved state.
+    pub fn workspace_state(&self, project: Option<&str>) -> Result<Value> {
+        let state = self.state();
+        let mut effects = Vec::<Value>::new();
+        for entry in state.registries.get("effects").into_iter().flatten() {
+            let effect = json_value(&entry.definition);
+            let row = json!({"id":effect["id"],"label":effect["label"],"group":effect["group"],
+                "parameters":effect["params"].as_array().map(|params| params.iter().map(|p| p["k"].clone()).collect::<Vec<_>>()).unwrap_or_default()});
+            match effects.iter_mut().find(|e| e["id"] == row["id"]) {
+                Some(previous) => *previous = row,
+                None => effects.push(row),
+            }
+        }
+        let extensions = state
+            .extensions
+            .values()
+            .filter(|e| e.installed)
+            .map(|e| json!({"id":e.id,"version":e.version,"enabled":e.enabled,"health":null}))
+            .collect::<Vec<_>>();
+        drop(state);
+        let (identity, selection) = match project {
+            Some(id) => {
+                let view = self.view(id)?;
+                let document = json_value(&pm_model::canonical::realize_project(
+                    view.snapshot
+                        .document
+                        .to_value()
+                        .ok_or_else(|| Error::invalid("Missing document"))?,
+                ));
+                (
+                    json!({"id":id,"name":document["name"],"revision":view.revision,
+                        "layerCount":document["layers"].as_array().map_or(0, Vec::len),
+                        "file":view.path.as_ref().map(|p| p.display().to_string()),"unsaved":null}),
+                    self.selection(id)?,
+                )
+            }
+            None => (Value::Null, Value::Null),
+        };
+        Ok(
+            json!({"project":identity,"openProjects":[],"extensions":extensions,
+            "registeredEffects":effects,"projectsScreenOpen":false,"selection":selection,
+            "layout":self.panel_layout(project)?,"viewport":null,"errors":[]}),
+        )
+    }
     pub fn selection(&self, id: &str) -> Result<Value> {
         let s = self.view(id)?.selection;
         Ok(json!({"layers":s.layers(),"keys":s.keys(),"chan":s.channel()}))
@@ -625,24 +669,6 @@ impl Automation {
             }
         }
         Ok(json!({"workspace":identity,"docks":docks,"registeredPanels":panels}))
-    }
-    pub fn list_panels(&self) -> Result<Value> {
-        self.surfaces
-            .as_ref()
-            .ok_or_else(|| Error::unavailable("shell/surface host"))?
-            .list_panels()
-    }
-    pub fn inspect_element(&self, panel: &str, element: Option<&str>) -> Result<Value> {
-        self.surfaces
-            .as_ref()
-            .ok_or_else(|| Error::unavailable("shell/surface host"))?
-            .inspect(panel, element)
-    }
-    pub fn drive_element(&self, panel: &str, element: &str, action: &Value) -> Result<Value> {
-        self.surfaces
-            .as_ref()
-            .ok_or_else(|| Error::unavailable("shell/surface host"))?
-            .drive(panel, element, action)
     }
     pub fn list_projects(&mut self) -> Result<Value> {
         let rows = match self.shell(ShellCall::Recent)? {
@@ -1010,24 +1036,6 @@ impl ActorAutomation {
         ));
         value["revision"] = json!(p.revision());
         Ok(value)
-    }
-    pub fn list_panels(&self) -> Result<Value> {
-        self.surfaces
-            .as_ref()
-            .ok_or_else(|| Error::unavailable("shell/surface host"))?
-            .list_panels()
-    }
-    pub fn inspect_element(&self, panel: &str, element: Option<&str>) -> Result<Value> {
-        self.surfaces
-            .as_ref()
-            .ok_or_else(|| Error::unavailable("shell/surface host"))?
-            .inspect(panel, element)
-    }
-    pub fn drive_element(&self, panel: &str, element: &str, action: &Value) -> Result<Value> {
-        self.surfaces
-            .as_ref()
-            .ok_or_else(|| Error::unavailable("shell/surface host"))?
-            .drive(panel, element, action)
     }
     pub fn capture_frames(&self, request: &CaptureRequest) -> Result<Value> {
         if self.inspect_project(&request.project_id)?.revision() != request.revision {

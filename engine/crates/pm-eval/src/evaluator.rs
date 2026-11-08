@@ -748,6 +748,32 @@ impl Evaluator {
         self.channel_memo.local(cx, layer)
     }
 
+    /// `layer`'s path geometry kept across the frames of an unchanged
+    /// document when every path channel it reads is time-independent
+    /// (`crate::channel_memo`).
+    pub(crate) fn kept_path_geometry(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+    ) -> Option<Arc<crate::bounds::PathGeometry>> {
+        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+            return None;
+        }
+        self.channel_memo.path_geometry(cx, layer)
+    }
+
+    /// Keeps `geometry`, computed from time-independent channels only.
+    pub(crate) fn keep_path_geometry(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        geometry: Arc<crate::bounds::PathGeometry>,
+    ) {
+        if !self.hooks.overrides_channels() && self.errors.is_empty() {
+            self.channel_memo.keep_path_geometry(cx, layer, geometry);
+        }
+    }
+
     /// Keeps `m`, `layer`'s local matrix just computed from `keys`, when
     /// every one of them was found time-independent.
     pub(crate) fn keep_local_matrix(
@@ -911,6 +937,28 @@ impl Evaluator {
             Got::Node(p) => node::get(p, b"v").to_js(),
             _ => JsValue::Undefined,
         })
+    }
+
+    /// What [`Self::ev_p`] answers for `prop` at any time and key, when that
+    /// needs neither: no hook overrides channels, no expression error is
+    /// recorded (none to clear), and `prop` is a channel object with no
+    /// `expr` and no keyframes. `None` otherwise.
+    pub fn static_channel(&self, prop: Option<&Node>) -> Option<JsValue> {
+        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+            return None;
+        }
+        let p = prop.filter(|p| {
+            node::truthy(Some(p))
+                && matches!(
+                    p.kind(),
+                    pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_)
+                )
+        })?;
+        let got = Got::Node(p);
+        if node::get(p, b"expr").truthy() || kf_length_truthy(&got) {
+            return None;
+        }
+        Some(node::get(p, b"v").to_js())
     }
 
     /// `PM.evP(L, prop, T, key)`: any channel object at composition time `T`.
@@ -1177,6 +1225,28 @@ impl Evaluator {
     /// `PM.resolveContent(L, T)`: `{ ...L.d }` with every declared content
     /// channel (and `fontAxis.*` on text) evaluated.
     pub fn resolve_content(&mut self, cx: &Comp<'_>, layer: &Node, time: f64) -> JsResult<Content> {
+        self.resolve_content_with(cx, layer, time, false)
+    }
+
+    /// [`Self::resolve_content`] for drawing: a shape's editable `paths` are
+    /// left out (a shape draws them from their path channels; copying them
+    /// was a deep copy of every vertex on every frame).
+    pub fn resolve_drawn_content(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        time: f64,
+    ) -> JsResult<Content> {
+        self.resolve_content_with(cx, layer, time, true)
+    }
+
+    fn resolve_content_with(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        time: f64,
+        drawn: bool,
+    ) -> JsResult<Content> {
         let d = node::get_checked(Some(layer), b"d")?;
         let mut content = Content::new();
         let mut sources: Vec<(JsString, Got<'_>)> = Vec::new();
@@ -1188,7 +1258,11 @@ impl Evaluator {
         let ty = node::to_js_string(node::member(Some(layer), "type"));
         let fields = address::content_fields(ty.as_bytes());
         let is_text = ty.as_bytes() == b"text";
+        let skip_paths = drawn && ty.as_bytes() == b"shape";
         for (key, value) in &sources {
+            if skip_paths && key.as_bytes() == b"paths" {
+                continue;
+            }
             let declared = fields.iter().any(|f| f.as_bytes() == key.as_bytes())
                 || (is_text && address::is_font_axis_key(key.as_bytes()));
             let resolved = if declared && node::is_property(value.node()) {

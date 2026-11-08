@@ -85,7 +85,7 @@ impl Window {
         }
         let mut value = panel.inspect(&self.thread)?;
         let text = session.draft.text();
-        let selection = session.draft.selection();
+        let selection = session.draft.text_selection();
         value["draft"] = json!({"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
         value["threadTitle"] = json!(
@@ -117,7 +117,7 @@ impl Window {
         );
         value["slash"] = json!({"visible":session.slash.visible(&text,session.applying,&choices),
             "index":session.slash.index,"choices":choices.iter().map(|c|json!({"id":c.id,"value":c.value})).collect::<Vec<_>>()});
-        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":session.catalog.efforts});
+        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":session.catalog.efforts_for(&session.settings.model)});
         Ok(value)
     }
 }
@@ -246,7 +246,7 @@ pub fn dispatch(
             let range = index(&selection[0])?..index(&selection[1])?;
             let mut draft = panel.session(thread)?.draft.clone();
             draft.set_text(text, now)?;
-            draft.select(range)?;
+            draft.select_text(range)?;
             *panel.draft_mut(thread)? = draft;
             None
         }

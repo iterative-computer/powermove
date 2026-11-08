@@ -18,6 +18,8 @@ pub struct GenerationControl<'a> {
     /// its codec process while this is true, then resumes the same process.
     pub pause: &'a dyn Fn() -> bool,
     pub on_pause: &'a dyn Fn(Option<PauseReason>),
+    /// The share of the clip encoded, 0 to 1, as the encoder reports it.
+    pub on_progress: &'a dyn Fn(f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,6 +346,9 @@ fn transcode(
         "prores_lt" => {
             cmd.args(["-c:v", "prores_videotoolbox", "-profile:v", "lt"]);
         }
+        "prores_hq" => {
+            cmd.args(["-c:v", "prores_videotoolbox", "-profile:v", "hq"]);
+        }
         "hevc_10" => {
             cmd.args([
                 "-c:v",
@@ -405,7 +410,18 @@ fn transcode(
         cmd.arg("-video_track_timescale").arg(den.to_string());
     }
     cmd.args(["-movflags", "use_metadata_tags", "-f", "mov"]);
+    // The encoder's progress, for the task's bar (overwritten each period).
+    let progress = NamedTempFile::new_in(request.store.root())?;
+    cmd.arg("-progress").arg(progress.path());
+    cmd.args(["-stats_period", "0.25"]);
     cmd.arg(destination);
+    let total_us = input
+        .get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(Value::as_str)
+        .and_then(|d| d.parse::<f64>().ok())
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .map(|d| d * 1e6);
     let log = NamedTempFile::new_in(request.store.root())?;
     let stderr = log.reopen()?;
     cmd.stdout(Stdio::null()).stderr(Stdio::from(stderr));
@@ -431,6 +447,16 @@ fn transcode(
                 .rev()
                 .collect::<String>();
             return Err(ProxyError::Codec(format!("{status}: {tail}")));
+        }
+        if let Some(total) = total_us
+            && let Ok(text) = std::fs::read_to_string(progress.path())
+            && let Some(done) = text
+                .lines()
+                .rev()
+                .find_map(|l| l.strip_prefix("out_time_us="))
+                .and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            (request.control.on_progress)((done / total).clamp(0.0, 1.0));
         }
         let disk_low = !disk_guard_pair(request.store.root(), disk_space)?;
         let reason = if disk_low {
@@ -615,6 +641,7 @@ fn validate(
         "prores_4444" => "ap4h",
         "prores_proxy" => "apco",
         "prores_lt" => "apcs",
+        "prores_hq" => "apch",
         "hevc_10" => "hvc1",
         _ => "",
     };

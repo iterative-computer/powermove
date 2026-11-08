@@ -39,6 +39,7 @@ impl ProxyRecipe {
         }
         let max_height = match requested_size {
             ProxySize::Automatic => (source_height / 2).max(540),
+            ProxySize::Full => source_height,
             ProxySize::Half => (source_height / 2).max(1),
             ProxySize::Quarter => (source_height / 4).max(1),
             ProxySize::P1080 => 1080,
@@ -82,6 +83,7 @@ impl ProxyRecipe {
                 ProxyFormat::ProResProxy => "prores_proxy",
                 ProxyFormat::ProResLt => "prores_lt",
                 ProxyFormat::Hevc10 => "hevc_10",
+                ProxyFormat::ProResHq => "prores_hq",
             }
         }
     }

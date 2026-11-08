@@ -39,6 +39,23 @@ const OWNER: &str = "extension:";
 /// Commands v4 extensions register at run time: `extension.v4:<panel>:<id>`.
 const V4_COMMAND: &str = "extension.v4:";
 const V4_OWNER: &str = "v4-extension:";
+/// `extension.v4theme:<panel>:<id>`, or `…:default` for the built-in look.
+const V4_THEME: &str = "extension.v4theme:";
+/// `extension.choice:<token>:<index>`: a built-in row of a menu that also
+/// carries extension items; its own callback runs.
+const CHOICE: &str = "extension.choice:";
+/// `extension.v4menu:<panel>:<key>`: a v4 extension's context-menu item.
+const V4_MENU: &str = "extension.v4menu:";
+thread_local! {
+    /// The v4 theme the person chose (`panel:id`), for every window.
+    static ACTIVE_THEME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// The active v1–3 theme last applied, for every window: its translation
+    /// (as JSON text) and its dark and light patches. A v4 theme going away
+    /// shows this again.
+    static V1_THEME: std::cell::RefCell<Option<(String, Patches)>> = const { std::cell::RefCell::new(None) };
+}
+/// A theme's patches for dark and for light windows.
+type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
 /// Keys this window's list of contributed panels in the shell.
 static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -130,6 +147,10 @@ fn external_link(url: &str) -> bool {
 pub struct Extensions {
     window: u64,
     pub host: Option<ExtensionHost>,
+    /// This window's raster overrides; dropped with its host.
+    overrides: Option<crate::raster_overrides::Overrides>,
+    /// The document whose captures carry this window's definitions.
+    doc_id: Option<u64>,
     /// One WebKit document per trust domain: the trusted realm's under the empty
     /// key, then each Store extension's own. Never shared.
     pages: BTreeMap<String, Page>,
@@ -147,6 +168,8 @@ pub struct Extensions {
     /// Open panels with no body right now: tabs behind another.
     hidden: BTreeSet<String>,
     menu: Option<OpenMenu>,
+    /// A built-in menu's callback while extensions answer for its menu.
+    choice: Option<(u64, crate::timeline_surface::Choose)>,
     next_menu: u64,
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
@@ -156,6 +179,15 @@ pub struct Extensions {
     compat_choices: Vec<Choice>,
     v4_choices: Vec<Choice>,
     v4_seen: u64,
+    v4_theme_choices: Vec<Choice>,
+    /// The active v1–3 theme's timeline surface inputs, per scheme.
+    pub v1_timeline: Value,
+    /// The viewport last sent to the compat realm.
+    viewport: Option<(f32, f32, f32)>,
+    /// The `themes.activate` request this window last acted on (its number).
+    v4_theme_requested: Option<u64>,
+    v4_themes: Vec<Value>,
+    v4_themes_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
     surfaces: BTreeMap<String, (String, String)>,
     /// Forks drawing a built-in panel in its place: id to (panel, source).
@@ -172,6 +204,8 @@ impl Default for Extensions {
         Self {
             window: NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             host: None,
+            overrides: None,
+            doc_id: None,
             pages: BTreeMap::new(),
             views: Rc::default(),
             data_stores: StoreDataStores::default(),
@@ -183,6 +217,7 @@ impl Default for Extensions {
             open_panels: BTreeSet::new(),
             hidden: BTreeSet::new(),
             menu: None,
+            choice: None,
             next_menu: 0,
             placed: BTreeMap::new(),
             seen: 0,
@@ -190,6 +225,12 @@ impl Default for Extensions {
             compat_choices: vec![],
             v4_choices: vec![],
             v4_seen: 0,
+            v4_theme_choices: vec![],
+            v4_theme_requested: None,
+            viewport: None,
+            v1_timeline: Value::Null,
+            v4_themes: vec![],
+            v4_themes_seen: 0,
             surfaces: BTreeMap::new(),
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
@@ -201,6 +242,9 @@ impl Default for Extensions {
 impl Drop for Extensions {
     fn drop(&mut self) {
         layout::set_contributed_panels(self.window, []);
+        if let Some(doc_id) = self.doc_id {
+            crate::mcp_services::set_resources(doc_id, None);
+        }
     }
 }
 impl Extensions {
@@ -208,6 +252,7 @@ impl Extensions {
         self.compat_choices
             .iter()
             .chain(&self.v4_choices)
+            .chain(&self.v4_theme_choices)
             .cloned()
             .collect()
     }
@@ -239,8 +284,22 @@ impl Controller {
         let project = session.project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
+        let doc_id = self.kernel.published(&project).map(|p| p.snapshot.doc_id);
+        let rasters = crate::raster_overrides::Overrides::new(
+            &self.engine,
+            self.kernel.clone(),
+            project.clone(),
+        );
+        let frames = crate::mcp_services::frame_renderer(
+            self.kernel.clone(),
+            project.clone(),
+            self.profile.clone(),
+        )
+        .ok();
         let host = ExtensionHost::start(HostConfig {
             kernel: self.kernel.clone(),
+            frames,
+            rasters: Some(rasters.hooks()),
             project,
             roots: roots(&self.profile),
             cache: self.profile.join("extensions-build"),
@@ -255,7 +314,11 @@ impl Controller {
                 let _ = wake_tx.try_send(());
             }),
         });
+        rasters.connect(host.raster_inbox());
+        self.extensions.doc_id = doc_id;
+        self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
+        self.sync_viewport();
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {
                 if this.update(cx, |v, cx| v.drain_extensions(cx)).is_err() {
@@ -390,6 +453,58 @@ impl Controller {
                 })
                 .detach();
             }
+            Some("import") => match request["file"].as_str().and_then(|t| t.parse::<u64>().ok()) {
+                Some(file) => {
+                    let definition = request["layerDefinition"].as_str().map(str::to_owned);
+                    self.import_for_extension(token, file, definition, cx)
+                }
+                None => {
+                    if let Some(host) = &self.extensions.host {
+                        host.answer(
+                            token,
+                            serde_json::json!({"error":"assets.import requires a File"}),
+                        );
+                    }
+                }
+            },
+            // The `tool` service's setTool: only the shell's tool commands.
+            Some("command") => {
+                if let Some(name) = request["name"].as_str().filter(|n| {
+                    n.starts_with("tool")
+                        && n.len() > 4
+                        && n.chars().all(|c| c.is_ascii_alphabetic())
+                }) {
+                    // A shape tool's shape rides along as the Shape tool's variant
+                    // (v1's rect, rounded, ellipse, polygon, star).
+                    let args = request["shape"]
+                        .as_str()
+                        .map(|shape| vec![serde_json::json!(shape)])
+                        .unwrap_or_default();
+                    self.host.borrow().send_command(name, args);
+                }
+            }
+            // The `viewer` service's setZoom: the viewer leaves fit at that zoom
+            // (as far as the display can show it) and reports where it landed.
+            Some("viewerZoom") => {
+                use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
+                if let Some(zoom) = request["zoom"].as_f64().filter(|z| z.is_finite()) {
+                    let pan = match request["pan"].as_array().map(Vec::as_slice) {
+                        Some([x, y]) => [x.as_f64().unwrap_or(0.), y.as_f64().unwrap_or(0.)],
+                        _ => self.view.pan,
+                    };
+                    let top = ZOOM_MAX.min(self.zoom_limit()).max(ZOOM_MIN);
+                    self.view.place(Some(zoom.clamp(ZOOM_MIN, top)), pan);
+                    self.write_view(None, cx);
+                }
+            }
+            Some("download") => {
+                let url = request["url"].as_str().unwrap_or_default().to_owned();
+                self.download_for_extension(token, url, cx);
+            }
+            Some("pick") => {
+                let accept = request["accept"].as_str().unwrap_or_default().to_owned();
+                self.pick_for_extension(token, &accept, request["multiple"] == true, cx);
+            }
             Some("openExternal") => {
                 let url = request["url"].as_str().unwrap_or_default();
                 let opened = external_link(url) && crate::platform::open_url(url);
@@ -431,8 +546,8 @@ impl Controller {
             _ => (),
         }
     }
-    /// Extensions add to a tab's menu asynchronously, so it opens when they
-    /// answer or the deadline passes, whichever comes first.
+    /// Extensions add to a tab's menu asynchronously: v4 realms answer first
+    /// (100 ms at most, off the main thread), then v1–3 within the deadline.
     pub fn extension_panel_menu(
         &mut self,
         id: &str,
@@ -440,13 +555,119 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
+        self.extension_menu(
+            vec![("panel:context", json!({"panelId": id}))],
+            entries,
+            at,
+            cx,
+        )
+    }
+    /// A built-in context menu with what v4 and v1–3 extensions add for each
+    /// of `locations` (v1–3's `MenuLocation` and its context, gathered in
+    /// order). `None`: it opens once they answer.
+    pub fn extension_menu(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
+        let compat = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0);
+        let runtime = self.builtins.runtime.clone().filter(|r| r.has_extensions());
         // With no realm nothing can add to it, so it opens right away.
-        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
+        if !compat && runtime.is_none() {
             return Some(entries);
+        }
+        cx.spawn(async move |this, cx| {
+            let (extra, locations) = match runtime {
+                Some(runtime) => {
+                    cx.background_executor()
+                        .spawn(async move {
+                            let extra = locations
+                                .iter()
+                                .flat_map(|(location, ctx)| v4_menu_items(&runtime, location, ctx))
+                                .collect::<Vec<_>>();
+                            (extra, locations)
+                        })
+                        .await
+                }
+                None => (vec![], locations),
+            };
+            let _ = this.update(cx, |v, cx| {
+                let mut entries = entries;
+                if !extra.is_empty() {
+                    entries.push(MenuEntry::separator());
+                    entries.extend(extra);
+                }
+                v.open_compat_menu(locations, entries, at, cx);
+            });
+        })
+        .detach();
+        None
+    }
+    /// True when some extension can add to a context menu.
+    pub fn extensions_listen(&self) -> bool {
+        self.extensions.host.as_ref().is_some_and(|h| h.view() != 0)
+            || self
+                .builtins
+                .runtime
+                .as_ref()
+                .is_some_and(|r| r.has_extensions())
+    }
+    /// A built-in menu given as rows (`{id,label,disabled?,checked?}` or
+    /// `null` for a separator) with extension items after them. A built-in
+    /// row runs `choose` with its index, as the plain native menu would.
+    pub fn extension_rows_menu(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        rows: &[Value],
+        at: (f32, f32),
+        choose: crate::timeline_surface::Choose,
+        cx: &mut Context<Self>,
+    ) {
+        self.extensions.next_menu += 1;
+        let token = self.extensions.next_menu;
+        let entries = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                if row.is_null() {
+                    return MenuEntry::separator();
+                }
+                let mut entry = MenuEntry::item(
+                    row["label"].as_str().unwrap_or_default(),
+                    format!("{CHOICE}{token}:{i}"),
+                )
+                .checked(row["checked"] == true);
+                entry.enabled = row["disabled"] != true;
+                entry
+            })
+            .collect();
+        self.extensions.choice = Some((token, choose));
+        if let Some(entries) = self.extension_menu(locations, entries, at, cx) {
+            self.host.borrow().context_menu(&entries, at.0, at.1);
+        }
+    }
+    /// v1–3 realms add to the menu, which opens when they answer or the
+    /// deadline passes.
+    fn open_compat_menu(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
+            self.host.borrow().context_menu(&entries, at.0, at.1);
+            return;
         };
         self.extensions.next_menu += 1;
         let key = self.extensions.next_menu;
-        host.gather_menu("panel:context", json!({"panelId": id}), key);
+        let pairs = locations
+            .into_iter()
+            .map(|(location, ctx)| json!([location, ctx]))
+            .collect();
+        host.gather_menus(pairs, key);
         self.extensions.menu = Some(OpenMenu { key, entries, at });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(MENU_DEADLINE).await;
@@ -459,7 +680,6 @@ impl Controller {
             });
         })
         .detach();
-        None
     }
     /// Each v4 extension gets its own realm and draws through the v4 panel path.
     /// One that is disabled, removed or rebuilt loses that realm here. A fork
@@ -746,10 +966,50 @@ impl Controller {
                 definitions,
                 ..Default::default()
             });
+            if let Some(doc_id) = self.extensions.doc_id {
+                crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+            }
             self.apply_extension_resources();
         }
+        self.apply_v1_theme(&value["nativeTheme"], cx);
         self.update_builtins(cx);
         cx.notify();
+    }
+    /// The active v1–3 theme, translated in the realm (plan 3.6.5), restyles
+    /// every window's chrome and native panels when it changes, in both
+    /// appearances. Choosing a v4 theme afterwards replaces it until this one
+    /// changes; another window publishing the same theme changes nothing.
+    fn apply_v1_theme(&mut self, theme: &Value, cx: &mut Context<Self>) {
+        if theme.is_null() {
+            return;
+        }
+        self.extensions.v1_timeline = theme["timeline"].clone();
+        let key = theme.to_string();
+        if V1_THEME.with(|t| t.borrow().as_ref().is_some_and(|(k, _)| *k == key)) {
+            return;
+        }
+        if let Some(error) = theme["error"].as_str() {
+            let name = theme["id"].as_str().unwrap_or("theme");
+            self.errors.borrow_mut().tell(
+                "Theme",
+                &format!("The theme “{name}” couldn’t be applied: {error}"),
+            );
+            V1_THEME.with(|t| *t.borrow_mut() = Some((key, Default::default())));
+            return;
+        }
+        let light = if theme["light"].is_object() {
+            &theme["light"]
+        } else {
+            &theme["dark"]
+        };
+        match theme_patch(&theme["dark"]).and_then(|dark| Ok((dark, theme_patch(light)?))) {
+            Ok(patches) => {
+                V1_THEME.with(|t| *t.borrow_mut() = Some((key, patches.clone())));
+                ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                apply_theme(patches, cx);
+            }
+            Err(message) => self.errors.borrow_mut().tell("Theme", &message),
+        }
     }
     /// Every live viewer renders the same contributed definitions.
     pub fn apply_extension_resources(&mut self) {
@@ -787,6 +1047,67 @@ impl Controller {
             }
             return true;
         }
+        if let Some(target) = cmd.name.strip_prefix(CHOICE) {
+            if let Some((token, index)) = target.split_once(':')
+                && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
+                && let Some((_, choose)) = self
+                    .extensions
+                    .choice
+                    .take_if(|(pending, _)| *pending == token)
+            {
+                choose(Some(index), cx);
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_MENU) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            runtime
+                                .run_menu(&panel, &key)
+                                .map_err(|e| format!("{e:?}"))
+                                .and_then(|ticket| {
+                                    wait_ticket(
+                                        ticket,
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(30),
+                                    )
+                                })
+                        })
+                        .await;
+                    if let Err(message) = outcome {
+                        let _ = this
+                            .update(cx, |v, _| v.errors.borrow_mut().tell("Extension", &message));
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_THEME) {
+            let chosen = (target != "default").then(|| target.to_owned());
+            let tokens = chosen.as_deref().and_then(|key| self.v4_theme(key));
+            match (chosen, tokens) {
+                (None, _) => {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(base_look(), cx);
+                }
+                (Some(key), Some(tokens)) => match theme_patch(&tokens) {
+                    Ok(patch) => {
+                        ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(key));
+                        apply_theme((patch.clone(), patch), cx);
+                    }
+                    Err(message) => self.errors.borrow_mut().tell("Theme", &message),
+                },
+                (Some(_), None) => {}
+            }
+            return true;
+        }
         if let Some(target) = cmd.name.strip_prefix(V4_COMMAND) {
             if let (Some(runtime), Some((panel, id))) =
                 (self.builtins.runtime.clone(), target.split_once(':'))
@@ -819,6 +1140,79 @@ impl Controller {
             host.run_command(id, Value::Array(cmd.args.clone()));
         }
         true
+    }
+    fn v4_theme(&self, key: &str) -> Option<Value> {
+        self.extensions
+            .v4_themes
+            .iter()
+            .find(|t| {
+                format!(
+                    "{}:{}",
+                    t["panel"].as_str().unwrap_or_default(),
+                    t["id"].as_str().unwrap_or_default()
+                ) == key
+            })
+            .map(|t| t["tokens"].clone())
+    }
+    /// Themes v4 extensions offer go into the palette ("Theme: <title>"). The
+    /// chosen one follows its extension: a reload restyles, a removal resets.
+    pub fn sync_v4_themes(&mut self, runtime: &pm_builtins::Builtins, cx: &mut Context<Self>) {
+        let Some((revision, list)) = runtime.themes_since(self.extensions.v4_themes_seen) else {
+            return;
+        };
+        self.extensions.v4_themes_seen = revision;
+        self.extensions.v4_themes = list;
+        let mut choices: Vec<Choice> = self
+            .extensions
+            .v4_themes
+            .iter()
+            .map(|t| Choice {
+                label: format!("Theme: {}", t["title"].as_str().unwrap_or_default()),
+                command: format!(
+                    "{V4_THEME}{}:{}",
+                    t["panel"].as_str().unwrap_or_default(),
+                    t["id"].as_str().unwrap_or_default()
+                ),
+            })
+            .collect();
+        if !choices.is_empty() {
+            choices.push(Choice {
+                label: "Theme: Default".into(),
+                command: format!("{V4_THEME}default"),
+            });
+        }
+        self.extensions.v4_theme_choices = choices;
+        self.host.borrow_mut().contributed_choices = self.extensions.palette_choices();
+        // The latest `themes.activate` in the window shows its theme, as v1–3's
+        // `theme.activate`; a later palette choice still wins. Each request
+        // acts once, so activating the same theme again shows it again.
+        if let Some((number, panel, id)) = runtime.theme_request()
+            && self.extensions.v4_theme_requested != Some(number)
+        {
+            self.extensions.v4_theme_requested = Some(number);
+            let prefix = format!("{panel}:");
+            match id {
+                Some(id) => ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(format!("{prefix}{id}"))),
+                // `activate(null)` puts back what this extension's theme replaced.
+                None if ACTIVE_THEME
+                    .with(|a| a.borrow().as_ref().is_some_and(|k| k.starts_with(&prefix))) =>
+                {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(base_look(), cx);
+                }
+                None => {}
+            }
+        }
+        if let Some(active) = ACTIVE_THEME.with(|a| a.borrow().clone()) {
+            match self.v4_theme(&active).map(|tokens| theme_patch(&tokens)) {
+                Some(Ok(patch)) => apply_theme((patch.clone(), patch), cx),
+                Some(Err(message)) => self.errors.borrow_mut().tell("Theme", &message),
+                None => {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(base_look(), cx);
+                }
+            }
+        }
     }
     /// Commands v4 extensions registered since the last look go into the
     /// palette and, with a `key`, the keymap.
@@ -1097,7 +1491,25 @@ impl Controller {
         .detach();
     }
     /// Sends placement after layout: positions live in the realm's document.
+    /// v1–3's `window.innerWidth` & co. follow the editor window's content.
+    fn sync_viewport(&mut self) {
+        let (size, scale) = {
+            let shell = self.host.borrow();
+            let view = &shell.gpui;
+            let scale = view.window().map_or(2., |w| w.backingScaleFactor()) as f32;
+            (view.frame().size, scale)
+        };
+        let viewport = (size.width as f32, size.height as f32, scale);
+        if viewport.0 > 0.
+            && self.extensions.viewport != Some(viewport)
+            && let Some(host) = &self.extensions.host
+        {
+            host.set_viewport(viewport.0, viewport.1, viewport.2);
+            self.extensions.viewport = Some(viewport);
+        }
+    }
     fn place_panels(&mut self) {
+        self.sync_viewport();
         let Some(host) = &self.extensions.host else {
             return;
         };
@@ -1224,4 +1636,142 @@ mod tests {
         let store = store_entries(&[json!({"label":"First","release":"one","repo":"r"})]);
         assert_eq!(store[0].command, "extension.install:one:r");
     }
+}
+
+/// A v4 theme's tokens as the shell's patch: colours `"#rrggbb"`, the rest
+/// numbers. Unknown tokens are refused by the shell when it applies the patch.
+fn theme_patch(tokens: &Value) -> Result<pm_shell::theme::Patch, String> {
+    let fields = tokens.as_object().ok_or("A theme needs a tokens object.")?;
+    fields
+        .iter()
+        .map(|(name, value)| {
+            let number = match value {
+                Value::Number(n) => n.as_f64(),
+                Value::String(hex) => hex
+                    .strip_prefix('#')
+                    .filter(|h| h.len() == 6)
+                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .map(f64::from),
+                _ => None,
+            };
+            number
+                .map(|n| (name.clone(), n))
+                .ok_or_else(|| format!("Theme token {name} needs a number or a #rrggbb colour."))
+        })
+        .collect()
+}
+/// Restyles every window with a dark and a light patch (empty: the built-in
+/// look), after the current update so each window's editor updates in turn.
+fn apply_theme((dark, light): Patches, cx: &mut App) {
+    cx.defer(move |cx| {
+        for window in cx.windows() {
+            let Some(editor) = window.downcast::<pm_shell::view::Editor>() else {
+                continue;
+            };
+            let (dark, light) = (dark.clone(), light.clone());
+            let _ = editor.update(cx, |e, _, cx| e.apply_themes(dark, light, cx));
+        }
+    });
+}
+/// What shows without a v4 theme: the active v1–3 theme, or the built-in look.
+fn base_look() -> Patches {
+    V1_THEME.with(|t| {
+        t.borrow()
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::theme_patch;
+    use serde_json::json;
+    #[::core::prelude::v1::test]
+    fn a_v4_theme_becomes_the_shell_patch() {
+        let patch = theme_patch(&json!({"colors.accent":"#ff8800","metrics.gap":8})).unwrap();
+        assert!(patch.contains(&("colors.accent".into(), f64::from(0xff8800u32))));
+        assert!(patch.contains(&("metrics.gap".into(), 8.)));
+        pm_shell::theme::set(patch).unwrap();
+        pm_shell::theme::clear();
+        assert!(theme_patch(&json!({"colors.accent":"orange"})).is_err());
+        let unknown = theme_patch(&json!({"colors.nonsense":"#000000"})).unwrap();
+        assert!(
+            pm_shell::theme::set(unknown).is_err(),
+            "unknown tokens are refused"
+        );
+    }
+}
+
+/// Waits for a realm evaluation on a worker until `deadline`.
+fn wait_ticket(
+    ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>,
+    deadline: std::time::Instant,
+) -> Result<String, String> {
+    loop {
+        if let Some(result) = ticket.try_take() {
+            return result.map(|e| e.value).map_err(|e| format!("{e:?}"));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("The extension didn't answer in time.".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+/// Every v4 extension's items for a menu, as native entries (off the main
+/// thread). Realms gather in parallel, each giving its contributions 100 ms;
+/// one 150 ms deadline covers them all.
+fn v4_menu_items(runtime: &pm_builtins::Builtins, location: &str, ctx: &Value) -> Vec<MenuEntry> {
+    let mut entries = vec![];
+    let tickets = runtime.gather_menus(location, ctx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+    for (panel, ticket) in tickets {
+        let Some(text) = ticket.ok().and_then(|t| wait_ticket(t, deadline).ok()) else {
+            continue;
+        };
+        // The realm returns the items as JSON text.
+        let items = serde_json::from_str::<Value>(&text)
+            .ok()
+            .map(|v| match v {
+                Value::String(inner) => serde_json::from_str(&inner).unwrap_or(Value::Null),
+                other => other,
+            })
+            .unwrap_or(Value::Null);
+        entries.extend(v4_entries(&panel, &items));
+    }
+    entries
+}
+fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
+    items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            if item == "-" {
+                return Some(MenuEntry::separator());
+            }
+            if let Some(header) = item["header"].as_str() {
+                let mut entry = MenuEntry::item(header, "");
+                entry.enabled = false;
+                return Some(entry);
+            }
+            let label = item["label"].as_str()?;
+            if let Some(children) = item["submenu"].as_array() {
+                return Some(MenuEntry::submenu(
+                    label,
+                    v4_entries(panel, &Value::Array(children.clone())),
+                ));
+            }
+            let command = match (item["key"].as_str(), item["disabled"] == true) {
+                (Some(key), false) => format!("{V4_MENU}{panel}:{key}"),
+                _ => String::new(),
+            };
+            let mut entry = MenuEntry::item(label, command);
+            if item["on"] == true {
+                entry = entry.checked(true);
+            }
+            entry.enabled = !entry.command.is_empty();
+            Some(entry)
+        })
+        .collect()
 }

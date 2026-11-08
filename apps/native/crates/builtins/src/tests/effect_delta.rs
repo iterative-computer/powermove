@@ -253,12 +253,12 @@ fn e07_application_reset_at_playhead_keeps_animation_and_is_one_undo_step() {
     finish(panels.mount("layer-effects").unwrap());
     let projection = panels
         .broker
-        .entries
+        .entry("layer-effects")
+        .unwrap()
         .lock()
         .unwrap()
-        .get("layer-effects")
-        .unwrap()
         .backend
+        .clone()
         .lock()
         .unwrap()
         .projection()
@@ -351,12 +351,12 @@ fn e07_application_saved_ramp_v1_keeps_legacy_controls_and_reset_defaults() {
         finish(panels.mount("layer-effects").unwrap());
         let projection = panels
             .broker
-            .entries
+            .entry("layer-effects")
+            .unwrap()
             .lock()
             .unwrap()
-            .get("layer-effects")
-            .unwrap()
             .backend
+            .clone()
             .lock()
             .unwrap()
             .projection()

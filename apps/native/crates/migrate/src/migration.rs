@@ -354,7 +354,12 @@ pub fn migrate_many_with_disk(
     for (snapshot, records) in batches {
         for record in *records {
             let rid = record_id(record);
-            ensure!(seen.insert(rid.clone()), "duplicate input record");
+            if !seen.insert(rid.clone()) {
+                // A development server's origin holding a copy of a key the
+                // shipped app's origin (captured first) already brought.
+                hook(Checkpoint::RecordPublished)?;
+                continue;
+            }
             if let Some(done) = pass.records.get(&rid) {
                 if let Some(key) = &done.stored {
                     verify_key(root, key)?;

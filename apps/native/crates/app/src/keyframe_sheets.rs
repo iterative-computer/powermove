@@ -92,11 +92,16 @@ impl Fields {
 }
 impl Controller {
     pub fn keyframe_sheet(&mut self, kind: Kind, cx: &mut Context<Self>) {
-        let (Some(session), Some(published)) = (self.session.clone(), self.published.clone())
-        else {
+        let Some(published) = self.published.clone() else {
             return;
         };
-        let ids = published.selection.keys().to_vec();
+        self.keyframe_sheet_for(kind, published.selection.keys().to_vec(), cx);
+    }
+    /// The sheet on given keys (a timeline right-click on clicked keys).
+    pub fn keyframe_sheet_for(&mut self, kind: Kind, ids: Vec<String>, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         if ids.is_empty() {
             self.message = "Select keyframes first.".into();
             cx.notify();

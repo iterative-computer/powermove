@@ -4,6 +4,52 @@ use objc2_app_kit::*;
 use objc2_foundation::NSString;
 use std::path::PathBuf;
 
+static TERMINATE: std::sync::OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
+    std::sync::OnceLock::new();
+static TERMINATE_HEARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Call first in `main`, before any thread exists: every thread inherits
+/// SIGTERM blocked, and one waits for it, so SIGTERM runs the quit path
+/// ([`terminations`]) instead of killing the process mid-write.
+pub fn route_sigterm() {
+    let tx = TERMINATE
+        .get_or_init(|| async_channel::bounded(1))
+        .0
+        .clone();
+    // SAFETY: plain signal-set calls on a local set, before other threads.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    let _ = std::thread::Builder::new()
+        .name("pm-sigterm".into())
+        .spawn(move || {
+            loop {
+                let mut signal = 0;
+                // SAFETY: waits on the blocked set built above.
+                if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
+                    continue;
+                }
+                if !TERMINATE_HEARD.load(std::sync::atomic::Ordering::Acquire) {
+                    // No window yet, so nothing is open to close.
+                    std::process::exit(0);
+                }
+                let _ = tx.try_send(());
+            }
+        });
+}
+/// SIGTERMs from [`route_sigterm`], for the quit coordinator.
+pub fn terminations() -> async_channel::Receiver<()> {
+    TERMINATE_HEARD.store(true, std::sync::atomic::Ordering::Release);
+    TERMINATE
+        .get_or_init(|| async_channel::bounded(1))
+        .1
+        .clone()
+}
+
 /// An open sheet that takes `.cube` files.
 pub fn cube_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = async_channel::bounded(1);
@@ -70,6 +116,26 @@ pub fn paths_named(
     rx
 }
 
+/// While held, macOS neither App Naps nor throttles the app, so a project that is
+/// opening keeps going when the window is behind others or the screen locks.
+/// Idle system sleep stays allowed.
+pub struct Busy(Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>);
+impl Busy {
+    pub fn begin(reason: &str) -> Self {
+        let options = objc2_foundation::NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
+        Self(
+            objc2_foundation::NSProcessInfo::processInfo()
+                .beginActivityWithOptions_reason(options, &NSString::from_str(reason)),
+        )
+    }
+}
+impl Drop for Busy {
+    fn drop(&mut self) {
+        // SAFETY: the token beginActivity returned, ended once.
+        unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.0) }
+    }
+}
+
 /// Hands a web link to the default browser.
 pub fn open_url(url: &str) -> bool {
     objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))
@@ -83,6 +149,22 @@ pub fn import_paths(
     multiple: bool,
     extensions: &[&str],
 ) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, folders, multiple, extensions, "Import")
+}
+
+/// Files for the Agent panel's Add Attachments.
+pub fn attach_paths(window: &NSWindow) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, false, true, &[], "Attach")
+}
+
+/// An open panel sheet whose default button reads `prompt`.
+pub fn choose_paths(
+    window: &NSWindow,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+    prompt: &str,
+) -> async_channel::Receiver<Vec<PathBuf>> {
     use objc2::{msg_send, runtime::AnyObject};
     use objc2_foundation::NSArray;
     let (tx, rx) = async_channel::bounded(1);
@@ -91,7 +173,8 @@ pub fn import_paths(
     panel.setCanChooseFiles(!folders);
     panel.setCanChooseDirectories(folders);
     panel.setAllowsMultipleSelection(multiple);
-    panel.setPrompt(Some(&NSString::from_str("Import")));
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
+    panel.setCanCreateDirectories(folders);
     let types: Vec<Retained<AnyObject>> = extensions
         .iter()
         .filter_map(|extension| unsafe {
@@ -305,4 +388,16 @@ pub fn export_destination(
     });
     panel.beginSheetModalForWindow_completionHandler(window, &done);
     rx
+}
+
+/// The AppKit window behind a GPUI window (a panel's own window, for sheets).
+pub fn ns_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    let view: Retained<objc2_app_kit::NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast())? };
+    view.window()
 }

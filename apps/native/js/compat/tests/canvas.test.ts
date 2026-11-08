@@ -147,7 +147,8 @@ test("native surface adoption preserves render/raster canvas identity without re
   const api = realm.extension("consumer").api;
   const canvas = api.render.renderFrameTo();
   expect(canvas).toBeInstanceOf(RecorderCanvas);
-  expect(canvas).toBe(api.render.raster());
+  // A layer's base raster on the same surface is the same canvas.
+  expect(canvas).toBe(api.render.raster({ id: "layer" }).cv);
   expect(canvas).toBe(realm.PM.renderFrameTo());
   expect(canvas.width).toBe(16);
   expect(recorder.surfaces.size).toBe(1);

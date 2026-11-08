@@ -1,5 +1,11 @@
 # Native theme pipeline (P2/P3 package 12)
 
+**In production (2026-11-08):** the compat realm bundles these modules and
+publishes the active v1–3 theme's `nativePatch` (`js/compat/src/native-theme.ts`);
+the app applies it to the shell's tokens (`app/src/extensions.rs`,
+`apply_v1_theme`). Verified on a co-founder's After Effects theme. Surface
+rules beyond tokens are not yet applied natively.
+
 Implementation: `apps/native/js/themes`, dependency-free ECMAScript modules for
 the trusted V8 realm. Node is used only for tests and fixture generation. There
 is no browser, Node API, network access, disk writer or UI-thread call in the

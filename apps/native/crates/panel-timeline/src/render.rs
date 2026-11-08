@@ -996,7 +996,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
             fill
         },
     );
-    o.radius = m.inner_radius as f64;
+    o.radius = m.clip_radius as f64;
     o.detail = json!({"from":c.from,"duration":c.duration,"cursor":if c.locked {"notAllowed"}else{"openHand"},"sourceEdges":[v.x(c.from),v.x(c.from+c.duration)]});
     ops.push(o);
     if !c.selected {
@@ -1020,7 +1020,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
             colors.text,
         );
         o.stroke = m.playhead as f64;
-        o.radius = m.inner_radius as f64;
+        o.radius = m.clip_radius as f64;
         ops.push(o);
     }
     let mut o = Op::new(
@@ -1307,5 +1307,285 @@ impl Frame {
             };
             Some((&o.id[5..], edge))
         })
+    }
+}
+
+/// One extension shape on a clip (`timeline.paint`), already validated:
+/// finite and bounded, in points from the clip's top-left corner.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Decoration {
+    Rect {
+        rect: [f64; 4],
+        color: u32,
+        opacity: f64,
+        radius: f64,
+    },
+    Text {
+        x: f64,
+        y: f64,
+        text: String,
+        size: f64,
+        color: u32,
+        opacity: f64,
+    },
+}
+/// Shapes by clip id.
+pub type Decorations = HashMap<String, Vec<Decoration>>;
+/// Shapes one clip may carry, from every painter together.
+pub const DECORATIONS_PER_CLIP: usize = 64;
+/// Characters one text shape may show.
+pub const DECORATION_TEXT: usize = 200;
+/// How far (points) a shape may sit from its clip; larger is clamped.
+const DECORATION_REACH: f64 = 4096.;
+
+/// Adds one painter's answer (`{clipId: [shape, …]}`) to `into`, keeping only
+/// the `visible` clips, at most [`DECORATIONS_PER_CLIP`] shapes per clip, finite
+/// bounded numbers and [`DECORATION_TEXT`] characters of text. Runs on the
+/// worker that received the answer, before anything reaches the main thread.
+pub fn add_decorations(
+    into: &mut Decorations,
+    answer: &Value,
+    visible: &std::collections::HashSet<String>,
+) {
+    let Some(answer) = answer.as_object() else {
+        return;
+    };
+    let number = |v: &Value, low: f64, high: f64| {
+        v.as_f64()
+            .filter(|n| n.is_finite())
+            .map(|n| n.clamp(low, high))
+    };
+    let colour = |v: &Value| {
+        v.as_str()
+            .and_then(|h| h.strip_prefix('#'))
+            .filter(|h| h.len() == 6)
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+    };
+    let reach = DECORATION_REACH;
+    for (id, shapes) in answer {
+        let (Some(shapes), true) = (shapes.as_array(), visible.contains(id)) else {
+            continue;
+        };
+        let list = into.entry(id.clone()).or_default();
+        for shape in shapes {
+            if list.len() >= DECORATIONS_PER_CLIP {
+                break;
+            }
+            let Some(color) = colour(&shape["color"]) else {
+                continue;
+            };
+            let opacity = number(&shape["opacity"], 0., 1.).unwrap_or(1.);
+            if let Some(r) = shape["rect"].as_array().filter(|r| r.len() == 4) {
+                let (Some(x), Some(y), Some(w), Some(h)) = (
+                    number(&r[0], -reach, reach),
+                    number(&r[1], -reach, reach),
+                    number(&r[2], 0., reach),
+                    number(&r[3], 0., reach),
+                ) else {
+                    continue;
+                };
+                list.push(Decoration::Rect {
+                    rect: [x, y, w, h],
+                    color,
+                    opacity,
+                    radius: number(&shape["radius"], 0., 64.).unwrap_or(0.),
+                });
+            } else if let Some(text) = shape["text"].as_str() {
+                list.push(Decoration::Text {
+                    x: number(&shape["x"], -reach, reach).unwrap_or(0.),
+                    y: number(&shape["y"], -reach, reach).unwrap_or(0.),
+                    text: text.chars().take(DECORATION_TEXT).collect(),
+                    size: number(&shape["size"], 6., 24.).unwrap_or(10.),
+                    color,
+                    opacity,
+                });
+            }
+        }
+        if list.is_empty() {
+            into.remove(id);
+        }
+    }
+}
+
+/// The frame's clips' extension decorations as ops, clipped to each clip's
+/// visible part. Main-thread cost (TL-PAINT-1): ≤ 2 ms for 1,000 clips.
+pub fn decoration_ops(ops: &[Op], decorations: &Decorations) -> Vec<Op> {
+    if decorations.is_empty() {
+        return vec![];
+    }
+    let mut out = vec![];
+    for clip in ops {
+        let Some(id) = clip.id.strip_prefix("clip:") else {
+            continue;
+        };
+        let Some(shapes) = decorations.get(id) else {
+            continue;
+        };
+        let b = clip.bounds;
+        let within = Some(match clip.clip {
+            Some(c) => {
+                let (x0, y0) = (b.x.max(c.x), b.y.max(c.y));
+                let (x1, y1) = (
+                    (b.x + b.width).min(c.x + c.width),
+                    (b.y + b.height).min(c.y + c.height),
+                );
+                Rect::new(x0, y0, (x1 - x0).max(0.), (y1 - y0).max(0.))
+            }
+            None => b,
+        });
+        for (i, shape) in shapes.iter().enumerate() {
+            let base = Op {
+                id: format!("deco:{id}:{i}"),
+                shape: "rect",
+                bounds: b,
+                color: 0,
+                opacity: 1.,
+                radius: 0.,
+                stroke: 0.,
+                text: None,
+                font_size: 0.,
+                detail: Value::Null,
+                clip: within,
+            };
+            out.push(match shape {
+                Decoration::Rect {
+                    rect: [x, y, w, h],
+                    color,
+                    opacity,
+                    radius,
+                } => Op {
+                    shape: if *radius > 0. { "rounded-rect" } else { "rect" },
+                    bounds: Rect::new(b.x + x, b.y + y, *w, *h),
+                    color: *color,
+                    opacity: *opacity,
+                    radius: *radius,
+                    ..base
+                },
+                Decoration::Text {
+                    x,
+                    y,
+                    text,
+                    size,
+                    color,
+                    opacity,
+                } => Op {
+                    shape: "text",
+                    bounds: Rect::new(b.x + x, b.y + y, b.width, size * 1.4),
+                    text: Some(text.clone()),
+                    font_size: *size,
+                    color: *color,
+                    opacity: *opacity,
+                    ..base
+                },
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod decoration_tests {
+    use super::*;
+    fn clips(n: usize) -> Vec<Op> {
+        (0..n)
+            .map(|i| {
+                let mut o = Op::new(
+                    format!("clip:L{i}"),
+                    "rounded-rect",
+                    Rect::new(
+                        300. + (i % 10) as f64 * 80.,
+                        (i / 10) as f64 * 22.,
+                        76.,
+                        20.,
+                    ),
+                    0x1f4b52,
+                );
+                o.clip = Some(Rect::new(266., 28., 1200., 2200.));
+                o
+            })
+            .collect()
+    }
+    fn visible(n: usize) -> std::collections::HashSet<String> {
+        (0..n).map(|i| format!("L{i}")).collect()
+    }
+    /// TL-PAINT-1: extension shapes for 1,000 clips become ops in ≤ 2 ms on the
+    /// main thread, at the 95th percentile of 40 runs. The gate is defined for
+    /// an optimized build: `cargo test --release -p pm-panel-timeline`.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "TL-PAINT-1 is measured in an optimized build (cargo test --release)"
+    )]
+    fn a_thousand_painted_clips_cost_under_two_milliseconds() {
+        let ops = clips(1000);
+        let answer: serde_json::Map<String, Value> = (0..1000)
+            .map(|i| {
+                (
+                    format!("L{i}"),
+                    json!([{"rect":[0,0,76,20],"color":"#5a1f8c","opacity":0.5},
+                           {"text":"take 3","x":4,"y":4,"color":"#ffffff","size":10}]),
+                )
+            })
+            .collect();
+        let mut shapes = Decorations::new();
+        add_decorations(&mut shapes, &Value::Object(answer), &visible(1000));
+        assert_eq!(decoration_ops(&ops, &shapes).len(), 2000);
+        let mut runs: Vec<std::time::Duration> = (0..40)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                std::hint::black_box(decoration_ops(&ops, &shapes));
+                start.elapsed()
+            })
+            .collect();
+        runs.sort();
+        let p95 = runs[37];
+        eprintln!("TL-PAINT-1 decoration ops for 1,000 clips: p95 {p95:?}");
+        assert!(p95 <= std::time::Duration::from_millis(2), "{p95:?}");
+    }
+    #[test]
+    fn painter_output_is_bounded_before_it_is_kept() {
+        let long = "x".repeat(10_000);
+        let many: Vec<Value> = (0..500)
+            .map(|_| json!({"rect":[0,0,4,4],"color":"#ffffff"}))
+            .collect();
+        let answer = json!({
+            "L0": [{"rect":[1e300,-1e300,1e300,5],"radius":1e300,"color":"#ff0000"},
+                   {"rect":[0,0,"wide",5],"color":"#ff0000"},
+                   {"rect":[0,0,5,5],"color":"red"},
+                   {"text":long,"x":1e300,"size":1e300,"color":"#00ff00"}],
+            "L1": many,
+            "gone": [{"rect":[0,0,4,4],"color":"#ffffff"}],
+        });
+        let mut shapes = Decorations::new();
+        add_decorations(&mut shapes, &answer, &visible(2));
+        assert!(!shapes.contains_key("gone"), "only visible clips are kept");
+        assert_eq!(shapes["L1"].len(), DECORATIONS_PER_CLIP);
+        let l0 = &shapes["L0"];
+        assert_eq!(l0.len(), 2, "unparseable and uncoloured shapes are dropped");
+        let Decoration::Rect { rect, radius, .. } = &l0[0] else {
+            panic!("{l0:?}")
+        };
+        assert_eq!(*rect, [4096., -4096., 4096., 5.]);
+        assert_eq!(*radius, 64.);
+        let Decoration::Text { text, x, size, .. } = &l0[1] else {
+            panic!("{l0:?}")
+        };
+        assert_eq!(text.chars().count(), DECORATION_TEXT);
+        assert_eq!((*x, *size), (4096., 24.));
+        for op in decoration_ops(&clips(2), &shapes) {
+            let b = op.bounds;
+            assert!(
+                [b.x, b.y, b.width, b.height]
+                    .iter()
+                    .all(|v| (*v as f32).is_finite())
+            );
+        }
+        // A second painter adds to the same clip only up to the shared limit.
+        add_decorations(
+            &mut shapes,
+            &json!({"L1":[{"rect":[0,0,4,4],"color":"#000000"}]}),
+            &visible(2),
+        );
+        assert_eq!(shapes["L1"].len(), DECORATIONS_PER_CLIP);
     }
 }

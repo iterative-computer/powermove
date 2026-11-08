@@ -1482,6 +1482,118 @@ exports[`wire snapshot: selected video 1`] = `
                   "text": "",
                   "type": "div",
                 },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
               ],
               "props": {
                 "data-pm-component": "form-group",
@@ -3879,6 +3991,118 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.audio",
                     "label": "Include Audio",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -6300,6 +6524,118 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                   "text": "",
                   "type": "div",
                 },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
               ],
               "props": {
                 "data-pm-component": "form-group",
@@ -8701,6 +9037,118 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                   "text": "",
                   "type": "div",
                 },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
               ],
               "props": {
                 "data-pm-component": "form-group",
@@ -10934,6 +11382,118 @@ exports[`wire snapshot: PNG sequence 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.alpha",
                     "label": "Transparent Background",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -15568,6 +16128,118 @@ exports[`wire snapshot: no captions 1`] = `
                   "text": "",
                   "type": "div",
                 },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
               ],
               "props": {
                 "data-pm-component": "form-group",
@@ -17647,6 +18319,118 @@ exports[`wire snapshot: multiple captions 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.audio",
                     "label": "Include Audio",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -20289,6 +21073,118 @@ exports[`wire snapshot: custom size 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.audio",
                     "label": "Include Audio",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -22966,6 +23862,118 @@ exports[`wire snapshot: inline invalid size 1`] = `
                   "text": "",
                   "type": "div",
                 },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
               ],
               "props": {
                 "data-pm-component": "form-group",
@@ -25364,6 +26372,118 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.audio",
                     "label": "Include Audio",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": true,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -28897,6 +30017,118 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                     "data-pm-component": "form-row",
                     "id": "export.row.audio",
                     "label": "Include Audio",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Use Proxies (Draft)",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "aria-checked": false,
+                            "control": "toggle",
+                            "data-pm-component": "checkbox",
+                            "disabled": false,
+                            "id": "export.useProxies",
+                            "label": "Use Proxies (Draft)",
+                            "role": "checkbox",
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+                            "value": false,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.useProxies",
+                    "label": "Use Proxies (Draft)",
                     "role": "group",
                     "style": {
                       "display": "flex",

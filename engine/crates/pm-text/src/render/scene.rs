@@ -594,13 +594,31 @@ impl NonzeroResolver {
     }
 }
 
-/// Maximum retained path payload in the default cross-frame cache.
-pub const COVERAGE_PATH_CACHE_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum retained path payload in the default cross-frame cache. At the
+/// coverage tolerance a text glyph's resolved lines take tens of KB; a
+/// text-heavy 1080p frame needs about 10 MB of them, and a cache smaller
+/// than one frame's set rebuilds part of it every frame.
+pub const COVERAGE_PATH_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Largest scratch a [`NonzeroResolver`] keeps between jobs.
+pub const NONZERO_RESOLVER_RETAIN_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Geometry {
+    /// Resolved lines in the source's own space, flattened at this local
+    /// tolerance (bits). Every linear transform whose device tolerance and
+    /// scale bucket give the same local tolerance maps them to its device
+    /// lines, so animated scale and rotation never flatten or resolve again.
+    Local(u64),
+    /// A singular or non-finite linear transform (coefficient bits): its
+    /// device lines, made after the transform.
+    Device([u64; 4]),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct CoverageKey {
     source: usize,
-    linear: [u64; 4],
+    geometry: Geometry,
 }
 
 struct CoverageEntry {
@@ -612,12 +630,44 @@ struct CoverageEntry {
     used: u64,
 }
 
-/// Bounded LRU of line-only coverage geometry after the placed path's
-/// linear transform. Glyph and atlas translations are applied after lookup.
+/// A placed path's line-only coverage geometry: `lines` after `linear` are
+/// its resolved device lines before translation.
+#[derive(Clone, Debug)]
+pub struct CoverageLines {
+    pub lines: Arc<BezPath>,
+    pub linear: Affine,
+}
+
+impl CoverageLines {
+    /// The lines after the linear transform, in order.
+    pub fn device_elements(&self) -> impl Iterator<Item = PathEl> + '_ {
+        let linear = self.linear;
+        self.lines.elements().iter().map(move |el| linear * *el)
+    }
+
+    /// The lines after the linear transform.
+    pub fn device(&self) -> BezPath {
+        BezPath::from_vec(self.device_elements().collect())
+    }
+
+    /// Identity of the geometry: the same retained lines and linear map.
+    pub fn key(&self) -> (usize, [u64; 4]) {
+        let [a, b, c, d, _, _] = self.linear.as_coeffs();
+        (
+            Arc::as_ptr(&self.lines) as usize,
+            [a.to_bits(), b.to_bits(), c.to_bits(), d.to_bits()],
+        )
+    }
+}
+
+/// Bounded LRU of line-only coverage geometry, resolved once in the placed
+/// path's own space per scale bucket. Glyph and atlas translations, and the
+/// linear transform, are applied by the rasterizer.
 pub struct CoveragePathCache {
     entries: HashMap<CoverageKey, Vec<CoverageEntry>>,
-    /// Geometry [`CoveragePathCache::prepare`] made for the misses it was
-    /// given, until [`CoveragePathCache::get`] takes it into the cache.
+    len: usize,
+    /// Local geometry [`CoveragePathCache::prepare`] made for the misses it
+    /// was given, until [`CoveragePathCache::get`] takes it into the cache.
     prepared: HashMap<CoverageKey, Vec<(PlacedPath, Vec<PathEl>)>>,
     resolver: NonzeroResolver,
     bytes: usize,
@@ -631,10 +681,35 @@ impl Default for CoveragePathCache {
     }
 }
 
+/// Scale buckets per octave for reused local geometry. A local tolerance of
+/// device tolerance / bucket top keeps every transform in the bucket within
+/// the device tolerance, at most 2^(1/8) more lines than flattening after it.
+const SCALE_BUCKETS_PER_OCTAVE: f64 = 4.0;
+
+fn linear(transform: Affine) -> Affine {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    Affine::new([a, b, c, d, 0.0, 0.0])
+}
+
+/// The local tolerance `placed`'s geometry is made at, or `None` for a
+/// singular or non-finite transform (made after the transform, as is).
+fn local_tolerance(placed: &PlacedPath) -> Option<f64> {
+    let linear = linear(placed.transform);
+    let scale = linear.spectral_norm();
+    let det = linear.determinant();
+    if !(scale.is_finite() && scale > 0.0 && det.is_finite() && det != 0.0) {
+        return None;
+    }
+    let top = (scale.log2() * SCALE_BUCKETS_PER_OCTAVE).ceil() / SCALE_BUCKETS_PER_OCTAVE;
+    let tolerance = path_coverage_tolerance(&placed.path, linear) / top.exp2();
+    (tolerance.is_finite() && tolerance > 0.0).then_some(tolerance)
+}
+
 impl CoveragePathCache {
     pub fn new(limit: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            len: 0,
             prepared: HashMap::new(),
             resolver: NonzeroResolver::default(),
             bytes: 0,
@@ -648,23 +723,32 @@ impl CoveragePathCache {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.values().map(Vec::len).sum()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len == 0
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.len = 0;
         self.prepared.clear();
         self.resolver = NonzeroResolver::default();
         self.bytes = 0;
         self.tick = 0;
     }
 
-    fn oldest(&self) -> Option<(CoverageKey, usize)> {
-        self.entries
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    /// Eviction scans: at this budget it is rare (an index cost more
+    /// allocation per cold frame than the scans it saves).
+    fn evict_oldest(&mut self) {
+        let Some((key, index)) = self
+            .entries
             .iter()
             .flat_map(|(key, bucket)| {
                 bucket
@@ -674,14 +758,12 @@ impl CoveragePathCache {
             })
             .min_by_key(|(_, _, used)| *used)
             .map(|(key, index, _)| (key, index))
-    }
-
-    fn evict_oldest(&mut self) {
-        let Some((key, index)) = self.oldest() else {
+        else {
             return;
         };
         let bucket = self.entries.get_mut(&key).expect("oldest entry exists");
         let entry = bucket.swap_remove(index);
+        self.len -= 1;
         let empty = bucket.is_empty();
         self.bytes -= entry.bytes;
         if empty {
@@ -689,43 +771,74 @@ impl CoveragePathCache {
         }
     }
 
+    /// Where `placed`'s geometry lives: its local geometry at its local
+    /// tolerance, or (singular transform) its device lines.
     fn key(placed: &PlacedPath) -> CoverageKey {
-        let [a, b, c, d, _, _] = placed.transform.as_coeffs();
-        CoverageKey {
-            source: Arc::as_ptr(&placed.path) as usize,
-            linear: [a.to_bits(), b.to_bits(), c.to_bits(), d.to_bits()],
+        let source = Arc::as_ptr(&placed.path) as usize;
+        match local_tolerance(placed) {
+            Some(tolerance) => CoverageKey {
+                source,
+                geometry: Geometry::Local(tolerance.to_bits()),
+            },
+            None => {
+                let [a, b, c, d, _, _] = placed.transform.as_coeffs();
+                CoverageKey {
+                    source,
+                    geometry: Geometry::Device([
+                        a.to_bits(),
+                        b.to_bits(),
+                        c.to_bits(),
+                        d.to_bits(),
+                    ]),
+                }
+            }
         }
     }
 
-    fn entry(&mut self, key: &CoverageKey, placed: &PlacedPath) -> Option<&mut CoverageEntry> {
-        self.entries.get_mut(key).and_then(|bucket| {
-            bucket.iter_mut().find(|entry| {
+    /// The cached lines for `key`, marked used now.
+    fn hit(&mut self, key: &CoverageKey, placed: &PlacedPath) -> Option<Arc<BezPath>> {
+        let tick = self.next_tick();
+        let entry = self.entries.get_mut(key)?.iter_mut().find(|entry| {
+            Arc::ptr_eq(&entry.source, &placed.path) && entry.style == placed.style
+        })?;
+        entry.used = tick;
+        Some(entry.lines.clone())
+    }
+
+    fn contains(&self, key: &CoverageKey, placed: &PlacedPath) -> bool {
+        self.entries.get(key).is_some_and(|bucket| {
+            bucket.iter().any(|entry| {
                 Arc::ptr_eq(&entry.source, &placed.path) && entry.style == placed.style
             })
         })
     }
 
-    /// Reuse line-only geometry for the same retained source, linear affine,
-    /// and stroke style. Apply `placed.transform`'s translation separately
-    /// when drawing the returned Arc. It remains valid after eviction.
-    pub fn get(&mut self, placed: &PlacedPath) -> Arc<BezPath> {
-        self.tick = self.tick.wrapping_add(1);
+    /// Reuse line-only geometry for the same retained source, scale bucket,
+    /// and stroke style. Apply the returned linear map, then
+    /// `placed.transform`'s translation, when drawing. It remains valid after
+    /// eviction.
+    pub fn get(&mut self, placed: &PlacedPath) -> CoverageLines {
         let key = Self::key(placed);
-        let tick = self.tick;
-        if let Some(hit) = self.entry(&key, placed) {
-            hit.used = tick;
-            return hit.lines.clone();
-        }
-        if let Some(elements) = self.take_prepared(&key, placed) {
-            return self.insert(key, placed, elements);
-        }
-        let (elements, input_elements) = line_geometry(placed, &mut self.resolver);
-        self.resolver.trim_after(
-            input_elements,
-            elements.len(),
-            self.limit.min(COVERAGE_PATH_CACHE_BYTES),
-        );
-        self.insert(key, placed, elements)
+        let linear = match key.geometry {
+            Geometry::Local(_) => linear(placed.transform),
+            Geometry::Device(_) => Affine::IDENTITY,
+        };
+        let lines = match self.hit(&key, placed) {
+            Some(lines) => lines,
+            None => {
+                let elements = self.take_prepared(&key, placed).unwrap_or_else(|| {
+                    let (elements, input_elements) = source_geometry(placed, &mut self.resolver);
+                    self.resolver.trim_after(
+                        input_elements,
+                        elements.len(),
+                        self.limit.min(NONZERO_RESOLVER_RETAIN_BYTES),
+                    );
+                    elements
+                });
+                self.insert(key, placed, elements)
+            }
+        };
+        CoverageLines { lines, linear }
     }
 
     fn take_prepared(&mut self, key: &CoverageKey, placed: &PlacedPath) -> Option<Vec<PathEl>> {
@@ -736,13 +849,13 @@ impl CoveragePathCache {
         Some(bucket.swap_remove(at).1)
     }
 
-    /// Makes the line geometry `paths` miss on several threads at once (a
-    /// frame meeting glyphs, sizes, or transforms new to the cache), each
-    /// exactly as [`Self::get`] makes it alone. `get` takes it into the
-    /// cache when it asks for it, in its own order, so a frame whose
-    /// geometry outgrows the cache evicts what it would have without this.
-    /// A few misses are left to `get`; what an earlier call made and `get`
-    /// never asked for is dropped.
+    /// Makes the geometry `paths` miss on several threads at once (a frame
+    /// meeting glyphs, sizes, or transforms new to the cache), each exactly
+    /// as [`Self::get`] makes it alone. `get` takes it into the cache when it
+    /// asks for it, in its own order, so a frame whose geometry outgrows the
+    /// cache evicts what it would have without this. A few misses are left
+    /// to `get`; what an earlier call made and `get` never asked for is
+    /// dropped.
     ///
     /// `map(n, make)` returns `make(0), …, make(n - 1)` in order, on threads
     /// of the caller's choosing.
@@ -755,7 +868,7 @@ impl CoveragePathCache {
         let mut missing: Vec<(CoverageKey, &PlacedPath)> = Vec::new();
         for placed in paths {
             let key = Self::key(placed);
-            let known = self.entry(&key, placed).is_some()
+            let known = self.contains(&key, placed)
                 || missing.iter().any(|(k, p)| {
                     *k == key && Arc::ptr_eq(&p.path, &placed.path) && p.style == placed.style
                 });
@@ -766,7 +879,7 @@ impl CoveragePathCache {
         if missing.len() < PREPARE_IN_PARALLEL {
             return;
         }
-        let make = |i: usize| line_geometry(missing[i].1, &mut NonzeroResolver::default()).0;
+        let make = |i: usize| source_geometry(missing[i].1, &mut NonzeroResolver::default()).0;
         let made = map(missing.len(), &make);
         for ((key, placed), elements) in missing.into_iter().zip(made) {
             self.prepared
@@ -791,13 +904,15 @@ impl CoveragePathCache {
             while self.bytes > self.limit - bytes {
                 self.evict_oldest();
             }
+            let used = self.next_tick();
             self.entries.entry(key).or_default().push(CoverageEntry {
                 source: placed.path.clone(),
                 style: placed.style.clone(),
                 lines: lines.clone(),
                 bytes,
-                used: self.tick,
+                used,
             });
+            self.len += 1;
             self.bytes += bytes;
         }
         lines
@@ -807,18 +922,39 @@ impl CoveragePathCache {
 /// Misses [`CoveragePathCache::prepare`] makes on several threads.
 const PREPARE_IN_PARALLEL: usize = 4;
 
-/// `placed`'s line-only coverage geometry after its linear transform, with
-/// overlapping contours resolved (nonzero), and the element count before
-/// resolution.
-fn line_geometry(placed: &PlacedPath, resolver: &mut NonzeroResolver) -> (Vec<PathEl>, usize) {
-    let [a, b, c, d, _, _] = placed.transform.as_coeffs();
-    let linear = PlacedPath {
-        transform: Affine::new([a, b, c, d, 0.0, 0.0]),
-        ..placed.clone()
+/// The geometry [`CoveragePathCache::key`] names: `placed`'s resolved
+/// local lines at its local tolerance, or (singular transform) its device
+/// lines; and the element count before resolution.
+fn source_geometry(placed: &PlacedPath, resolver: &mut NonzeroResolver) -> (Vec<PathEl>, usize) {
+    let raw = match local_tolerance(placed) {
+        Some(tolerance) => local_coverage_path(placed, tolerance),
+        None => coverage_path(
+            &PlacedPath {
+                transform: linear(placed.transform),
+                ..placed.clone()
+            },
+            Affine::IDENTITY,
+        ),
     };
-    let raw = coverage_path(&linear, Affine::IDENTITY);
     let input_elements = raw.elements().len();
     (resolver.resolve_owned(raw).into_elements(), input_elements)
+}
+
+/// `placed`'s line-only fill path in its own space, strokes expanded there
+/// as in [`coverage_path`].
+fn local_coverage_path(placed: &PlacedPath, tolerance: f64) -> BezPath {
+    match &placed.style {
+        PathStyle::Fill => flatten_transformed(&placed.path, Affine::IDENTITY, tolerance),
+        PathStyle::Stroke(stroke) => {
+            let path = kurbo::stroke(
+                placed.path.iter(),
+                stroke,
+                &StrokeOpts::default(),
+                tolerance,
+            );
+            flatten_transformed(&path, Affine::IDENTITY, tolerance)
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1374,25 +1510,25 @@ mod tests {
             ..first.clone()
         };
         let mut unlimited = CoveragePathCache::new(usize::MAX);
-        let lines = unlimited.get(&first);
-        assert!(Arc::ptr_eq(&lines, &unlimited.get(&first)));
-        assert!(Arc::ptr_eq(&lines, &unlimited.get(&shifted)));
-        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&scaled)));
-        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&stroked)));
+        let lines = unlimited.get(&first).lines;
+        assert!(Arc::ptr_eq(&lines, &unlimited.get(&first).lines));
+        assert!(Arc::ptr_eq(&lines, &unlimited.get(&shifted).lines));
+        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&scaled).lines));
+        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&stroked).lines));
 
         let mut probe = CoveragePathCache::new(usize::MAX);
         probe.get(&first);
         let one_entry_bytes = probe.bytes();
         let mut limited = CoveragePathCache::new(one_entry_bytes);
-        let old = limited.get(&first);
-        assert!(Arc::ptr_eq(&old, &limited.get(&first)));
+        let old = limited.get(&first).lines;
+        assert!(Arc::ptr_eq(&old, &limited.get(&first).lines));
         let same_shape_new_source = PlacedPath {
             path: Arc::new((*source).clone()),
             ..first.clone()
         };
         limited.get(&same_shape_new_source);
         assert!(limited.bytes() <= one_entry_bytes);
-        assert!(!Arc::ptr_eq(&old, &limited.get(&first)));
+        assert!(!Arc::ptr_eq(&old, &limited.get(&first).lines));
     }
 
     /// `make(0), …, make(n - 1)` on a thread each.
@@ -1444,15 +1580,29 @@ mod tests {
         // The same source and transform twice is made once.
         paths.push(paths[3].clone());
         let mut alone = CoveragePathCache::new(usize::MAX);
-        let want: Vec<BezPath> = paths.iter().map(|p| (*alone.get(p)).clone()).collect();
+        let want: Vec<BezPath> = paths.iter().map(|p| alone.get(p).device()).collect();
         let mut prepared = CoveragePathCache::new(usize::MAX);
         prepared.prepare(paths.iter().rev(), threads);
+        // One local geometry per source, style and local tolerance.
+        let mut distinct: Vec<(CoverageKey, &PlacedPath)> = Vec::new();
+        for placed in &paths {
+            let key = CoveragePathCache::key(placed);
+            if !distinct.iter().any(|(k, p)| {
+                *k == key && Arc::ptr_eq(&p.path, &placed.path) && p.style == placed.style
+            }) {
+                distinct.push((key, placed));
+            }
+        }
+        assert!(
+            distinct.len() < paths.len() - 1,
+            "scale buckets share geometry"
+        );
         assert_eq!(
             prepared.prepared.values().map(Vec::len).sum::<usize>(),
-            paths.len() - 1
+            distinct.len()
         );
         for (placed, want) in paths.iter().zip(&want) {
-            assert_eq!(prepared.get(placed).elements(), want.elements());
+            assert_eq!(prepared.get(placed).device().elements(), want.elements());
         }
         assert!(prepared.prepared.values().all(Vec::is_empty));
         // The cache holds what it holds without preparing, in the same order.
@@ -1474,12 +1624,80 @@ mod tests {
         }
         small.prepare(paths.iter(), threads);
         for (placed, want) in paths.iter().zip(&want) {
-            assert_eq!(small.get(placed).elements(), want.elements());
+            assert_eq!(small.get(placed).device().elements(), want.elements());
         }
         assert_eq!(
             (small.len(), small.bytes()),
             (small_alone.len(), small_alone.bytes())
         );
+    }
+
+    /// Animated scale and rotation map one resolved local geometry; each
+    /// frame's lines stay within the device tolerance of flattening after
+    /// the transform, overlaps resolved, for fills and strokes, including a
+    /// reflection.
+    #[test]
+    fn animated_transforms_reuse_local_geometry_within_device_tolerance() {
+        let mut overlapping = BezPath::new();
+        overlapping.move_to((0.0, 0.0));
+        overlapping.curve_to((40.0, -20.0), (80.0, 20.0), (60.0, 60.0));
+        overlapping.line_to((0.0, 60.0));
+        overlapping.close_path();
+        overlapping.move_to((30.0, 10.0));
+        overlapping.quad_to((90.0, 30.0), (50.0, 90.0));
+        overlapping.line_to((20.0, 80.0));
+        overlapping.close_path();
+        let source = Arc::new(overlapping);
+        let mut cache = CoveragePathCache::new(usize::MAX);
+        for style in [PathStyle::Fill, PathStyle::Stroke(Stroke::new(3.0))] {
+            let frames: Vec<Affine> = (0..24)
+                .map(|i| {
+                    let t = i as f64 / 24.0;
+                    Affine::rotate(t * 0.9)
+                        * Affine::scale_non_uniform(2.05 + 0.04 * t, 2.0 - 0.05 * t)
+                })
+                .chain([Affine::scale_non_uniform(-2.05, 2.0)])
+                .collect();
+            let keys: std::collections::HashSet<_> = frames
+                .iter()
+                .map(|&transform| {
+                    CoveragePathCache::key(&PlacedPath {
+                        path: source.clone(),
+                        transform,
+                        style: style.clone(),
+                    })
+                })
+                .collect();
+            assert_eq!(keys.len(), 1, "one scale bucket, one local geometry");
+            for transform in frames {
+                let placed = PlacedPath {
+                    path: source.clone(),
+                    transform,
+                    style: style.clone(),
+                };
+                let lines = cache.get(&placed).device();
+                let mut exact = NonzeroResolver::default();
+                let want = exact.resolve(&coverage_path(&placed, Affine::IDENTITY));
+                let tolerance = path_coverage_tolerance(&placed.path, transform);
+                // Area within the band the two flattenings allow around the
+                // perimeter; the same resolved winding (0 or 1) anywhere.
+                let perimeter: f64 = want
+                    .segments()
+                    .map(|s| kurbo::ParamCurveArclen::arclen(&s, 1e-9))
+                    .sum();
+                assert!(
+                    (lines.area().abs() - want.area().abs()).abs() <= 2.0 * tolerance * perimeter,
+                    "{} vs {}",
+                    lines.area(),
+                    want.area()
+                );
+                for (x, y) in [(35.0, 40.0), (45.0, 50.0), (0.5, 30.0), (500.0, 500.0)] {
+                    let at = transform * kurbo::Point::new(x, y);
+                    assert_eq!(lines.winding(at).abs(), want.winding(at).abs());
+                    assert!(lines.winding(at).abs() <= 1);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1503,15 +1721,15 @@ mod tests {
         let raw = coverage_path(&placed, Affine::IDENTITY);
         assert_eq!(raw.winding(kurbo::Point::new(1.5, 1.0)), 2);
         let mut cache = CoveragePathCache::default();
-        let resolved = cache.get(&placed);
+        let resolved = cache.get(&placed).device();
         assert_eq!(resolved.winding(kurbo::Point::new(1.5, 1.0)), 1);
         assert!((resolved.area().abs() - 6.0).abs() < 1e-9);
         assert_eq!(resolved.winding(kurbo::Point::new(3.5, 1.0)), 0);
         let shifted = PlacedPath {
             transform: Affine::translate((0.375, 0.125)),
-            ..placed
+            ..placed.clone()
         };
-        assert!(Arc::ptr_eq(&resolved, &cache.get(&shifted)));
+        assert_eq!(cache.get(&placed).key(), cache.get(&shifted).key());
     }
 
     #[test]
@@ -1528,7 +1746,7 @@ mod tests {
         };
         let raw = coverage_path(&placed, Affine::IDENTITY);
         assert_eq!(raw.winding(kurbo::Point::new(2.0, 1.0)).abs(), 2);
-        let resolved = CoveragePathCache::default().get(&placed);
+        let resolved = CoveragePathCache::default().get(&placed).device();
         assert_eq!(resolved.winding(kurbo::Point::new(2.0, 1.0)).abs(), 1);
     }
 

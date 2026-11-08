@@ -238,9 +238,60 @@ impl LibraryWriter {
         meta: Value,
         preserve_trash: bool,
     ) -> Result<(), LibraryError> {
+        let (rows, trash) = self.entry_rows(id, &project, preserve_trash)?;
         let mut envelope = Map::new();
         envelope.insert("v", Value::from("1.2.0"));
-        envelope.insert("proj", project.clone());
+        envelope.insert("proj", project);
+        self.batch(vec![
+            (format!("projectHistory.{id}"), Some(history)),
+            (format!("projectWorkspace.{id}"), Some(workspace)),
+            (format!("projectMeta.{id}"), Some(meta)),
+            (format!("project.{id}"), Some(Value::Object(envelope))),
+            ("projects".into(), Some(Value::Array(rows))),
+            ("projectTrash".into(), Some(Value::Array(trash))),
+            (format!("projectJournal.{id}"), None),
+        ])
+    }
+    /// The entry of a project whose body is its `.pmv` file: the row and the
+    /// metadata that names the file, never a second copy of the project.
+    /// `summary` holds the row's `name`, `w` and `h`.
+    pub fn save_file_entry(
+        &self,
+        id: &str,
+        summary: &Value,
+        meta: Value,
+        preserve_trash: bool,
+    ) -> Result<(), LibraryError> {
+        let (rows, trash) = self.entry_rows(id, summary, preserve_trash)?;
+        self.batch(vec![
+            (format!("projectMeta.{id}"), Some(meta)),
+            ("projects".into(), Some(Value::Array(rows))),
+            ("projectTrash".into(), Some(Value::Array(trash))),
+            // An older build kept a copy here; the file holds all of it.
+            (format!("project.{id}"), None),
+            (format!("projectHistory.{id}"), None),
+            (format!("projectWorkspace.{id}"), None),
+            (format!("projectJournal.{id}"), None),
+        ])
+    }
+    /// A library project opened unchanged: first in recents, with its view
+    /// state, and its body left as it is.
+    pub fn touch_entry(&self, id: &str, summary: &Value, meta: Value) -> Result<(), LibraryError> {
+        let (rows, trash) = self.entry_rows(id, summary, true)?;
+        self.batch(vec![
+            (format!("projectMeta.{id}"), Some(meta)),
+            ("projects".into(), Some(Value::Array(rows))),
+            ("projectTrash".into(), Some(Value::Array(trash))),
+        ])
+    }
+    /// `projects` with `id`'s row first (unless it stays trashed), and
+    /// `projectTrash` without it.
+    fn entry_rows(
+        &self,
+        id: &str,
+        project: &Value,
+        preserve_trash: bool,
+    ) -> Result<(Vec<Value>, Vec<Value>), LibraryError> {
         let mut rows = self.rows("projects")?;
         let mut row = rows
             .iter()
@@ -272,15 +323,7 @@ impl LibraryWriter {
             rows.insert(0, Value::Object(row));
             trash.retain(|r| r.get("id").and_then(Value::as_str) != Some(id));
         }
-        self.batch(vec![
-            (format!("projectHistory.{id}"), Some(history)),
-            (format!("projectWorkspace.{id}"), Some(workspace)),
-            (format!("projectMeta.{id}"), Some(meta)),
-            (format!("project.{id}"), Some(Value::Object(envelope))),
-            ("projects".into(), Some(Value::Array(rows))),
-            ("projectTrash".into(), Some(Value::Array(trash))),
-            (format!("projectJournal.{id}"), None),
-        ])
+        Ok((rows, trash))
     }
     fn batch(&self, values: Vec<(String, Option<Value>)>) -> Result<(), LibraryError> {
         for (key, value) in &values {

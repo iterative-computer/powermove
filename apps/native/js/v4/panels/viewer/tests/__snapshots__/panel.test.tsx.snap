@@ -214,6 +214,24 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
     "text": "",
     "type": "div",
   },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
+  },
   "2": {
     "children": [
       3,
@@ -291,6 +309,7 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -345,6 +364,7 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -539,6 +559,7 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -591,13 +612,13 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -643,6 +664,24 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -721,6 +760,7 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -775,6 +815,7 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -969,6 +1010,7 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -1021,13 +1063,13 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -1073,6 +1115,24 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -1151,6 +1211,7 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -1205,6 +1266,7 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -1399,6 +1461,7 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -1451,13 +1514,13 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -1503,6 +1566,24 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -1581,6 +1662,7 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -1635,6 +1717,7 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -1829,6 +1912,7 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -1881,13 +1965,13 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -1933,6 +2017,24 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -2011,6 +2113,7 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -2065,6 +2168,7 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -2259,6 +2363,7 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -2311,13 +2416,13 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -2363,6 +2468,24 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -2441,6 +2564,7 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -2495,6 +2619,7 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -2689,6 +2814,7 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -2741,13 +2867,13 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -2969,6 +3095,24 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
     "text": "",
     "type": "div",
   },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
+  },
   "2": {
     "children": [
       3,
@@ -3046,6 +3190,7 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -3100,6 +3245,7 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -3294,6 +3440,7 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -3346,13 +3493,13 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -3398,6 +3545,24 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -3476,6 +3641,7 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -3530,6 +3696,7 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -3724,6 +3891,7 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -3776,13 +3944,13 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -3828,6 +3996,24 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -3906,6 +4092,7 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -3960,6 +4147,7 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -4154,6 +4342,7 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -4206,13 +4395,13 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -4258,6 +4447,24 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -4336,6 +4543,7 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -4390,6 +4598,7 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -4584,6 +4793,7 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -4636,13 +4846,13 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -4734,6 +4944,7 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -4788,6 +4999,7 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -4982,6 +5194,7 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
   "15": {
     "children": [
       16,
+      17,
     ],
     "id": 15,
     "input": null,
@@ -5038,6 +5251,24 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
   "16": {
     "children": [],
     "id": 16,
+    "input": null,
+    "listeners": {},
+    "parent": 15,
+    "props": {
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.overlays",
+    },
+    "text": "",
+    "type": "canvas",
+  },
+  "17": {
+    "children": [],
+    "id": 17,
     "input": null,
     "listeners": {},
     "parent": 15,
@@ -5314,6 +5545,7 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -5368,6 +5600,7 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -5562,6 +5795,7 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
   "15": {
     "children": [
       16,
+      17,
     ],
     "id": 15,
     "input": null,
@@ -5618,6 +5852,24 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
   "16": {
     "children": [],
     "id": 16,
+    "input": null,
+    "listeners": {},
+    "parent": 15,
+    "props": {
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.overlays",
+    },
+    "text": "",
+    "type": "canvas",
+  },
+  "17": {
+    "children": [],
+    "id": 17,
     "input": null,
     "listeners": {},
     "parent": 15,
@@ -5894,6 +6146,7 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -5948,6 +6201,7 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -6142,6 +6396,7 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
   "15": {
     "children": [
       16,
+      17,
     ],
     "id": 15,
     "input": null,
@@ -6198,6 +6453,24 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
   "16": {
     "children": [],
     "id": 16,
+    "input": null,
+    "listeners": {},
+    "parent": 15,
+    "props": {
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.overlays",
+    },
+    "text": "",
+    "type": "canvas",
+  },
+  "17": {
+    "children": [],
+    "id": 17,
     "input": null,
     "listeners": {},
     "parent": 15,
@@ -6429,6 +6702,24 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
     "text": "",
     "type": "div",
   },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
+  },
   "2": {
     "children": [
       3,
@@ -6506,6 +6797,7 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -6560,6 +6852,7 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -6754,6 +7047,7 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -6806,13 +7100,13 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -6858,6 +7152,24 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -6936,6 +7248,7 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -6990,6 +7303,7 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -7184,6 +7498,7 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -7236,13 +7551,13 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -7267,7 +7582,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
   "1": {
     "children": [
       2,
-      4,
+      5,
     ],
     "id": 1,
     "input": null,
@@ -7292,6 +7607,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
   "2": {
     "children": [
       3,
+      4,
     ],
     "id": 2,
     "input": null,
@@ -7344,6 +7660,24 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
     "listeners": {},
     "parent": 2,
     "props": {
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.overlays",
+    },
+    "text": "",
+    "type": "canvas",
+  },
+  "4": {
+    "children": [],
+    "id": 4,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
       "id": "viewer.gizmos",
       "label": "Transform gizmos",
       "style": {
@@ -7355,12 +7689,12 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
     "text": "",
     "type": "canvas",
   },
-  "4": {
+  "5": {
     "children": [
-      5,
-      7,
+      6,
+      8,
     ],
-    "id": 4,
+    "id": 5,
     "input": null,
     "listeners": {},
     "parent": 1,
@@ -7385,11 +7719,11 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
     "text": "",
     "type": "div",
   },
-  "5": {
+  "6": {
     "children": [
-      6,
+      7,
     ],
-    "id": 5,
+    "id": 6,
     "input": null,
     "listeners": {
       "change": {
@@ -7399,7 +7733,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
         "preventDefault": false,
       },
     },
-    "parent": 4,
+    "parent": 5,
     "props": {
       "binding": "viewer.zoom",
       "control": "select",
@@ -7408,6 +7742,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -7462,6 +7797,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -7545,21 +7881,21 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
     "text": "",
     "type": "button",
   },
-  "6": {
+  "7": {
     "children": [],
-    "id": 6,
+    "id": 7,
     "input": null,
     "listeners": {},
-    "parent": 5,
+    "parent": 6,
     "props": {},
     "text": "Fit (54 %)",
     "type": "text",
   },
-  "7": {
+  "8": {
     "children": [
-      8,
+      9,
     ],
-    "id": 7,
+    "id": 8,
     "input": null,
     "listeners": {
       "change": {
@@ -7569,7 +7905,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
         "preventDefault": false,
       },
     },
-    "parent": 4,
+    "parent": 5,
     "props": {
       "binding": "viewer.quality",
       "control": "select",
@@ -7643,12 +7979,12 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
     "text": "",
     "type": "button",
   },
-  "8": {
+  "9": {
     "children": [],
-    "id": 8,
+    "id": 9,
     "input": null,
     "listeners": {},
-    "parent": 7,
+    "parent": 8,
     "props": {},
     "text": "Auto (Half)",
     "type": "text",
@@ -7673,7 +8009,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
   "1": {
     "children": [
       2,
-      4,
+      5,
     ],
     "id": 1,
     "input": null,
@@ -7698,6 +8034,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
   "2": {
     "children": [
       3,
+      4,
     ],
     "id": 2,
     "input": null,
@@ -7750,6 +8087,24 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
     "listeners": {},
     "parent": 2,
     "props": {
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.overlays",
+    },
+    "text": "",
+    "type": "canvas",
+  },
+  "4": {
+    "children": [],
+    "id": 4,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
       "id": "viewer.gizmos",
       "label": "Transform gizmos",
       "style": {
@@ -7761,12 +8116,12 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
     "text": "",
     "type": "canvas",
   },
-  "4": {
+  "5": {
     "children": [
-      5,
-      7,
+      6,
+      8,
     ],
-    "id": 4,
+    "id": 5,
     "input": null,
     "listeners": {},
     "parent": 1,
@@ -7791,11 +8146,11 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
     "text": "",
     "type": "div",
   },
-  "5": {
+  "6": {
     "children": [
-      6,
+      7,
     ],
-    "id": 5,
+    "id": 6,
     "input": null,
     "listeners": {
       "change": {
@@ -7805,7 +8160,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
         "preventDefault": false,
       },
     },
-    "parent": 4,
+    "parent": 5,
     "props": {
       "binding": "viewer.zoom",
       "control": "select",
@@ -7814,6 +8169,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -7868,6 +8224,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -7951,21 +8308,21 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
     "text": "",
     "type": "button",
   },
-  "6": {
+  "7": {
     "children": [],
-    "id": 6,
+    "id": 7,
     "input": null,
     "listeners": {},
-    "parent": 5,
+    "parent": 6,
     "props": {},
     "text": "Fit (54 %)",
     "type": "text",
   },
-  "7": {
+  "8": {
     "children": [
-      8,
+      9,
     ],
-    "id": 7,
+    "id": 8,
     "input": null,
     "listeners": {
       "change": {
@@ -7975,7 +8332,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
         "preventDefault": false,
       },
     },
-    "parent": 4,
+    "parent": 5,
     "props": {
       "binding": "viewer.quality",
       "control": "select",
@@ -8049,12 +8406,12 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
     "text": "",
     "type": "button",
   },
-  "8": {
+  "9": {
     "children": [],
-    "id": 8,
+    "id": 9,
     "input": null,
     "listeners": {},
-    "parent": 7,
+    "parent": 8,
     "props": {},
     "text": "Auto (Half)",
     "type": "text",
@@ -8080,7 +8437,7 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
     "children": [
       2,
       8,
-      10,
+      11,
     ],
     "id": 1,
     "input": null,
@@ -8103,10 +8460,28 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
     "type": "div",
   },
   "10": {
-    "children": [
-      11,
-    ],
+    "children": [],
     "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
+  },
+  "11": {
+    "children": [
+      12,
+    ],
+    "id": 11,
     "input": null,
     "listeners": {
       "click": {
@@ -8143,12 +8518,12 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
     "text": "",
     "type": "button",
   },
-  "11": {
+  "12": {
     "children": [],
-    "id": 11,
+    "id": 12,
     "input": null,
     "listeners": {},
-    "parent": 10,
+    "parent": 11,
     "props": {},
     "text": "Return to Composition",
     "type": "text",
@@ -8230,6 +8605,7 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -8284,6 +8660,7 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -8478,6 +8855,7 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -8530,13 +8908,13 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -8582,6 +8960,24 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -8660,6 +9056,7 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -8714,6 +9111,7 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -8908,6 +9306,7 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -8960,13 +9359,13 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -9012,6 +9411,24 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -9090,6 +9507,7 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
       "label": "Zoom, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "54 %",
           "menu": [
             {
               "label": "Fit",
@@ -9144,6 +9562,7 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -9338,6 +9757,7 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -9390,13 +9810,13 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",
@@ -9442,6 +9862,24 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
     },
     "text": "",
     "type": "div",
+  },
+  "10": {
+    "children": [],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {
+      "id": "viewer.gizmos",
+      "label": "Transform gizmos",
+      "style": {
+        "inset": "fill",
+        "position": "absolute",
+      },
+      "surface": "viewer.gizmos",
+    },
+    "text": "",
+    "type": "canvas",
   },
   "2": {
     "children": [
@@ -9520,6 +9958,7 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
         "pmKit": {
+          "display": "Fit (54 %)",
           "menu": [
             {
               "label": "Fit (54 %)",
@@ -9574,6 +10013,7 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
               "v": "viewer.fit",
             },
           ],
+          "widthSample": "Fit (100 %)",
         },
       },
       "options": [
@@ -9768,6 +10208,7 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
   "8": {
     "children": [
       9,
+      10,
     ],
     "id": 8,
     "input": null,
@@ -9820,13 +10261,13 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
     "listeners": {},
     "parent": 8,
     "props": {
-      "id": "viewer.gizmos",
-      "label": "Transform gizmos",
+      "id": "viewer.overlays",
+      "label": "Extension overlays",
       "style": {
         "inset": "fill",
         "position": "absolute",
       },
-      "surface": "viewer.gizmos",
+      "surface": "viewer.overlays",
     },
     "text": "",
     "type": "canvas",

@@ -207,14 +207,75 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
         throw(s, "Host argument quota");
         return;
     }
-    let result = serde_json::from_str(&arg)
+    // A Rust panic can't unwind through V8's frames (the process would abort
+    // with "failed to initiate panic"): a panicking host operation ends this
+    // generation instead, and the panic is reported by the panic hook.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        serde_json::from_str(&arg)
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                if op == "engine" {
+                    engine_op(&state, v)
+                } else {
+                    host_op(&mut state.lock().unwrap(), &op, v).map(|v| v.to_string())
+                }
+            })
+    }));
+    let Ok(result) = result else {
+        s.terminate_execution();
+        return;
+    };
+    if state.lock().unwrap().cancellation.is_cancelled() {
+        s.terminate_execution();
+        return;
+    }
+    match result {
+        Ok(text) => match v8::String::new(s, &text) {
+            Some(result) => rv.set(result.into()),
+            None => throw(s, "Engine response quota"),
+        },
+        Err(error) => throw(s, &error),
+    }
+}
+/// `__bytes(operation, view, input)`: an engine call carrying one byte payload
+/// (an encoded image, a file), copied out of V8 once instead of as JSON.
+fn bytes_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let op = a.get(0).to_rust_string_lossy(s);
+    let bytes = if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(a.get(1)) {
+        let mut out = vec![0; view.byte_length()];
+        view.copy_contents(&mut out);
+        out
+    } else if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(a.get(1)) {
+        let store = buffer.get_backing_store();
+        store
+            .data()
+            .map(|data| {
+                // SAFETY: the backing store is alive for this call and `byte_length` long.
+                unsafe {
+                    std::slice::from_raw_parts(data.as_ptr() as *const u8, store.byte_length())
+                }
+                .to_vec()
+            })
+            .unwrap_or_default()
+    } else {
+        throw(s, "Host byte payload must be an ArrayBuffer or view");
+        return;
+    };
+    let input = a.get(2).to_rust_string_lossy(s);
+    let state = s.get_slot::<Native>().unwrap().0.clone();
+    let limits = state.lock().unwrap().limits.clone();
+    if bytes.len() > limits.max_response_bytes || input.len() > limits.max_op_bytes {
+        throw(s, "Host argument quota");
+        return;
+    }
+    let result = serde_json::from_str::<Value>(&input)
         .map_err(|e| e.to_string())
-        .and_then(|v| {
-            if op == "engine" {
-                engine_op(&state, v)
-            } else {
-                host_op(&mut state.lock().unwrap(), &op, v).map(|v| v.to_string())
-            }
+        .and_then(|input| {
+            engine_call(&state, &op, |engine, generation, budget| {
+                engine
+                    .call_bytes(generation, &op, &bytes, &input, budget)
+                    .map(|value| value.to_string())
+            })
         });
     if state.lock().unwrap().cancellation.is_cancelled() {
         s.terminate_execution();
@@ -228,11 +289,61 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
         Err(error) => throw(s, &error),
     }
 }
+/// `__read(operation, input)`: bytes the host holds, as a new `ArrayBuffer`.
+fn read_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let op = a.get(0).to_rust_string_lossy(s);
+    let input = a.get(1).to_rust_string_lossy(s);
+    let state = s.get_slot::<Native>().unwrap().0.clone();
+    let max = state.lock().unwrap().limits.max_response_bytes;
+    let mut bytes = None;
+    let result = serde_json::from_str::<Value>(&input)
+        .map_err(|e| e.to_string())
+        .and_then(|input| {
+            engine_call(&state, &op, |engine, generation, mut budget| {
+                budget.max_response_bytes = max;
+                let read = engine.read_bytes(generation, &op, &input, budget)?;
+                if read.len() > max {
+                    return Err(crate::Error::Quota("Engine response quota"));
+                }
+                bytes = Some(read);
+                Ok(String::new())
+            })
+        });
+    if state.lock().unwrap().cancellation.is_cancelled() {
+        s.terminate_execution();
+        return;
+    }
+    match (result, bytes) {
+        (Ok(_), Some(bytes)) => {
+            // Inside the V8 sandbox: allocated by the isolate, then filled.
+            let buffer = v8::ArrayBuffer::new(s, bytes.len());
+            if let Some(data) = buffer.get_backing_store().data() {
+                // SAFETY: a fresh buffer of exactly `bytes.len()` bytes no one else sees yet.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.as_ptr().cast(), bytes.len())
+                };
+            }
+            rv.set(buffer.into());
+        }
+        (Err(error), _) => throw(s, &error),
+        _ => throw(s, "Host read failed"),
+    }
+}
 /// The reply as JSON text, serialized once.
 fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<String, String> {
     let operation = input["operation"]
         .as_str()
         .ok_or("Invalid engine operation")?;
+    engine_call(state, operation, |engine, generation, budget| {
+        engine.call_text(generation, operation, &input["input"], budget)
+    })
+}
+/// Meters, reserves and bounds one synchronous engine call.
+fn engine_call(
+    state: &Arc<Mutex<NativeState>>,
+    operation: &str,
+    call: impl FnOnce(&dyn EngineProxy, &Generation, HostBudget) -> crate::Result<String>,
+) -> std::result::Result<String, String> {
     let (engine, generation, budget, _reservation) = {
         let mut n = state.lock().unwrap();
         let engine = n.engine.clone().ok_or("Engine service is not attached")?;
@@ -265,9 +376,7 @@ fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Resu
         )
     };
     budget.check().map_err(|e| e.to_string())?;
-    let text = engine
-        .call_text(&generation, operation, &input["input"], budget.clone())
-        .map_err(|e| e.to_string())?;
+    let text = call(&*engine, &generation, budget.clone()).map_err(|e| e.to_string())?;
     budget.check().map_err(|e| e.to_string())?;
     if text.len() > budget.max_response_bytes {
         return Err("Engine response quota".into());
@@ -571,6 +680,8 @@ impl Vm {
                 ("__host", v8::Function::new(cs, native).unwrap()),
                 ("__now", v8::Function::new(cs, now).unwrap()),
                 ("__clone", v8::Function::new(cs, clone_value).unwrap()),
+                ("__bytes", v8::Function::new(cs, bytes_op).unwrap()),
+                ("__read", v8::Function::new(cs, read_op).unwrap()),
                 (
                     "__linkModules",
                     v8::Function::new(cs, crate::modules::link).unwrap(),
