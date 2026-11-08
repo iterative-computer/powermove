@@ -239,8 +239,15 @@ impl Controller {
         let project = session.project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
+        let frames = crate::mcp_services::frame_renderer(
+            self.kernel.clone(),
+            project.clone(),
+            self.profile.clone(),
+        )
+        .ok();
         let host = ExtensionHost::start(HostConfig {
             kernel: self.kernel.clone(),
+            frames,
             project,
             roots: roots(&self.profile),
             cache: self.profile.join("extensions-build"),

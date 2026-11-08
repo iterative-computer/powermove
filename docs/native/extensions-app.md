@@ -141,8 +141,13 @@ window is open is shown in it.
   stable), not the stored object. `structuredClone` accepts views; other natives that
   refuse proxies would not.
 
-- `render.raster`, `renderFrameTo` and `snapshot` have no engine backend, and raster
-  overrides do not reach the viewer.
+- `render.raster` has no engine backend and raster overrides do not reach the viewer
+  or export (typewriter-effect, number-counter, linked-scene-bezier and
+  variable-font-anchor depend on them): the engine needs a render continuation that
+  asks the realm for a layer's canvas and resumes with its pixels (s5-compat.md §3).
+- `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine
+  (a one-frame PNG export, `mcp_services::frame_renderer`), so each call takes as long
+  as a frame export; snapshot is a JPEG at quality 0.92.
 - `api.services` holds only what extensions register; the built-in `viewer`,
   `timeline`, `inspector`, `tool` and `shaderHooks` services do not exist natively.
 - `ui.modal` and `PM.Fonts` throw `Unavailable`.

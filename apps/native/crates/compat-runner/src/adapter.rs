@@ -275,6 +275,19 @@ impl KernelAdapter {
         }
     }
     /// Revision and timing facts for a transport without a document copy.
+    /// The open composition's width and height.
+    pub fn size(&self) -> Result<(f64, f64)> {
+        let p = self.published()?;
+        let root = p.snapshot.root().ok_or(Error::Invalid("no open project"))?;
+        let open = p.snapshot.open_comp();
+        let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+        let number = |key: &str, default: f64| {
+            comp.get(key)
+                .and_then(|n| n.to_value().as_f64())
+                .unwrap_or(default)
+        };
+        Ok((number("w", 1920.), number("h", 1080.)))
+    }
     pub fn timebase(&self) -> Result<crate::transport::TimeBase> {
         let p = self.published()?;
         Ok(crate::transport::TimeBase::of(&p))

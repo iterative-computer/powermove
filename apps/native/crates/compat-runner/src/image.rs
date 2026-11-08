@@ -95,6 +95,66 @@ impl Encoded {
     }
 }
 
+/// A snapshot's JPEG (quality 0.92, as a canvas's default), through ImageIO.
+#[cfg(target_os = "macos")]
+pub(crate) fn jpeg(pixels: &ImageData) -> Result<Vec<u8>> {
+    use objc2_core_foundation::{CFData, CFDictionary, CFMutableData, CFNumber, CFString, CFType};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
+        kCGColorSpaceSRGB,
+    };
+    use objc2_image_io::{CGImageDestination, kCGImageDestinationLossyCompressionQuality};
+    let failed = || Error::Host("The snapshot could not be encoded".into());
+    let (width, height) = (pixels.width() as usize, pixels.height() as usize);
+    // JPEG has no alpha: composite over black, as a canvas's toDataURL does.
+    let mut rgb: Vec<u8> = pixels.bytes().to_vec();
+    for px in rgb.chunks_exact_mut(4) {
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
+            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+        }
+        px[3] = 255;
+    }
+    // SAFETY: a constant colour space name.
+    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).ok_or_else(failed)?;
+    // SAFETY: `rgb` is width*height*4 bytes and outlives the context.
+    let context = unsafe {
+        CGBitmapContextCreate(
+            rgb.as_mut_ptr().cast(),
+            width,
+            height,
+            8,
+            width * 4,
+            Some(&space),
+            CGImageAlphaInfo::NoneSkipLast.0,
+        )
+    }
+    .ok_or_else(failed)?;
+    let image = CGBitmapContextCreateImage(Some(&context)).ok_or_else(failed)?;
+    let data = CFMutableData::new(None, 0).ok_or_else(failed)?;
+    let kind = CFString::from_static_str("public.jpeg");
+    // SAFETY: a fresh mutable data, one image, documented option types.
+    unsafe {
+        let destination =
+            CGImageDestination::with_data(&data, &kind, 1, None).ok_or_else(failed)?;
+        let quality = CFNumber::new_f64(0.92);
+        let options = CFDictionary::<CFString, CFType>::from_slices(
+            &[kCGImageDestinationLossyCompressionQuality],
+            &[quality.as_ref()],
+        );
+        destination.add_image(&image, Some(options.as_ref()));
+        if !destination.finalize() {
+            return Err(failed());
+        }
+    }
+    let data: &CFData = &data;
+    Ok(data.to_vec())
+}
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn jpeg(_: &ImageData) -> Result<Vec<u8>> {
+    Err(Error::Host("JPEG snapshots need ImageIO".into()))
+}
+
 fn sniff(bytes: &[u8]) -> Option<&'static str> {
     let at = |offset: usize, magic: &[u8]| bytes.get(offset..offset + magic.len()) == Some(magic);
     Some(if at(0, b"\x89PNG") {

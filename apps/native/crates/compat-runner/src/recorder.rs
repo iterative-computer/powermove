@@ -65,6 +65,7 @@ pub struct NativeHost {
     transport: crate::transport::Transport,
     events: Box<dyn RealmEvents>,
     text: Mutex<Option<CanvasText>>,
+    frames: Mutex<Option<crate::FrameRenderer>>,
 }
 pub(crate) fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
@@ -140,7 +141,81 @@ impl NativeHost {
             transport,
             events,
             text: Mutex::new(None),
+            frames: Mutex::new(None),
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn kernel_size(&self) -> (f64, f64) {
+        self.kernel.lock().unwrap().size().unwrap()
+    }
+    pub fn set_frames(&self, frames: Option<crate::FrameRenderer>) {
+        *self.frames.lock().unwrap() = frames;
+    }
+    /// `render.renderFrameTo(time, width, height)` and `PM.Export.snapshot(time,
+    /// maxWidth)`: an engine render of the open composition. The frame becomes a
+    /// recorder canvas (pixels the extension can read) or a JPEG data URL.
+    fn render_query(&self, method: &str, args: &Value) -> Result<Value> {
+        let renderer = self.frames.lock().unwrap().clone().ok_or_else(|| {
+            Error::Host(format!(
+                "{method} needs the engine, which this host does not have"
+            ))
+        })?;
+        let number = |i: usize| args.get(i).and_then(Value::as_f64);
+        let time = number(0).filter(|t| t.is_finite()).unwrap_or(0.).max(0.);
+        let (width, height) = match method {
+            "render.renderFrameTo" => (
+                number(1).ok_or(Error::Invalid("render width"))?,
+                number(2).ok_or(Error::Invalid("render height"))?,
+            ),
+            _ => {
+                // Snapshot: the composition's aspect at most `maxWidth` wide.
+                let (w, h) = self.kernel.lock().unwrap().size()?;
+                let width = number(1).unwrap_or(480.).min(w).max(1.);
+                (width, (width * h / w).round())
+            }
+        };
+        let side = |v: f64| {
+            (v.is_finite() && (1. ..=16384.).contains(&v.round())).then(|| v.round() as u32)
+        };
+        let (Some(width), Some(height)) = (side(width), side(height)) else {
+            return Err(Error::Invalid("render size"));
+        };
+        let png = renderer(time, width, height).map_err(Error::Host)?;
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+        let mut reader = decoder
+            .read_info()
+            .map_err(|e| Error::Host(e.to_string()))?;
+        let mut rgba = vec![
+            0;
+            reader
+                .output_buffer_size()
+                .ok_or(Error::Quota("render frame"))?
+        ];
+        let info = reader
+            .next_frame(&mut rgba)
+            .map_err(|e| Error::Host(e.to_string()))?;
+        rgba.truncate(info.buffer_size());
+        if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+            return Err(Error::Host("engine frame is not 8-bit RGBA".into()));
+        }
+        let pixels = ImageData::from_rgba(info.width, info.height, rgba).map_err(host_error)?;
+        if method == "render.snapshot" {
+            return Ok(json!(format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(crate::image::jpeg(&pixels)?)
+            )));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.next += 1;
+        let id = state.next;
+        let mut canvas = Canvas::new(id, info.width, info.height).map_err(host_error)?;
+        canvas
+            .put_image_data(pixels, 0, 0, None)
+            .map_err(host_error)?;
+        state.surfaces.insert(id.to_string(), canvas);
+        Ok(
+            json!({"kind":"recorder-surface","surface":id.to_string(),"width":info.width,"height":info.height}),
+        )
     }
     pub fn set_text(&self, text: CanvasText) {
         *self.text.lock().unwrap() = Some(text);
@@ -1023,6 +1098,15 @@ impl EngineProxy for NativeHost {
                 return self.kernel.lock().unwrap().call(input, time);
             }
             "kernel.publication" => return self.kernel.lock().unwrap().publication(),
+            "kernel.query"
+                if matches!(
+                    input["method"].as_str(),
+                    Some("render.renderFrameTo" | "render.snapshot")
+                ) =>
+            {
+                let method = input["method"].as_str().unwrap_or_default();
+                return self.render_query(method, &input["args"]["args"]);
+            }
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "extension.health" => {
                 self.events

@@ -123,6 +123,10 @@ pub(crate) fn boot_realm(realm: &Realm, host: &NativeHost, prelude: &str) -> Res
     Ok(())
 }
 
+/// Renders the open composition at `(time, width, height)` to PNG bytes.
+pub type FrameRenderer =
+    Arc<dyn Fn(f64, u32, u32) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
+
 pub const PROJECT: &str = "compat";
 const COMPAT_REALM: u32 = 2;
 
@@ -483,6 +487,44 @@ mod tests {
             ("image/png", 1, 1)
         );
         assert!(image.png.starts_with(b"\x89PNG"));
+    }
+    #[test]
+    fn render_frame_to_and_snapshot_read_the_engine_frame() {
+        let runner = dom_runner();
+        let asked = Arc::new(std::sync::Mutex::new(vec![]));
+        let log = asked.clone();
+        runner
+            .host
+            .set_frames(Some(Arc::new(move |time, width, height| {
+                log.lock().unwrap().push((time, width, height));
+                let mut png = vec![];
+                let mut encoder = png::Encoder::new(&mut png, width, height);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header().unwrap();
+                writer
+                    .write_image_data(&[0, 128, 255, 255].repeat((width * height) as usize))
+                    .unwrap();
+                drop(writer);
+                Ok(png)
+            })));
+        let frame = runner
+            .json("(()=>{const c=PM.renderFrameTo(1.5,4,2);const p=c.getContext('2d').getImageData(0,0,4,2).data;return [c.width,c.height,[p[0],p[1],p[2],p[3]]]})()")
+            .unwrap();
+        assert_eq!(frame, json!([4, 2, [0, 128, 255, 255]]));
+        let snapshot = runner.json("PM.Export.snapshot(0, 96)").unwrap();
+        assert!(
+            snapshot
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/jpeg;base64,/9j/")
+        );
+        let (w, h) = runner.host.kernel_size();
+        assert_eq!(
+            asked.lock().unwrap()[1],
+            (0., 96, (96. * h / w).round() as u32)
+        );
+        assert_eq!(asked.lock().unwrap()[0], (1.5, 4, 2));
     }
     #[test]
     fn extension_bytes_are_staged_as_files_and_held_files_read_lazily() {

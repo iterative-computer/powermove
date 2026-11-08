@@ -75,6 +75,9 @@ pub struct HostConfig {
     pub text: Option<Box<dyn Fn() -> CanvasText + Send>>,
     /// Published state changed. Runs on any thread; must only schedule.
     pub wake: Arc<dyn Fn() + Send + Sync>,
+    /// The open composition rendered by the engine at a time and size, as PNG
+    /// (`render.renderFrameTo`, `PM.Export.snapshot`).
+    pub frames: Option<crate::FrameRenderer>,
 }
 
 enum Input {
@@ -1379,6 +1382,7 @@ impl Owner {
         if let Some(text) = &self.config.text {
             host.set_text(text());
         }
+        host.set_frames(self.config.frames.clone());
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         crate::boot_realm(&realm, &host, "")?;
@@ -1609,6 +1613,7 @@ mod tests {
                 cache: root.path().join("cache"),
                 owner: None,
                 text: None,
+                frames: None,
                 wake: Arc::new(|| ()),
             });
             Self {
@@ -1788,6 +1793,7 @@ mod tests {
             owner: None,
             text: None,
             wake: Arc::new(|| ()),
+            frames: None,
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         while !later.is_ready() || later.contributions().is_none() {

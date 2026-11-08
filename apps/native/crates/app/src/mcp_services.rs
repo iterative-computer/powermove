@@ -248,6 +248,32 @@ impl ExportChild for EngineJobs {
     }
 }
 /// One composition frame as PNG bytes, through the production export renderer.
+/// The extension realm's `render.renderFrameTo`/`snapshot`: the open
+/// composition of `project`, rendered by the engine as one PNG frame.
+pub(crate) fn frame_renderer(
+    kernel: KernelHandle,
+    project: String,
+    profile: PathBuf,
+) -> AnyResult<pm_compat_runner::FrameRenderer> {
+    let jobs = EngineJobs::new(
+        kernel.clone(),
+        std::env::current_exe()?,
+        Arc::new(AtomicBool::new(false)),
+        profile,
+    );
+    Ok(Arc::new(move |time, width, height| {
+        let published = kernel.published(&project).ok_or("No open project")?;
+        let root = published.snapshot.root().ok_or("No open project")?;
+        let open = published.snapshot.open_comp();
+        let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+        let fps = comp
+            .get("fps")
+            .and_then(|n| n.to_value().as_f64())
+            .unwrap_or(30.);
+        std::fs::create_dir_all(&jobs.cache).map_err(|e| e.to_string())?;
+        frame(&jobs, &published, fps, time, Size::new(width, height)).map_err(|e| e.to_string())
+    }))
+}
 fn frame(
     jobs: &EngineJobs,
     published: &Published,
