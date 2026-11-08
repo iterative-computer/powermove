@@ -131,12 +131,7 @@ impl EngineJobs {
             &published.snapshot,
             JobSpec::Export {
                 session: SessionId::new(published.snapshot.doc_id)?,
-                composition: published
-                    .snapshot
-                    .open_comp()
-                    .unwrap_or_default()
-                    .as_str()
-                    .into(),
+                composition: published.snapshot.render_comp().as_str().into(),
                 settings,
             },
             media,

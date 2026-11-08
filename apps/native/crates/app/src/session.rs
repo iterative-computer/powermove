@@ -1029,7 +1029,7 @@ impl Controller {
         let Some(p) = self.published.clone() else {
             return;
         };
-        let comp = p.snapshot.open_comp().unwrap_or_default();
+        let comp = p.snapshot.render_comp();
         let root = p.snapshot.document.root().unwrap();
         let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
         let number = |key: &str, default| {
@@ -1040,9 +1040,16 @@ impl Controller {
         };
         self.duration = number("dur", 1.).max(0.001);
         self.dimensions = [number("w", 1920.), number("h", 1080.)];
-        let fps = number("fps", 30.);
-        self.rate =
-            pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+        // 29.97 is NTSC 30000/1001, as export and the engine read it.
+        let exact = composition.get("fpsRational").and_then(|r| {
+            Some([
+                crate::node_number(r.at(0)?)? as i64,
+                crate::node_number(r.at(1)?)? as i64,
+            ])
+        });
+        self.rate = pm_time::rate_from_document(exact, number("fps", 30.))
+            .map(|d| d.rate)
+            .unwrap_or(pm_time::Rate::FPS_30);
         let media = self.media.clone();
         self.background = composition
             .get("bg")
