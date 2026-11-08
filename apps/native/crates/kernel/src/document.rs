@@ -60,13 +60,8 @@ impl Snapshot {
     /// The id the engine renders the open composition by: `compId`, or the
     /// project `id` when the layers sit at the root (as the engine resolves it).
     pub fn render_comp(&self) -> String {
-        self.open_comp()
-            .or_else(|| {
-                self.root()
-                    .and_then(|r| r.get("id"))
-                    .and_then(model::str_of)
-                    .map(str::to_owned)
-            })
+        self.root()
+            .and_then(model::render_comp_id)
             .unwrap_or_default()
     }
 
