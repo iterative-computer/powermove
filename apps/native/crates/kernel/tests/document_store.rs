@@ -754,3 +754,18 @@ fn pick_binds_the_hit_to_a_stable_id() {
     assert_eq!(again.revision, 2);
     assert_ne!(again.layer_id.as_deref(), Some(id.as_str()));
 }
+
+/// A root-level project (no `compId`) answers raw queries that name its
+/// composition "" by the project id, as the engine addresses it.
+#[test]
+fn raw_queries_address_a_root_level_composition() {
+    let project = parse(
+        r#"{"id":"root-film","name":"Root","w":64,"h":36,"fps":30,"dur":2,"assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":40,"kf":[]}},"d":{"w":10,"h":10},"fx":[]}]}"#,
+    )
+    .unwrap();
+    let mut store = DocumentStore::new_untitled(project);
+    let mut q = store.queries();
+    let request = parse(r#"{"op":"worldOpacity","comp":"","open":"","layer":0,"t":0}"#).unwrap();
+    let value = q.query(&request).unwrap();
+    assert_eq!(value.as_f64(), Some(0.4));
+}
