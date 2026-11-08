@@ -215,9 +215,10 @@ impl Builtins {
                 watchdog_hooks: broker.clone(),
                 engine: Some(broker.clone()),
                 cache: CodeCache::new(4 * 1024 * 1024),
-                // 64 MiB per isolate at its heap ceiling, from the one account
-                // all windows and publish checks share (32 isolates in all).
-                admission: Admission::panels(),
+                // Reserved per isolate at its heap ceiling (64 MiB), for the
+                // plan's 64-isolate budget per window: the nine built-ins and
+                // the user's v4 extensions, each in its own isolate (§3.4/§3.7).
+                admission: Admission::new(64 * 64 * 1024 * 1024),
             },
         )?;
         Ok(Self {
