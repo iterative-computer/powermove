@@ -52,6 +52,7 @@ mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
 mod viewer2;
+mod viewer_overlays;
 use anyhow::{Context, Result};
 use gpui::AppContext;
 use pm_node::fonts::{

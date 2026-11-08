@@ -4,7 +4,7 @@ see its effect, revert it, see it gone. Synthetic extensions only.
 
 usage: agent-flows.py <powermove-native> <profile> [flow ...]
        (pm-gui launch <lane> <project> first; the profile is the lane's)
-Flows: v4-theme, v1-theme (default: all). Exit status 1 on any failure.
+Flows: v4-theme, v4-overlay, v1-theme (default: all). Exit status 1 on any failure.
 """
 import base64, json, os, shutil, subprocess, sys, tempfile, time, zlib
 
@@ -81,6 +81,14 @@ def panel_colour(mcp):
     return png_pixel(image, w // 2, h - 40)[:3]
 
 
+def viewer_centre(mcp):
+    """The viewer capture's centre: the composition's middle."""
+    content = mcp.tool("capture_panel", {"panelId": "viewer"})
+    facts = json.loads(content[0]["text"])
+    image = base64.b64decode(content[1]["data"])
+    return png_pixel(image, facts["image"]["width"] // 2, facts["image"]["height"] // 2)[:3]
+
+
 def near(a, b, tolerance=24):
     return all(abs(x - y) <= tolerance for x, y in zip(a, b))
 
@@ -105,6 +113,16 @@ EXTENSIONS = {
                  "  themes.activate('flow');\n"
                  "}\n"
                  "export function view() { return jsx('text', { children: 'Flow theme' }); }\n"),
+    "v4-overlay": ({"id": "agent-flow-v4-overlay", "name": "Flow Overlay", "version": "1.0.0",
+                    "apiVersion": 4, "entry": "index.tsx", "author": "agent"},
+                   "index.tsx",
+                   "import { jsx } from 'powermove/jsx-runtime';\n"
+                   "export function activate({ overlays }) {\n"
+                   "  overlays.viewer(({ frame }) => jsx('div', { style: { position: 'absolute',\n"
+                   "    left: frame.x, top: frame.y, width: frame.width, height: frame.height,\n"
+                   "    background: '#5a1f8c' } }));\n"
+                   "}\n"
+                   "export function view() { return jsx('text', { children: 'Flow overlay' }); }\n"),
     "v1-theme": ({"id": "agent-flow-v1-theme", "name": "Flow Theme v1", "version": "1.0.0",
                   "apiVersion": 3, "entry": "index.ts", "contributes": ["themes"], "author": "agent"},
                  "index.ts",
@@ -116,8 +134,12 @@ EXTENSIONS = {
 }
 
 
+PROBES = {"v4-overlay": viewer_centre}
+
+
 def flow(mcp, name):
     manifest, entry, source = EXTENSIONS[name]
+    probe = PROBES.get(name, panel_colour)
     eid = manifest["id"]
     session = json.loads(mcp.tool("start_session", {"prompt": f"Agent flow {name}"})[0]["text"])
     stage = session["stagingDirectory"]
@@ -129,7 +151,7 @@ def flow(mcp, name):
             mcp.tool("publish_extensions", {"extensions": [
                 {"id": eid, "action": "removed", "summary": f"{name} leftover"}]})
             time.sleep(2)
-        before = panel_colour(mcp)
+        before = probe(mcp)
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "manifest.json"), "w") as f:
             json.dump(manifest, f)
@@ -137,12 +159,12 @@ def flow(mcp, name):
             f.write(source)
         mcp.tool("publish_extensions", {"extensions": [
             {"id": eid, "action": "created", "summary": f"{name} flow"}]})
-        until(f"{name} visible", lambda: near(panel_colour(mcp), PURPLE))
+        until(f"{name} visible", lambda: near(probe(mcp), PURPLE))
         shutil.rmtree(folder)
         mcp.tool("publish_extensions", {"extensions": [
             {"id": eid, "action": "removed", "summary": f"{name} flow revert"}]})
-        until(f"{name} reverted", lambda: near(panel_colour(mcp), before, 6))
-        print(f"ok {name}: {before} -> purple -> {panel_colour(mcp)}")
+        until(f"{name} reverted", lambda: near(probe(mcp), before, 6))
+        print(f"ok {name}: {before} -> purple -> {probe(mcp)}")
     finally:
         mcp.tool("finish_session", {"commit": False})
 

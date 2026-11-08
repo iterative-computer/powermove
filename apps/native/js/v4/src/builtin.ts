@@ -33,6 +33,20 @@ export interface BuiltinEnv {
   themes?: Themes;
   /** Extensions only: context-menu items (see `Menus`). */
   menus?: Menus;
+  /** Extensions only: drawing over the viewer (see `Overlays`). */
+  overlays?: Overlays;
+}
+
+/**
+ * Drawing over the composition in the viewer, as v1–3 extensions drew on the
+ * viewer's overlay canvas: `viewer(Component)` renders `<Component frame />`
+ * above the picture and below the transform gizmos, where `frame` is
+ * `{ x, y, width, height, scale }`, the composition's rectangle in the
+ * overlay's points (`scale` = points per composition pixel). Display only:
+ * pointer input goes to the viewer. Returns a function that removes it.
+ */
+export interface Overlays {
+  viewer(component: (props: { frame: Json }) => unknown): () => void;
 }
 
 /**

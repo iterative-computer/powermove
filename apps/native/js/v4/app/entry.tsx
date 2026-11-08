@@ -25,6 +25,7 @@ import type {
   Mounted,
   Themes,
   Menus,
+  Overlays,
 } from "../src/builtin";
 import { mount as layerEffects } from "../panels/effect-controls/mount";
 import { mount as fxbrowser } from "../panels/effects/mount";
@@ -263,6 +264,39 @@ async function gatherMenu(location: string, ctx: Record<string, Json>) {
   }
   return JSON.stringify(out);
 }
+/** This realm's viewer overlay (`overlays.viewer`): display only, drawn over
+ * the composition; `frame` is where the composition sits, in its points. */
+let overlay: { root: any; component: any } | null = null;
+let viewerFrame: Json = { x: 0, y: 0, width: 0, height: 0, scale: 1 };
+async function renderOverlay() {
+  if (!overlay) return;
+  const Overlay = overlay.component;
+  await overlay.root.render(<Overlay frame={viewerFrame} />);
+  await overlay.root.flush();
+}
+function overlaysFor(env: { rootOptions: any }): Overlays {
+  return {
+    viewer(component) {
+      if (typeof component !== "function")
+        throw new Error("A viewer overlay is a component");
+      overlay?.root.dispose();
+      const transport: Transport = async (commit) =>
+        native("overlay.commit", commit);
+      const entry = {
+        root: createRoot(transport, report, env.rootOptions),
+        component,
+      };
+      overlay = entry;
+      void renderOverlay().catch(report);
+      return () => {
+        if (overlay !== entry) return;
+        entry.root.dispose();
+        overlay = null;
+        native("overlay.clear", null);
+      };
+    },
+  };
+}
 async function mountExtension(
   id: string,
   text: string,
@@ -284,6 +318,7 @@ async function mountExtension(
     themes: themeApi,
     menus: menuApi,
   };
+  (env as any).overlays = overlaysFor(env as any);
   (globalThis as any).__powermove_runtime = RUNTIME;
   const graph = JSON.parse(text);
   const url = (name: string) =>
@@ -332,6 +367,7 @@ async function mountExtension(
     commands: commandApi,
     themes: themeApi,
     menus: menuApi,
+    overlays: (env as any).overlays,
   });
   // A component, so the view's hooks have one to belong to.
   const View = namespace.view;
@@ -365,6 +401,11 @@ async function mountExtension(
     await host.command(name, args);
     await this.publish();
     return true;
+  },
+  /** Where the composition sits in the viewer (for the overlay). */
+  viewerFrame(frame: Json) {
+    viewerFrame = frame;
+    return renderOverlay().then(() => true);
   },
   /** The window is opening a menu at `location`: this realm's items. */
   gatherMenu(location: string, ctx: Record<string, Json>) {

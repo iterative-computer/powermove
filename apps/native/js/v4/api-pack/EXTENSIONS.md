@@ -52,7 +52,7 @@ The entry is TypeScript/TSX and exports one of:
   panel, `env.platform` requests (menus, focus), and `env.root()` for a surface.
   Return `{ root, dispose, settle?, show?, publish? }`.
 
-An optional `activate({ host, id, hot, commands, themes, menus })` runs before
+An optional `activate({ host, id, hot, commands, themes, menus, overlays })` runs before
 `view()` renders.
 
 Commands: `commands.register({ id, title, key }, run)` adds `title` to the
@@ -75,6 +75,11 @@ menu each time it opens: `"panel:context"` (`ctx.panelId`), `"layer:context"`
 and `"viewer:context"` (empty canvas: `ctx.time`), as v1–3's
 `menus.contribute`: `"-"`, `{ header }` or `{ label, kb?, on?, disabled?,
 run?, submenu? }`; a Promise is waited for at most 100 ms.
+
+Viewer overlays: `overlays.viewer(({ frame }) => …)` draws over the composition
+in the viewer, below the transform gizmos. `frame` is `{ x, y, width, height,
+scale }`, the composition's rectangle in the overlay's points; it follows pan
+and zoom. Display only. It returns a function that removes the overlay.
 
 State survives a publish only through `hot` (in `mount(env)` it is `env.hot`).
 Each publish runs the new version in a fresh runtime. The old version first

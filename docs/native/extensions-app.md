@@ -161,7 +161,7 @@ What a v1–3 extension could change and where v4 stands, without forking:
 | Commands, keybindings, panels | `commands.register`, `view()` / `mount(env)` |
 | Themes: tokens and CSS (`theme.register`, `theme.activate`) | `themes.register` / `themes.activate` (tokens). v1–3 CSS themes reach native chrome through the translator; surface rules beyond tokens aren't applied natively yet. |
 | Context menus (`menus.contribute`) | `menus.contribute` for panel, layer, timeline and viewer; `titlebar:right` not yet |
-| Viewer overlays (drawing on `ViewerService.ov` or the stage DOM) | Open: needs a v4 overlay surface over the viewer |
+| Viewer overlays (drawing on `ViewerService.ov` or the stage DOM) | `overlays.viewer` (display only) |
 | Timeline columns and painting (`TimelineService.cv`, gutter DOM) | Open: needs v4 outline columns and P-TEXTURE painters (TL-PAINT-1 ≤ 2 ms for 1,000 clips) |
 | Titlebar/toolbar items (`titlebar:right`, titlebar DOM) | Open: needs an extension slot in the window toolbar |
 

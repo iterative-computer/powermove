@@ -79,6 +79,8 @@ pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::Pat
     }
 }
 
+/// A v4 extension's viewer overlay publishes as `<panel>@viewer`.
+pub const VIEWER_OVERLAY: &str = "@viewer";
 /// A deduplicated agent-tool thread request: fingerprint, thread, run.
 type ThreadRequest = (String, String, Option<String>);
 #[derive(Clone, Debug)]
@@ -101,6 +103,8 @@ struct Entry {
     router: HostRouter<HostDataService<data::Data>>,
     surface: Surface,
     interaction: Interaction,
+    /// A v4 extension's viewer overlay (`overlays.viewer`), display only.
+    overlay: Surface,
 }
 /// Completed byte receipts stay native; the JSX panel receives metadata only.
 #[derive(Clone)]
@@ -148,6 +152,8 @@ struct Broker {
     commands: Mutex<(u64, BTreeMap<String, Value>)>,
     /// Themes each extension realm offers (`themes.register`), by panel.
     themes: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
+    overlays_cleared: Mutex<Vec<String>>,
 }
 impl Builtins {
     pub fn new(
@@ -621,6 +627,7 @@ impl Builtins {
             thread_requests: Default::default(),
             commands: Default::default(),
             themes: Default::default(),
+            overlays_cleared: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -688,6 +695,7 @@ impl Builtins {
         self.broker.publications.lock().unwrap().remove(panel);
         self.broker.forget_commands(panel);
         self.broker.forget_themes(panel);
+        self.broker.forget_overlay(panel);
     }
     /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
     /// it: same realm identity, routes and host operations, the fork's code.
@@ -761,6 +769,7 @@ impl Builtins {
         self.broker.entries.lock().unwrap().remove(id);
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
+        self.broker.forget_overlay(id);
     }
     /// Every extension command in this window when they changed since `seen`:
     /// `(revision, [{panel, id, title, key}])`.
@@ -822,6 +831,18 @@ impl Builtins {
     pub fn run_menu(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.runMenu({})", json!(key)))
+    }
+    /// Viewer overlays whose extension took them down since the last look.
+    pub fn take_cleared_overlays(&self) -> Vec<String> {
+        std::mem::take(&mut *self.broker.overlays_cleared.lock().unwrap())
+    }
+    /// Where the composition sits in the viewer, for extension overlays:
+    /// `{x, y, width, height, scale}` in overlay points.
+    pub fn viewer_frame(&self, frame: &Value) {
+        let script = format!("__pmBuiltin.viewerFrame({frame})");
+        for realm in self.extension_realms.lock().unwrap().values() {
+            let _ = realm.eval(script.clone());
+        }
     }
     pub fn run_command(&self, panel: &str, id: &str, args: &[Value]) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval(format!(
@@ -1298,6 +1319,7 @@ impl EngineProxy for Broker {
                     backend,
                     router,
                     surface: Surface::default(),
+                    overlay: Surface::default(),
                     interaction: Interaction::default(),
                 },
             );
@@ -1465,6 +1487,36 @@ impl EngineProxy for Broker {
                     ),
                 }
             }
+            "overlay.commit" => {
+                let commit = serde_json::from_value(input.clone())
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                match entry.overlay.apply(commit) {
+                    Ok(_) => {
+                        self.publications.lock().unwrap().insert(
+                            format!("{panel}{VIEWER_OVERLAY}"),
+                            Publication {
+                                panel: format!("{panel}{VIEWER_OVERLAY}"),
+                                generation: generation.number,
+                                surface: Arc::new(entry.overlay.clone()),
+                            },
+                        );
+                        (self.wake)();
+                        Ok(json!({"accepted":true,"revision":entry.overlay.revision()}))
+                    }
+                    Err(error) => Ok(
+                        json!({"accepted":false,"revision":entry.overlay.revision(),"error":error.to_string()}),
+                    ),
+                }
+            }
+            "overlay.clear" => {
+                entry.overlay = Surface::default();
+                self.overlays_cleared
+                    .lock()
+                    .unwrap()
+                    .push(format!("{panel}{VIEWER_OVERLAY}"));
+                (self.wake)();
+                Ok(Value::Null)
+            }
             "export.observe" => {
                 let mut backend = entry.backend.lock().unwrap();
                 backend.native.export["run"] = input.clone();
@@ -1631,6 +1683,11 @@ impl KernelHooks for Broker {
     fn seal_open_gestures(&self, _: &Generation) {}
 }
 impl Broker {
+    fn forget_overlay(&self, panel: &str) {
+        let id = format!("{panel}{VIEWER_OVERLAY}");
+        self.publications.lock().unwrap().remove(&id);
+        self.overlays_cleared.lock().unwrap().push(id);
+    }
     fn forget_themes(&self, panel: &str) {
         let mut themes = self.themes.lock().unwrap();
         if themes.1.remove(panel).is_some() {

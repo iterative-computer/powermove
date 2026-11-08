@@ -25,6 +25,8 @@ pub struct Host {
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
+    /// v4 extensions' viewer overlays (`overlays.viewer`).
+    pub overlays: Option<Entity<crate::viewer_overlays::ViewerOverlays>>,
     clock: crate::playback::PanelClock,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     pub(crate) ready: BTreeSet<String>,
@@ -112,6 +114,16 @@ impl Controller {
                 .borrow_mut()
                 .insert("viewer.gizmos".into(), gizmos.clone().into());
             self.builtins.gizmos = Some(gizmos);
+            let host: Rc<dyn crate::gizmo::Host> =
+                Rc::new(ControllerDelegate(cx.entity().downgrade()));
+            let tokens = self.host.borrow().tokens.clone();
+            let overlays = cx.new(|_| crate::viewer_overlays::ViewerOverlays::new(host, tokens));
+            self.builtins
+                .natives
+                .views
+                .borrow_mut()
+                .insert("viewer.overlays".into(), overlays.clone().into());
+            self.builtins.overlays = Some(overlays);
         }
         self.start_extensions(cx);
         let (tx, rx) = async_channel::bounded(1);
@@ -392,7 +404,19 @@ impl Controller {
             return;
         };
         let mut mounted = false;
+        for id in runtime.take_cleared_overlays() {
+            if let Some(overlays) = &self.builtins.overlays {
+                overlays.update(cx, |o, cx| o.clear(&id, cx));
+            }
+        }
         for p in runtime.take_publications() {
+            if p.panel.ends_with(pm_builtins::VIEWER_OVERLAY) {
+                if let Some(overlays) = &self.builtins.overlays {
+                    let runtime = runtime.clone();
+                    overlays.update(cx, |o, cx| o.publish(runtime, p, cx));
+                }
+                continue;
+            }
             if let Some(view) = self.builtins.views.get(&p.panel) {
                 view.update(cx, |v, cx| v.publish(p, cx));
             } else {

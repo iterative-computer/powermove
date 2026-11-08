@@ -1968,8 +1968,10 @@ fn an_extension_offers_a_theme_the_window_can_apply() {
     let (revision, list) = panels.themes_since(0).expect("registered");
     assert_eq!(
         list,
-        vec![json!({"panel":"synthetic-theme","id":"warm","title":"Warm","active":true,
-            "tokens":{"colors.accent":"#ff8800","metrics.gap":8}})]
+        vec![
+            json!({"panel":"synthetic-theme","id":"warm","title":"Warm","active":true,
+            "tokens":{"colors.accent":"#ff8800","metrics.gap":8}})
+        ]
     );
     assert!(panels.themes_since(revision).is_none());
     // Its themes leave with it.
@@ -2039,6 +2041,52 @@ fn an_extension_adds_items_to_a_panel_context_menu() {
     assert!(text_of(&panels, "synthetic-menu").contains(&"Marked 1".to_owned()));
     panels.unmount_extension("synthetic-menu");
     assert!(!panels.has_extensions());
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn an_extension_draws_a_viewer_overlay_that_follows_the_frame() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                export function activate({ overlays }) {
+                    overlays.viewer(({ frame }) => jsx('text', { children: 'Frame ' + frame.width }));
+                }
+                export function view() { return jsx('text', { children: 'Panel' }); }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(
+        panels
+            .mount_extension("synthetic-overlay", &graph, None)
+            .unwrap(),
+    );
+    let overlay = "synthetic-overlay@viewer";
+    let text = |panels: &Builtins| -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(p) = panels
+                .take_publications()
+                .into_iter()
+                .find(|p| p.panel == overlay)
+            {
+                return p.surface.nodes().values().map(|n| n.text.clone()).collect();
+            }
+            assert!(Instant::now() < deadline, "no overlay publication");
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    assert!(text(&panels).contains(&"Frame 0".to_owned()));
+    panels.viewer_frame(&json!({"x":10,"y":20,"width":640,"height":360,"scale":0.5}));
+    assert!(text(&panels).contains(&"Frame 640".to_owned()));
+    panels.unmount_extension("synthetic-overlay");
+    assert_eq!(panels.take_cleared_overlays(), vec![overlay.to_owned()]);
     panels.close();
     actor.shutdown();
 }
