@@ -4,7 +4,10 @@ globalThis.__installNativeCanvas = function (owner) {
   const document = owner.dom?.document;
   if (!document) return;
   const prototype = Object.getPrototypeOf(document.createElement("canvas"));
-  const records = new Map();
+  // Weak: a canvas element an extension drops goes with its native surface.
+  const records = new WeakMap(),
+    bound = new Set();
+  const isCanvas = (node) => !!node && Object.getPrototypeOf(node) === prototype;
   const native = (node) => {
     let record = records.get(node);
     if (!record) {
@@ -13,6 +16,7 @@ globalThis.__installNativeCanvas = function (owner) {
         context: null,
       };
       records.set(node, record);
+      bound.add(new WeakRef(node));
     }
     return record;
   };
@@ -341,7 +345,9 @@ globalThis.__installNativeCanvas = function (owner) {
   }
   globalThis.ImageBitmap = ImageBitmap;
   const bitmap = (bytes, type) => new ImageBitmap(decodeBytes(bytes, type), bytes);
-  globalThis.createImageBitmap = async (source) => {
+  // createImageBitmap(source[, sx, sy, sw, sh][, options]): crop and resize
+  // draw through a recorder canvas, as a browser resamples them.
+  const bitmapOf = async (source) => {
     if (source instanceof Blob)
       return bitmap(new Uint8Array(await source.arrayBuffer()), source.type);
     if (source && Object.getPrototypeOf(source) === imagePrototype) {
@@ -349,18 +355,66 @@ globalThis.__installNativeCanvas = function (owner) {
       return bitmap(imageRecord(source).bytes, "");
     }
     if (source instanceof ImageBitmap) return bitmap(ImageBitmap.bytes(source), "");
-    if (source && records.has(source)) {
-      const local = runtime.local(source.toDataURL());
-      return bitmap(local.bytes, local.type);
-    }
-    throw new TypeError(
-      "createImageBitmap: the source is not an image, Blob, ImageBitmap or canvas",
+    const canvas = isCanvas(source)
+      ? native(source).canvas
+      : typeof source?.data?.length === "number" &&
+          Number.isInteger(source.width) &&
+          Number.isInteger(source.height)
+        ? (() => {
+            // ImageData: its pixels exactly, through a scratch canvas.
+            const scratch = owner.realm.createCanvas(source.width, source.height);
+            const { width, height } = source;
+            scratch
+              .getContext("2d")
+              .putImageData({ width, height, data: Array.from(source.data) }, 0, 0);
+            return scratch;
+          })()
+        : null;
+    if (!canvas)
+      throw new TypeError(
+        "createImageBitmap: the source is not an image, Blob, ImageBitmap, ImageData or canvas",
+      );
+    if (!canvas.width || !canvas.height)
+      throw new DOMException("The source has no pixels.", "InvalidStateError");
+    const local = runtime.local(canvas.toDataURL());
+    return bitmap(local.bytes, local.type);
+  };
+  globalThis.createImageBitmap = async (source, ...rest) => {
+    const crop = rest.length >= 4 ? rest.slice(0, 4).map(Number) : null;
+    const options = (crop ? rest[4] : rest[0]) ?? {};
+    if (crop && (!crop[2] || !crop[3]))
+      throw new RangeError("createImageBitmap: the crop is empty");
+    const base = await bitmapOf(source);
+    const resize = options.resizeWidth !== undefined || options.resizeHeight !== undefined;
+    if (!crop && !resize) return base;
+    const [sx, sy, sw, sh] = crop ?? [0, 0, base.width, base.height];
+    const ratio = Math.abs(sw) / Math.abs(sh);
+    const width = Math.round(
+      options.resizeWidth ??
+        (options.resizeHeight !== undefined ? options.resizeHeight * ratio : Math.abs(sw)),
     );
+    const height = Math.round(
+      options.resizeHeight ??
+        (options.resizeWidth !== undefined ? options.resizeWidth / ratio : Math.abs(sh)),
+    );
+    if (!(width > 0 && height > 0))
+      throw new DOMException("The bitmap size is invalid.", "InvalidStateError");
+    const scratch = owner.realm.createCanvas(width, height);
+    try {
+      const context = scratch.getContext("2d");
+      context.imageSmoothingEnabled = options.resizeQuality !== "pixelated";
+      context.drawImage(ImageBitmap.source(base), sx, sy, sw, sh, 0, 0, width, height);
+      const local = runtime.local(scratch.toDataURL());
+      return bitmap(local.bytes, local.type);
+    } finally {
+      base.close();
+      scratch.dispose();
+    }
   };
   // What drawImage and createPattern receive: the native source for a DOM
   // canvas, an image or a bitmap. A broken image throws, as in a browser.
   const drawable = (source) => {
-    if (records.has(source)) return native(source).canvas;
+    if (isCanvas(source)) return native(source).canvas;
     if (source instanceof ImageBitmap) return ImageBitmap.source(source);
     if (source && Object.getPrototypeOf(source) === imagePrototype) {
       const record = want(source);
@@ -379,7 +433,13 @@ globalThis.__installNativeCanvas = function (owner) {
     name === "src" && images.get(node)?.local ? null : value;
   owner.flushCanvases = () => {
     const bindings = [];
-    for (const [node, record] of records) {
+    for (const ref of bound) {
+      const node = ref.deref(),
+        record = node && records.get(node);
+      if (!record) {
+        bound.delete(ref);
+        continue;
+      }
       if (!node.isConnected) continue;
       bindings.push({
         surface: record.canvas.surface,

@@ -23,10 +23,13 @@ struct State {
     dom_sequence: u64,
     /// Decoded images by id (`image-N`, `svg-N` for vector sources).
     images: BTreeMap<String, crate::image::Encoded>,
-    image_bytes: usize,
+    /// Bytes held by images and their SVG rasters, against `IMAGE_BUDGET`.
+    image_bytes: u64,
+    /// An SVG raster pin's bytes and its raster-to-intrinsic scale per axis.
+    rasters: BTreeMap<(String, u64), (u64, f64, f64)>,
 }
 /// Decoded image memory one realm may hold at once.
-const IMAGE_BUDGET: usize = 1 << 30;
+const IMAGE_BUDGET: u64 = 1 << 30;
 /// SVG rasters are cached in quarter-scale steps: version `q` is `q / 4` scale.
 const SVG_STEPS: f64 = 4.;
 /// Everything a host owner hears from its realm, without waiting on it.
@@ -154,7 +157,7 @@ impl NativeHost {
     /// `render.renderFrameTo(time, width, height)` and `PM.Export.snapshot(time,
     /// maxWidth)`: an engine render of the open composition. The frame becomes a
     /// recorder canvas (pixels the extension can read) or a JPEG data URL.
-    fn render_query(&self, method: &str, args: &Value) -> Result<Value> {
+    fn render_query(&self, method: &str, args: &Value, budget: &HostBudget) -> Result<Value> {
         let renderer = self.frames.lock().unwrap().clone().ok_or_else(|| {
             Error::Host(format!(
                 "{method} needs the engine, which this host does not have"
@@ -162,16 +165,22 @@ impl NativeHost {
         })?;
         let number = |i: usize| args.get(i).and_then(Value::as_f64);
         let time = number(0).filter(|t| t.is_finite()).unwrap_or(0.).max(0.);
-        let (width, height) = match method {
+        let (width, height, motion_blur) = match method {
+            // renderFrameTo(time, width, height, {mblur}): motion blur unless off.
             "render.renderFrameTo" => (
                 number(1).ok_or(Error::Invalid("render width"))?,
                 number(2).ok_or(Error::Invalid("render height"))?,
+                args.get(3).and_then(|o| o.get("mblur")) != Some(&Value::Bool(false)),
             ),
             _ => {
-                // Snapshot: the composition's aspect at most `maxWidth` wide.
+                // Snapshot: scaled down to at most `maxWidth`, never up; no blur.
                 let (w, h) = self.kernel.lock().unwrap().size()?;
-                let width = number(1).unwrap_or(480.).min(w).max(1.);
-                (width, (width * h / w).round())
+                let scale = (number(1).unwrap_or(480.) / w).min(1.);
+                (
+                    (w * scale).round().max(2.),
+                    (h * scale).round().max(2.),
+                    false,
+                )
             }
         };
         let side = |v: f64| {
@@ -180,7 +189,17 @@ impl NativeHost {
         let (Some(width), Some(height)) = (side(width), side(height)) else {
             return Err(Error::Invalid("render size"));
         };
-        let png = renderer(time, width, height).map_err(Error::Host)?;
+        crate::image::rgba_bytes(u64::from(width), u64::from(height))?;
+        let stop = || budget.check().is_err();
+        let png = renderer(&crate::FrameRequest {
+            time,
+            width,
+            height,
+            motion_blur,
+            stop: &stop,
+        })
+        .map_err(Error::Host)?;
+        budget.check()?;
         let decoder = png::Decoder::new(std::io::Cursor::new(&png));
         let mut reader = decoder
             .read_info()
@@ -195,14 +214,24 @@ impl NativeHost {
             .next_frame(&mut rgba)
             .map_err(|e| Error::Host(e.to_string()))?;
         rgba.truncate(info.buffer_size());
-        if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
-            return Err(Error::Host("engine frame is not 8-bit RGBA".into()));
+        if info.bit_depth != png::BitDepth::Eight {
+            return Err(Error::Host("engine frame is not 8-bit".into()));
         }
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => rgba,
+            // An opaque frame: RGB, alpha 255.
+            png::ColorType::Rgb => rgba
+                .chunks_exact(3)
+                .flat_map(|px| [px[0], px[1], px[2], 255])
+                .collect(),
+            _ => return Err(Error::Host("engine frame is not RGB".into())),
+        };
         let pixels = ImageData::from_rgba(info.width, info.height, rgba).map_err(host_error)?;
         if method == "render.snapshot" {
             return Ok(json!(format!(
                 "data:image/jpeg;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(crate::image::jpeg(&pixels)?)
+                base64::engine::general_purpose::STANDARD
+                    .encode(crate::image::jpeg(&pixels, 0.74)?)
             )));
         }
         let mut state = self.state.lock().unwrap();
@@ -349,7 +378,10 @@ impl NativeHost {
                 .ok_or(Error::Invalid("unretained source"))?;
             entry.1 -= 1;
             if entry.1 == 0 {
-                state.pins.remove(&(id, version));
+                state.pins.remove(&(id.clone(), version));
+                if let Some((charge, ..)) = state.rasters.remove(&(id, version)) {
+                    state.image_bytes = state.image_bytes.saturating_sub(charge);
+                }
             }
             return Ok(Value::Null);
         }
@@ -363,14 +395,19 @@ impl NativeHost {
                 .images
                 .remove(&id)
                 .ok_or(Error::Invalid("unknown image"))?;
-            state.image_bytes -=
-                image.bytes.len() + image.width as usize * image.height as usize * 4;
+            state.image_bytes = state.image_bytes.saturating_sub(image.cost);
             return Ok(Value::Null);
         }
         if operation == "recorder.retainVersion" && state.images.contains_key(&id) {
-            let State { images, pins, .. } = &mut *state;
+            let State {
+                images,
+                pins,
+                rasters,
+                image_bytes,
+                ..
+            } = &mut *state;
             let image = &images[&id];
-            // Vector images rasterize at the scale they are drawn, in quarter steps.
+            // A vector image rasterizes at the scale it is drawn, in quarter steps.
             let version = if image.is_vector() {
                 (args
                     .get(1)
@@ -385,7 +422,25 @@ impl NativeHost {
             if let Some(pin) = pins.get_mut(&(id.clone(), version)) {
                 pin.1 += 1;
             } else {
-                let pixels = image.pixels(version as f64 / SVG_STEPS)?;
+                let size = image.raster_size(version as f64 / SVG_STEPS);
+                // A new SVG raster is admitted before it is allocated.
+                let charge = match size {
+                    Some((w, h)) => crate::image::rgba_bytes(u64::from(w), u64::from(h))?,
+                    None => 0,
+                };
+                let total = image_bytes
+                    .checked_add(charge)
+                    .filter(|total| *total <= IMAGE_BUDGET)
+                    .ok_or(Error::Quota("image memory"))?;
+                let pixels = image.pixels(size)?;
+                *image_bytes = total;
+                if let Some((w, h)) = size {
+                    let (nw, nh) = image.natural();
+                    rasters.insert(
+                        (id.clone(), version),
+                        (charge, f64::from(w) / nw, f64::from(h) / nh),
+                    );
+                }
                 let number = id[id.find('-').map_or(0, |i| i + 1)..].parse().unwrap_or(0);
                 let source = Source {
                     key: pm_recorder::SourceKey {
@@ -474,6 +529,7 @@ impl NativeHost {
             surfaces,
             paints,
             next,
+            rasters,
             ..
         } = &mut *state;
         let handle = |paints: &mut BTreeMap<String, Paint>, next: &mut u64, paint: Paint| {
@@ -811,15 +867,15 @@ impl NativeHost {
             }
             ("recorder.command", "drawImage") => {
                 let source = source.unwrap();
-                // A vector source's raster is `factor` times its intrinsic size;
-                // the caller's coordinates are intrinsic, as in a browser.
-                let factor = values[0]["surface"]
+                // An SVG raster's scale from intrinsic size, per axis (it may be
+                // capped); the caller's coordinates are intrinsic, as in a browser.
+                let (fx, fy) = values[0]["surface"]
                     .as_str()
-                    .filter(|id| id.starts_with("svg-"))
-                    .map_or(1., |_| source.key.version as f64 / SVG_STEPS);
+                    .and_then(|id| rasters.get(&(id.to_owned(), source.key.version)))
+                    .map_or((1., 1.), |(_, fx, fy)| (*fx, *fy));
                 let (sw, sh) = (
-                    source.pixels.width() as f64 / factor,
-                    source.pixels.height() as f64 / factor,
+                    source.pixels.width() as f64 / fx,
+                    source.pixels.height() as f64 / fy,
                 );
                 let (src, dst) = match values.len() {
                     3 => (
@@ -848,12 +904,7 @@ impl NativeHost {
                     ),
                     _ => return Err(Error::Invalid("drawImage arity")),
                 };
-                let src = Rect::new(
-                    src.x0 * factor,
-                    src.y0 * factor,
-                    src.x1 * factor,
-                    src.y1 * factor,
-                );
+                let src = Rect::new(src.x0 * fx, src.y0 * fy, src.x1 * fx, src.y1 * fy);
                 canvas.draw_image(source, src, dst).map_err(host_error)?;
                 Value::Null
             }
@@ -1021,21 +1072,35 @@ impl EngineProxy for NativeHost {
         budget.check()?;
         match operation {
             "image.load" => {
-                let image =
-                    crate::image::Encoded::load(bytes, input["type"].as_str().unwrap_or(""))?;
-                let cost = image.bytes.len() + image.width as usize * image.height as usize * 4;
-                let mut state = self.state.lock().unwrap();
-                if state.image_bytes + cost > IMAGE_BUDGET {
-                    return Err(Error::Quota("image memory"));
-                }
-                state.next += 1;
-                let id = format!(
-                    "{}-{}",
-                    if image.is_vector() { "svg" } else { "image" },
-                    state.next
+                let mut reserved = 0;
+                // Reserved before decoding allocates; refused past the budget.
+                let image = crate::image::Encoded::load(
+                    bytes,
+                    input["type"].as_str().unwrap_or(""),
+                    |cost| {
+                        let mut state = self.state.lock().unwrap();
+                        state.image_bytes = state
+                            .image_bytes
+                            .checked_add(cost)
+                            .filter(|total| *total <= IMAGE_BUDGET)
+                            .ok_or(Error::Quota("image memory"))?;
+                        reserved = cost;
+                        Ok(())
+                    },
                 );
+                let mut state = self.state.lock().unwrap();
+                let image = match image {
+                    Ok(image) => image,
+                    Err(error) => {
+                        // A failed decode returns its reservation.
+                        state.image_bytes = state.image_bytes.saturating_sub(reserved);
+                        return Err(error);
+                    }
+                };
+                state.next += 1;
+                let kind = if image.is_vector() { "svg" } else { "image" };
+                let id = format!("{kind}-{}", state.next);
                 let reply = json!({"surface":id,"width":image.width,"height":image.height,"type":image.mime});
-                state.image_bytes += cost;
                 state.images.insert(id, image);
                 Ok(reply)
             }
@@ -1089,6 +1154,13 @@ impl EngineProxy for NativeHost {
     ) -> Result<Value> {
         budget.check()?;
         match operation {
+            "file.release" => {
+                // The realm collected the last File for this picked token.
+                if let Some(token) = input["token"].as_str().and_then(|t| t.parse().ok()) {
+                    crate::files::release(token);
+                }
+                return Ok(Value::Null);
+            }
             "transport.command" => {
                 let base = self.kernel.lock().unwrap().timebase()?;
                 return self.transport.command(input, base);
@@ -1105,7 +1177,7 @@ impl EngineProxy for NativeHost {
                 ) =>
             {
                 let method = input["method"].as_str().unwrap_or_default();
-                return self.render_query(method, &input["args"]["args"]);
+                return self.render_query(method, &input["args"]["args"], &budget);
             }
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "extension.health" => {

@@ -17,6 +17,8 @@ pub(crate) struct Encoded {
     pub mime: String,
     pub width: u32,
     pub height: u32,
+    /// Bytes this image holds (encoded and, for a raster, decoded).
+    pub cost: u64,
     kind: Kind,
 }
 enum Kind {
@@ -34,47 +36,91 @@ fn is_svg(bytes: &[u8], mime: &str) -> bool {
     text.starts_with('<') && text.contains("<svg")
 }
 
+/// `width × height × 4` bytes, refusing more pixels than a canvas can hold.
+pub(crate) fn rgba_bytes(width: u64, height: u64) -> Result<u64> {
+    width
+        .checked_mul(height)
+        .filter(|pixels| *pixels <= MAX_PIXELS)
+        .map(|pixels| pixels * 4)
+        .ok_or_else(|| Error::Host("The image is too large to draw.".into()))
+}
+
 impl Encoded {
-    pub fn load(bytes: &[u8], mime: &str) -> Result<Self> {
+    /// Decodes `bytes`. `admit` sees what the image will hold before anything
+    /// large is allocated, and may refuse it.
+    pub fn load(bytes: &[u8], mime: &str, admit: impl FnOnce(u64) -> Result<()>) -> Result<Self> {
         let invalid = || Error::Host("The source image cannot be decoded.".into());
         if bytes.is_empty() {
             return Err(invalid());
         }
+        let encoded = bytes.len() as u64;
         if is_svg(bytes, mime) {
             let tree = usvg::Tree::from_data(bytes, &svg_options()).map_err(|_| invalid())?;
             let size = tree.size();
-            let (width, height) = (size.width().round() as u32, size.height().round() as u32);
+            let side = |v: f32| {
+                let v = f64::from(v).round();
+                (v.is_finite() && v <= f64::from(u32::MAX)).then_some(v as u32)
+            };
+            let (Some(width), Some(height)) = (side(size.width()), side(size.height())) else {
+                return Err(invalid());
+            };
+            // Rasters of it are charged when drawn (`raster_size`).
+            admit(encoded)?;
             return Ok(Self {
                 bytes: bytes.into(),
                 mime: "image/svg+xml".into(),
                 width,
                 height,
+                cost: encoded,
                 kind: Kind::Svg(Box::new(tree)),
             });
         }
-        let pixels = decode_raster(bytes).ok_or_else(invalid)?;
+        let (width, height) = raster_size(bytes).ok_or_else(invalid)?;
+        let decoded = rgba_bytes(width, height)?;
+        let cost = decoded + encoded;
+        admit(cost)?;
+        let pixels = decode_raster(bytes, width, height).ok_or_else(invalid)?;
         Ok(Self {
             bytes: bytes.into(),
             mime: sniff(bytes).unwrap_or(mime).into(),
             width: pixels.width(),
             height: pixels.height(),
+            cost,
             kind: Kind::Raster(Arc::new(pixels)),
         })
     }
-    /// Pixels to draw at `scale` times the intrinsic size. Rasters ignore the
-    /// scale; an SVG is rendered at it (quantized by the caller), capped.
-    pub fn pixels(&self, scale: f64) -> Result<Arc<ImageData>> {
+    /// The raster an SVG gets at `scale` times its intrinsic size (capped at
+    /// 8192 px a side), as `(width, height)`; its bytes are `rgba_bytes`.
+    pub fn raster_size(&self, scale: f64) -> Option<(u32, u32)> {
+        let Kind::Svg(tree) = &self.kind else {
+            return None;
+        };
+        let size = tree.size();
+        let (w, h) = (f64::from(size.width()), f64::from(size.height()));
+        let scale = scale.max(1. / w.min(h).max(1.));
+        let scale = scale.min(MAX_SVG_SIDE / w.max(h));
+        Some((
+            (w * scale).round().clamp(1., MAX_SVG_SIDE) as u32,
+            (h * scale).round().clamp(1., MAX_SVG_SIDE) as u32,
+        ))
+    }
+    /// The intrinsic size in CSS pixels, unrounded.
+    pub fn natural(&self) -> (f64, f64) {
         match &self.kind {
-            Kind::Raster(pixels) => Ok(pixels.clone()),
-            Kind::Svg(tree) => {
-                let size = tree.size();
-                let (w, h) = (f64::from(size.width()), f64::from(size.height()));
-                let scale = scale.max(1. / w.min(h).max(1.));
-                let scale = scale.min(MAX_SVG_SIDE / w.max(h));
-                let (pw, ph) = (
-                    (w * scale).round().max(1.) as u32,
-                    (h * scale).round().max(1.) as u32,
-                );
+            Kind::Svg(tree) => (
+                f64::from(tree.size().width()),
+                f64::from(tree.size().height()),
+            ),
+            Kind::Raster(_) => (f64::from(self.width), f64::from(self.height)),
+        }
+    }
+    /// Pixels to draw: a raster's own, or an SVG rendered at `size` (from
+    /// `raster_size`, already admitted by the caller).
+    pub fn pixels(&self, size: Option<(u32, u32)>) -> Result<Arc<ImageData>> {
+        match (&self.kind, size) {
+            (Kind::Raster(pixels), _) => Ok(pixels.clone()),
+            (Kind::Svg(tree), Some((pw, ph))) => {
+                let (w, h) = self.natural();
                 let mut pixmap = tiny_skia::Pixmap::new(pw, ph)
                     .ok_or(Error::Host("SVG raster is too large".into()))?;
                 let transform = tiny_skia::Transform::from_scale(
@@ -88,6 +134,7 @@ impl Encoded {
                     ImageData::from_rgba(pw, ph, bytes).map_err(crate::recorder::host_error)?,
                 ))
             }
+            (Kind::Svg(_), None) => Err(Error::Invalid("SVG raster size")),
         }
     }
     pub fn is_vector(&self) -> bool {
@@ -95,9 +142,9 @@ impl Encoded {
     }
 }
 
-/// A snapshot's JPEG (quality 0.92, as a canvas's default), through ImageIO.
+/// A snapshot's JPEG at `quality` (main's snapshot uses 0.74), through ImageIO.
 #[cfg(target_os = "macos")]
-pub(crate) fn jpeg(pixels: &ImageData) -> Result<Vec<u8>> {
+pub(crate) fn jpeg(pixels: &ImageData, quality: f64) -> Result<Vec<u8>> {
     use objc2_core_foundation::{CFData, CFDictionary, CFMutableData, CFNumber, CFString, CFType};
     use objc2_core_graphics::{
         CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
@@ -137,7 +184,7 @@ pub(crate) fn jpeg(pixels: &ImageData) -> Result<Vec<u8>> {
     unsafe {
         let destination =
             CGImageDestination::with_data(&data, &kind, 1, None).ok_or_else(failed)?;
-        let quality = CFNumber::new_f64(0.92);
+        let quality = CFNumber::new_f64(quality);
         let options = CFDictionary::<CFString, CFType>::from_slices(
             &[kCGImageDestinationLossyCompressionQuality],
             &[quality.as_ref()],
@@ -151,7 +198,7 @@ pub(crate) fn jpeg(pixels: &ImageData) -> Result<Vec<u8>> {
     Ok(data.to_vec())
 }
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn jpeg(_: &ImageData) -> Result<Vec<u8>> {
+pub(crate) fn jpeg(_: &ImageData, _: f64) -> Result<Vec<u8>> {
     Err(Error::Host("JPEG snapshots need ImageIO".into()))
 }
 
@@ -211,8 +258,47 @@ fn svg_options() -> usvg::Options<'static> {
 
 /// ImageIO decodes every format WebKit shows, applies EXIF orientation and the
 /// embedded colour profile, and draws into sRGB as a canvas sees it.
+/// A raster's displayed size from its header, before any pixel is decoded
+/// (orientations 5–8 swap the sides).
 #[cfg(target_os = "macos")]
-fn decode_raster(bytes: &[u8]) -> Option<ImageData> {
+fn raster_size(bytes: &[u8]) -> Option<(u64, u64)> {
+    use objc2_core_foundation::{CFData, CFDictionary, CFNumber, CFString, CFType};
+    use objc2_image_io::{
+        CGImageSource, kCGImagePropertyOrientation, kCGImagePropertyPixelHeight,
+        kCGImagePropertyPixelWidth,
+    };
+    let data = CFData::from_bytes(bytes);
+    // SAFETY: no options; the data outlives the source.
+    let source = unsafe { CGImageSource::with_data(&data, None) }?;
+    // SAFETY: index 0, no options.
+    let properties = unsafe { source.properties_at_index(0, None) }?;
+    // SAFETY: ImageIO's property dictionaries have CFString keys.
+    let properties: &CFDictionary<CFString, CFType> = unsafe { properties.cast_unchecked() };
+    let number = |key: &CFString| -> Option<i64> {
+        properties.get(key)?.downcast_ref::<CFNumber>()?.as_i64()
+    };
+    // SAFETY: constant keys.
+    let (w, h, orientation) = unsafe {
+        (
+            number(kCGImagePropertyPixelWidth)?,
+            number(kCGImagePropertyPixelHeight)?,
+            number(kCGImagePropertyOrientation).unwrap_or(1),
+        )
+    };
+    let (w, h) = (u64::try_from(w).ok()?, u64::try_from(h).ok()?);
+    (w > 0 && h > 0).then_some(if (5..=8).contains(&orientation) {
+        (h, w)
+    } else {
+        (w, h)
+    })
+}
+#[cfg(not(target_os = "macos"))]
+fn raster_size(_: &[u8]) -> Option<(u64, u64)> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn decode_raster(bytes: &[u8], expected_width: u64, expected_height: u64) -> Option<ImageData> {
     use objc2_core_foundation::{
         CFBoolean, CFData, CFDictionary, CFString, CGPoint, CGRect, CGSize,
     };
@@ -240,7 +326,12 @@ fn decode_raster(bytes: &[u8]) -> Option<ImageData> {
     // SAFETY: the options dictionary has the documented key and value types.
     let image = unsafe { source.thumbnail_at_index(0, Some(options.as_ref())) }?;
     let (width, height) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
-    if width == 0 || height == 0 || (width as u64) * (height as u64) > MAX_PIXELS {
+    // The header admitted this size; a stream that decodes larger is refused.
+    if width == 0
+        || height == 0
+        || width as u64 > expected_width.max(expected_height)
+        || height as u64 > expected_width.max(expected_height)
+    {
         return None;
     }
     let mut pixels = vec![0u8; width * height * 4];
@@ -269,6 +360,6 @@ fn decode_raster(bytes: &[u8]) -> Option<ImageData> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn decode_raster(_: &[u8]) -> Option<ImageData> {
+fn decode_raster(_: &[u8], _: u64, _: u64) -> Option<ImageData> {
     None
 }

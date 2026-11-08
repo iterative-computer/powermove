@@ -80,8 +80,27 @@ export class CompatRealm {
   private unacknowledgedSelection?: Data;
   private unacknowledgedWorkspace?: Data;
   private domConnection?: { globals: Data; dispose(): void };
-  private canvases = new Set<RecorderCanvas>();
-  private nativeCanvases = new Map<string, RecorderCanvas>();
+  /** Weak: a canvas an extension drops releases its native surface when collected. */
+  private canvases = new Set<WeakRef<RecorderCanvas>>();
+  private nativeCanvases = new Map<string, WeakRef<RecorderCanvas>>();
+  private collected = new FinalizationRegistry<{
+    surface: string;
+    ref: WeakRef<RecorderCanvas>;
+  }>(({ surface, ref }) => {
+    this.canvases.delete(ref);
+    if (this.nativeCanvases.get(surface) === ref)
+      this.nativeCanvases.delete(surface);
+    if (this.disposed) return;
+    try {
+      this.options.recorder?.release(surface);
+    } catch {}
+  });
+  private track(canvas: RecorderCanvas): WeakRef<RecorderCanvas> {
+    const ref = new WeakRef(canvas);
+    this.canvases.add(ref);
+    this.collected.register(canvas, { surface: canvas.surface, ref });
+    return ref;
+  }
 
   constructor(private options: RealmOptions) {
     this.keymap = new CompatKeymap(
@@ -329,8 +348,26 @@ export class CompatRealm {
     this.PM.version = "1.0.0";
     installModelFactories(this.PM);
     this.PM.layerDefinition = (id: string) => this.kernel.layerTypes.get(id);
-    this.PM.renderFrameTo = (...args: any[]) =>
-      this.renderQuery("render.renderFrameTo", args);
+    // As main: a new canvas, or `target` resized and filled, returned.
+    this.PM.renderFrameTo = (
+      time: number,
+      width: number,
+      height: number,
+      options: Data = {},
+      target?: any,
+    ) => {
+      const frame = this.renderQuery("render.renderFrameTo", [
+        time,
+        width,
+        height,
+        { mblur: options?.mblur, mbSamples: options?.mbSamples },
+      ]);
+      if (!target) return frame;
+      if (target.width !== frame.width) target.width = frame.width;
+      if (target.height !== frame.height) target.height = frame.height;
+      target.getContext("2d").drawImage(frame, 0, 0);
+      return target;
+    };
     this.PM.Export = {
       snapshot: (...args: any[]) => this.renderQuery("render.snapshot", args),
       snapshotAsync: async (...args: any[]) =>
@@ -673,7 +710,7 @@ export class CompatRealm {
         "Native recorder-canvas host is not attached",
       );
     const canvas = new RecorderCanvas(this.options.recorder, width, height);
-    this.canvases.add(canvas);
+    this.track(canvas);
     return canvas;
   }
   /** An image the host decoded (`image.load`), drawable on this realm's canvases. */
@@ -701,7 +738,7 @@ export class CompatRealm {
     });
     if (value?.kind !== "recorder-surface") return value;
     const surface = value as NativeSurface;
-    let canvas = this.nativeCanvases.get(surface.surface);
+    let canvas = this.nativeCanvases.get(surface.surface)?.deref();
     if (!canvas) {
       if (!this.options.recorder)
         throw new HostError(
@@ -714,8 +751,7 @@ export class CompatRealm {
         surface.height,
         surface.surface,
       );
-      this.nativeCanvases.set(surface.surface, canvas);
-      this.canvases.add(canvas);
+      this.nativeCanvases.set(surface.surface, this.track(canvas));
     }
     return canvas;
   }
@@ -793,7 +829,7 @@ export class CompatRealm {
         this.options.host.reportError(error);
       }
     }
-    for (const canvas of this.canvases) canvas.dispose();
+    for (const ref of this.canvases) ref.deref()?.dispose();
     this.domConnection?.dispose();
     this.kernel.dispose();
     this.busListeners.clear();

@@ -134,7 +134,7 @@ export class RecorderCanvas {
   private w: number;
   private h: number;
   constructor(
-    private host: RecorderHost,
+    readonly host: RecorderHost,
     width = 300,
     height = 150,
     surface?: string,
