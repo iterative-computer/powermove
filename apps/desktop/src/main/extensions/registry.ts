@@ -28,6 +28,7 @@ import { missingKeys, resolveVars, type VarsResolution } from '../env/resolve';
 import type { Store } from '../storage';
 import { compileExtension } from './compiler';
 import { scanExtensionDirs, type DiscoveredExtension } from './discovery';
+import { fileContentVersion } from '../file-content-version';
 
 const SOURCE_FILE_BYTES = 64 * 1024;
 
@@ -68,7 +69,7 @@ export interface ExtensionRegistry {
   readonly buildDir: string;
   readonly userDir: string;
   list(): ExtensionRecord[];
-  refresh(ids?: string[]): Promise<void>;
+  refresh(ids?: string[]): Promise<void | string[]>;
   setEnabled(request: ExtensionSetEnabledRequest): Promise<ExtensionRecord[]>;
   remove(request: ExtensionIdRequest): Promise<ExtensionRecord[]>;
   reload(request: ExtensionIdRequest): Promise<ExtensionRecord[]>;
@@ -322,8 +323,16 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
 
     refresh(ids) {
       if (ids !== undefined) ids.forEach(validateId);
-      const run = refreshQueue.then(() => performRefresh(ids));
-      refreshQueue = run.catch(() => undefined);
+      const version = (id: string): string | undefined => {
+        const record = records.get(id);
+        return record && JSON.stringify([{ ...record, updatedAt: 0 }, buildCache.get(record.dir)?.signature]);
+      };
+      const run = refreshQueue.then(async () => {
+        const before = new Map([...records.keys()].map(id => [id, version(id)]));
+        await performRefresh(ids);
+        return [...new Set([...before.keys(), ...records.keys()])].filter(id => before.get(id) !== version(id));
+      });
+      refreshQueue = run.then(() => undefined, () => undefined);
       return run;
     },
 
@@ -586,14 +595,16 @@ async function directorySignature(root: string): Promise<string> {
       const fullPath = path.join(directory, entry.name);
       const metadata = await fs.lstat(fullPath);
       if (metadata.isSymbolicLink()) {
-        parts.push(`l:${relative}:${metadata.mtimeMs}`);
+        parts.push(`l:${relative}:${await fs.readlink(fullPath)}`);
       } else if (metadata.isDirectory()) {
-        parts.push(`d:${relative}:${metadata.mtimeMs}`);
+        parts.push(`d:${relative}`);
         await walk(fullPath, relative);
       } else if (metadata.isFile()) {
         files += 1;
         if (files > MANIFEST_LIMITS.sourceFiles) throw new Error('Extension has too many source files.');
-        parts.push(`f:${relative}:${metadata.size}:${metadata.mtimeMs}`);
+        // Sync clients can preserve mtime when replacing source. Conversely,
+        // directory touches/xattrs must not discard an unchanged compiled bundle.
+        parts.push(`f:${relative}:${(await fileContentVersion(fullPath)).sha256}`);
       }
     }
   }

@@ -7,7 +7,7 @@ import {
 } from '../../shared/extensions';
 
 export interface ExtensionWatcherRegistry {
-  refresh(ids: string[]): Promise<void> | void;
+  refresh(ids: string[]): Promise<void | string[]> | void | string[];
   emitChanged(event: ExtensionsChangedEvent): void;
 }
 
@@ -62,8 +62,9 @@ export function startExtensionWatcher({
     pendingIds.clear();
 
     try {
-      await registry.refresh(ids);
-      if (!closed) registry.emitChanged({ ids, reason: 'watch' });
+      const changed = await registry.refresh(ids);
+      const changedIds = changed ?? ids;
+      if (!closed && changedIds.length) registry.emitChanged({ ids: changedIds, reason: 'watch' });
     } catch (error) {
       reportError(error);
     }
