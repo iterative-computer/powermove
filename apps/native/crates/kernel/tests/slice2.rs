@@ -463,7 +463,11 @@ fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     // A live pid with a fresh heartbeat owns the lock (an unflocked writer).
     fs::write(
         &path,
-        format!("{{\"pid\":{},\"heartbeat\":{}}}", std::process::id(), now_ms()),
+        format!(
+            "{{\"pid\":{},\"heartbeat\":{}}}",
+            std::process::id(),
+            now_ms()
+        ),
     )
     .unwrap();
     assert_eq!(
@@ -650,6 +654,33 @@ fn a_clean_close_leaves_no_journal_for_quit_or_the_next_open() {
     assert_eq!(projects, 0);
     let session = open(&mut k);
     k.shell(ShellCall::Close(session)).unwrap();
+}
+#[test]
+fn a_project_from_before_compositions_opens_with_one_stable_composition() {
+    let dir = common::TempDir::new("legacy-comp");
+    let file = dir.path("legacy.pmv");
+    // No compId or compName, as files saved before compositions have.
+    fs::write(&file, r##"{"v":"1.0.0","proj":{"id":"Plegacy1","name":"Legacy","w":200,"h":100,"fps":30,"dur":2,"bg":"#000000","assets":{},"layers":[{"id":"L1","type":"shape","name":"Layer","from":0,"dur":2,"on":true,"p":{}}]}}"##).unwrap();
+    let open = || {
+        let o = pm_kernel::project_io::open_project(&file, Default::default()).unwrap();
+        let comp = o.open_comp.clone().expect("an open composition");
+        let root = o.document.to_value().unwrap();
+        let stored = root
+            .get("comps")
+            .and_then(|c| c.get(&comp))
+            .expect("stored under its id");
+        assert_eq!(stored.get("name").and_then(Value::as_str), Some("Legacy"));
+        assert_eq!(
+            stored.get("layers").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+        comp
+    };
+    assert_eq!(
+        open(),
+        open(),
+        "the same id on every open keeps the journal base"
+    );
 }
 #[test]
 fn foreign_electron_library_is_readonly_and_copy_identity_is_new() {

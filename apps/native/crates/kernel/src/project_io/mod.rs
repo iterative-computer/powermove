@@ -592,6 +592,8 @@ pub(crate) fn from_container(
     let version_member = fields.remove("v");
     let raw_history = fields.remove("history");
     let workspace = fields.remove("ws");
+    let mut project = project;
+    normalize_compositions(&mut project);
     let canonical = canonical_project(project);
     let open_comp = open_comp_id(&canonical).map(str::to_owned);
     let history = raw_history
@@ -617,6 +619,57 @@ pub(crate) fn from_container(
         open_comp,
         history,
     })
+}
+
+/// `normalizeCompositions` (main `core/validate/project.ts`): a project from
+/// before compositions gets an id and name for its open composition. Without
+/// one the viewer and timeline had no composition to show. The id is derived
+/// from the project's, so every open of an unsaved file has one journal base.
+fn normalize_compositions(project: &mut Value) {
+    let Value::Object(root) = project else {
+        return;
+    };
+    let named = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    if !named(root.get("compId")) {
+        let seed = root
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("Comp")
+            .to_owned();
+        let taken = |id: &str| {
+            root.get("comps")
+                .and_then(Value::as_object)
+                .is_some_and(|c| c.contains_key(id))
+        };
+        let mut n = 0u32;
+        let id =
+            loop {
+                let digest = Sha256::digest(format!("{seed}\0{n}"));
+                let id: String =
+                    std::iter::once('C')
+                        .chain(digest.iter().take(7).map(|b| {
+                            b"0123456789abcdefghijklmnopqrstuvwxyz"[*b as usize % 36] as char
+                        }))
+                        .collect();
+                if !taken(&id) {
+                    break id;
+                }
+                n += 1;
+            };
+        root.insert("compId", Value::from(id));
+        if !named(root.get("compName")) {
+            let name = root
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Comp 1")
+                .to_owned();
+            root.insert("compName", Value::from(name));
+        }
+    }
 }
 
 /// Known logical history can be re-exported without an archive. Dictionaries,
