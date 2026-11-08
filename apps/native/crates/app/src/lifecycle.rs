@@ -100,7 +100,13 @@ fn next_quit(cx: &mut App) {
     }
     let host = cx.global::<QuitCoordinator>().host.clone();
     cx.spawn(async move |cx| {
-        let result = host.kernel.shell(ShellCall::PrepareQuit).await;
+        let mut result = host.kernel.shell(ShellCall::PrepareQuit).await;
+        if let Some(Ok(ShellReply::Compacted { .. })) = &result {
+            // A clean quit leaves library.lock released, not to go stale.
+            if let Some(Err(e)) = host.kernel.shell(ShellCall::ReleaseLibrary).await {
+                result = Some(Err(e));
+            }
+        }
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
             // library next launch, so they never hold the quit.
@@ -138,6 +144,14 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         });
         cx.spawn(async move |cx| {
             while rx.recv().await.is_ok() {
+                cx.update(begin_quit);
+            }
+        })
+        .detach();
+        // SIGTERM (kill, logout, a shutdown script) quits like Quit does.
+        let terminations = crate::platform::terminations();
+        cx.spawn(async move |cx| {
+            while terminations.recv().await.is_ok() {
                 cx.update(begin_quit);
             }
         })

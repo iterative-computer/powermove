@@ -82,6 +82,13 @@ fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) ->
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let headless = args
+        .first()
+        .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
+        || args.iter().any(|a| a == "--powermove-mcp");
+    if !headless {
+        platform::route_sigterm();
+    }
     if args.first().is_some_and(|a| a == "--engine-job") {
         return pm_engine_service::jobs::run_child();
     }

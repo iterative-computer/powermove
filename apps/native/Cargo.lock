@@ -5091,6 +5091,7 @@ dependencies = [
  "fs2",
  "gpui-ce",
  "gpui_ce_macos",
+ "libc",
  "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
