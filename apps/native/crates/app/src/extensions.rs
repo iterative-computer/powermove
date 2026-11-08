@@ -9,7 +9,6 @@ use pm_compat_host::{
     RequestContext, Result as PageResult, StoreDataStores, SyncHandler, Trust,
 };
 use pm_compat_runner::{
-    PAGE_BUNDLE,
     host::{ExtensionHost, HostConfig},
     transport::{TransportOwner, TransportRequest},
 };
@@ -266,6 +265,16 @@ impl Controller {
             return;
         };
         let revision = host.revision();
+        // A rebuilt realm is a new document: render again so open panels
+        // replace the page the old one drew into.
+        if self
+            .extensions
+            .pages
+            .get("")
+            .is_some_and(|page| host.view() != 0 && page.view != host.view())
+        {
+            cx.notify();
+        }
         for toast in host.take_toasts() {
             self.message = toast;
             cx.notify();
@@ -691,20 +700,26 @@ impl Controller {
             .host
             .as_ref()
             .and_then(|h| h.store_session(&key));
+        let tokens = self.host.borrow().tokens.clone();
+        let bundle = pm_compat_runner::page_bundle(
+            tokens.scheme == pm_design::Scheme::Dark,
+            tokens.accessibility.increase_contrast,
+            tokens.accessibility.reduce_transparency,
+        );
         let created = match &session {
             Some(session) => MacDomHost::new_store_remote_dom(
                 mtm,
                 session,
                 events.clone(),
                 &mut self.extensions.data_stores,
-                PAGE_BUNDLE,
+                &bundle,
             ),
             None if key.is_empty() => MacDomHost::new_remote_dom(
                 mtm,
                 Trust::Trusted,
                 events.clone(),
                 &mut self.extensions.data_stores,
-                PAGE_BUNDLE,
+                &bundle,
             ),
             None => return,
         };

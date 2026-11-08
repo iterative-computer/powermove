@@ -34,6 +34,34 @@ pub const COMPAT_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/compat.j
 pub const STORE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/store.js"));
 pub const PAGE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/page.js"));
 
+/// The page script with the shipped app's theme variables for this appearance.
+/// v1–3 panels style themselves with them (`--tx`, `--bg-field`, `--line`, …);
+/// in Electron they came from the app's own stylesheet. The editions are
+/// generated from pm-design's tokens.
+pub fn page_bundle(dark: bool, increase_contrast: bool, reduce_transparency: bool) -> String {
+    macro_rules! edition {
+        ($name:literal) => {
+            include_str!(concat!("../../../js/themes/editions/v1/", $name))
+        };
+    }
+    let css = match (dark, increase_contrast, reduce_transparency) {
+        (false, false, false) => edition!("light.css"),
+        (false, false, true) => edition!("light-solid.css"),
+        (false, true, false) => edition!("light-contrast.css"),
+        (false, true, true) => edition!("light-contrast-solid.css"),
+        (true, false, false) => edition!("dark.css"),
+        (true, false, true) => edition!("dark-solid.css"),
+        (true, true, false) => edition!("dark-contrast.css"),
+        (true, true, true) => edition!("dark-contrast-solid.css"),
+    };
+    let scheme = if dark { "dark" } else { "light" };
+    format!(
+        "{PAGE_BUNDLE}\n(()=>{{const s=document.createElement('style');s.textContent={};document.head.prepend(s);document.documentElement.dataset.theme={};}})();",
+        serde_json::to_string(css).expect("CSS is a string"),
+        serde_json::to_string(scheme).expect("scheme is a string"),
+    )
+}
+
 /// One realm holds every trusted extension and a live mirror of the project.
 pub(crate) fn limits() -> Limits {
     Limits {
