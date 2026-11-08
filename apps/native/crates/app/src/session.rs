@@ -82,6 +82,8 @@ pub struct Controller {
     pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
     /// The toolbar tool, mirrored from shell commands for native surfaces.
     pub tool: String,
+    /// The Shape tool's variant (`rect`, `rounded`, `ellipse`, `polygon`, `star`).
+    pub shape_variant: String,
     pub view: crate::gizmo::ViewPlacement,
     /// The pending or running write of `view`.
     pub(crate) view_write: Option<gpui::Task<()>>,
@@ -332,6 +334,7 @@ impl Controller {
             close_operation: None,
             gizmo_lines: vec![],
             tool: "toolSelect".into(),
+            shape_variant: "rect".into(),
             view: Default::default(),
             view_write: None,
             clipboard: Default::default(),
@@ -1352,6 +1355,23 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if cmd.name == "toolShape" {
+            // The segment menu names a variant; Q again on the Shape tool
+            // cycles them; a toolbar click keeps the current one.
+            let variants = pm_shell::SHAPES.map(|(v, _, _)| v);
+            let at = variants
+                .iter()
+                .position(|v| *v == self.shape_variant)
+                .unwrap_or(0);
+            if let Some(v) = cmd.args.first().and_then(|v| v.as_str())
+                && variants.contains(&v)
+            {
+                self.shape_variant = v.into();
+            } else if cmd.token.is_some() && self.tool == "toolShape" {
+                self.shape_variant = variants[(at + 1) % variants.len()].into();
+            }
+            self.host.borrow().select_shape(&self.shape_variant);
+        }
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
             self.tool = cmd.name.clone();
             // The Pen tool shows the selection's paths; others hide them.

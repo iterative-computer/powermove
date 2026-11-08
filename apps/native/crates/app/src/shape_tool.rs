@@ -1,6 +1,7 @@
-//! The Shape tool (Q): a drag in the viewer draws a rectangle (viewer.ts
-//! `startShape`/`createShape`). With an unlocked, maskable layer selected
-//! the box becomes a mask on it; otherwise a new shape layer.
+//! The Shape tool (Q): a drag in the viewer draws a rectangle, rounded
+//! rectangle, ellipse, polygon or star (viewer.ts `startShape`/`createShape`).
+//! With an unlocked, maskable layer selected a rectangle or ellipse becomes a
+//! mask on it; otherwise a new shape layer.
 use pm_kernel::{
     Command, LayerCommand, PropertyCommand, Published, QueryMirror,
     commands::{
@@ -48,6 +49,16 @@ impl ShapeBox {
     pub fn h(&self) -> f64 {
         self.y1 - self.y0
     }
+    /// The outline an ellipse drawn in this box follows.
+    pub fn ellipse(&self, steps: usize) -> Vec<[f64; 2]> {
+        let (cx, cy) = ((self.x0 + self.x1) / 2., (self.y0 + self.y1) / 2.);
+        (0..steps)
+            .map(|i| {
+                let a = i as f64 / steps as f64 * std::f64::consts::TAU;
+                [cx + self.w() / 2. * a.cos(), cy + self.h() / 2. * a.sin()]
+            })
+            .collect()
+    }
     pub fn corners(&self) -> [[f64; 2]; 4] {
         [
             [self.x0, self.y0],
@@ -64,20 +75,35 @@ pub struct ShapePlan {
     pub commands: Vec<Command>,
     pub select: Option<String>,
 }
+pub fn ellipse_outline(shape: ShapeBox, steps: usize) -> Vec<[f64; 2]> {
+    shape.ellipse(steps)
+}
 /// `None` for a box too small to draw (under half a pixel either way).
-pub fn plan(published: &Published, shape: ShapeBox, time: f64) -> Option<ShapePlan> {
+pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) -> Option<ShapePlan> {
     if shape.w() < 0.5 || shape.h() < 0.5 {
         return None;
     }
-    if let Some(plan) = mask_plan(published, shape, time) {
+    let (kind, name, label, radius) = match variant {
+        "rounded" => ("rect", "Rounded", "Draw rounded", 20.),
+        "ellipse" => ("ellipse", "Ellipse", "Draw ellipse", 0.),
+        "polygon" => ("polygon", "Polygon", "Draw polygon", 0.),
+        "star" => ("star", "Star", "Draw star", 0.),
+        _ => ("rect", "Rect", "Draw rect", 0.),
+    };
+    let mask = match variant {
+        "ellipse" => Some(MaskShape::Ellipse),
+        "rect" | "" => Some(MaskShape::Rect),
+        _ => None,
+    };
+    if let Some(plan) = mask.and_then(|m| mask_plan(published, shape, time, m)) {
         return Some(plan);
     }
     let id = new_id("L");
     let mut content = Map::new();
-    content.insert("shape", Value::from("rect"));
+    content.insert("shape", Value::from(kind));
     content.insert("w", Value::Number(100.));
     content.insert("h", Value::Number(100.));
-    content.insert("radius", Value::Number(0.));
+    content.insert("radius", Value::Number(radius));
     // The source shape is 100 px, so Scale in percent is the drawn size.
     let mut properties = Map::new();
     properties.insert("position.x", Value::Number((shape.x0 + shape.x1) / 2.));
@@ -88,7 +114,7 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64) -> Option<ShapePl
         id: id.clone(),
         layer_type: "shape".into(),
         comp: None,
-        name: Some("Rect".into()),
+        name: Some(name.into()),
         from: None,
         duration: None,
         content,
@@ -104,13 +130,18 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64) -> Option<ShapePl
         time,
     };
     Some(ShapePlan {
-        label: "Draw rect",
+        label,
         commands: vec![LayerCommand::Add(Box::new(add)).into()],
         select: Some(id),
     })
 }
 /// The first selected layer takes the box as a mask when it can hold one.
-fn mask_plan(published: &Published, shape: ShapeBox, time: f64) -> Option<ShapePlan> {
+fn mask_plan(
+    published: &Published,
+    shape: ShapeBox,
+    time: f64,
+    kind: MaskShape,
+) -> Option<ShapePlan> {
     let layer = published.selection.layers().first()?.clone();
     let root = published.snapshot.root()?;
     let info = pm_kernel::model::list_layers(root, None)
@@ -130,7 +161,7 @@ fn mask_plan(published: &Published, shape: ShapeBox, time: f64) -> Option<ShapeP
         MaskCommand::Add {
             layer_id: layer.clone(),
             mask_id: mask.clone(),
-            shape: MaskShape::Rect,
+            shape: kind,
         }
         .into(),
     ];

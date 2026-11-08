@@ -26,6 +26,7 @@ struct Recorder {
     menus: Cell<usize>,
     commands: RefCell<Vec<String>>,
     input: RefCell<Option<Rc<FakeInput>>>,
+    variant: RefCell<Option<String>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -126,6 +127,13 @@ impl Host for Recording {
     }
     fn command(&self, name: &str, _: &mut App) {
         self.0.commands.borrow_mut().push(name.into());
+    }
+    fn shape_variant(&self, _: &App) -> String {
+        self.0
+            .variant
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| "rect".into())
     }
     fn text_input(
         &self,
@@ -1053,4 +1061,32 @@ fn the_pen_draws_a_closed_mask_path_on_the_selected_layer(cx: &mut TestAppContex
         .unwrap()
         .clone();
     assert_eq!(path.get("vertices").unwrap().as_array().unwrap().len(), 2);
+}
+
+/// The Star variant draws a star shape layer named for it, even over a
+/// maskable selection (only rectangles and ellipses become masks).
+#[gpui::test]
+fn the_star_variant_draws_a_star_layer(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Shape));
+    *s.recorder.variant.borrow_mut() = Some("star".into());
+    let at = s.point_of([300., 200.]);
+    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+    });
+    let id = s.rig.kernel.published(PROJECT).unwrap().selection.layers()[0].clone();
+    let layer = layer_value(&s.rig.kernel, &id).unwrap();
+    assert_eq!(
+        layer.get("name").and_then(pm_model::Value::as_str),
+        Some("Star")
+    );
+    assert_eq!(
+        layer
+            .get("d")
+            .and_then(|d| d.get("shape"))
+            .and_then(pm_model::Value::as_str),
+        Some("star")
+    );
 }

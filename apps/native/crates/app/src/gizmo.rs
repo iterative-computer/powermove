@@ -140,6 +140,10 @@ pub trait Host: 'static {
     /// The shared layer menu, on the selection the press made.
     fn layer_menu(&self, window: &mut Window, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
+    /// The Shape tool's variant.
+    fn shape_variant(&self, _: &App) -> String {
+        "rect".into()
+    }
     /// Editing tools stop playback first.
     fn pause(&self, _: &mut App) {}
     /// A shell command (the tool returning to Select).
@@ -531,9 +535,14 @@ impl GizmoSurface {
         let drawn = self.sketch.as_ref().and_then(|s| s.shape);
         if let Some(shape) = drawn.or(self.text_sketch.as_ref().and_then(|s| s.shape)) {
             let [w, h] = frame.size;
-            let c = shape.corners();
-            for i in 0..4 {
-                let (a, b) = (c[i], c[(i + 1) % 4]);
+            // The Ellipse variant previews its outline; the others their box.
+            let c = if drawn.is_some() && self.host.shape_variant(cx) == "ellipse" {
+                crate::shape_tool::ellipse_outline(shape, 32)
+            } else {
+                shape.corners().to_vec()
+            };
+            for i in 0..c.len() {
+                let (a, b) = (c[i], c[(i + 1) % c.len()]);
                 lines.push(OverlayLine {
                     ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
                     color: [1., 1., 1., 1.],
@@ -967,12 +976,14 @@ impl GizmoSurface {
             self.project.clone(),
             self.host.time(cx),
         );
+        let variant = self.host.shape_variant(cx);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let published = kernel.published(&project).ok_or("No open project")?;
-                    let Some(plan) = crate::shape_tool::plan(&published, shape, time) else {
+                    let Some(plan) = crate::shape_tool::plan(&published, shape, time, &variant)
+                    else {
                         return Ok(());
                     };
                     let call = Call::Transact {

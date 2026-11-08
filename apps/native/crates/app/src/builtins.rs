@@ -1066,6 +1066,11 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn report(&self, message: String, cx: &mut App) {
         crate::timeline_surface::Delegate::report(self, message, cx);
     }
+    fn shape_variant(&self, cx: &App) -> String {
+        self.0
+            .upgrade()
+            .map_or_else(|| "rect".into(), |c| c.read(cx).shape_variant.clone())
+    }
     fn pause(&self, cx: &mut App) {
         if let Some(controller) = self.0.upgrade()
             && let Some(viewer) = &controller.read(cx).viewer
