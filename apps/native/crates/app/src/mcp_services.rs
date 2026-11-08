@@ -786,7 +786,7 @@ impl EngineHook for EngineJobs {
 }
 
 type Rgba = (Vec<u8>, u32, u32);
-fn png(pixels: &[u8], width: u32, height: u32) -> AnyResult<Vec<u8>> {
+pub(crate) fn png(pixels: &[u8], width: u32, height: u32) -> AnyResult<Vec<u8>> {
     let mut bytes = vec![];
     let mut encoder = ::png::Encoder::new(&mut bytes, width, height);
     encoder.set_color(::png::ColorType::Rgba);

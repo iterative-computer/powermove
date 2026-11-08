@@ -132,3 +132,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
 - Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
 - The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.
+
+## Agents lane decisions (2026-11-08)
+
+- **Panel and workspace tools run on the main thread** (`app/src/panel_bridge.rs`): the MCP worker sends the call and waits up to 30 s (main's timeout text); the main thread never waits for the worker. The headless `--powermove-mcp` host has no window and refuses them before parsing arguments.
+- **Bridge calls draw a frame first** (not presented), so an occluded window or a locked screen still builds panel views, geometry and pointer listeners; input steps are paced one frame and 16 ms apart, as main paces drag points.
+- **capture_panel draws one unpresented frame with the Reduce Transparency materials** and reads it back (vendored GPUI `frame-capture` feature ungates `Window::render_to_image`), so glass never shows what's behind the window. Images are PNG, like native `render_frames`, at most 1600 px wide.
+- **interact_panel click activates the control the way a click does** (`SurfaceView::activate`); pop-ups and colour wells refuse click and point to `select` / `computer_use_panel`. Fill sets the field text, sends `input`, writes a bound field's model, then commits.
+- **set_panel_layout saves a named shell layout and shows it**; a taken name gets a number so earlier layouts stay. No Undo entry yet: shell layouts have no history (open item).

@@ -28,6 +28,7 @@ mod media;
 mod media_import;
 mod media_refresh;
 mod migration_report;
+mod panel_bridge;
 mod panels;
 mod perf_gate;
 mod platform;
@@ -157,6 +158,8 @@ fn main() -> Result<()> {
     let fonts = RenderFonts::new(broker.clone());
     let text_fonts = fonts.clone();
     let worker_profile = profile.clone();
+    let (bridge, bridge_calls) = panel_bridge::channel();
+    let bridge_windows = panel_bridge::Shared::default();
     let (actor, engine, mcp_host, tools) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
@@ -173,6 +176,7 @@ fn main() -> Result<()> {
         )?);
         let tools = mcp::Tools::new(mcp_host.clone(), exports);
         mcp_services::connect_engine(&tools, engine.export_activity())?;
+        tools.automation.lock().unwrap().surfaces = Some(Arc::new(bridge));
         // The server itself starts once the library is attached (first_run).
         Ok((actor, engine, mcp_host, tools))
     })
@@ -196,6 +200,7 @@ fn main() -> Result<()> {
             move |host, window, cx| {
                 if !started.replace(true) {
                     diag::install_probe(cx);
+                    panel_bridge::serve(bridge_calls.clone(), bridge_windows.clone(), cx);
                     let rx = wake_rx.clone();
                     let broker = broker.clone();
                     let service = service.clone();
@@ -222,6 +227,7 @@ fn main() -> Result<()> {
                 });
                 let font_broker = broker.clone();
                 entity.update(cx, |v, _| v.font_broker = Some(font_broker));
+                panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);
                 let weak = entity.downgrade();

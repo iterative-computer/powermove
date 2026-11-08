@@ -19,6 +19,9 @@ use std::{
 };
 
 /// Native surfaces by the opaque `surface` lease a `canvas`/`frame` node mounts.
+#[path = "v4_agent.rs"]
+pub mod agent;
+
 #[derive(Clone, Default)]
 pub struct Natives {
     pub views: Rc<RefCell<BTreeMap<String, AnyView>>>,

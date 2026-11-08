@@ -213,6 +213,13 @@ pub const IMPLEMENTED: &[&str] = &[
     "store_search",
     "store_extension",
     "store_source",
+    "open_panel",
+    "get_panel_state",
+    "interact_panel",
+    "capture_panel",
+    "computer_use_panel",
+    "set_panel_layout",
+    "get_workspace_state",
 ];
 /// Adapter availability is distinct from a working standalone backend.
 pub const HOST_BACKED: &[&str] = &[
@@ -233,6 +240,13 @@ pub const HOST_BACKED: &[&str] = &[
     "store_search",
     "store_extension",
     "store_source",
+    "open_panel",
+    "get_panel_state",
+    "interact_panel",
+    "capture_panel",
+    "computer_use_panel",
+    "set_panel_layout",
+    "get_workspace_state",
 ];
 pub fn backing(name: &str) -> &'static str {
     match name {

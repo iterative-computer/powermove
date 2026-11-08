@@ -29,17 +29,23 @@ no production caller.
 - `publish_extensions`, `fork_builtin_extension` and `stage_fork_rebase` follow
   main's contract through `pm_mcp::extensions` and the app's
   `extension_authoring.rs`; see [extensions-app.md](extensions-app.md#agent-authoring).
+- Panel and workspace tools (`open_panel`, `get_panel_state`, `interact_panel`,
+  `capture_panel`, `computer_use_panel`, `set_panel_layout`,
+  `get_workspace_state`, and the live half of `get_panel_layout`) run on the
+  main thread through `app/src/panel_bridge.rs`, against the shell's live
+  layout and the v4 panels' compiled trees. Compat (WebKit) panel bodies and
+  the viewer's Metal layer aren't in captures or reads yet.
 - `thread_list` and `thread_read` read the durable thread archive. `activity` and
   `questions` stay empty, because a live session isn't reachable from an MCP worker.
 
-Of the 68 tools, 39 have bodies in the app. The other 29 refuse with
+Of the 68 tools, 46 have bodies in the app. The other 22 refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
 <!-- refused-tools -->
 | Tools | What is missing |
 |---|---|
-| `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A bridge from MCP workers to the main-thread shell and v4 surfaces. |
+| `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A window: only the headless `--powermove-mcp` host refuses these. The running app answers them on its main thread (`app/src/panel_bridge.rs`). |
 | `generate_captions`, `transcribe_media` | A local transcription runtime. |
 | `publish_visual_reply` | A safe viewer and its input validator. |
 | `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |

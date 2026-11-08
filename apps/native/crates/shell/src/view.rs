@@ -772,6 +772,103 @@ impl Editor {
         }
         cx.notify();
     }
+    /// Swaps the glass materials for their Reduce Transparency fallback (on)
+    /// and back (off), so a panel capture never shows what's behind the window.
+    /// Returns the tokens to restore.
+    pub fn solid_materials(&mut self, restore: Option<Tokens>) -> Option<Tokens> {
+        match restore {
+            Some(tokens) => {
+                self.tokens = tokens;
+                None
+            }
+            None => {
+                let solid = Tokens::new(
+                    self.tokens.scheme,
+                    pm_design::Accessibility {
+                        reduce_transparency: true,
+                        ..self.tokens.accessibility
+                    },
+                );
+                let previous = self.tokens.clone();
+                self.tokens.translucency = solid.translucency;
+                self.tokens.accessibility.reduce_transparency = true;
+                Some(previous)
+            }
+        }
+    }
+    /// The window-point rect of the stack showing panel `id` (tab strip
+    /// included) in the last layout pass; `None` when it isn't on screen.
+    pub fn panel_rect(&self, id: &str) -> Option<Rect> {
+        self.geometry
+            .panels
+            .iter()
+            .find(|p| {
+                let group = &self.layout.docks[p.dock].groups[p.group];
+                group.tabs.get(group.active).is_some_and(|tab| tab == id)
+                    && self
+                        .maximized_panel
+                        .as_deref()
+                        .is_none_or(|maximized| maximized == id)
+            })
+            .map(|p| p.rect)
+    }
+    /// The live arrangement in the agents' digest shape (get_panel_layout).
+    pub fn layout_digest(&self) -> serde_json::Value {
+        let docks: Vec<_> = self
+            .layout
+            .docks
+            .iter()
+            .map(|dock| {
+                let panels: Vec<_> = dock
+                    .groups
+                    .iter()
+                    .flat_map(|group| {
+                        group.tabs.iter().enumerate().map(move |(i, id)| {
+                            serde_json::json!({"id":id,"title":crate::layout::panel_title(id),
+                                "collapsed":dock.collapsed || i != group.active,
+                                "flex":group.size.is_none(),"size":group.size})
+                        })
+                    })
+                    .collect();
+                serde_json::json!({"id":dock.id,"size":dock.size,"panels":panels})
+            })
+            .collect();
+        let name = crate::layout::PRESETS
+            .iter()
+            .find(|(id, _)| *id == self.layout.workspace)
+            .map_or(self.layout.workspace.as_str(), |(_, name)| name);
+        serde_json::json!({"workspace":{"id":self.layout.workspace,"name":name},"docks":docks})
+    }
+    /// set_panel_layout: saves `docks` as a new named layout and shows it. A
+    /// name already taken gets a number, so earlier layouts stay.
+    pub fn agent_layout(
+        &mut self,
+        name: &str,
+        docks: Vec<crate::layout::Dock>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<String> {
+        let layout = Layout {
+            version: self.layout.version,
+            workspace: self.layout.workspace.clone(),
+            docks,
+        };
+        layout.validate()?;
+        let mut saved = String::new();
+        self.mutate_store(|store| {
+            let mut candidate = name.to_owned();
+            let mut n = 2;
+            while store.saved.contains_key(&candidate) {
+                candidate = format!("{name} {n}");
+                n += 1;
+            }
+            store.save_named(&candidate, &layout).map(|s| saved = s)
+        })?;
+        self.layout = layout;
+        self.maximized_panel = None;
+        self.save();
+        cx.notify();
+        Ok(saved)
+    }
     /// Runs a shell command without an AppKit host (tests).
     #[doc(hidden)]
     pub fn run_shell_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
