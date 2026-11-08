@@ -135,14 +135,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 
 ## Open, recovery and quit (core lane, 2026-11-08)
 
-- A file project's library entry is its row plus `projectMeta.file`; the `.pmv` is its only body, so open and save never copy it into the library. Entries written by older builds lose their copy on next open. A closed entry's Duplicate and rollback compaction read the file.
+- A file project's library entry is its row plus `projectMeta.file`; the `.pmv` is its only body, so open and save never copy it into the library. Entries written by older builds lose their copy on next open. A closed entry's Duplicate and rollback compaction read the file; when the file is gone, opening or duplicating the entry recovers its journal's work as a library copy.
 - A journal session that starts from exactly what its file or slot holds writes checkpoint 0 at its first change, not at open; until then recovery replays from that base, including its undo history and workspace. A save deletes the sessions it made redundant at once.
-- A journal whose document and undo history equal the saved file retires without asking; a newer panel layout in it is kept silently.
+- A journal whose document, layout and undo history equal the saved file retires without asking; any other difference asks.
 - SIGTERM runs the normal Quit path; a clean quit releases `library.lock` (`ShellCall::ReleaseLibrary`, internal).
-- Library projects read media the first launch moved out of IndexedDB from `<profile>/Media Store` (by `storageKey`, then `media:<fingerprint>`, then asset id) when their file lacks it; library saves don't copy store-backed media into a backing file. Save As embeds it, as v1 did.
+- Library projects read media the first launch moved out of IndexedDB from `<profile>/Media Store` (by `storageKey`, then `media:<fingerprint>`, then asset id) when their file lacks it; media that only Undo can bring back is read too. Library saves don't copy store-backed media into a backing file; Save As embeds it, as v1 did, except bytes the first launch classified proxy-only: those are marked proxy-only in the media table, export as proxies only, and never enter a file.
 - Reopening a library project unchanged rewrites only its row and view state, never its slot.
 - A record that a development-server IndexedDB origin also holds migrates from the shipped app's origin (`app_powermove_*`, captured first).
 - The window shows a project as soon as the kernel opens it; its media catalog follows from the background refresh.
 - MCP render_frames draws proxy-only media from its proxy, as the viewer does; export_video still refuses it (plan §6).
-- A journal whose document equals the saved file and whose undo steps are the saved ones regrouped (an agent's finish_session squash after save_project), with nothing to redo, retires silently and keeps the newer grouping; a cleared history or redo-only work still asks.
+- A journal whose document and layout equal the saved file and whose undo steps are the saved steps merged into consecutive runs (an agent's finish_session squash after save_project, compared operation by operation), with nothing to redo on either side, also retires silently. The file's finer steps stay; nothing from the journal is adopted.
 - While an open waits on a person's recovery choice, MCP tools that need the project say which project and that nothing changed; list_projects and the Store tools still run. The choice stays the person's.

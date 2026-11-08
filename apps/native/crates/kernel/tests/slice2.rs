@@ -1545,3 +1545,75 @@ fn a_session_killed_unchanged_or_after_saving_reopens_without_asking() {
         ShellReply::RecoveryRequired { .. }
     ));
 }
+#[test]
+fn opening_the_entry_of_a_deleted_file_recovers_its_unsaved_work() {
+    let dir = common::TempDir::new("deleted-file-open");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    {
+        let mut k = kernel(&profile);
+        open(&mut k, "P", SessionSource::File(path.clone()));
+        edit(&mut k, "P", 17.0);
+        k.sync_all();
+    }
+    fs::remove_file(&path).unwrap();
+    let mut k = kernel(&profile);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::Library {
+                profile: profile.clone(),
+                project: "P".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::Opened { session, .. } = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
+        Some(17.0)
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    // The work is a library project now; the entry still names its file.
+    let reader = LibraryStore::open(&profile);
+    assert!(
+        reader
+            .projects()
+            .unwrap()
+            .iter()
+            .any(|r| r.name.ends_with("— Recovered"))
+    );
+    assert!(reader.read("projectMeta.P").unwrap().is_some());
+}
+#[test]
+fn duplicating_the_entry_of_a_deleted_file_copies_its_newest_work() {
+    let dir = common::TempDir::new("deleted-file-duplicate");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    {
+        let mut k = kernel(&profile);
+        open(&mut k, "P", SessionSource::File(path.clone()));
+        edit(&mut k, "P", 23.0);
+        k.sync_all();
+    }
+    fs::remove_file(&path).unwrap();
+    let mut k = kernel(&profile);
+    k.shell(ShellCall::Duplicate {
+        project: "P".into(),
+        id: "copy".into(),
+        name: "Copy".into(),
+    })
+    .unwrap();
+    let copy = LibraryStore::open(&profile).load("copy").unwrap().unwrap();
+    assert!(copy.session.as_ref().and_then(|m| m.get("file")).is_none());
+    let mut fresh = Kernel::new(Default::default());
+    fresh.open("copy", OpenSource::Library(copy)).unwrap();
+    assert_eq!(
+        common::opacity_of(fresh.project("copy").unwrap().store(), "layer0"),
+        Some(23.0)
+    );
+}

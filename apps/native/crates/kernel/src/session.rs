@@ -268,11 +268,6 @@ fn with_identity(mut v: Value, id: &str, name: Option<&str>) -> Value {
     }
     v
 }
-/// `recovered` holds the saved steps merged into fewer (a squash after the
-/// save), with nothing to redo. A cleared history is still work to recover.
-fn regrouped(recovered: &crate::History, saved: &crate::History) -> bool {
-    !recovered.can_redo() && recovered.applied() > 0 && recovered.applied() <= saved.applied()
-}
 /// The opened project's canonical document (the base recovery replays onto).
 /// A file's is shared, not copied.
 fn source_document(source: &OpenSource) -> pm_model::Document {
@@ -283,15 +278,6 @@ fn source_document(source: &OpenSource) -> pm_model::Document {
         _ => Value::Null,
     };
     pm_model::Document::new(Some(crate::model::to_canonical(value)), 1)
-}
-fn set_workspace(source: &mut OpenSource, workspace: Value) {
-    match source {
-        OpenSource::File(opened) => opened.file.envelope.workspace = Some(workspace),
-        OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
-            lib.workspace = Some(workspace)
-        }
-        _ => {}
-    }
 }
 // A durable rebase checkpoint after a clean close contains no unsaved work.
 // Compare history and workspace too; document equality alone would hide edits.
@@ -768,6 +754,11 @@ impl Kernel {
     ) -> Result<(), KernelFailure> {
         let w = self.library.as_ref().ok_or_else(|| failure("No library"))?;
         let mut meta = p.session.unwrap_or(Value::Null);
+        // A copy that named the original's file would reopen as that file.
+        if let Value::Object(m) = &mut meta {
+            m.remove("file");
+            m.remove("embeddedMedia");
+        }
         let ws = p.workspace.unwrap_or(Value::Null);
         let history = p.history.unwrap_or(Value::Null);
         if let Some(file) = file.filter(|f| !f.media.is_empty()) {
@@ -980,7 +971,7 @@ impl Kernel {
         let mut lock = None;
         let mut meta = Value::Object(Map::new());
         let mut rejected_history = None;
-        let (mut source, destination, base) = match source {
+        let (source, destination, base) = match source {
             SessionSource::New(value) => {
                 let w = self
                     .library
@@ -1004,19 +995,22 @@ impl Kernel {
                     return Err(KernelFailure::AlreadyOpen(s.handle.project.clone()));
                 }
                 let reader = LibraryStore::open(&profile);
-                let p = reader.load(&project).map_err(failure)?.ok_or_else(|| {
-                    // A file's entry has no body of its own (save_file_entry).
+                let Some(p) = reader.load(&project).map_err(failure)? else {
+                    // A file's entry has no body of its own (save_file_entry):
+                    // its unsaved work is in the journal.
                     let file = reader
                         .read(&format!("projectMeta.{project}"))
                         .ok()
                         .flatten()
                         .is_some_and(|m| m.get("file").is_some());
-                    failure(if file {
-                        "The project’s file isn’t available"
-                    } else {
-                        "Library project is missing"
-                    })
-                })?;
+                    if !file {
+                        return Err(failure("Library project is missing"));
+                    }
+                    if !self.owns_library(&profile) {
+                        return Err(failure("The project’s file isn’t available"));
+                    }
+                    return self.open_without_file(id, &project);
+                };
                 let owned = self.library.as_ref().is_some_and(|w| {
                     w.store().dir().canonicalize().ok() == reader.dir().canonicalize().ok()
                 });
@@ -1198,24 +1192,14 @@ impl Kernel {
                 && !r.truncated
                 && r.document.canonical_hash().as_deref() == Some(&base)
                 && let Some((history, workspace)) = &saved
-                && (r.history.saves_as(history) || regrouped(&r.history, history))
+                && (r.history.saves_as(history) || r.history.regroups(history))
+                && r.workspace == *workspace
             {
-                // The base already holds this document and its undo steps, so
-                // there is nothing to decide. A newer grouping of those steps
-                // (an agent's finished session) and panel layout are kept
-                // without asking. Old sessions stay on disk.
-                if r.workspace != *workspace {
-                    set_workspace(&mut source, r.workspace.clone());
-                }
-                if !r.history.saves_as(history) {
-                    match &mut source {
-                        OpenSource::File(opened) => opened.history = Some(r.history.clone()),
-                        OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
-                            lib.history = Some(r.history.snapshot().to_saved_packed())
-                        }
-                        _ => {}
-                    }
-                }
+                // The base already holds this document, its layout and every
+                // undo state, so there is nothing to decide. A coarser
+                // grouping of the saved steps (an agent's finish_session
+                // squash after its save) is not kept: the saved steps reach
+                // every state it did. Old sessions stay on disk.
                 recovered = Recovery::Nothing;
             }
         }
@@ -1809,14 +1793,60 @@ impl Kernel {
         (!path.starts_with(backing)).then_some(path)
     }
     /// A closed file entry as a library project, read from its file.
+    /// A file entry whose file is gone: its journal's work opens as a
+    /// recovered copy in the library; the entry stays, naming the file.
+    fn open_without_file(
+        &mut self,
+        id: String,
+        project: &str,
+    ) -> Result<ShellReply, KernelFailure> {
+        match self.recover(project, None, None) {
+            Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
+                let crashed = r.session.clone();
+                let copy = self.recovery_copy(r, None)?;
+                crate::journal::archive_session(crashed).map_err(failure)?;
+                let profile = self.library.as_ref().unwrap().store().dir().to_path_buf();
+                self.open_session(
+                    id,
+                    SessionSource::Library {
+                        profile,
+                        project: copy,
+                    },
+                    None,
+                )
+            }
+            Recovery::Unrecoverable { .. } => Err(failure(
+                "The project’s file isn’t available, and its unsaved changes can’t be replayed without it. They are kept.",
+            )),
+            Recovery::Nothing => Err(failure("The project’s file isn’t available")),
+        }
+    }
     fn file_entry_project(
         &self,
         id: &str,
     ) -> Result<crate::library::LibraryProject, KernelFailure> {
-        let path = self
-            .file_entry(id)
-            .filter(|p| p.is_file())
-            .ok_or_else(|| failure("The project’s file isn’t available"))?;
+        let Some(path) = self.file_entry(id).filter(|p| p.is_file()) else {
+            // The file is gone: its journal holds the newest state, if any.
+            return match self.recover(id, None, None) {
+                Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
+                    Ok(crate::library::LibraryProject {
+                        id: id.into(),
+                        project: pm_model::canonical::realize_project(
+                            r.document.to_value().unwrap_or(Value::Null),
+                        ),
+                        history: Some(r.history.snapshot().to_saved_packed()),
+                        workspace: Some(r.workspace),
+                        session: self.library.as_ref().and_then(|w| {
+                            w.store().read(&format!("projectMeta.{id}")).ok().flatten()
+                        }),
+                        journal_applied: 0,
+                        journal_skipped: 0,
+                        from_autosave: false,
+                    })
+                }
+                _ => Err(failure("The project’s file isn’t available")),
+            };
+        };
         let opened = project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
         let session = self
             .library

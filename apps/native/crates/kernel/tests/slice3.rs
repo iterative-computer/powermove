@@ -901,8 +901,22 @@ fn clean_close_reopen_needs_no_recovery_but_history_only_work_still_prompts() {
     k.shell(ShellCall::DeferClose(s)).unwrap();
     prepare(&mut k, &root.0);
 }
+fn reopen(root: &Path) -> (Kernel, ShellReply) {
+    let mut k = kernel(root);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "p".into(),
+            source: SessionSource::Library {
+                profile: root.into(),
+                project: "p".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    (k, reply)
+}
 #[test]
-fn an_agent_squash_after_its_save_reopens_without_asking() {
+fn an_agent_squash_after_its_save_reopens_without_asking_and_keeps_every_saved_step() {
     let root = common::TempDir::new("squash-after-save");
     {
         let mut k = kernel(&root.0);
@@ -916,17 +930,35 @@ fn an_agent_squash_after_its_save_reopens_without_asking() {
         assert!(!matches!(squash(&mut k, agent, m), Reply::Throw(_)));
         k.durability_barrier().unwrap();
     }
-    let mut k = kernel(&root.0);
-    let reply = k
-        .shell(ShellCall::PrepareOpen {
-            id: "p".into(),
-            source: SessionSource::Library {
-                profile: root.0.clone(),
-                project: "p".into(),
-            },
-            electron_profile: None,
-        })
-        .unwrap();
-    assert!(matches!(reply, ShellReply::Opened { .. }), "{reply:?}");
-    assert_eq!(k.project("p").unwrap().store().history().applied(), 1);
+    // Killed twice: the saved steps open both times and nothing is asked.
+    for _ in 0..2 {
+        let (k, reply) = reopen(&root.0);
+        assert!(matches!(reply, ShellReply::Opened { .. }), "{reply:?}");
+        let store = k.project("p").unwrap().store();
+        assert_eq!(store.history().applied(), 2);
+        assert_eq!(common::opacity_of(store, "l"), Some(30.));
+        assert!(!store.is_dirty());
+    }
+}
+#[test]
+fn unsaved_steps_that_end_on_the_saved_document_still_ask() {
+    let root = common::TempDir::new("same-end-other-steps");
+    {
+        let mut k = kernel(&root.0);
+        let s = new(&mut k);
+        edit(&mut k, caller(5), 20.);
+        edit(&mut k, caller(5), 30.);
+        k.shell(ShellCall::Save(s)).unwrap();
+        call(&mut k, caller(5), HistoryCall::Undo);
+        call(&mut k, caller(5), HistoryCall::Undo);
+        edit(&mut k, caller(5), 50.);
+        edit(&mut k, caller(5), 30.);
+        k.durability_barrier().unwrap();
+    }
+    // Same document as the save, but Undo would reach 50, not 20.
+    let (_k, reply) = reopen(&root.0);
+    assert!(
+        matches!(reply, ShellReply::RecoveryRequired { .. }),
+        "{reply:?}"
+    );
 }
