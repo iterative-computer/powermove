@@ -294,7 +294,6 @@ impl A11y {
         self.nodes.begin_frame(self.window_title.as_ref());
     }
 
-    /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
     /// A forced tree the adapter would drop (nothing connected yet) is kept
     /// for the activation, which otherwise returns only the root. Returns the
     /// update when it is for the adapter instead.
@@ -306,6 +305,7 @@ impl A11y {
         Some(update)
     }
 
+    /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
     pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
         let update = self.nodes.finalize();
         self.debug.capture(
