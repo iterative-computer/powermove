@@ -97,6 +97,30 @@ fn run(fonts: RenderFonts) {
             ),
         )
         .wait();
+    // The viewer's text questions (caret geometry, typography offset,
+    // picking) go through the same font-fed query path as the app's.
+    let published = kernel.published("synthetic").unwrap();
+    let layout = text_host::query(&published, |q| q.text_layout(None, "t", 0.)).unwrap();
+    let lines = layout.get("lines").and_then(Value::as_array).unwrap();
+    assert_eq!(lines.len(), 1);
+    let stops = lines[0]
+        .get("boundaries")
+        .and_then(Value::as_array)
+        .unwrap();
+    let last = stops
+        .last()
+        .unwrap()
+        .get("x")
+        .and_then(Value::as_f64)
+        .unwrap();
+    assert!(last > 48., "measured with real fonts: {last}");
+    let offset = text_host::query(&published, |q| q.text_font_offset(None, "t", 0.)).unwrap();
+    assert_eq!(offset, [0., 0.], "no typography anchoring recorded");
+    let hit = text_host::query(&published, |q| {
+        q.pick(None, 110., 220., 0., &Default::default())
+    })
+    .unwrap();
+    assert_eq!(hit.layer_id.as_deref(), Some("t"));
     edit(
         TransformCommand::CenterAnchor {
             layer_ids: vec!["t".into()],

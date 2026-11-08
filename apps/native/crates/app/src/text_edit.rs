@@ -23,8 +23,8 @@ use super::{GizmoSurface, inverse_point, transform};
 use gpui::{prelude::*, *};
 use gpui_macos::native_text::TextEvent;
 use pm_kernel::{
-    Call, Caller, Command, ContentCommand, GestureCall, LayerCommand, PropertyCommand, QueryMirror,
-    Reply, Request, SelectionCall, TextCommand, WriteBody,
+    Call, Caller, Command, ContentCommand, GestureCall, LayerCommand, PropertyCommand, Reply,
+    Request, SelectionCall, TextCommand, WriteBody,
     commands::{
         layers::{AddLayer, LayerPatch},
         properties::SetProperty,
@@ -50,6 +50,8 @@ pub trait TextInput {
     fn place(&self, bounds: Bounds<Pixels>, clip: Bounds<Pixels>);
     /// Where the system insertion point stands, clipped; `None` hides it.
     fn stage_caret(&self, caret: Option<(Bounds<Pixels>, Bounds<Pixels>)>);
+    /// Where input method candidates open, window points.
+    fn stage_input_rect(&self, rect: Option<Bounds<Pixels>>);
     /// The composing range an input method holds.
     fn marked_range(&self) -> Option<(usize, usize)>;
     fn take_events(&self) -> Vec<TextEvent>;
@@ -432,11 +434,28 @@ pub fn read_text(p: &pm_kernel::Published, id: &str, time: f64) -> Option<TextPo
         .get("name")
         .and_then(|n| n.to_value().as_str().map(str::to_owned))
         .unwrap_or_default();
-    let mut mirror = QueryMirror::new(p);
-    let q = mirror.queries();
-    let layout = Layout::parse(&q.text_layout(None, id, time).ok()?)?;
-    let matrix = q.world_matrix(None, id, time).ok()?;
-    let mut value = |key: &str| q.evaluate(None, id, key, time).ok();
+    // Fonts come from the registry when the layout needs them; the caret
+    // follows typography anchoring as the painted glyphs do.
+    let (layout, matrix, values) = crate::text_host::query(p, |q| {
+        let layout = q.text_layout(None, id, time)?;
+        let mut matrix = q.world_matrix(None, id, time)?;
+        let [x, y] = q.text_font_offset(None, id, time).unwrap_or([0., 0.]);
+        matrix[4] += matrix[0] * x + matrix[2] * y;
+        matrix[5] += matrix[1] * x + matrix[3] * y;
+        let values: Vec<Option<Value>> = ["c.text", "c.font", "c.weight", "c.size", "c.italic"]
+            .iter()
+            .map(|key| q.evaluate(None, id, key, time).ok())
+            .collect();
+        Ok((layout, matrix, values))
+    })
+    .ok()?;
+    let layout = Layout::parse(&layout)?;
+    let value = |key: &str| {
+        let at = ["c.text", "c.font", "c.weight", "c.size", "c.italic"]
+            .iter()
+            .position(|k| *k == key)?;
+        values[at].clone()
+    };
     let text = value("c.text")
         .and_then(|v| v.as_str().map(str::to_owned))
         .or_else(|| {
@@ -473,6 +492,12 @@ pub enum Entry {
 }
 enum Job {
     Begin(&'static str),
+    /// The fresh layer (and its paragraph box), inside the gesture.
+    Add {
+        at: [f64; 2],
+        width: Option<f64>,
+        time: f64,
+    },
     Step {
         commands: Vec<Command>,
         replace: bool,
@@ -599,10 +624,6 @@ impl GizmoSurface {
         let time = self.host.time(cx);
         self.host.pause(cx);
         let id = pm_kernel::new_id("L");
-        let Some(published) = self.kernel.published(&self.project) else {
-            return;
-        };
-        let add = add_text(&published, &id, at, width, time);
         self.open_session(
             id.clone(),
             true,
@@ -615,11 +636,8 @@ impl GizmoSurface {
         );
         if let Some(s) = &mut self.text {
             s.jobs.push_back(Job::Begin("Add Text"));
-            s.jobs.push_back(Job::Step {
-                commands: add,
-                replace: false,
-                text: false,
-            });
+            // Planned off main: the alignment it inherits is evaluated.
+            s.jobs.push_back(Job::Add { at, width, time });
             s.jobs.push_back(Job::Select(id));
         }
         self.text_pump(cx);
@@ -1092,10 +1110,22 @@ impl GizmoSurface {
             )
         };
         if let Some(input) = &s.input {
-            let caret = (start == end).then(|| {
-                let c = layout.caret(start);
-                let top = to_window([c.x, c.top]);
-                let bottom = to_window([c.x, c.top + c.height]);
+            let stem = |index: usize| {
+                let c = layout.caret(index);
+                (
+                    to_window([c.x, c.top]),
+                    to_window([c.x, c.top + c.height]),
+                    c,
+                )
+            };
+            // Candidates open at the composition's start, else the caret.
+            let (top, bottom, _) = stem(input.marked_range().map_or(start, |m| m.0));
+            input.stage_input_rect(Some(window_box(&[top, bottom])));
+            let (top, bottom, c) = stem(start);
+            // The system insertion point stands upright; text at an angle gets
+            // its caret drawn along the glyphs instead.
+            let upright = (f32::from(top.x) - f32::from(bottom.x)).abs() < 0.5;
+            let caret = (start == end && upright).then(|| {
                 let b = window_box(&[top, bottom]);
                 // The indicator draws its own width inside a slim frame.
                 Bounds::new(
@@ -1104,6 +1134,16 @@ impl GizmoSurface {
                 )
             });
             input.stage_caret(caret.map(|c| (c, self.bounds)));
+            if start == end && !upright {
+                let width = 1.5 * unit;
+                let rect = Rect {
+                    x: c.x - width / 2.,
+                    y: c.top,
+                    w: width,
+                    h: c.height,
+                };
+                fill(quad(rect), rgb(t.colors.accent), window);
+            }
         }
         if let Some(input) = &s.input {
             input.place(window_box(&corners), self.bounds);
@@ -1129,10 +1169,9 @@ fn add_text(
             .iter()
             .find_map(|s| texts.iter().find(|l| &l.id == s))
             .or(texts.last())?;
-        let value = QueryMirror::new(published)
-            .queries()
-            .evaluate(None, &source.id, "c.align", time)
-            .ok()?;
+        let value =
+            crate::text_host::query(published, |q| q.evaluate(None, &source.id, "c.align", time))
+                .ok()?;
         value.as_str().map(str::to_owned)
     });
     let align = match align.as_deref() {
@@ -1251,6 +1290,13 @@ async fn run_job(
                 Reply::Gesture(id) => Ok(Some(id)),
                 _ => Err("The edit could not start".into()),
             }
+        }
+        Job::Add { at, width, time } => {
+            let gesture = gesture.ok_or("The edit could not start")?;
+            let published = kernel.published(project).ok_or("No open project")?;
+            let commands = add_text(&published, layer, at, width, time);
+            call(kernel, project, step(gesture, commands, false)).await?;
+            Ok(None)
         }
         Job::Step {
             commands, replace, ..
@@ -1400,11 +1446,11 @@ fn text_under(
 ) -> Option<String> {
     let p = kernel.published(project)?;
     let root = p.snapshot.root()?;
-    let id = QueryMirror::new(&p)
-        .queries()
-        .pick(None, at[0], at[1], time, &Default::default())
-        .ok()?
-        .layer_id?;
+    let id = crate::text_host::query(&p, |q| {
+        q.pick(None, at[0], at[1], time, &Default::default())
+    })
+    .ok()?
+    .layer_id?;
     pm_kernel::model::list_layers(root, None)
         .into_iter()
         .find(|l| l.id == id && l.kind == "text" && !l.effectively_locked)
@@ -1463,6 +1509,9 @@ impl TextInput for NativeInput {
     }
     fn marked_range(&self) -> Option<(usize, usize)> {
         self.0.marked_range()
+    }
+    fn stage_input_rect(&self, rect: Option<Bounds<Pixels>>) {
+        self.0.stage_input_rect(rect.map(ns_rect));
     }
     fn take_events(&self) -> Vec<TextEvent> {
         self.0.take_events()

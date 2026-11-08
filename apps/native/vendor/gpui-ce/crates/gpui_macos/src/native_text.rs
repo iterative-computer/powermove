@@ -89,6 +89,9 @@ struct State {
     caret: Option<(Retained<NSView>, Retained<NSTextInsertionIndicator>)>,
     /// Canvas: the caret rectangle and clip in GPUI points, `None` hides it.
     caret_staged: Cell<Option<(NSRect, NSRect)>>,
+    /// Canvas: where input method candidates open (GPUI points): the host's
+    /// caret on the visible text, never this view's own unwrapped layout.
+    input_rect: Cell<Option<NSRect>>,
 }
 impl State {
     fn emit(&self, event: TextEvent) {
@@ -142,6 +145,27 @@ define_class!(
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             self.chord(event) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
+        }
+        /// Input methods place candidates here (NSTextInputClient).
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, range: NSRange, actual: *mut NSRange) -> NSRect {
+            if !actual.is_null() {
+                unsafe { *actual = range };
+            }
+            let staged = self.ivars().borrow().upgrade().and_then(|s| s.input_rect.get());
+            match (staged, self.window()) {
+                (Some(rect), Some(window)) => {
+                    let h = window.contentView().map_or(0., |v| v.bounds().size.height);
+                    let flipped = NSRect::new(
+                        NSPoint::new(rect.origin.x, h - rect.origin.y - rect.size.height),
+                        rect.size,
+                    );
+                    window.convertRectToScreen(flipped)
+                }
+                _ => unsafe {
+                    msg_send![super(self), firstRectForCharacterRange: range, actualRange: actual]
+                },
+            }
         }
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
@@ -435,6 +459,7 @@ impl NativeTextSlot {
                 (host, indicator)
             }),
             caret_staged: Cell::new(None),
+            input_rect: Cell::new(None),
         });
         if let Some(canvas) = &canvas {
             *canvas.ivars().borrow_mut() = Rc::downgrade(&state);
@@ -537,6 +562,11 @@ impl NativeTextSlot {
     /// points, clipped), or `None` while a range is selected.
     pub fn stage_caret(&self, caret: Option<(NSRect, NSRect)>) {
         self.state.caret_staged.set(caret);
+    }
+    /// Canvas: the caret rectangle input method candidates open beside
+    /// (top-left GPUI points).
+    pub fn stage_input_rect(&self, rect: Option<NSRect>) {
+        self.state.input_rect.set(rect);
     }
     /// Canvas: the composing (marked) UTF-16 range, if any.
     pub fn marked_range(&self) -> Option<(usize, usize)> {

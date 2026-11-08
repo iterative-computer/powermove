@@ -165,6 +165,25 @@ pub(crate) fn dispatch<'d>(
             let layout = try_js!(layout);
             glyph_layout(out, &layout);
         }
+        // The typography-anchor shift of a text layer's glyphs (`PM.raster`'s
+        // `fontOffset`), which on-canvas editing geometry follows.
+        "textFontOffset" => {
+            let l = layer!();
+            fonts.clear_reports();
+            let mut probe = InkProbe {
+                inner: &mut fonts.measure,
+                ink: false,
+            };
+            let anchored = scope.text_raster_with(l, t, &mut probe, true, true);
+            let plain = scope.text_raster_with(l, t, &mut probe, true, false);
+            text_checks!(probe);
+            let (anchored, plain) = (try_js!(anchored), try_js!(plain));
+            out.raw("{\"x\":");
+            out.num(anchored.selection.x0 - plain.selection.x0);
+            out.raw(",\"y\":");
+            out.num(anchored.selection.y0 - plain.selection.y0);
+            out.raw("}");
+        }
         "textRasterGeometry" => {
             let l = layer!();
             fonts.clear_reports();
