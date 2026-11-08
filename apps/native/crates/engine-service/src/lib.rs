@@ -1453,6 +1453,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 match result {
                     Ok(Some(s)) => {
                         v.status.error = None;
+                        // The drawable was another size than configured (a
+                        // resize whose publication lagged): later frames
+                        // render at the size actually shown.
+                        let shown = v.config.output.resized(s.width, s.height);
+                        if s.drawable.is_some() && shown != v.config.output {
+                            v.config.output = shown;
+                            v.dirty = true;
+                        }
                         v.status.stand_in_frames +=
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
                         v.status.effective_quality = spec.scale;
@@ -1747,6 +1755,57 @@ mod worker_tests {
             assert!(std::time::Instant::now() < deadline, "{status:?}");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// A layer resized without a configure (its size publication lagged):
+    /// the frame is drawn at the drawable's size and later frames follow it,
+    /// instead of the drawable being dropped and the frame retried forever.
+    #[test]
+    fn a_drawable_of_another_size_is_drawn_not_retried() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("drawable-size-test").unwrap()).unwrap();
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_framebuffer_only(false);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(200., 100.));
+        let v = shapes_viewer(&service, Some(layer));
+        // The first frame shows that the drawable differs; the next renders
+        // at its size.
+        std::thread::sleep(Duration::from_millis(300));
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        assert_eq!(status.error, None);
+        assert_eq!(status.no_drawable, 0);
+        let pixels = status.frame.unwrap().pixels.unwrap();
+        assert_eq!(pixels.len(), 200 * 100);
+        // Settled: no frame keeps being asked for.
+        std::thread::sleep(Duration::from_millis(300));
+        let completed = || v.status().frame.and_then(|f| f.completion_host_seconds);
+        let settled = completed();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(completed(), settled, "a paused viewer stays idle");
+        assert_eq!(v.status().no_drawable, 0);
+    }
+
+    #[test]
+    fn a_resized_crop_stays_inside_its_canvas() {
+        let output = Output {
+            width: 100,
+            height: 50,
+            display: 1,
+            headroom: 1.,
+            crop: Some(Crop {
+                x: 30,
+                y: 10,
+                canvas_width: 130,
+                canvas_height: 60,
+            }),
+        };
+        let resized = output.resized(103, 51);
+        assert_eq!((resized.width, resized.height), (103, 51));
+        resized.validate().unwrap();
+        assert_eq!(output.resized(100, 50), output);
     }
 
     /// A removed or reset GPU: the worker rebuilds its device, points the
