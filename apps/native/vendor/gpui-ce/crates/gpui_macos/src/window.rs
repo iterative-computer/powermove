@@ -1047,6 +1047,7 @@ impl MacWindowState {
                             msg_send![class!(CAMetalDisplayLink), alloc];
                         let raw: *mut Objc2Object = msg_send![allocated, initWithMetalLayer: self.renderer.layer_ptr() as ObjcId];
                         link = Retained::from_raw(raw).expect("CAMetalDisplayLink initialization");
+                        self.renderer.set_display_link_bound();
                         let _: () = msg_send![&*link, setDelegate: view];
                         let _: () = msg_send![&*link, setPreferredFrameLatency: 2.0_f32];
                     } else {
@@ -2254,7 +2255,11 @@ impl PlatformWindow for MacWindow {
             this.force_render_pending = true;
         }
         #[cfg(not(feature = "wgpu"))]
-        this.renderer.draw(scene);
+        if !this.renderer.draw(scene) {
+            // A synchronous paint on a display-link layer: the link's next
+            // update paints this scene.
+            this.force_render_pending = true;
+        }
         // Committing the slot transaction runs AppKit's display cycle, which
         // calls back into this window (cursor rects take this lock): release
         // the lock first, or the main thread deadlocks on itself.

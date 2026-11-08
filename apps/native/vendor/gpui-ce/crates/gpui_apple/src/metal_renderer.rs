@@ -238,6 +238,9 @@ pub struct MetalRenderer {
     is_unified_memory: bool,
     presents_with_transaction: bool,
     display_link_drawable: Option<metal::MetalDrawable>,
+    /// The layer belongs to a CAMetalDisplayLink, which forbids `nextDrawable`:
+    /// every drawable then comes from a display-link update.
+    display_link_bound: bool,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
     command_queue: CommandQueue,
@@ -506,6 +509,7 @@ impl MetalRenderer {
             layer,
             presents_with_transaction: false,
             display_link_drawable: None,
+            display_link_bound: false,
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -676,14 +680,23 @@ impl MetalRenderer {
         self.display_link_drawable = drawable;
     }
 
-    pub fn draw(&mut self, scene: &Scene) {
+    /// Set once a CAMetalDisplayLink is made for this layer.
+    pub fn set_display_link_bound(&mut self) {
+        self.display_link_bound = true;
+    }
+
+    /// Whether the scene reached a drawable. A synchronous paint (AppKit's
+    /// `displayLayer:`, a key-window change) on a display-link layer has none:
+    /// asking for one raises `CAMetalLayerInvalidOperation` and aborts the app,
+    /// so the caller paints on the link's next update instead.
+    pub fn draw(&mut self, scene: &Scene) -> bool {
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
                 log::error!(
                     "draw() called on headless renderer - use render_scene_to_image() instead"
                 );
-                return;
+                return false;
             }
         };
         let viewport_size = layer.drawable_size();
@@ -692,6 +705,9 @@ impl MetalRenderer {
             (viewport_size.height.ceil() as i32).into(),
         );
         let supplied = self.display_link_drawable.take();
+        if supplied.is_none() && self.display_link_bound {
+            return false;
+        }
         let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
             supplied.as_deref().or_else(|| layer.next_drawable())
         }) {
@@ -701,7 +717,7 @@ impl MetalRenderer {
                 "failed to retrieve next drawable, drawable size: {:?}",
                 viewport_size
             );
-            return;
+            return false;
         };
 
         // A display-link update can carry the previous size during live resize.
@@ -726,7 +742,7 @@ impl MetalRenderer {
             Ok(command_buffer) => command_buffer,
             Err(error) => {
                 log::error!("failed to render pre-sized scene: {error}");
-                return;
+                return false;
             }
         };
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
@@ -746,6 +762,7 @@ impl MetalRenderer {
             command_buffer.present_drawable(drawable);
             command_buffer.commit();
         }
+        true
     }
 
     /// Renders the scene to a texture and returns the pixel data as an RGBA image.
