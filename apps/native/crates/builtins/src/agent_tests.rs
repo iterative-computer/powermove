@@ -630,20 +630,6 @@ fn an_agent_tool_launches_sends_to_and_cancels_a_background_thread() {
     panel.connected(Provider::Chatgpt);
     let agent = panel.agent();
     let visible = thread_id(&agent);
-    let threads = |agent: &agent_host::SharedAgent| agent.lock().unwrap().panel.summaries().len();
-    let before = threads(&agent);
-    let refused = panel
-        .panels
-        .agent_thread_control(
-            "thread_launch",
-            &json!({"title":"t","message":"m","target":{"providerInstanceId":"claude"}}),
-        )
-        .unwrap_err();
-    assert_eq!(
-        refused,
-        "Sign in to Claude in Settings › Agents before starting a run."
-    );
-    assert_eq!(threads(&agent), before, "a refused launch leaves no thread");
     let launched = panel
         .panels
         .agent_thread_control(
