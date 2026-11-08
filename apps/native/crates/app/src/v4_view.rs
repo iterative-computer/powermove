@@ -376,6 +376,8 @@ impl SurfaceView {
                     disabled,
                     default: primary,
                     destructive: button_role == Some("destructive"),
+                    inline: self.publication.panel == "viewer"
+                        && matches!(kind, crate::v4_control::Kind::Popup),
                 },
                 &tokens,
                 window,

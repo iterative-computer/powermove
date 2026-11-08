@@ -53,3 +53,10 @@ uses. The governing rules stay in [language.md](language.md).
   `text` ring.
 - The playhead head is the rounded pin (top 3, bottom 6) the render op
   already described; the painter drew it as a diamond.
+
+## 3. Viewer bar
+
+- The zoom and preview-resolution pop-ups are borderless title pop-ups
+  sized to their title (`ControlSpec::inline`, viewer panel only), as in the
+  owner's demo; inspector and sheet pop-ups keep the bezel at `value_column`.
+- The Fit row is titled `Fit (54 %)`, so the closed pop-up names the zoom.
