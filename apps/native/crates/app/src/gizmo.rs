@@ -10,6 +10,8 @@ use pm_kernel::{
 use pm_model::Value;
 use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
 use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
+#[path = "marquee.rs"]
+mod marquee;
 #[path = "pen_tool.rs"]
 pub mod pen;
 #[path = "text_edit.rs"]
@@ -250,6 +252,8 @@ pub struct GizmoSurface {
     pen_selected: Option<(String, String)>,
     pen_drag: Option<pen::PenDrag>,
     pen_pointer: Option<[f64; 2]>,
+    /// A Select-tool drag from empty canvas.
+    marquee: Option<marquee::Marquee>,
 }
 struct Sketch {
     origin: Point<Pixels>,
@@ -465,6 +469,7 @@ impl GizmoSurface {
             pen_selected: None,
             pen_drag: None,
             pen_pointer: None,
+            marquee: None,
         }
     }
     /// Selection, document or playhead moved. The Controller calls in during its
@@ -786,7 +791,8 @@ impl GizmoSurface {
                             selected.iter().filter(|s| *s != id).cloned().collect()
                         }
                         Some(id) => vec![id.clone()],
-                        None if press.shift => return None,
+                        // Shift on empty canvas keeps the selection for a marquee.
+                        None if press.shift => return Some((read_at(&p, press.time)?, None, true)),
                         None => vec![],
                     };
                     let add =
@@ -795,17 +801,31 @@ impl GizmoSurface {
                     let request = Request::new(Caller::native(), selection);
                     kernel.call(&project, request).await?.ok()?;
                     let p = kernel.published(&project)?;
-                    Some((read_at(&p, press.time)?, target.filter(|_| !press.shift)))
+                    let empty = target.is_none();
+                    Some((
+                        read_at(&p, press.time)?,
+                        target.filter(|_| !press.shift),
+                        empty,
+                    ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.picks -= 1;
                 let held = s.picking.take();
-                let Some((poses, target)) = poses else {
+                let Some((poses, target, empty)) = poses else {
                     return;
                 };
                 s.poses = Arc::new(poses);
                 s.draw(cx);
+                // A press on empty canvas that is still held draws a marquee.
+                if let Some(origin) = held.filter(|_| empty) {
+                    s.marquee = Some(marquee::Marquee {
+                        origin,
+                        start: press.at,
+                        shift: press.shift,
+                        shape: None,
+                    });
+                }
                 if let Some(origin) = held.filter(|_| target.is_some() && s.transformable()) {
                     s.drag = Some(Drag {
                         hit: Hit::Body,
@@ -849,6 +869,9 @@ impl GizmoSurface {
         }
         if self.sketch.is_some() || self.text_sketch.is_some() {
             self.sketch_move(event, cx);
+            return;
+        }
+        if self.marquee_move(event, cx) {
             return;
         }
         if let Some(frame) = self.host.frame(self.bounds, cx) {
@@ -902,7 +925,7 @@ impl GizmoSurface {
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         self.panning = None;
-        if self.text_release() || self.pen_up(commit, cx) {
+        if self.text_release() || self.pen_up(commit, cx) || self.marquee_up(commit, cx) {
             return;
         }
         if let Some(sketch) = self.text_sketch.take() {
@@ -933,7 +956,7 @@ impl GizmoSurface {
         if self.finish_text(false, cx) {
             return true;
         }
-        if self.pen_up(false, cx) {
+        if self.pen_up(false, cx) || self.marquee_up(false, cx) {
             return true;
         }
         if self.drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
@@ -1512,6 +1535,7 @@ impl Render for GizmoSurface {
                         let _ = this.update(cx, |s, cx| {
                             if let Some(frame) = s.host.frame(s.bounds, cx) {
                                 s.pen_paint(frame, window);
+                                s.marquee_paint(frame, window);
                                 s.text_paint(frame, window);
                             }
                         });

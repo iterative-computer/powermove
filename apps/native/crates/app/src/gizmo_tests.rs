@@ -1090,3 +1090,42 @@ fn the_star_variant_draws_a_star_layer(cx: &mut TestAppContext) {
         Some("star")
     );
 }
+/// A Select-tool drag from empty canvas selects the layers it encloses;
+/// Shift toggles them instead.
+#[gpui::test]
+fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    // Around the first square (150..250, 100..200) only.
+    let from = s.point_of([120., 80.]);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    for step in 1..=4 {
+        let at = from + point(px(40. * step as f32), px(35. * step as f32));
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    s.vcx.simulate_mouse_up(
+        from + point(px(160.), px(140.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
+    });
+}
