@@ -36,6 +36,44 @@ pub struct ExportRequest {
     #[serde(default = "disk_reserve")]
     pub disk_reserve: u64,
 }
+/// An export frame's raster override answer from the window that has the
+/// document open: `None` passes the layer through; `Some` is straight RGBA8
+/// with the quad's size and anchor (layer pixels).
+pub type CompatReply = Option<(u32, u32, Vec<u8>, [f64; 2], [f64; 2])>;
+/// Answers export frames' raster override needs (`compat`, layer, seconds,
+/// scale), on the job's reader thread.
+pub type CompatAnswerer =
+    Arc<dyn Fn(&str, &str, f64, f64) -> std::result::Result<CompatReply, String> + Send + Sync>;
+struct CompatProducer {
+    producing: Arc<dyn Fn() -> bool + Send + Sync>,
+    answer: CompatAnswerer,
+}
+static COMPAT: Mutex<Option<CompatProducer>> = Mutex::new(None);
+/// The window whose extensions wrap `raster` (none: exports draw natively).
+pub fn set_compat_answerer(
+    producer: Option<(Arc<dyn Fn() -> bool + Send + Sync>, CompatAnswerer)>,
+) {
+    *COMPAT.lock().unwrap() =
+        producer.map(|(producing, answer)| CompatProducer { producing, answer });
+}
+/// A compat need's reply on the child's stdin. Pixels go through a private
+/// file the child reads and removes, never through the pipe.
+fn compat_reply(id: u64, answered: std::result::Result<CompatReply, String>) -> String {
+    let body = match answered {
+        Ok(None) => serde_json::json!({"id": id, "native": true}),
+        Ok(Some((width, height, rgba, size, anchor))) => {
+            let path = std::env::temp_dir()
+                .join(format!("powermove-compat-{}-{id}.rgba", std::process::id()));
+            match std::fs::write(&path, &rgba) {
+                Ok(()) => serde_json::json!({"id": id, "width": width, "height": height,
+                    "size": size, "anchor": anchor, "file": path}),
+                Err(e) => serde_json::json!({"id": id, "error": e.to_string()}),
+            }
+        }
+        Err(error) => serde_json::json!({"id": id, "error": error}),
+    };
+    format!("{}\n", serde_json::json!({ "compatAnswer": body }))
+}
 /// Room left for macOS and a project save when a long export fills a disk.
 pub const DISK_RESERVE: u64 = 2 << 30;
 fn disk_reserve() -> u64 {
@@ -153,9 +191,27 @@ impl ExportHandle {
     /// One already admitted band cannot be preempted by Metal.
     pub fn start_scheduled(
         executable: &Path,
-        request: ExportRequest,
+        mut request: ExportRequest,
         interactive: Arc<AtomicBool>,
     ) -> Result<Self> {
+        // An export draws what the viewer draws: a raster override's layers too.
+        let answerer = COMPAT
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| (c.producing)().then(|| c.answer.clone()));
+        if answerer.is_some()
+            && let JobSpec::Export { settings, .. } = &mut request.spec
+            && !settings
+                .delivery
+                .compat
+                .contains(&pm_protocol::snapshot::CompatSource::RasterOverride)
+        {
+            settings
+                .delivery
+                .compat
+                .push(pm_protocol::snapshot::CompatSource::RasterOverride);
+        }
         request.resources.validate()?;
         ensure!(
             matches!(request.spec, JobSpec::Export { .. }),
@@ -190,8 +246,34 @@ impl ExportHandle {
         )));
         let events = state.clone();
         let id = request.job;
+        let compat_input = input.clone();
         let reader = std::thread::spawn(move || {
             for line in std::io::BufReader::new(output).lines() {
+                if let Ok(text) = line.as_deref()
+                    && text.starts_with("{\"compat\"")
+                {
+                    let need: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+                    let need = &need["compat"];
+                    let id = need["id"].as_u64().unwrap_or(0);
+                    let answered = match &answerer {
+                        Some(answer) => answer(
+                            need["composition"].as_str().unwrap_or_default(),
+                            need["layer"].as_str().unwrap_or_default(),
+                            need["seconds"].as_f64().unwrap_or(0.),
+                            need["scale"].as_f64().unwrap_or(1.),
+                        ),
+                        None => Err("No window has this project's extensions open".into()),
+                    };
+                    let mut input = compat_input.lock().unwrap();
+                    if input
+                        .write_all(compat_reply(id, answered).as_bytes())
+                        .and_then(|_| input.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 if matches!(line.as_deref(), Ok("\"gpu\"")) {
                     while interactive.load(Ordering::Acquire)
                         && !gate_cancel.load(Ordering::Acquire)
@@ -283,8 +365,16 @@ pub fn run_child() -> Result<()> {
     request.resources.validate()?;
     let (grant, permits) = std::sync::mpsc::channel();
     let stopped = cancel.clone();
+    let rasters = Arc::new(JobRasters::default());
+    let replies = rasters.clone();
     std::thread::spawn(move || {
         for line in lines {
+            if let Ok(text) = line.as_deref()
+                && text.starts_with("{\"compatAnswer\"")
+            {
+                replies.reply(text);
+                continue;
+            }
             if matches!(line.as_deref(), Ok("grant")) {
                 let _ = grant.send(());
                 continue;
@@ -357,9 +447,14 @@ pub fn run_child() -> Result<()> {
         use pm_protocol::validate::Validate;
         settings.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         ensure!(
-            settings.delivery.compat.is_empty(),
-            "compat export requires the P2 runtime host"
+            settings
+                .delivery
+                .compat
+                .iter()
+                .all(|s| *s == pm_protocol::snapshot::CompatSource::RasterOverride),
+            "this export needs an extension's WebGL context, which the app does not host"
         );
+        let overriding = !settings.delivery.compat.is_empty();
         let catalog = crate::MediaCatalog {
             originals: request.originals,
             proxies: request.proxies,
@@ -378,6 +473,9 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("cancelled");
         }
         let mut renderer = pm_render::Renderer::headless()?;
+        if overriding {
+            renderer.set_compat_rasters(Some(rasters.clone()));
+        }
         // An export never ships silently without an effect the project uses.
         let failures = renderer
             .set_document_effects(&doc, &request.resources.definitions)
@@ -460,6 +558,94 @@ pub fn run_child() -> Result<()> {
     Ok(())
 }
 
+/// An export's raster override layers, asked of the parent (which asks the
+/// window's extensions) one layer at a time; the frame waits for each, as an
+/// export has no per-frame deadline. A need with no answer fails the frame.
+#[derive(Default)]
+struct JobRasters {
+    next: std::sync::atomic::AtomicU64,
+    waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>,
+    answered: Mutex<
+        std::collections::HashMap<(String, String, u64, u64), pm_render::compat::CompatAnswer>,
+    >,
+}
+impl JobRasters {
+    fn reply(&self, text: &str) {
+        let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+        let body = value["compatAnswer"].clone();
+        if let Some(id) = body["id"].as_u64()
+            && let Some(tx) = self.waiting.lock().unwrap().remove(&id)
+        {
+            let _ = tx.send(body);
+        }
+    }
+}
+impl pm_render::compat::CompatRasters for JobRasters {
+    fn producing(&self, source: pm_protocol::snapshot::CompatSource) -> bool {
+        source == pm_protocol::snapshot::CompatSource::RasterOverride
+    }
+    fn answer(
+        &self,
+        composition: &str,
+        layer: &str,
+        time: f64,
+        scale: f64,
+        source: pm_protocol::snapshot::CompatSource,
+        _crop: Option<pm_protocol::common::PixelRect>,
+    ) -> pm_render::compat::CompatAnswer {
+        use pm_render::compat::CompatAnswer;
+        if source != pm_protocol::snapshot::CompatSource::RasterOverride {
+            return CompatAnswer::Native;
+        }
+        let key = (
+            composition.to_owned(),
+            layer.to_owned(),
+            time.to_bits(),
+            scale.to_bits(),
+        );
+        if let Some(answer) = self.answered.lock().unwrap().get(&key) {
+            return answer.clone();
+        }
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.waiting.lock().unwrap().insert(id, tx);
+        let need = serde_json::json!({"compat": {"id": id, "composition": composition,
+            "layer": layer, "seconds": time, "scale": scale}});
+        {
+            let mut out = std::io::stdout().lock();
+            if writeln!(out, "{need}").and_then(|_| out.flush()).is_err() {
+                return CompatAnswer::Missing;
+            }
+        }
+        let Ok(body) = rx.recv_timeout(std::time::Duration::from_secs(120)) else {
+            return CompatAnswer::Missing;
+        };
+        let answer = if body["native"] == true {
+            CompatAnswer::Native
+        } else if let Some(file) = body["file"].as_str() {
+            let data = std::fs::read(file);
+            let _ = std::fs::remove_file(file);
+            let number = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.);
+            match data {
+                Ok(data) => crate::compat::override_raster(
+                    body["width"].as_u64().unwrap_or(0) as u32,
+                    body["height"].as_u64().unwrap_or(0) as u32,
+                    data,
+                    [number(&body["size"], 0), number(&body["size"], 1)],
+                    [number(&body["anchor"], 0), number(&body["anchor"], 1)],
+                ),
+                Err(_) => CompatAnswer::Missing,
+            }
+        } else {
+            CompatAnswer::Missing
+        };
+        // Only the frame being drawn is kept: an export never comes back.
+        let mut answered = self.answered.lock().unwrap();
+        answered.retain(|(_, _, t, _), _| *t == key.2);
+        answered.insert(key, answer.clone());
+        answer
+    }
+}
 /// Inherited-pipe admission. Exactly one renderer band per grant; never a
 /// whole-frame burst. Cancellation and parent EOF interrupt a deferred export.
 struct ChildGate(Mutex<std::sync::mpsc::Receiver<()>>);

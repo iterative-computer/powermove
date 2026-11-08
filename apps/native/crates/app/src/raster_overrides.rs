@@ -15,12 +15,20 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Batches asked of the realm and not answered, with the revision they are for.
+/// Who a batch's answers are for.
+enum Asker {
+    /// The viewer, at a document revision.
+    Viewer(u64, Vec<CompatNeed>),
+    /// An export frame, waiting on its job's reader thread.
+    Export(std::sync::mpsc::Sender<Vec<RasterAnswer>>),
+}
+/// Batches asked of the realm and not answered.
 #[derive(Default)]
 struct Batches {
     next: u64,
-    open: HashMap<u64, (u64, Vec<CompatNeed>)>,
+    open: HashMap<u64, Asker>,
 }
+type Realm = Arc<dyn Fn(u64, Value) + Send + Sync>;
 
 pub(crate) struct Overrides {
     store: Arc<CompatStore>,
@@ -28,6 +36,7 @@ pub(crate) struct Overrides {
     kernel: KernelHandle,
     project: String,
     batches: Arc<Mutex<Batches>>,
+    realm: Arc<Mutex<Option<Realm>>>,
 }
 
 impl Overrides {
@@ -38,6 +47,7 @@ impl Overrides {
             kernel,
             project,
             batches: Arc::default(),
+            realm: Arc::default(),
         }
     }
     pub(crate) fn hooks(&self) -> RasterHooks {
@@ -72,8 +82,13 @@ impl Overrides {
         });
         let (store, batches) = (self.store.clone(), self.batches.clone());
         let answers = Arc::new(move |batch: u64, answers: Vec<RasterAnswer>| {
-            let Some((revision, needs)) = batches.lock().unwrap().open.remove(&batch) else {
-                return;
+            let (revision, needs) = match batches.lock().unwrap().open.remove(&batch) {
+                Some(Asker::Viewer(revision, needs)) => (revision, needs),
+                Some(Asker::Export(reply)) => {
+                    let _ = reply.send(answers);
+                    return;
+                }
+                None => return,
             };
             let answered = needs
                 .into_iter()
@@ -99,9 +114,18 @@ impl Overrides {
             self.kernel.clone(),
             self.project.clone(),
         );
+        let export = self.export_answerer();
         let producing = Arc::new(move |on: bool| {
             let revision = kernel.published(&project).map_or(0, |p| p.revision());
             store.set_state(on, revision);
+            // Exports started while an override is registered ask this realm.
+            let store = store.clone();
+            pm_engine_service::jobs::set_compat_answerer(on.then(|| {
+                (
+                    Arc::new(move || store.producing_now()) as Arc<dyn Fn() -> bool + Send + Sync>,
+                    export.clone(),
+                )
+            }));
         });
         RasterHooks {
             base,
@@ -109,8 +133,45 @@ impl Overrides {
             producing,
         }
     }
+    /// An export frame's need: one layer asked of the realm, waited for on the
+    /// job's reader thread (never the main thread).
+    fn export_answerer(&self) -> pm_engine_service::jobs::CompatAnswerer {
+        let (batches, realm) = (self.batches.clone(), self.realm.clone());
+        Arc::new(move |composition, layer, seconds, scale| {
+            let realm = realm
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or("The project's window has no extensions running")?;
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut open = batches.lock().unwrap();
+            open.next += 1;
+            let batch = open.next;
+            open.open.insert(batch, Asker::Export(tx));
+            drop(open);
+            realm(
+                batch,
+                json!([{"composition": composition, "layer": layer,
+                    "seconds": seconds, "scale": scale}]),
+            );
+            let answers = rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .map_err(|_| "The extension did not draw the layer in time".to_owned())?;
+            Ok(match answers.into_iter().next() {
+                Some(RasterAnswer::Raster {
+                    width,
+                    height,
+                    straight_rgba,
+                    size,
+                    anchor,
+                }) => Some((width, height, straight_rgba, size, anchor)),
+                _ => None,
+            })
+        })
+    }
     /// The store's needs go to this window's realm, a batch at a time.
     pub(crate) fn connect(&self, realm: Arc<dyn Fn(u64, Value) + Send + Sync>) {
+        *self.realm.lock().unwrap() = Some(realm.clone());
         let batches = self.batches.clone();
         self.store.set_sink(Some(Arc::new(move |revision, needs: Vec<CompatNeed>| {
             let wire: Vec<Value> = needs
@@ -128,7 +189,7 @@ impl Overrides {
             let mut open = batches.lock().unwrap();
             open.next += 1;
             let batch = open.next;
-            open.open.insert(batch, (revision, needs));
+            open.open.insert(batch, Asker::Viewer(revision, needs));
             drop(open);
             realm(batch, Value::Array(wire));
         })));
