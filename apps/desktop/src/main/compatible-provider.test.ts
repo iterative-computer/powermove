@@ -445,3 +445,52 @@ describe('connecting the way people with API keys and local models work', () => 
     expect(await new CompatibleProvider(await temp(), fetcher).detectLocal()).toEqual([{ preset: 'lmstudio', baseUrl: 'http://localhost:1234/v1', models: 2 }]);
   });
 });
+
+it('delivers live direction after the current tool results and keeps working on the same run', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-compatible-steer-')); directories.push(directory);
+  const requests: any[] = [];
+  let provider!: CompatibleProvider;
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return Response.json({ data: [{ id: 'local' }] });
+    const body = JSON.parse(options.body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    requests.push(body);
+    if (requests.length === 1) {
+      // Direction arrives while the model is mid-run.
+      expect(provider.steer({ id: 'steer-run', prompt: 'Make it blue instead', images: [] })).toBe(true);
+      return streamed(event({ tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_project_state', arguments: '{}' } }] }, 'tool_calls'));
+    }
+    return streamed(event({ content: 'Done, in blue.' }, 'stop'));
+  }) as typeof fetch;
+  provider = new CompatibleProvider(directory, fetcher);
+  await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: false });
+  const result = await provider.run({ id: 'steer-run', mode: 'autonomous', access: 'editor', prompt: 'Make the title red', images: [], attachments: [] } as any, () => {},
+    async () => ({ runId: 'steer-run', callId: 'c1', ok: true, content: [{ type: 'text', text: 'state' }] }));
+  expect(result).toMatchObject({ ok: true });
+  expect(requests).toHaveLength(2);
+  // Original request, its tool batch and result, then the direction — in protocol order.
+  expect(requests[1].messages.map((message: any) => message.role)).toEqual(['system', 'user', 'assistant', 'tool', 'user']);
+  expect(requests[1].messages[1].content).toContain('Make the title red');
+  expect(requests[1].messages[4].content).toContain('Make it blue instead');
+  expect(provider.steer({ id: 'steer-run', prompt: 'After the run', images: [] })).toBe(false);
+});
+
+it('gives direction that arrives during the final answer another turn instead of dropping it', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-compatible-late-steer-')); directories.push(directory);
+  const requests: any[] = [];
+  let provider!: CompatibleProvider;
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return Response.json({ data: [{ id: 'local' }] });
+    const body = JSON.parse(options.body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    requests.push(body);
+    if (requests.length === 1) expect(provider.steer({ id: 'late-run', prompt: 'Also add a subtitle', images: [] })).toBe(true);
+    return streamed(event({ content: requests.length === 1 ? 'Title is red.' : 'Title is red and has a subtitle.' }, 'stop'));
+  }) as typeof fetch;
+  provider = new CompatibleProvider(directory, fetcher);
+  await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: false });
+  const result = await provider.run({ id: 'late-run', mode: 'autonomous', access: 'editor', prompt: 'Make the title red', images: [], attachments: [] } as any, () => {});
+  expect(requests).toHaveLength(2);
+  expect(requests[1].messages.at(-1).content).toContain('Also add a subtitle');
+  expect(JSON.parse((result as any).text).summary).toBe('Title is red and has a subtitle.');
+});

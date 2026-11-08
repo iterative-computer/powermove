@@ -277,6 +277,31 @@ describe('Claude runner', () => {
     await expect(result).resolves.toEqual({ ok: true, text: '{"message":"done"}', access: 'editor' });
   });
 
+  it('steers a live turn through stdin, and refuses once the turn has closed it', async () => {
+    const runner = new ClaudeRunner();
+    const child = fakeChild();
+    const result = runner.run(request({ id: 'claude-steer' }), {
+      userData: '/tmp/powermove-claude-steer', extensionsDir: '/tmp/powermove-extensions', apiPackFiles: async () => [],
+      binary: '/bin/claude', spawnProcess: () => child as never
+    });
+    await vi.waitFor(() => expect(child.written()).toContain('Return a greeting'));
+    expect(await runner.steer({ id: 'someone-else', prompt: 'Ignore', images: [] })).toBe(false);
+    expect(await runner.steer({ id: 'claude-steer', prompt: 'Make it warmer', images: [] })).toBe(true);
+    const messages = child.written().split('\n').filter(Boolean).map((text) => JSON.parse(text));
+    // The original prompt stays the first message; the direction joins the same session.
+    expect(messages.map((message) => message.type)).toEqual(['user', 'user']);
+    expect(messages[1].message.content[0].text).toBe('Make it warmer');
+
+    child.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '{"message":"hi"}', structured_output: { message: 'hi' } })}\n`);
+    await vi.waitFor(() => expect(child.stdin.writableEnded).toBe(true));
+    // Too late for this CLI: the caller falls back to a continuation run.
+    expect(await runner.steer({ id: 'claude-steer', prompt: 'Too late', images: [] })).toBe(false);
+    child.stdout.end();
+    child.emit('close', 0, null);
+    await expect(result).resolves.toEqual({ ok: true, text: '{"message":"hi"}', access: 'editor' });
+    expect(await runner.steer({ id: 'claude-steer', prompt: 'After the run', images: [] })).toBe(false);
+  });
+
   it('asks the person before a Project run leaves its sandbox, and passes their answer to the CLI', async () => {
     const userData = await mkdtemp(path.join(tmpdir(), 'claude-approval-'));
     try {

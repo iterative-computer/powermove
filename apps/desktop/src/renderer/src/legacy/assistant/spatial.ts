@@ -612,6 +612,8 @@ async function performThreadControl(args: any): Promise<any> {
     }
   }
   const previousRequest = session.activeRequest;
+  // A replaced or reconfigured run carries its interrupted request forward.
+  const request = continuedRequest(session, args.message, !!previousRequest);
   const token = session.requestToken = ++runToken;
   const controller = new window.AbortController();
   session.activeRequest = controller;
@@ -622,7 +624,7 @@ async function performThreadControl(args: any): Promise<any> {
     if (!AGENT_MODELS[args.provider as keyof typeof AGENT_MODELS].some(model => model.id === args.model)) AGENT_MODELS[args.provider as keyof typeof AGENT_MODELS].push({ id: args.model, label: args.model });
     S.provider = args.provider; S.model = args.model; S.reasoningEffort = args.reasoningEffort || modelEffort(args.provider, args.model, null) || 'medium';
   }
-  Object.assign(session, { provider: args.provider, model: args.model, reasoningEffort: args.reasoningEffort, access: args.access, requestText: args.message,
+  Object.assign(session, { provider: args.provider, model: args.model, reasoningEffort: args.reasoningEffort, access: args.access, requestText: request,
     requestAttachments: [], requestStartedAt: Date.now(), phase: 'working', activity: '', plan: null, panelRun: null, uiPlacement: null, codexRequestId: null });
   updateSteps(['Understand the request and project', 'Carry out the work', 'Review the result'], 0, session);
   let started!: (id: string) => void;
@@ -632,9 +634,9 @@ async function performThreadControl(args: any): Promise<any> {
   const focus = panelFocusContext(thread.scope, PM.WS?.current, PM.PANELS || {});
   const job = (async () => {
     try {
-      if (session.projectId === APP_AGENT_PROJECT_ID) await runAppRequest({ session, request: args.message, token, controller, threadId: thread.id });
-      else if (args.access === 'editor') await runEditorRequest({ session, request: args.message, token, controller, focus, context: null, threadId: thread.id });
-      else await runAutonomousRequest({ session, request: args.message, token, controller, access: args.access, focus, context: null, threadId: thread.id });
+      if (session.projectId === APP_AGENT_PROJECT_ID) await runAppRequest({ session, request, token, controller, threadId: thread.id });
+      else if (args.access === 'editor') await runEditorRequest({ session, request, token, controller, focus, context: null, threadId: thread.id });
+      else await runAutonomousRequest({ session, request, token, controller, access: args.access, focus, context: null, threadId: thread.id });
       if (token === session.requestToken) thread.lastRunStatus = 'completed';
     } catch (error: any) {
       if (token !== session.requestToken) return;
@@ -2683,6 +2685,25 @@ async function runEditorRequest({ session, request, token, controller, focus, co
 
 }
 
+/* A provider without live steering (Codex in Project access) is stopped and
+   started again. The new run must carry the interrupted request as well,
+   or the agent reads the new direction as the whole task and drops the work
+   in progress. The original and every direction since are kept per session. */
+const steeredRequests = new WeakMap<object, { original: string; directions: string[] }>();
+function continuedRequest(session: any, direction: string, replacing: boolean): string {
+  if (!replacing || !session.requestText) { steeredRequests.delete(session); return direction; }
+  const prior = steeredRequests.get(session) ?? { original: session.requestText, directions: [] };
+  const next = { original: prior.original, directions: [...prior.directions, direction] };
+  steeredRequests.set(session, next);
+  return `ORIGINAL REQUEST (still in progress)
+${next.original}
+
+NEW DIRECTION${next.directions.length > 1 ? ' (oldest first; the latest wins where they conflict)' : ''}
+${next.directions.join('\n\n')}
+
+The run working on the original request was stopped only so you could receive this direction. Its completed edits were kept. Re-read the live project state, keep the work already done, and finish the original request with the new direction applied.`;
+}
+
 async function sendRequest(input: any) {
   const typedRequest: any = input.value.trim();
   ensureThreadProject();
@@ -2692,7 +2713,7 @@ async function sendRequest(input: any) {
   session.provider = S.provider; session.model = S.model;
   session.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort);
   // The conversation keeps what was typed; the agent gets any built-in request in full.
-  const request: any = expandAgentRequest(typedRequest) || 'Review the attached files and make the relevant editable change.';
+  const typedTask: any = expandAgentRequest(typedRequest) || 'Review the attached files and make the relevant editable change.';
   const focus = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {});
   const context = S.context ? JSON.parse(JSON.stringify(S.context)) : null;
   const steering: any = session.phase === 'working';
@@ -2735,7 +2756,7 @@ async function sendRequest(input: any) {
       .filter(isAgentImageAttachment).map((item: any) => item.dataUrl).slice(0, 6);
     const steeringToken = session.requestToken;
     const accepted: any = await PM.CodexBridge.steer(
-      `${request}\n\nThis is new direction for the active run. Incorporate it into the same final editable result.\n\nATTACHED FILES\n${JSON.stringify(attachmentContext)}`,
+      `NEW DIRECTION FROM THE USER\n${typedTask}\n\nKeep working on the request you were already doing; do not drop it or start over. Apply this direction to the same final result.${attachmentContext.length ? `\n\nATTACHED FILES\n${JSON.stringify(attachmentContext)}` : ''}`,
       steeringImages,
       session.codexRequestId,
     );
@@ -2747,6 +2768,7 @@ async function sendRequest(input: any) {
     if (session.conversation.at(-1) === steeringMessage) session.conversation.pop();
     S.attachments.unshift(...steeringAttachments);
   }
+  const request: any = continuedRequest(session, typedTask, steering);
   const previousRequest: any = session.activeRequest;
   const token: any = (session.requestToken = ++runToken);
   const controller: any = new window.AbortController();

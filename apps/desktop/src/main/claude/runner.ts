@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { CodexAnswerRequest, CodexQuestion, CodexRunRequest, CodexRunResult, CodexTraceEvent } from '../../shared/ipc';
+import type { CodexAnswerRequest, CodexQuestion, CodexRunRequest, CodexRunResult, CodexSteerRequest, CodexTraceEvent } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
 import { collectArtifacts } from '../codex/artifacts';
 import { ExtensionPublicationConflictError, publishExtensionChanges, withStageSnapshot } from '../codex/change-history';
@@ -123,6 +124,8 @@ interface ActiveRun {
   killTimer: NodeJS.Timeout | null;
   userData: string;
   sessionWrite: Promise<void>;
+  /** Images sent with steering, removed when the run ends. */
+  steerDirectory: string | null;
 }
 
 interface Attempt {
@@ -206,7 +209,8 @@ export class ClaudeRunner {
       // Only Project runs ask; Edit runs and Full access never prompt.
       requestApproval: req.mode === 'autonomous' && req.access === 'project' ? options.requestApproval ?? null : null,
       layout: null, killTimer: null,
-      userData: options.userData, sessionWrite: Promise.resolve()
+      userData: options.userData, sessionWrite: Promise.resolve(),
+      steerDirectory: null
     };
     this.active.set(req.id, state);
     let editorDirectory: string | null = null;
@@ -358,7 +362,31 @@ export class ClaudeRunner {
       this.cancelled.delete(req.id);
       if (state.layout) await removeEmptyRunDirectory(state.layout);
       if (editorDirectory) await rm(editorDirectory, { recursive: true, force: true });
+      if (state.steerDirectory) await rm(state.steerDirectory, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /* Live direction for a running turn. Claude Code reads a stdin user message
+     at its next step and keeps working on the original request with it. One
+     written as the turn wraps up gets a turn of its own: the CLI still reads
+     it after stdin closes. False once stdin is closed, so the caller falls back. */
+  async steer(req: CodexSteerRequest): Promise<boolean> {
+    const state = this.active.get(req.id);
+    const stdin = state?.child?.stdin;
+    if (!state || this.cancelled.has(req.id) || !stdin || stdin.destroyed || stdin.writableEnded) return false;
+    const imagePaths: string[] = [];
+    if (req.images.length) {
+      state.steerDirectory ??= await mkdtemp(path.join(tmpdir(), 'powermove-claude-steer-'));
+      for (const image of req.images) {
+        const file = path.join(state.steerDirectory, `steer-${randomUUID()}.${imageExtension(image)}`);
+        await writeFile(file, image);
+        imagePaths.push(file);
+      }
+    }
+    // The run may have finished while images were written.
+    if (this.active.get(req.id) !== state || state.child?.stdin !== stdin || stdin.destroyed || stdin.writableEnded) return false;
+    stdin.write(claudeUserMessage(req.prompt, imagePaths));
+    return true;
   }
 
   async cancel(id: string): Promise<boolean> {
