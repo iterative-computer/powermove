@@ -145,3 +145,4 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The window shows a project as soon as the kernel opens it; its media catalog follows from the background refresh.
 - MCP render_frames draws proxy-only media from its proxy, as the viewer does; export_video still refuses it (plan §6).
 - A journal whose document equals the saved file and whose undo steps are the saved ones regrouped (an agent's finish_session squash after save_project), with nothing to redo, retires silently and keeps the newer grouping; a cleared history or redo-only work still asks.
+- While an open waits on a person's recovery choice, MCP tools that need the project say which project and that nothing changed; list_projects and the Store tools still run. The choice stays the person's.

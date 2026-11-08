@@ -997,6 +997,7 @@ impl Controller {
                                 v.errors.borrow_mut().push("Project", &prompt.alert.message);
                             }
                             v.recovery_pending = true;
+                            v.mcp.awaiting_recovery(Some(name.clone()));
                             crate::surfaces::recovery_macos::sheet(
                                 &prompt,
                                 &v.host.borrow().window,
@@ -1006,6 +1007,7 @@ impl Controller {
                             Ok(rx) => rx.recv().await.ok(),
                             Err(_) => None,
                         };
+                        let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
                         let call = response
                             .and_then(|r| r.action)
                             .and_then(|action| recovery.decision(action));

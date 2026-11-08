@@ -20,6 +20,8 @@ pub struct Host {
     pub profile: PathBuf,
     current: Mutex<Option<SessionHandle>>,
     operations: Arc<AtomicBool>,
+    /// The project whose open waits on a person's recovery choice.
+    deciding: Mutex<Option<String>>,
     pub closing: AtomicBool,
     changed: Mutex<Vec<async_channel::Sender<()>>>,
 }
@@ -39,6 +41,7 @@ impl Host {
                 profile,
                 current: Mutex::new(None),
                 operations: Arc::new(AtomicBool::new(false)),
+                deciding: Mutex::new(None),
                 closing: AtomicBool::new(false),
                 changed: Mutex::new(vec![changed]),
             }),
@@ -50,6 +53,23 @@ impl Host {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
             .map(|_| Operation(self.operations.clone()))
+    }
+    /// While `project`'s open waits on a recovery choice in the window, tools
+    /// say so instead of reporting a bare operation in progress.
+    pub fn awaiting_recovery(&self, project: Option<String>) {
+        *self.deciding.lock().unwrap() = project;
+    }
+    /// The reply to a tool the open's fence turned away.
+    pub fn fenced(&self) -> Error {
+        match self.deciding.lock().unwrap().as_deref() {
+            Some(project) => Error::conflict(format!(
+                "“{project}” has unsaved work from a session that ended unexpectedly. \
+                 Powermove is waiting for someone to choose what to do with it in its \
+                 window, and nothing has changed yet. list_projects and the Store tools \
+                 still work. Ask them to choose, then try again."
+            )),
+            None => Error::conflict("A project operation is in progress. Inspect and retry."),
+        }
     }
     pub fn current(&self) -> Option<SessionHandle> {
         self.current.lock().unwrap().clone()
