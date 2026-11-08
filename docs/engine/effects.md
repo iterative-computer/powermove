@@ -224,6 +224,7 @@ effects are routed as before (`Feature::Effects`, `Feature::Transition`,
 | Effect id the document marks `missing` | skipped (fast path) | skipped (fast path) |
 | Effect id marked missing in the set (removal, omitted from a full update, `missing` of an embedded set) | `PM.FX[type]` undefined: skipped, layer buffer path | same |
 | Effect id unknown (no snapshot, not missing) | n/a | routed (`Feature::Definition`); contract 10: `pm-cli` fails only here |
+| Effect id with no installed provider (native app) | n/a | viewer frames and agent stills: bypassed on its layer (`Renderer::set_isolate_layers` / `set_bypass_missing_effects`), named in the status line; exports refuse, naming it |
 | Program WebGL refuses | skipped | skipped, `ShaderCompile` reported |
 | Program WebGL draws, engine cannot translate | drawn | drawn by the fallback runner with its textures (viewer: the window's runner; jobs: a window's runner through the host); `NotHeadlessRenderable` reported; `pm-cli`: named failure, exit 4 |
 | Program the fallback runner refuses (WebGL refuses it too) | skipped | skipped, `ShaderCompile` reported |

@@ -91,6 +91,7 @@ run of the original app costs one capture at most. Conflicts appear in Window â–
 | Project names stay exactly as they were | N3; the copy suffix was a beta artefact. Copy ids stay private. |
 | Merge settings before attach, media after | The library opens without waiting for media; nothing races the kernel's writer. |
 | Unchanged source skips capture by metadata stamp | A launch must not hash gigabytes. |
+| The engine's `shader-cache/` doesn't make a profile un-fresh | The engine starts before the gate and caches compiled shaders there; derived data, never work. |
 | Files in `Fresh`-started libraries stay out of migration | A library with no `migration.json` was made here; a copy would overwrite that work. |
 
 ## Verification
