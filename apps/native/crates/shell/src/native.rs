@@ -287,6 +287,8 @@ pub fn popover_frame(w: &gpui::Window, t: &Tokens) {
     }
     content.addSubview_positioned_relativeTo(&mat, NSWindowOrderingMode::Below, Some(&gpui));
     window.invalidateShadow();
+    // The half-bounce entrance (plan §3.10), as the palette and field menu.
+    animate(&window, true, t, &mut None);
 }
 pub fn contents(v: &NSView) -> Retained<NSView> {
     unsafe {
@@ -2504,6 +2506,9 @@ impl Popup {
             "Search fields…"
         })));
         search.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+        // The field is the menu's only input and always focused: no ring (owner rule:
+        // no accent focus rings), as Spotlight's field.
+        search.setFocusRingType(NSFocusRingType::None);
         search.setAccessibilityLabel(Some(&NSString::from_str("Search")));
         body.addSubview(&search);
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
