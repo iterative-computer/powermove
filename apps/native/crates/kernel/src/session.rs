@@ -268,6 +268,11 @@ fn with_identity(mut v: Value, id: &str, name: Option<&str>) -> Value {
     }
     v
 }
+/// `recovered` holds the saved steps merged into fewer (a squash after the
+/// save), with nothing to redo. A cleared history is still work to recover.
+fn regrouped(recovered: &crate::History, saved: &crate::History) -> bool {
+    !recovered.can_redo() && recovered.applied() > 0 && recovered.applied() <= saved.applied()
+}
 /// The opened project's canonical document (the base recovery replays onto).
 /// A file's is shared, not copied.
 fn source_document(source: &OpenSource) -> pm_model::Document {
@@ -1193,13 +1198,23 @@ impl Kernel {
                 && !r.truncated
                 && r.document.canonical_hash().as_deref() == Some(&base)
                 && let Some((history, workspace)) = &saved
-                && r.history.saves_as(history)
+                && (r.history.saves_as(history) || regrouped(&r.history, history))
             {
-                // The base already holds this document and undo history, so
-                // there is nothing to decide. A panel layout changed since is
-                // kept without asking. Old sessions stay on disk.
+                // The base already holds this document and its undo steps, so
+                // there is nothing to decide. A newer grouping of those steps
+                // (an agent's finished session) and panel layout are kept
+                // without asking. Old sessions stay on disk.
                 if r.workspace != *workspace {
                     set_workspace(&mut source, r.workspace.clone());
+                }
+                if !r.history.saves_as(history) {
+                    match &mut source {
+                        OpenSource::File(opened) => opened.history = Some(r.history.clone()),
+                        OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
+                            lib.history = Some(r.history.snapshot().to_saved_packed())
+                        }
+                        _ => {}
+                    }
                 }
                 recovered = Recovery::Nothing;
             }

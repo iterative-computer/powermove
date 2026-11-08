@@ -901,3 +901,32 @@ fn clean_close_reopen_needs_no_recovery_but_history_only_work_still_prompts() {
     k.shell(ShellCall::DeferClose(s)).unwrap();
     prepare(&mut k, &root.0);
 }
+#[test]
+fn an_agent_squash_after_its_save_reopens_without_asking() {
+    let root = common::TempDir::new("squash-after-save");
+    {
+        let mut k = kernel(&root.0);
+        let s = new(&mut k);
+        let agent = caller(7);
+        let m = mark(&mut k, agent);
+        edit(&mut k, agent, 20.);
+        edit(&mut k, agent, 30.);
+        k.shell(ShellCall::Save(s)).unwrap();
+        // finish_session commit:true after save_project regroups the steps.
+        assert!(!matches!(squash(&mut k, agent, m), Reply::Throw(_)));
+        k.durability_barrier().unwrap();
+    }
+    let mut k = kernel(&root.0);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "p".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "p".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    assert!(matches!(reply, ShellReply::Opened { .. }), "{reply:?}");
+    assert_eq!(k.project("p").unwrap().store().history().applied(), 1);
+}
