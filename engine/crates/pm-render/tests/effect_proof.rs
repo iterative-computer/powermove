@@ -151,11 +151,9 @@ fn prove_effect_chains(
 }
 
 fn main() {
-    let captures = corpus_dirs();
-    if captures.is_empty() {
-        eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
+    let Some(captures) = gate_captures("effect_proof", corpus_dirs()) else {
         return;
-    }
+    };
     let only = std::env::var("PM_RENDER_ONLY").ok();
     let mut rows = std::env::var_os("PM_L6_EFFECT_PROOF")
         .map(|path| std::fs::File::create(path).expect("effect proof output"));
