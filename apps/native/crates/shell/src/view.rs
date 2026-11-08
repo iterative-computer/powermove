@@ -45,6 +45,8 @@ pub struct Editor {
     focus: FocusHandle,
     panel_focus: HashMap<String, FocusHandle>,
     panel_order: Vec<String>,
+    /// The panel Ctrl-F6 moved to. Only it shows a focus ring, until a press.
+    ringed_panel: Option<String>,
     workspace_focus: FocusHandle,
     pub status: String,
     store: LayoutStore,
@@ -106,6 +108,7 @@ impl Editor {
             gesture: None,
             focus: cx.focus_handle(),
             panel_focus: HashMap::new(),
+            ringed_panel: None,
             panel_order: vec![],
             workspace_focus: cx.focus_handle().tab_stop(true).tab_index(2000),
             status,
@@ -455,6 +458,7 @@ impl Editor {
                         }
                     });
                     window.focus(&self.panel_focus[&self.panel_order[index]], cx);
+                    self.ringed_panel = Some(self.panel_order[index].clone());
                 }
             } else {
                 let first = self.panel_order.first().map(|id| &self.panel_focus[id]);
@@ -1140,6 +1144,11 @@ impl Render for Editor {
                     }
                 }
             })
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this.ringed_panel.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     if let Some(g) = this.gesture.take() {
@@ -1206,7 +1215,10 @@ impl Render for Editor {
                 .tab_group()
                 .tab_index(self.panel_order.iter().position(|v| v == &id).unwrap_or(0) as isize)
                 .track_focus(&self.panel_focus[&id])
-                .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
+                // Keyboard panel focus only (Ctrl-F6): a click never rings a panel.
+                .when(self.ringed_panel.as_deref() == Some(id.as_str()), |p| {
+                    p.focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
+                })
                 .accessibility_id(format!("shell.panel.{id}"))
                 .aria_label(layout::panel_title(&id).to_string())
                 .rounded(px(m.panel_radius))
@@ -1740,6 +1752,11 @@ mod keyboard_tests {
                 for id in order.iter().chain(order.iter().take(1)) {
                     v.command(command("shellPanelNext"), w, cx);
                     assert!(v.panel_focus[id].is_focused(w), "{id}");
+                    assert_eq!(
+                        v.ringed_panel.as_deref(),
+                        Some(id.as_str()),
+                        "Ctrl-F6 rings it"
+                    );
                 }
                 v.command(command("shellPanelPrevious"), w, cx);
                 assert!(v.panel_focus[order.last().unwrap()].is_focused(w));
