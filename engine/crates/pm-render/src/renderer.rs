@@ -675,8 +675,7 @@ impl Renderer {
             matches!(&failure.scope, ErrorScope::Definition { definition } if accepted.contains(definition))
         });
         if !pinned.is_empty() {
-            let messages: Vec<_> = pinned.iter().map(|f| f.message.as_str()).collect();
-            return Err(messages.join("; "));
+            return Err(pinned_failure(&pinned));
         }
         self.effects.versioned_builtins = true;
         self.effects.file_app_version = document.saving_app_version().map(str::to_owned);
@@ -2588,6 +2587,38 @@ fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError>
         })
 }
 
+/// Why the pinned built-in programs can't draw: one sentence a person can
+/// read, then a blank line and every program's own message.
+fn pinned_failure(pinned: &[pm_protocol::error::EngineError]) -> String {
+    let process = pm_glsl::FailureStage::CompilerProcess.name();
+    let summary = if pinned.iter().any(|f| f.message.contains(process)) {
+        "Effects can't draw: the shader compiler (pm-glsl-compiler) didn't start.".to_owned()
+    } else {
+        let mut names: Vec<String> = Vec::new();
+        for f in pinned {
+            if let pm_protocol::error::ErrorScope::Definition { definition } = &f.scope {
+                let id = definition.as_str();
+                let id = id.strip_prefix("pm.history.main.").unwrap_or(id);
+                let id = id
+                    .rsplit_once('.')
+                    .filter(|(_, v)| v.parse::<u32>().is_ok())
+                    .map_or(id, |(id, _)| id);
+                if !names.iter().any(|n| n == id) {
+                    names.push(id.to_owned());
+                }
+            }
+        }
+        let more = match names.len().saturating_sub(3) {
+            0 => String::new(),
+            n => format!(" and {n} more"),
+        };
+        names.truncate(3);
+        format!("Built-in effects can't draw: {}{more}.", names.join(", "))
+    };
+    let details: Vec<_> = pinned.iter().map(|f| f.message.as_str()).collect();
+    format!("{summary}\n\n{}", details.join("\n"))
+}
+
 /// Moves layer-scoped refusals into per-layer failures.
 fn layer_failures(unsupported: &mut Vec<Unsupported>, failures: &mut Vec<LayerFailure>) {
     unsupported.retain(|u| {
@@ -2649,6 +2680,47 @@ mod depth_device_tests {
         assert_eq!(
             available_precision(Precision::Float16, false),
             Precision::Float16
+        );
+    }
+}
+
+#[cfg(test)]
+mod pinned_failure_tests {
+    use pm_protocol::{
+        common::DefinitionId,
+        error::{EngineError, ErrorCode, ErrorScope},
+    };
+    fn failure(id: &str, message: &str) -> EngineError {
+        EngineError::new(
+            ErrorCode::NotHeadlessRenderable,
+            ErrorScope::Definition {
+                definition: DefinitionId::from(id),
+            },
+            message,
+        )
+    }
+    #[test]
+    fn the_status_reads_as_one_sentence_with_every_message_after_it() {
+        let missing = super::pinned_failure(&[failure(
+            "pm.history.main.blur.2",
+            "The shader of pm.history.main.blur.2 compiles in WebGL but not in the native engine's pipeline (compiler-process: cannot start pm-glsl-compiler).",
+        )]);
+        let (first, rest) = missing.split_once("\n\n").unwrap();
+        assert_eq!(
+            first,
+            "Effects can't draw: the shader compiler (pm-glsl-compiler) didn't start."
+        );
+        assert!(rest.contains("pm.history.main.blur.2"));
+        let named = super::pinned_failure(&[
+            failure("pm.history.main.blur.2", "a (naga-msl: x)."),
+            failure("blur", "b (naga-msl: x)."),
+            failure("crossfade", "c (naga-msl: x)."),
+            failure("wipe", "d (naga-msl: x)."),
+            failure("glow", "e (naga-msl: x)."),
+        ]);
+        assert!(
+            named.starts_with("Built-in effects can't draw: blur, crossfade, wipe and 1 more.\n\n"),
+            "{named}"
         );
     }
 }

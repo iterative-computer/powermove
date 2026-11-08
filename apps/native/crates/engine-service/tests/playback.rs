@@ -420,7 +420,8 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
 }
 
 /// An extension's effect, given by the resource snapshot the compat runtime
-/// publishes, renders natively; without the snapshot the layer is reported.
+/// publishes, renders natively; without the snapshot the layer draws without
+/// it and the effect is reported as not installed.
 #[test]
 fn extension_effects_from_the_resource_snapshot_render_natively() {
     let tinted = snapshot(&format!(
@@ -446,8 +447,13 @@ fn extension_effects_from_the_resource_snapshot_render_natively() {
     };
     let missing = settled(&v, "without the extension");
     assert!(
-        missing.layer_failures.iter().any(|f| f.layer == "top") || missing.error.is_some(),
-        "an unknown effect is reported, never skipped: {missing:?}"
+        missing
+            .missing_effects
+            .iter()
+            .any(|m| m.effect == "ext.invert" && m.layers == 1)
+            && missing.layer_failures.is_empty()
+            && missing.error.is_none(),
+        "an uninstalled effect is bypassed and reported: {missing:?}"
     );
     let mut invert = pm_render::all_builtin_definitions()
         .definitions
