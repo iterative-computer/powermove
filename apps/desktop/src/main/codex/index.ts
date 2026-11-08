@@ -374,6 +374,10 @@ export function registerCodexIpc(
   appServerRunner: CodexAppServerRunner = new CodexAppServerRunner()
 ): void {
   const compatible = new CompatibleProvider(ctx.userData);
+  // Each transport owns its own runs; only the one running this id accepts.
+  // `codex exec` cannot take input mid-run, so Codex Project runs fall back.
+  const steerProvider = async (request: CodexSteerRequest): Promise<boolean> =>
+    await appServerRunner.steer(request) || await claudeRunner.steer(request) || compatible.steer(request);
   const approvals = new AgentApprovals();
   const runner = new CodexRunner();
   const claudeRunner = new ClaudeRunner();
@@ -390,7 +394,7 @@ export function registerCodexIpc(
     directory: path.join(ctx.userData, 'Agent Tasks'),
     providers: () => orchestrationProviders({ chatgpt: account, claude: claudeAccount, compatible }),
     cancel: cancelProvider,
-    steer: request => appServerRunner.steer(request),
+    steer: steerProvider,
     answer: request => approvals.answer(request) || appServerRunner.answer(request) || claudeRunner.answer(request),
     threadControl: async (request, tool, args) => {
       const session = rootToolSessions.get(request.id);
@@ -742,7 +746,7 @@ export function registerCodexIpc(
     requireTrusted(event, ctx);
     const req = requireSteerRequest(rawRequest);
     if (owners.get(req.id) !== event.sender) return { accepted: false };
-    return { accepted: await appServerRunner.steer(req) };
+    return { accepted: await steerProvider(req) };
   });
 
   ipcMain.handle(IPC.codexAnswer, async (event, rawRequest: unknown) => {

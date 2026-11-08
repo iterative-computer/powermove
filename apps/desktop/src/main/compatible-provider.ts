@@ -2,7 +2,7 @@ import { safeStorage } from 'electron';
 import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { COMPATIBLE_PRESETS, DEFAULT_COMPATIBLE_PROVIDER, isLocalAddress, presetFor, providerUrl, type CompatibleLocalServer, type CompatibleModelInfo, type CompatibleModelList, type CompatibleProviderConfig, type CompatibleProviderInput } from '../shared/compatible-provider';
-import type { CodexRunRequest, CodexRunResult, CodexTraceEvent, AgentToolResponseEvent } from '../shared/ipc';
+import type { CodexRunRequest, CodexRunResult, CodexSteerRequest, CodexTraceEvent, AgentToolResponseEvent } from '../shared/ipc';
 import { OUTSIDE_SANDBOX_TOOL, OUTSIDE_SANDBOX_TOOL_NAME, POWERMOVE_AGENT_TOOLS, POWERMOVE_APP_AGENT_TOOLS, POWERMOVE_LIVE_INSPECTION_TOOLS } from './agent-tools/spec';
 import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '../shared/effect-authoring';
 import { AGENT_RESPONSE_STYLE } from '../shared/response-style';
@@ -80,6 +80,10 @@ function modelToolResult(result: AgentToolResponseEvent): string {
 
 export class CompatibleProvider {
   private runs = new Map<string, AbortController>();
+  /** Live direction waiting for the next model request, per running run.
+   * Null once the run is finishing: a later steer is refused so the caller
+   * can fall back instead of losing it. */
+  private steering = new Map<string, CodexSteerRequest[] | null>();
   constructor(private directory: string, private request: typeof fetch = fetch) {}
   private get file() { return path.join(this.directory, 'agent-provider.json'); }
   private async read(): Promise<Saved> {
@@ -264,12 +268,30 @@ export class CompatibleProvider {
     return found.filter((server): server is CompatibleLocalServer => server !== null);
   }
   cancel(id: string): void { this.runs.get(id)?.abort(); }
+
+  /** Queues new direction; the model reads it on its next request, after any tool results. */
+  steer(req: CodexSteerRequest): boolean {
+    const queue = this.steering.get(req.id);
+    if (!queue || !this.runs.has(req.id)) return false;
+    queue.push(req);
+    return true;
+  }
   cancelAll(): void { for (const run of this.runs.values()) run.abort(); }
   async run(req: CodexRunRequest, onTrace: (trace: CodexTraceEvent) => void,
     callTool?: (name: string, args: Record<string, unknown>) => Promise<AgentToolResponseEvent>,
     options?: CompatibleRunOptions): Promise<CodexRunResult> {
     if (this.runs.has(req.id)) return { ok: false, cancelled: false, error: 'This run is already active.' };
     const controller = new AbortController(); this.runs.set(req.id, controller);
+    const steering: CodexSteerRequest[] = []; this.steering.set(req.id, steering);
+    /* Before the run ends, claim it so no steer arrives too late to be read.
+       False when direction is already waiting: the model must see it first. */
+    const finishing = (): boolean => {
+      if (steering.length) return false;
+      this.steering.set(req.id, null);
+      return true;
+    };
+    // A finish that fails sends the model back to work, so it can be steered again.
+    const reopen = (): void => { if (this.runs.get(req.id) === controller) this.steering.set(req.id, steering); };
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(60 * 60_000)]);
     let workspace: CompatibleWorkspace | undefined;
     let finished = false;
@@ -310,6 +332,13 @@ export class CompatibleProvider {
       const messages: any[] = [{ role: 'system', content: instructions + (options?.additionalInstructions ? `\n\n${options.additionalInstructions}` : '') }, { role: 'user', content: config.vision ? content : content.map(item => item.text).join('\n\n') }];
       for (let turn = 0; turn < 160; turn++) {
         signal.throwIfAborted();
+        // Tool results must directly follow their assistant batch, so new
+        // direction joins the conversation only before the next request.
+        for (const direction of steering.splice(0)) {
+          const text = `NEW DIRECTION FROM THE USER\n${direction.prompt}\n\nKeep working on the original request; apply this direction to it.`;
+          const images = config.vision ? direction.images.map(bytes => ({ type: 'image_url', image_url: { url: `data:image/${bytes[0] === 0xff ? 'jpeg' : 'png'};base64,${Buffer.from(bytes).toString('base64')}` } })) : [];
+          messages.push({ role: 'user', content: images.length ? [{ type: 'text', text }, ...images] : text });
+        }
         const response = await this.send(providerUrl(config.baseUrl) + '/chat/completions', {
           method: 'POST', redirect: 'error', headers: this.headers(key), signal,
           body: JSON.stringify({ model, messages, stream: true,
@@ -324,6 +353,8 @@ export class CompatibleProvider {
         messages.push({ role: 'assistant', ...message });
         if (!message.tool_calls?.length) {
           if (!message.content.trim()) throw new Error('The model returned an empty response. Try again or choose another model.');
+          // Direction that arrived during the final answer gets another turn.
+          if (!finishing()) continue;
           const result = { summary: message.content, commands: [], artifacts: [], extensions: [], notes: [], externalActions: [] };
           if (workspace) {
             // A prose-only reply may finish an inspection. Staged file changes
@@ -334,6 +365,7 @@ export class CompatibleProvider {
               return completed;
             }
             catch (error) {
+              reopen();
               messages.push({ role: 'user', content: `The run could not finish: ${String(error)}. Inspect the staged files and use complete_task with all extension changes.` });
               continue;
             }
@@ -369,12 +401,14 @@ export class CompatibleProvider {
                 if (tool.function.name === 'complete_task') {
                   // Completing a batch before its other calls run loses work.
                   if (message.tool_calls.length !== 1) throw new Error('Call complete_task by itself after all other tools finish.');
+                  if (!finishing()) throw new Error('The user sent new direction before this result was saved. Apply it, then call complete_task again.');
                   completed = await workspace.finish(args, signal);
                   finished = true;
                   result = { runId: req.id, callId: tool.id, ok: true, content: [{ type: 'text', text: 'Result saved. Powermove will check requested media imports and extensions, then continue any required live verification.' }] };
                 } else result = { runId: req.id, callId: tool.id, ok: true, content: await workspace.call(tool.function.name, args, signal) };
               } else result = await callTool!(tool.function.name, args);
             } catch (error) {
+              if (!completed) reopen();
               result = { runId: req.id, callId: tool.id, ok: false, content: [], error: error instanceof Error ? error.message : 'Tool failed' };
             }
           }
@@ -408,7 +442,7 @@ export class CompatibleProvider {
         if (signal.aborted && !finished) await preserveCancelledRun(workspace.layout).catch(() => undefined);
         else await discardExtensionStage(workspace.layout).catch(() => undefined);
       }
-      if (this.runs.get(req.id) === controller) this.runs.delete(req.id);
+      if (this.runs.get(req.id) === controller) { this.runs.delete(req.id); this.steering.delete(req.id); }
     }
   }
 }
