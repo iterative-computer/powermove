@@ -75,6 +75,8 @@ export interface Section {
   action?: SectionAction;
   animators?: { id: string; name: string }[];
   presets?: AnimatorPreset[];
+  /** Masks: a heading row with Remove, then that mask's rows. */
+  masks?: { id: string; name: string; rows: Row[] }[];
 }
 export interface InspectorSnapshot {
   target: Target;
@@ -108,6 +110,7 @@ export type Intent =
   | { type: "drop-effect"; effect: Json; target: string }
   | { type: "add-animator"; preset: string }
   | { type: "remove-animator"; animator: string }
+  | { type: "remove-mask"; mask: string }
   | { type: "set-value"; row: string; value: Json };
 export type ModelOperation = Extract<
   HostOperation,
@@ -147,6 +150,13 @@ export interface NativeServices {
 }
 export interface ReadoutClock {
   schedule(callback: () => void): () => void;
+}
+/** A section's own rows and its masks' rows. */
+export function sectionRows(section: Section): Row[] {
+  return [
+    ...section.rows,
+    ...(section.masks ?? []).flatMap((mask) => mask.rows),
+  ];
 }
 export function rowBindings(row: Row): Binding[] {
   const fields = "axes" in row.control ? row.control.axes : [row.control];

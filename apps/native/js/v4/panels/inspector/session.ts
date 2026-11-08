@@ -9,7 +9,7 @@ import type {
   ReadoutClock,
   Row,
 } from "./contracts";
-import { rowBindings } from "./contracts";
+import { rowBindings, sectionRows } from "./contracts";
 
 /** Worker-owned lifecycle. Only acknowledged host bindings are usable. */
 export class InspectorSession {
@@ -106,7 +106,7 @@ export class InspectorSession {
       const wanted = new Map<string, Binding>();
       for (const section of this.snapshot.sections) {
         if (section.collapsed) continue;
-        for (const row of section.rows) {
+        for (const row of sectionRows(section)) {
           for (const binding of rowBindings(row)) {
             const duplicate = wanted.get(binding.handle);
             if (
@@ -182,7 +182,7 @@ export class InspectorSession {
   row(id: string): Row | undefined {
     for (const section of this.snapshot.sections) {
       if (!section.collapsed) {
-        const row = section.rows.find((row) => row.id === id);
+        const row = sectionRows(section).find((row) => row.id === id);
         if (row) return row;
       }
     }

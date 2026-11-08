@@ -322,6 +322,11 @@ impl Properties {
                     .collect::<Vec<_>>();
                 sections.push(json!({"id":"animators","title":"Text Animators","collapsed":self.collapsed.get("animators").copied().unwrap_or(false),"rows":[],"action":"animator","animators":animators,"presets":presets}));
             }
+            let kind = target["first"]["type"].as_str().unwrap_or("").to_owned();
+            if !matches!(kind.as_str(), "audio" | "camera") {
+                let masks = self.masks(model, &layer, time)?;
+                sections.push(json!({"id":"masks","title":"Masks","collapsed":self.collapsed.get("masks").copied().unwrap_or(false),"rows":[],"action":"mask","masks":masks}));
+            }
             if !layer_rows.is_empty() {
                 let mut section = json!({"id":"layer","title":"Layer","collapsed":self.collapsed.get("layer").copied().unwrap_or(false),"rows":layer_rows});
                 if target["first"]["type"] == "precomp" {
@@ -350,6 +355,84 @@ impl Properties {
             );
         }
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
+    }
+    /// Each mask's rows (MasksSection.svelte): Enabled, Shape, Mode and its
+    /// animatable box and feather.
+    fn masks(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        let stored = model.layer(layer).map_err(|e| e.to_string())?;
+        let masks = stored
+            .get("masks")
+            .and_then(pm_model::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let locked = !model.editable(layer);
+        let mut out = vec![];
+        for (index, mask) in masks.iter().enumerate() {
+            let Some(mid) = mask.get("id").and_then(pm_model::Value::as_str) else {
+                continue;
+            };
+            let mut rows = vec![];
+            for (key, label, unit, step) in [
+                ("on", "Enabled", "", 0.),
+                ("shape", "Shape", "", 0.),
+                ("mode", "Mode", "", 0.),
+                ("x", "X", "px", 1.),
+                ("y", "Y", "px", 1.),
+                ("w", "Width", "px", 1.),
+                ("h", "Height", "px", 1.),
+                ("rotation", "Rotation", "°", 1.),
+                ("feather", "Feather", "px", 0.5),
+            ] {
+                let path = format!("m.{mid}.{key}");
+                let binding = Binding::Property(PropertyId::new(layer, &path));
+                let state = match model.binding_state(&binding, time) {
+                    Ok(state) => state,
+                    Err(pm_panel_inspector::InspectorError::MissingProperty(_)) => continue,
+                    Err(error) => return Err(error.to_string()),
+                };
+                let lease = self.lease(model, &path, binding)?;
+                let value = super::data::wire(&state.value);
+                let control = match (key, &value) {
+                    ("shape", Value::String(_)) => {
+                        json!({"kind":"choice","binding":lease,"value":value,"options":["rect","ellipse"],"mixed":state.mixed})
+                    }
+                    ("mode", Value::String(_)) => {
+                        json!({"kind":"choice","binding":lease,"value":value,"options":["add","subtract"],"mixed":state.mixed})
+                    }
+                    (_, Value::Bool(_)) => {
+                        json!({"kind":"toggle","binding":lease,"value":value,"mixed":state.mixed})
+                    }
+                    (_, Value::Number(_)) => {
+                        let mut axis = json!({"binding":lease,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed});
+                        if key == "feather" {
+                            axis["min"] = json!(0);
+                        }
+                        json!({"kind":"number","axes":[axis]})
+                    }
+                    _ => continue,
+                };
+                let animation = if state.key_at_playhead {
+                    "key-at-playhead"
+                } else if state.animated {
+                    "animated"
+                } else {
+                    "static"
+                };
+                rows.push(json!({"id":path,"label":label,"locked":locked,"animation":animation,"control":control}));
+            }
+            let name = mask
+                .get("name")
+                .and_then(pm_model::Value::as_str)
+                .filter(|n| !n.trim().is_empty())
+                .map_or_else(|| format!("Mask {}", index + 1), str::to_owned);
+            out.push(json!({"id":mid,"name":name,"rows":rows}));
+        }
+        Ok(out)
     }
     pub fn valid(&self, handle: &str, channels: &[String]) -> bool {
         self.handles
@@ -426,6 +509,39 @@ impl Properties {
                 model.remove_text_animator(caller, &layer, id)
             };
             return request.map(Some).map_err(|e| e.to_string());
+        }
+        if (intent["type"] == "section-action" && intent["action"] == "mask")
+            || intent["type"] == "remove-mask"
+        {
+            use pm_kernel::commands::masks::{MaskCommand, MaskShape};
+            let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
+            let (label, command) = if intent["type"] == "remove-mask" {
+                let mask = intent["mask"].as_str().ok_or("Mask")?;
+                (
+                    "Remove Mask",
+                    MaskCommand::Remove {
+                        layer_id,
+                        mask_ids: vec![mask.into()],
+                    },
+                )
+            } else {
+                (
+                    "Add Mask",
+                    MaskCommand::Add {
+                        layer_id,
+                        mask_id: pm_kernel::new_id("K"),
+                        shape: MaskShape::Rect,
+                    },
+                )
+            };
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some(label.into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![command.into()]),
+                },
+            )));
         }
         if intent["type"] == "section-action" && intent["action"] == "release-precomp" {
             let layer_id = model.primary().ok_or("No selected layer")?.to_owned();

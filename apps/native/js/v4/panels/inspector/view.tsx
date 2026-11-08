@@ -608,6 +608,23 @@ export function InspectorPanel({
                 />
               </InspectorRow>
             ))}
+            {section.masks?.flatMap((mask) => [
+                <InspectorRow key={mask.id} label={mask.name}>
+                  <Action
+                    id={`remove-mask:${mask.id}`}
+                    label={`Remove ${mask.name}`}
+                    tooltip="Remove Mask"
+                    symbol="minus"
+                    disabled={target.kind === "layers" && target.first.locked}
+                    onActivate={() =>
+                      session.send({ type: "remove-mask", mask: mask.id })
+                    }
+                  />
+                </InspectorRow>,
+                ...mask.rows.map((row) => (
+                  <Property key={row.id} row={row} session={session} />
+                )),
+            ])}
             {section.rows.map((row) => (
               <Property key={row.id} row={row} session={session} />
             ))}
