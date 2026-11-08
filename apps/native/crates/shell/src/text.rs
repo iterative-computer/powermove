@@ -165,9 +165,11 @@ impl Render for TextField {
                     .child(self.placeholder.clone())
             })
             .when(dense && !editing && !self.value.is_empty(), |d| {
-                d.child(self.value.clone())
+                d.overflow_hidden()
+                    .child(div().min_w(px(0.)).truncate().child(self.value.clone()))
                     .children(self.unit.clone().map(|unit| {
                         div()
+                            .flex_none()
                             .ml(px(self.tokens.metrics.inner_radius))
                             .text_color(rgb(self.tokens.colors.muted))
                             .child(unit)
