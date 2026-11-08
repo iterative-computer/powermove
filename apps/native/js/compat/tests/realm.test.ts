@@ -683,3 +683,73 @@ test("owned onDispose handlers run once without reporting retired-owner health f
   expect(called).toBe(1);
   expect(host.errors).toEqual([]);
 });
+describe("writes cost what they touch", () => {
+  const big = (layers: number, keys: number) => ({
+    name: "big",
+    layers: Array.from({ length: layers }, (_, l) => ({
+      id: `l${l}`,
+      p: {
+        x: {
+          v: 0,
+          kf: Array.from({ length: keys }, (_, k) => ({
+            i: `k${k}`,
+            t: k,
+            v: k,
+          })),
+        },
+      },
+    })),
+  });
+  test("a deep write sends only its path and settles only there", () => {
+    const mirror = new DocumentMirror(big(3, 4));
+    const key = mirror.document.layers[2].p.x.kf[1];
+    key.v = 99;
+    expect(mirror.take()).toEqual([
+      { path: ["layers", 2, "p", "x", "kf", 1, "v"], exists: true, value: 99 },
+    ]);
+    expect(mirror.pending()).toEqual([]);
+    expect(mirror.document.layers[2].p.x.kf[1]).toBe(key);
+  });
+  test("a record an extension built keeps taking its later raw writes", () => {
+    const mirror = new DocumentMirror(big(1, 1));
+    const raw: Data = { i: "new", t: 5, v: 1, ease: { speed: 0 } };
+    mirror.document.layers[0].p.x.kf.push(raw);
+    expect(mirror.take()).toEqual([
+      {
+        path: ["layers", 0, "p", "x", "kf"],
+        exists: true,
+        value: [
+          { i: "k0", t: 0, v: 0 },
+          { i: "new", t: 5, v: 1, ease: { speed: 0 } },
+        ],
+      },
+    ]);
+    mirror.acknowledged.layers[0].p.x.kf.push(copy(raw));
+    raw.ease.speed = 3;
+    expect(mirror.take()).toEqual([
+      {
+        path: ["layers", 0, "p", "x", "kf", 1, "ease", "speed"],
+        exists: true,
+        value: 3,
+      },
+    ]);
+  });
+  test("a thousand one-key boundaries on 200k keyframes stay cheap", () => {
+    const mirror = new DocumentMirror(big(400, 500));
+    const started = performance.now();
+    for (let i = 0; i < 1000; i++) {
+      mirror.document.layers[i % 400].p.x.kf[i % 500].v = -(i + 1);
+      const ops = mirror.take();
+      expect(ops).toHaveLength(1);
+      // The native adapter answers with the stored change's operations.
+      mirror.applyOps(ops);
+      mirror.settle(ops);
+    }
+    // One whole-tree walk per boundary takes tens of milliseconds here.
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(mirror.acknowledged.layers[999 % 400].p.x.kf[999 % 500].v).toBe(
+      -1000,
+    );
+    expect(mirror.pending()).toEqual([]);
+  });
+});
