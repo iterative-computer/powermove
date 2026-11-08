@@ -317,8 +317,8 @@ impl KernelLibrary {
             row.open = published.session.is_some();
             row.edited = published.dirty;
             row.file = published.path.clone().or(row.file);
-            if let Some(document) = published.snapshot.document.to_value() {
-                let v = pm_model::canonical::realize_project(document);
+            if let Some(root) = published.snapshot.root() {
+                let v = open_summary(root);
                 if let Some(name) = v.get("name").and_then(Value::as_str) {
                     row.name = name.into();
                 }
@@ -331,6 +331,27 @@ impl KernelLibrary {
         }
         Ok(row)
     }
+}
+/// The realized project's `name`, `w`, `h`, `fps` and `dur` (the open
+/// composition's), read in place rather than realizing the whole document.
+fn open_summary(root: &pm_model::Node) -> Value {
+    let comp = root
+        .get("compId")
+        .and_then(|id| match id.kind() {
+            pm_model::NodeKind::String(s) => s.as_str(),
+            _ => None,
+        })
+        .and_then(|id| root.get("comps")?.get(id));
+    let mut m = pm_model::json::Map::new();
+    if let Some(name) = root.get("name") {
+        m.insert("name", name.to_value());
+    }
+    for k in ["w", "h", "fps", "dur"] {
+        if let Some(v) = comp.and_then(|c| c.get(k)).or_else(|| root.get(k)) {
+            m.insert(k, v.to_value());
+        }
+    }
+    Value::Object(m)
 }
 fn number(v: &Value, key: &str) -> Option<f64> {
     v.get(key)
