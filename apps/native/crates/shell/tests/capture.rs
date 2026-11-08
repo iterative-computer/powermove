@@ -30,6 +30,8 @@ fn shell_window_appearance_matrix() {
             let tokens = Tokens::new(scheme, a11y);
             let expected = tokens.colors.clone();
             let translucent = tokens.translucent();
+            let (ground, edge_ink, panel_alpha) =
+                (tokens.ground(), tokens.edge(), tokens.translucency.panel);
             let metrics = tokens.metrics;
             let mut cx = HeadlessAppContext::with_platform(
                 Arc::new(
@@ -67,24 +69,50 @@ fn shell_window_appearance_matrix() {
                 )
             );
             let rgb = |v: u32| [(v >> 16) as u8, (v >> 8) as u8, v as u8];
-            // Probe panel and viewer interiors and a panel edge, away from glyphs/AA.
+            // Source-over of a token colour at an alpha onto a probed pixel.
+            let over = |(c, a): (u32, f32), under: [u8; 4]| -> [u8; 3] {
+                let c = rgb(c);
+                std::array::from_fn(|i| {
+                    (c[i] as f32 * a + under[i] as f32 * (1. - a)).round() as u8
+                })
+            };
+            let near = |got: [u8; 4], want: [u8; 3], what: &str| {
+                assert!(
+                    (0..3).all(|i| got[i].abs_diff(want[i]) <= 1) && got[3] == 255,
+                    "{name}: {what} {got:?}, want {want:?}"
+                );
+            };
+            // Probe a gap, a panel interior, a panel edge and the viewer, away
+            // from glyphs/AA. Headless has an opaque black backdrop where the
+            // app has the desktop blur, so every layer's composite is exact:
+            // ground over black, panel material over ground, hairline over panel.
+            let gap = image.get_pixel(2 * scale, 200 * scale).0;
             let panel = image.get_pixel(40 * scale, 150 * scale).0;
             let edge = image.get_pixel(6 * scale, 200 * scale).0;
+            near(gap, over(ground, [0, 0, 0, 255]), "ground");
+            near(
+                panel,
+                over((expected.panel, panel_alpha), gap),
+                "panel",
+            );
+            near(edge, over(edge_ink, panel), "edge");
             if translucent {
-                // The panel material lets the window ground (and the desktop
-                // blur under it) through, so it never reads as the solid token.
-                assert_ne!(&panel[..3], &rgb(expected.panel), "{name}: translucent");
+                // In dark the panel steps lighter than the ground it sits on.
+                if scheme == Scheme::Dark {
+                    assert!(panel[0] > gap[0], "{name}: panel above ground");
+                }
             } else {
-                // Reduce Transparency: the panel is exactly the solid token.
-                assert_eq!((&panel[..3], panel[3]), (&rgb(expected.panel)[..], 255));
+                // Reduce Transparency: ground and panel are the solid tokens.
+                assert_eq!(&gap[..3], &rgb(expected.window), "{name}: solid ground");
+                assert_eq!(&panel[..3], &rgb(expected.panel), "{name}: solid panel");
+            }
+            if a11y.increase_contrast {
+                assert_eq!(&edge[..3], &rgb(expected.separator), "{name}: solid edge");
             }
             assert_eq!(
                 &image.get_pixel(500 * scale, 150 * scale).0[..3],
                 &rgb(expected.viewer)
             );
-            if a11y.increase_contrast {
-                assert_eq!(&edge[..3], &rgb(expected.separator), "{name}: solid edge");
-            }
             std::fs::create_dir_all("/tmp/pm-shots").unwrap();
             image
                 .save(format!("/tmp/pm-shots/ptext-shell-headless-{name}.png"))

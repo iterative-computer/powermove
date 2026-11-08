@@ -224,6 +224,10 @@ pub struct Metrics {
 /// Transparency makes the window and panels solid.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Translucency {
+    /// Tint over the blur. Darker than `colors.window` in dark, because the
+    /// blur lightens the ground: the composite lands near the solid window and
+    /// the panel material keeps its step above it (language §3, tonal elevation).
+    pub ground: u32,
     pub window: f32,
     pub panel: f32,
     pub edge: f32,
@@ -539,24 +543,28 @@ impl Tokens {
             },
             translucency: match (scheme, accessibility.reduce_transparency) {
                 (Scheme::Dark, true) => Translucency {
+                    ground: 0x111111,
                     window: 1.,
                     panel: 1.,
                     edge: 0.06,
                     line: 0.07,
                 },
                 (Scheme::Light, true) => Translucency {
+                    ground: 0xeeeef1,
                     window: 1.,
                     panel: 1.,
                     edge: 0.08,
                     line: 0.09,
                 },
                 (Scheme::Dark, false) => Translucency {
+                    ground: 0x080808,
                     window: 0.82,
                     panel: 0.7,
                     edge: 0.06,
                     line: 0.07,
                 },
                 (Scheme::Light, false) => Translucency {
+                    ground: 0xeeeef1,
                     window: 0.8,
                     panel: 0.72,
                     edge: 0.08,
@@ -642,6 +650,15 @@ impl Tokens {
             (self.colors.separator, 1.)
         } else {
             (self.colors.text, self.translucency.line)
+        }
+    }
+    /// Window ground as (colour, alpha): the `ground` tint over the blur, or
+    /// the solid `window` colour under Reduce Transparency.
+    pub fn ground(&self) -> (u32, f32) {
+        if self.translucent() {
+            (self.translucency.ground, self.translucency.window)
+        } else {
+            (self.colors.window, 1.)
         }
     }
     /// The window ground needs a behind-window blur under it.

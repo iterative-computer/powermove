@@ -329,6 +329,10 @@ const ROLES: &[(&str, &str)] = &[
         "translucency.panel",
         "Shared panel material over the window tint (1 = solid)",
     ),
+    (
+        "translucency.ground",
+        "Window tint over the behind-window blur, darker than `window` so panels step above the composite",
+    ),
     ("translucency.edge", "Panel hairline edge in `text` ink"),
     (
         "translucency.line",
@@ -370,7 +374,7 @@ fn leaves(t: &Tokens) -> Vec<(String, Value)> {
 }
 
 fn show(key: &str, v: &Value) -> String {
-    if key.starts_with("colors.") {
+    if key.starts_with("colors.") || key == "translucency.ground" {
         format!("`#{:06X}`", v.as_u64().unwrap())
     } else {
         let n = v.as_f64().unwrap();

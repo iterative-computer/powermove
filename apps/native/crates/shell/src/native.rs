@@ -186,7 +186,7 @@ fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
     window.setBackgroundColor(Some(&colour));
 }
 /// Behind-window blur under everything in the content view; GPUI tints it
-/// with `colors.window` at `translucency.window`.
+/// with `Tokens::ground`.
 fn backdrop(mtm: MainThreadMarker, content: &NSView) -> Retained<NSVisualEffectView> {
     let v = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content.bounds());
     v.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);

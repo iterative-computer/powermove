@@ -1003,7 +1003,7 @@ impl Render for Editor {
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
-        let ground = t.translucency.window;
+        let (ground, ground_alpha) = t.ground();
         let (edge, edge_alpha) = t.edge();
         let (line, line_alpha) = t.line();
         let dragging = matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved);
@@ -1070,7 +1070,7 @@ impl Render for Editor {
                                     point(px(r.x), px(r.y)),
                                     gpui::size(px(r.w), px(r.h)),
                                 ))
-                                .background(tint(c.window, ground)),
+                                .background(tint(ground, ground_alpha)),
                             );
                         }
                     },

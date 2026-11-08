@@ -150,6 +150,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 15658737,
       "window": 0.8,
       "panel": 0.72,
       "edge": 0.08,
@@ -307,6 +308,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 15658737,
       "window": 1.0,
       "panel": 1.0,
       "edge": 0.08,
@@ -464,6 +466,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 15658737,
       "window": 0.8,
       "panel": 0.72,
       "edge": 0.08,
@@ -621,6 +624,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 15658737,
       "window": 1.0,
       "panel": 1.0,
       "edge": 0.08,
@@ -778,6 +782,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 526344,
       "window": 0.82,
       "panel": 0.7,
       "edge": 0.06,
@@ -935,6 +940,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 1118481,
       "window": 1.0,
       "panel": 1.0,
       "edge": 0.06,
@@ -1092,6 +1098,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 526344,
       "window": 0.82,
       "panel": 0.7,
       "edge": 0.06,
@@ -1249,6 +1256,7 @@
       "tooltip_warm": 0.6
     },
     "translucency": {
+      "ground": 1118481,
       "window": 1.0,
       "panel": 1.0,
       "edge": 0.06,

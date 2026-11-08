@@ -108,7 +108,7 @@ running Electron app.
 | Menus, context menus, palette, field menu | System menus; palette/field menu are glass child panels | System behaviour |
 | Sheets (Save Layout, New Composition, Export, Composition Settings) | System sheet frame (glass); content on **panel** material in cards | Electron's Nov 2026 rule: dialogs are cut from the panel material. The system owns the frame; we own the content. |
 | Alerts (destructive confirmations, Full Access) | `NSAlert` | Exact system look and keyboard behaviour |
-| Window ground, status bar | `colors.window` at `translucency.window` over a behind-window blur (`NSVisualEffectView`, `.underWindowBackground`) | The owner's demo: a heavy tint, so only a hint of the desktop comes through |
+| Window ground, status bar | `translucency.ground` at `translucency.window` over a behind-window blur (`NSVisualEffectView`, `.underWindowBackground`); solid `colors.window` under Reduce Transparency (`Tokens::ground`) | The owner's demo: a heavy tint, so only a hint of the desktop comes through. The tint is darker than `colors.window` because the blur lightens it, so panels still step lighter than the ground |
 | Panels, inspector, lists, timeline, agent conversation | One shared material: `colors.panel` at `translucency.panel`, a `text` hairline edge (`translucency.edge`) | Not glass: no refraction, and the tint keeps dense text legible. Panel bodies never repeat the fill |
 | Viewer surround | Solid `colors.viewer`, the deepest neutral | Footage must read true; no material tint |
 
