@@ -136,8 +136,12 @@ pub fn new_project_sheet(
         // to a whole number rather than to every keystroke.
         field.setIdentifier(Some(&NSString::from_str(id)));
         field.setContinuous(false);
-        unsafe {
-            let _: () = objc2::msg_send![&*field, setSendsActionOnEndEditing: true];
+        // A cell property: NSTextField itself doesn't answer it (sending it
+        // there aborted the app on File ▸ New Project).
+        if let Some(cell) = field.cell() {
+            unsafe {
+                let _: () = objc2::msg_send![&*cell, setSendsActionOnEndEditing: true];
+            }
         }
         group.addArrangedSubview(&field);
         sheet.fields.insert(id.into(), field);

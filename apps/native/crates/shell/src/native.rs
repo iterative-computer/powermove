@@ -91,7 +91,9 @@ pub struct MenuState {
     pub disabled: std::collections::BTreeSet<String>,
 }
 /// The editor window commands should go to: the key window, else the main window
-/// (a key palette/field-menu child panel is not an editor window).
+/// (a key palette/field-menu child panel is not an editor window), else the
+/// frontmost editor (the app is inactive, e.g. a menu item invoked through
+/// accessibility while another app is frontmost).
 fn editor_window_number() -> Option<isize> {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
@@ -100,6 +102,7 @@ fn editor_window_number() -> Option<isize> {
         [app.keyWindow(), app.mainWindow()]
             .into_iter()
             .flatten()
+            .chain(app.orderedWindows().to_vec())
             .map(|w| w.windowNumber())
             .find(|n| r.contains_key(n))
     })
