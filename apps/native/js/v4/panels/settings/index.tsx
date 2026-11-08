@@ -157,7 +157,18 @@ function SettingRow({
         }}
       >
         <Copy>{row.label}</Copy>
-        <RowControl row={row} model={model} />
+        {/* Controls share one trailing value column (Settings-sheet anatomy). */}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            justifyContent: "end",
+            width: t("metrics.sheet_value_column"),
+            flexShrink: 0,
+          }}
+        >
+          <RowControl row={row} model={model} />
+        </div>
       </div>
       {row.detail && <Copy secondary>{row.detail}</Copy>}
       {row.error && (
@@ -590,14 +601,19 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
       <div
         role="group"
         label="Settings sections"
-        style={{ width: t("metrics.settings_sidebar") }}
+        style={{
+          ...column,
+          width: t("metrics.settings_sidebar"),
+          padding: t("metrics.gap"),
+          gap: t("metrics.gap"),
+        }}
       >
         <UI.TextField
           id="settings.search"
           label="Search"
           binding={bindings.search}
           value={model.query}
-          metadata={{ searching: model.searching }}
+          metadata={{ searching: model.searching, placeholder: "Search" }}
           onInput={(event) => {
             if (typeof event.value === "string") void model.search(event.value);
           }}
@@ -615,7 +631,15 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
             .map((group) => (
               <div key={group} role="group" label={group}>
                 {(group !== "Project" || !!model.publication.project) && (
-                  <text style={help}>{group}</text>
+                  <text
+                    style={{
+                      ...help,
+                      paddingLeft: t("metrics.inset"),
+                      paddingTop: t("metrics.gap"),
+                    }}
+                  >
+                    {group}
+                  </text>
                 )}
                 {model.availableSections
                   .filter(

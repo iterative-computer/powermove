@@ -97,3 +97,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 
 - **`onPointerEnter` / `onPointerLeave` (2026-11-07, additive):** typed on every intrinsic element; the host already delivered `pointerenter`/`pointerleave` to listeners. Timeline rows use them to show their switches on hover.
 - **`EventPlan.semantic` (2026-11-08, additive, host↔renderer wire):** optional; the host sets it to the target's `id` when it planned an activation on an identified element, and the renderer then accepts the event even if a render restyled that element first (a hovered row stays clickable).
+
+## Look lane decisions (2026-11-08)
+
+- **The owner's GPUI demo is the visual reference.** Translucent window (`translucency.ground` at `translucency.window` over a behind-window blur), one shared panel material (`colors.panel` at `translucency.panel`) with a `text` hairline edge, 8 pt panel radius, 38 pt headers with a divider, 24 pt status line. Reduce Transparency makes both solid; Increase Contrast makes edges solid `separator`.
+- **Dark stays neutral grey** (`dark_is_neutral_grey`); the demo's warm stone hue is not adopted, only its materials and metrics.
+- **Concentric radii apply only inside an outer corner's curve.** Panel content sits `inset` (12) in, past the 8 pt corner, so controls keep `control_radius` 6 (spec test states this rule).
+- **Panel bodies never repeat `colors.panel`.** The v4 host drops a root `colors.panel` fill; panel windows (Export, Settings, Agent) paint it once.
+- **v4 additive:** `metadata.placeholder` on `TextField` shows a muted hint in the empty field (no new prop).
+- **The ground tint is darker than `colors.window` in dark (`#080808`, the demo's `#0C0A09` relationship)** because the blur lightens it; panels then composite a step above the ground, as tonal elevation requires.
+- **The shell tab strip is the only Project / Effect Controls switch.** Both panels' own `SegmentedControl` (kept for the web host) is hidden in the native header.
+- **Synchronous presents (live resize, key-window change) release the `CAMetalDisplayLink` first;** Core Animation forbids `nextDrawable` while a link owns the layer.

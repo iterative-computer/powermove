@@ -20,6 +20,11 @@ const textStyle = {
   color: token("colors.text"),
   fontSize: token("typography.body"),
 };
+// Group labels are quiet captions above their rows (no-decorative-chrome rule).
+const groupTextStyle = {
+  color: token("colors.muted"),
+  fontSize: token("typography.minimum"),
+};
 const hitStyle = {
   minWidth: token("metrics.hit"),
   minHeight: token("metrics.hit"),
@@ -58,6 +63,9 @@ export function EffectsPanel({
       <text
         role="heading"
         style={{
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "center",
           height: token("metrics.header"),
           paddingLeft: token("metrics.inset"),
           fontSize: token("typography.title"),
@@ -83,6 +91,7 @@ export function EffectsPanel({
           id={ids.search}
           label="Search effects"
           title="Search effects"
+          metadata={{ placeholder: "Search" }}
           binding={bindings.search}
           value={model.query}
           disabled={model.installedCount() === 0}
@@ -223,7 +232,6 @@ export function EffectsPanel({
                   }}
                   style={{
                     ...style,
-                    fontWeight: token("typography.semibold_weight"),
                     ...(increaseContrast &&
                     window.from + window.rows.indexOf(row) > 0
                       ? {
@@ -233,7 +241,7 @@ export function EffectsPanel({
                       : {}),
                   }}
                 >
-                  <text style={textStyle}>{row.name}</text>
+                  <text style={groupTextStyle}>{row.name}</text>
                 </TreeItem>
               );
             const { item } = row;

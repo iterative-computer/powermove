@@ -73,12 +73,15 @@ impl WelcomeView {
         let primary = self.frame.default.as_deref() == Some(&button.id);
         let enabled = button.enabled;
         let id = button.id.clone();
+        let focus = c.focus;
         let mut element = div()
             .id(SharedString::from(format!("welcome-{}", button.id)))
             .debug_selector(|| format!("welcome-{id}", id = id.clone()))
             .role(Role::Button)
             .aria_label(button.label.clone())
             .aria_disabled(!enabled)
+            .tab_index(0)
+            .focus_visible_style(move |s| s.ring(px(2.)).ring_color(rgb(focus)))
             .px(px(m.inset))
             .h(px(m.row))
             .flex()
@@ -142,6 +145,7 @@ impl WelcomeView {
                 .role(Role::RadioButton)
                 .aria_label(choice.label.clone())
                 .aria_selected(selected)
+                .tab_index(0)
                 .flex()
                 .flex_col()
                 .gap(px(m.gap / 2.))
@@ -321,9 +325,10 @@ impl Render for WelcomeView {
                 div()
                     .id("welcome-details")
                     .debug_selector(|| "welcome-details".into())
-                    .role(Role::Button)
+                    .role(Role::DisclosureTriangle)
                     .aria_label("Details")
                     .aria_expanded(self.details_open)
+                    .tab_index(0)
                     .text_size(px(t.typography.body))
                     .text_color(rgb(c.secondary))
                     .child("Details")
@@ -354,7 +359,13 @@ impl Render for WelcomeView {
             footer = footer.child(self.button(button, cx));
         }
         content = content.child(footer);
+        // The accessibility tree hangs off an identified, labelled root, as in
+        // the editor; without it VoiceOver sees only the traffic lights.
         let mut root = div()
+            .id("welcome")
+            .role(Role::Group)
+            .accessibility_id("shell.welcome")
+            .aria_label(frame.title.clone())
             .relative()
             .size_full()
             .flex()
@@ -376,6 +387,7 @@ impl Render for WelcomeView {
                     .debug_selector(|| "welcome-back".into())
                     .role(Role::Button)
                     .aria_label(frame.back.clone().unwrap_or_default())
+                    .tab_index(0)
                     .absolute()
                     .top(px(m.toolbar))
                     .left(px(m.sheet_inset))

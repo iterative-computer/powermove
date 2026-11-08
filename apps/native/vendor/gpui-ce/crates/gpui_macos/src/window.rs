@@ -1078,18 +1078,18 @@ impl MacWindowState {
             .log_err();
     }
 
-    /// A layer driven by a CAMetalDisplayLink must not vend drawables itself
-    /// (Core Animation raises, even with the link paused). A synchronous paint
-    /// detaches the link; the next start attaches a fresh one.
-    fn release_metal_display_link(&mut self) {
-        let metal = self.ca_display_link.as_ref().is_some_and(|link| unsafe {
-            let kind: Bool = msg_send![&**link, isKindOfClass: class!(CAMetalDisplayLink)];
-            kind.as_bool()
-        });
-        if metal && let Some(link) = self.ca_display_link.take() {
+    /// A synchronous present calls `nextDrawable`, which Core Animation forbids
+    /// while a `CAMetalDisplayLink` owns the layer, even a paused one (it raises
+    /// `CAMetalLayerInvalidOperation`). Drop the link; `start_display_link`
+    /// makes a new one after the present.
+    fn release_display_link_for_sync_present(&mut self) {
+        if let Some(link) = self.ca_display_link.take() {
             unsafe {
                 let _: () = msg_send![&*link, invalidate];
             }
+        }
+        if let Some(frame_source) = self.frame_source.as_mut() {
+            frame_source.stop();
         }
     }
 
@@ -1461,7 +1461,8 @@ impl MacWindow {
                     // the window or application aren't active, which is often the case
                     // e.g. for notification windows.
                     let tracking_area: ObjcId = msg_send![class!(NSTrackingArea), alloc];
-                    let _: () = msg_send![
+                    // `init…` returns the object; declaring `()` aborts debug builds.
+                    let tracking_area: ObjcId = msg_send![
                         tracking_area,
                         initWithRect: Objc2NSRect::new(Objc2NSPoint::new(0., 0.), NSSize::new(0., 0.)),
                         options: NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect,
@@ -3389,7 +3390,7 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.sync_present_requested = true;
-                lock.stop_display_link();
+                lock.release_display_link_for_sync_present();
                 let request = lock.next_frame_request();
                 drop(lock);
                 callback(request);
@@ -3515,8 +3516,7 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.sync_present_requested = true;
-        lock.stop_display_link();
-        lock.release_metal_display_link();
+        lock.release_display_link_for_sync_present();
         let request = lock.next_frame_request();
         drop(lock);
         callback(request);

@@ -141,7 +141,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
 | `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
 | `metrics.group_radius` | Settings grouped-form card corner | 10 | 10 | 10 | 10 |
-| `metrics.header` | Panel header, viewer bar and timeline header height | 32 | 32 | 32 | 32 |
+| `metrics.header` | Panel header, viewer bar and timeline header height | 38 | 38 | 38 | 38 |
 | `metrics.hit` | Minimum pointer target | 24 | 24 | 24 | 24 |
 | `metrics.inner_radius` | Control nested in a control (segment in a track) | 4 | 4 | 4 | 4 |
 | `metrics.inset` | Content inset inside a panel | 12 | 12 | 12 | 12 |
@@ -159,7 +159,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.min_width` | Minimum window width | 980 | 980 | 980 | 980 |
 | `metrics.palette_height` | Command palette maximum height | 360 | 360 | 360 | 360 |
 | `metrics.palette_width` | Command palette width | 520 | 520 | 520 | 520 |
-| `metrics.panel_radius` | Panel corner radius | 12 | 12 | 12 | 12 |
+| `metrics.panel_radius` | Panel corner radius | 8 | 8 | 8 | 8 |
 | `metrics.pasteboard_opacity` | Opacity of selected layers drawn outside the frame | 0.35 | 0.35 | 0.35 | 0.35 |
 | `metrics.playhead` | Playhead line width | 1.5 | 1.5 | 1.5 | 1.5 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
@@ -175,7 +175,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.sheet_value_column` | Shared value column in sheets | 240 | 240 | 240 | 240 |
 | `metrics.sheet_width` | Default sheet width | 480 | 480 | 480 | 480 |
 | `metrics.sheet_width_wide` | Width of wide sheets: Export, Expression | 600 | 600 | 600 | 600 |
-| `metrics.status` | Status bar height | 30 | 30 | 30 | 30 |
+| `metrics.status` | Status bar height | 24 | 24 | 24 | 24 |
 | `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
 | `metrics.symbol_inline` | SF Symbol size inside rows | 11 | 11 | 11 | 11 |
 | `metrics.symbol_panel` | SF Symbol size in panel headers | 13 | 13 | 13 | 13 |
@@ -221,6 +221,11 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `motion.tooltip_delay` | Delay before a tooltip appears for hover or keyboard focus (s) | 0.38 | 0.38 | 0.38 | 0.38 |
 | `motion.tooltip_warm` | Time window for an immediate tooltip swap to a neighbouring control (s) | 0.6 | 0.6 | 0.6 | 0.6 |
 | `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
+| `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.06 | 0.08 | 0.06 |
+| `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#080808` | `#EEEEF1` | `#080808` |
+| `translucency.line` | Header, column and status dividers in `text` ink | 0.09 | 0.07 | 0.09 | 0.07 |
+| `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.72 | 0.7 | 0.72 | 0.7 |
+| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.8 | 0.82 | 0.8 | 0.82 |
 <!-- tokens:end -->
 
 ## Surface token additions — 2026-11-04

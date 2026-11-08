@@ -275,12 +275,12 @@ fn sf_symbols_rasterize_tinted_for_every_kind_and_header_glyph() {
 }
 
 #[test]
-fn panel_headers_share_the_32_pt_header_metric() {
-    assert_eq!(tokens().metrics.header, 32.);
+fn panel_headers_share_the_38_pt_header_metric() {
+    assert_eq!(tokens().metrics.header, 38.);
     assert_eq!(
         Tokens::new(Scheme::Light, Accessibility::default())
             .metrics
             .header,
-        32.
+        38.
     );
 }

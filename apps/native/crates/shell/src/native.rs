@@ -175,6 +175,32 @@ pub fn app_appearance(t: &Tokens) {
     NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
         .setAppearance(NSAppearance::appearanceNamed(name).as_deref());
 }
+/// The window ground: clear over a behind-window blur while translucent,
+/// the solid `window` colour under Reduce Transparency.
+fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
+    let translucent = t.translucent();
+    backdrop.setHidden(!translucent);
+    window.setOpaque(!translucent);
+    let colour = if translucent {
+        NSColor::clearColor()
+    } else {
+        native_color(t.colors.window)
+    };
+    window.setBackgroundColor(Some(&colour));
+}
+/// Behind-window blur under everything in the content view; GPUI tints it
+/// with `Tokens::ground`.
+fn backdrop(mtm: MainThreadMarker, content: &NSView) -> Retained<NSVisualEffectView> {
+    let v = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content.bounds());
+    v.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
+    v.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    v.setState(NSVisualEffectState::Active);
+    v.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    content.addSubview_positioned_relativeTo(&v, NSWindowOrderingMode::Below, None);
+    v
+}
 pub fn rect(r: crate::layout::Rect, h: f64) -> NSRect {
     NSRect::new(
         NSPoint::new(r.x as f64, h - r.y as f64 - r.h as f64),
@@ -882,6 +908,7 @@ pub struct Host {
     pub window: Retained<NSWindow>,
     pub gpui: Retained<NSView>,
     content: Retained<NSView>,
+    backdrop: Retained<NSVisualEffectView>,
     viewer: Retained<NSView>,
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
     pub splitter_focus: bool,
@@ -1002,7 +1029,6 @@ impl Host {
             t.metrics.min_height as f64,
         ));
         window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
-        window.setBackgroundColor(Some(&native_color(t.colors.window)));
         let (tx, rx) = async_channel::unbounded();
         ROUTES.with(|r| {
             r.borrow_mut().insert(window.windowNumber(), tx.clone());
@@ -1045,6 +1071,8 @@ impl Host {
             l.setBackgroundColor(Some(&native_color(t.colors.viewer).CGColor()));
         }
         content.addSubview_positioned_relativeTo(&viewer, NSWindowOrderingMode::Below, Some(&gpui));
+        let backdrop = backdrop(mtm, &content);
+        ground(&window, &backdrop, &t);
         let choices = base_choices();
         let palette = Popup::new(&window, &t, Surface::Palette, choices.clone(), tx.clone());
         palette.borrow_mut().shortcuts = shortcut_glyphs();
@@ -1069,6 +1097,7 @@ impl Host {
             window,
             gpui: gpui.clone(),
             content,
+            backdrop,
             viewer,
             viewer_rect: Rc::new(Cell::new(None)),
             splitter_focus: false,
@@ -1502,8 +1531,7 @@ impl Host {
     }
     pub fn update_tokens(&mut self, t: Tokens) {
         appearance(&self.window, &t);
-        self.window
-            .setBackgroundColor(Some(&native_color(t.colors.window)));
+        ground(&self.window, &self.backdrop, &t);
         if let Some(layer) = self.viewer.layer() {
             layer.setBackgroundColor(Some(&native_color(t.colors.viewer).CGColor()));
         }
@@ -1605,8 +1633,14 @@ impl Host {
             if let Some(g) = geometry {
                 self.viewer.setHidden(false);
                 self.viewer.setFrame(g.frame);
-                unsafe {
-                    let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
+                // Without a transform the Metal layer is the view's own backing
+                // layer and AppKit sizes it; framing it here would move it to
+                // the content view's origin (the stray lower-left rectangle).
+                if self.viewer_transform.is_some() {
+                    unsafe {
+                        let _: () =
+                            msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
+                    }
                 }
                 self.layer.set_contents_scale(g.scale);
                 self.viewer_crop.set(g.crop);
@@ -2475,7 +2509,11 @@ impl Popup {
                 ),
                 NSSize::new(size.width - m.menu_inset as f64 * 2., m.menu_row as f64),
             );
-            b.setFrame(r);
+            // The glider spans the row; the title sits `gap` inside it.
+            b.setFrame(NSRect::new(
+                NSPoint::new(r.origin.x + m.gap as f64, r.origin.y),
+                NSSize::new(r.size.width - m.gap as f64 * 2., r.size.height),
+            ));
             if i == self.model.selected {
                 self.glider.setFrame(r);
             }

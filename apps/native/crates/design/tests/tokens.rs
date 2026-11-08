@@ -55,6 +55,20 @@ fn placement_accessibility_and_motion_contract() {
     );
     assert!(t.typography.minimum >= 11.);
     assert_eq!(t.metrics.gap, 6.);
-    assert_eq!(t.metrics.panel_radius, 12.);
+    assert_eq!(t.metrics.panel_radius, 8.);
+    assert_eq!((t.metrics.header, t.metrics.status), (38., 24.));
+    assert!(Tokens::new(Scheme::Dark, Accessibility::default()).translucent());
+    let solid = Tokens::new(
+        Scheme::Dark,
+        Accessibility {
+            reduce_transparency: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        !solid.translucent(),
+        "Reduce Transparency makes the window solid"
+    );
+    assert_eq!(solid.translucency.panel, 1.);
     assert_eq!(t.colors.accent, 0xff6019);
 }

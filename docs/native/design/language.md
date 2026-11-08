@@ -64,12 +64,12 @@ running Electron app.
 ```
 ┌ traffic lights · Sidebar · Title/Edited ·· [ tool capsule ] ·· Agent · Tasks · Export · Inspector ┐  52 pt unified toolbar (glass)
 │┌ Project | Effect Controls ┐┌ viewer bar (Fit (54 %) ⌄)(Auto ⌄)┐┌ Properties ────────┐│
-││                            ││                               ││                       ││  panels: solid, 12 pt radius,
+││                            ││                               ││                       ││  panels: one material, 8 pt radius,
 │└────────────────────────────┘│                               ││                       ││  6 pt gaps and window edge
 │┌ Timeline ─────────────────────────────────────────────────┐│├ Effects & Presets ───┤│
-││ ▶ 00:01:25:13 · 30 fps            header (32 pt)          │││                       ││
+││ ▶ 00:01:25:13 · 30 fps            header (38 pt)          │││                       ││
 │└───────────────────────────────────────────────────────────┘│└───────────────────────┘│
-└ status bar (30 pt): Saved · 133 layers · 11 keyframes        Paused · 1920×1080 · 30 fps ┘
+└ status bar (24 pt): Saved · 133 layers · 11 keyframes        Paused · 1920×1080 · 30 fps ┘
 ```
 
 - **Toolbar** is an `NSToolbar` in a unified title bar (`metrics.toolbar` =
@@ -90,7 +90,7 @@ running Electron app.
   Panels are separate cards on the window ground with `metrics.gap` (6 pt)
   between them and to the window edge; `metrics.inset` (12 pt) is the
   content inset inside a panel.
-- **Status bar** (`metrics.status` = 30 pt) sits on the window ground, not in
+- **Status bar** (`metrics.status` = 24 pt) sits on the window ground, not in
   a panel: quiet `muted` text, left = document facts, right = playback and
   format facts. Nothing in it is a primary control.
 - **No panel touches a window corner** (toolbar above, status bar below), so
@@ -108,7 +108,8 @@ running Electron app.
 | Menus, context menus, palette, field menu | System menus; palette/field menu are glass child panels | System behaviour |
 | Sheets (Save Layout, New Composition, Export, Composition Settings) | System sheet frame (glass); content on **panel** material in cards | Electron's Nov 2026 rule: dialogs are cut from the panel material. The system owns the frame; we own the content. |
 | Alerts (destructive confirmations, Full Access) | `NSAlert` | Exact system look and keyboard behaviour |
-| Panels, inspector, lists, timeline, agent conversation, status bar | **Solid** (`colors.panel`, `colors.window`) | HIG: never put glass under dense text or controls |
+| Window ground, status bar | `translucency.ground` at `translucency.window` over a behind-window blur (`NSVisualEffectView`, `.underWindowBackground`); solid `colors.window` under Reduce Transparency (`Tokens::ground`) | The owner's demo: a heavy tint, so only a hint of the desktop comes through. The tint is darker than `colors.window` because the blur lightens it, so panels still step lighter than the ground |
+| Panels, inspector, lists, timeline, agent conversation | One shared material: `colors.panel` at `translucency.panel`, a `text` hairline edge (`translucency.edge`) | Not glass: no refraction, and the tint keeps dense text legible. Panel bodies never repeat the fill |
 | Viewer surround | Solid `colors.viewer`, the deepest neutral | Footage must read true; no material tint |
 
 Rules:
@@ -121,10 +122,12 @@ Rules:
   one surface); a glass button inside a glass popover is not — use a plain
   borderless button there.
 - **Reduce Transparency** → every glass surface becomes solid
-  (`colors.floating`, or `colors.window` for the toolbar band). Enforced by
-  `Tokens::material`.
+  (`colors.floating`, or `colors.window` for the toolbar band), and the window
+  ground and panel material become opaque (`translucency.*` = 1, no blur).
+  Enforced by `Tokens::material` and `Tokens::translucent`.
 - **Increase Contrast** → glass gets the system's high-contrast border; GPUI
-  borders double (`metrics.border` = 2) and separators/secondary text step up.
+  borders double (`metrics.border` = 2), panel edges and dividers become solid
+  `separator` (`Tokens::edge`, `Tokens::line`) and secondary text steps up.
 - Elevation in solid surfaces is tonal, not shadowed: window → panel → field →
   floating each step lighter in dark. Floating surfaces (`colors.floating`)
   stay **lifted above panels** in both schemes; never set them equal to the
@@ -227,8 +230,8 @@ SF Pro via `.SystemUIFont` (automatic optical sizes); SF Pro Display only for
 
 - **2 pt grid** for every metric; most rhythm in 4s.
 - `gap` 6 between panels and to the window edge; `inset` 12 inside panels.
-- `header` 32: panel header, viewer bar and timeline header share one height
-  (Electron's Nov 2026 `--hdr-h`).
+- `header` 38: panel header, viewer bar and timeline header share one height
+  (the owner's demo), with a `line` divider under panel headers.
 - `row` 28: inspector rows, list rows; a `field` (22) sits centred in it.
 - `track_row` 28 / `property_row` 22 / `ruler` 24 in the timeline.
 - `control` 28 for standalone buttons and pop-ups; toolbar capsules 34
@@ -246,8 +249,8 @@ SF Pro via `.SystemUIFont` (automatic optical sizes); SF Pro Display only for
 | Element | Radius |
 |---|---|
 | Window | System (macOS 26 toolbar windows) |
-| Panel | `panel_radius` 12 |
-| Control inside a panel (field, button, segmented track, thumbnail) | `control_radius` 6 = 12 − 6 inset |
+| Panel | `panel_radius` 8 |
+| Control inside a panel (field, button, segmented track, thumbnail) | `control_radius` 6; content sits `inset` 12 in, clear of the panel corner |
 | Control inside a control (segment, chip in a field) | `inner_radius` 4 |
 | Toolbar capsule, toolbar button group, tags | height ÷ 2 (capsule) |
 | Popovers, sheets, menus | System |
@@ -585,6 +588,8 @@ These are made in this document; reverse any of them here and in pm-design.
 4. Workspace switcher leaves the toolbar for Window ▸ Workspace plus an
    optional toolbar item. Chosen: menu + optional item.
 5. Panel header 32 pt (Electron latest) rather than 36 pt (mockup v2).
+   Superseded 2026-11-08 by the owner's demo: 38 pt headers, 8 pt panel
+   radius, 24 pt status line, translucent window and panel material.
 
 **Design-lead resolutions (2026-11-01).** Three open design items, decided
 within the rules above (reverse here if the owner disagrees):
