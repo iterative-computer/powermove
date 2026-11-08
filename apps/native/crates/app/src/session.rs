@@ -40,7 +40,8 @@ pub struct Controller {
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     pub opening: bool,
-    /// Held while a project opens: no App Nap or background throttling.
+    /// Held while a project opens and its panels settle: no App Nap or
+    /// background throttling.
     pub(crate) busy: Option<crate::platform::Busy>,
     /// The project an open is reading, shown until it lands or fails, and
     /// then until the panels have drawn it (`settling`).
@@ -1029,15 +1030,16 @@ impl Controller {
             }
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
-                v.busy = None;
                 v.recovery_pending = false;
                 // Panels say it's opening until they've mounted for the project.
                 v.settling = match &result {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
                     _ => None,
                 };
+                // Held until the panels have drawn the project (`settled`).
                 if v.settling.is_none() {
                     v.opening_name = None;
+                    v.busy = None;
                 }
                 match result {
                     Some(Ok(ShellReply::Opened {

@@ -210,6 +210,7 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
+            self.busy = None;
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
