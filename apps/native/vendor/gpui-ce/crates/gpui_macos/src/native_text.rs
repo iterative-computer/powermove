@@ -24,6 +24,10 @@ pub enum TextKind {
     /// from its own layout. Clicks pass through to the host; blurring reports
     /// `Blurred` instead of committing, so the host decides.
     Canvas,
+    /// A message composer: a multiline text view where Return submits and
+    /// Shift- or Option-Return starts a new line (IME, spelling, dictation
+    /// and emoji are AppKit's own).
+    Composer,
 }
 impl TextKind {
     fn dense(self) -> bool {
@@ -46,6 +50,8 @@ pub enum TextEvent {
     Key(&'static str),
     /// Canvas only: the editor lost first responder.
     Blurred,
+    /// Return in a composer, with the text as typed.
+    Submitted(String),
 }
 enum Editor {
     Field(Retained<NSTextField>),
@@ -320,6 +326,22 @@ impl TextDelegate {
             }
             return true;
         }
+        if command == objc2::sel!(insertNewline:) && self.ivars().kind == TextKind::Composer {
+            let flags = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
+                .currentEvent()
+                .map(|e| e.modifierFlags())
+                .unwrap_or(objc2_app_kit::NSEventModifierFlags::empty());
+            if flags.intersects(
+                objc2_app_kit::NSEventModifierFlags::Shift | objc2_app_kit::NSEventModifierFlags::Option,
+            ) {
+                // A new line, as typed.
+                unsafe { view.insertNewlineIgnoringFieldEditor(None) };
+                return true;
+            }
+            let s = self.ivars();
+            s.emit(TextEvent::Submitted(s.editor.value()));
+            return true;
+        }
         if command == objc2::sel!(cancelOperation:) && self.ivars().kind.dense() {
             self.ivars().finish(true);
             if let Some(w) = view.window() {
@@ -366,7 +388,7 @@ impl NativeTextSlot {
                 container.setLineFragmentPadding(0.);
             }
             Editor::Multiline(v)
-        } else if kind == TextKind::Multiline {
+        } else if matches!(kind, TextKind::Multiline | TextKind::Composer) {
             let v = NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::ZERO);
             v.setRichText(false);
             v.setImportsGraphics(false);
@@ -592,15 +614,20 @@ impl NativeTextSlot {
             v.setSelectedRange(NSRange::new(start, end - start));
         }
     }
-    /// Canvas: an outside change (undo, the inspector) while editing, keeping
-    /// the selection where it still fits. Composition is never interrupted.
+    /// Replaces the text even while editing (a composer clearing after its
+    /// message was sent; on canvas, an outside change such as undo or the
+    /// inspector, keeping the selection where it still fits). An input
+    /// method's composition is never interrupted.
     pub fn replace_value(&self, value: &str) {
         if self.has_marked_text() || self.value() == value {
             return;
         }
         let (start, end) = self.selection();
         self.state.editor.set(value);
-        self.set_selection(start, end);
+        *self.state.original.borrow_mut() = value.into();
+        if self.state.kind == TextKind::Canvas {
+            self.set_selection(start, end);
+        }
     }
     pub fn has_marked_text(&self) -> bool {
         match &self.state.editor {

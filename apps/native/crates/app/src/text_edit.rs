@@ -792,7 +792,7 @@ impl GizmoSurface {
                         self.finish_text(false, cx);
                     }
                 }
-                TextEvent::Committed(_) | TextEvent::Cancelled => {}
+                TextEvent::Committed(_) | TextEvent::Cancelled | TextEvent::Submitted(_) => {}
             }
         }
     }

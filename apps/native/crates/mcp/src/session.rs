@@ -10,6 +10,39 @@ use std::{
     },
 };
 
+/// Tools the running app answers on its main thread (`SurfaceHook`).
+const PANEL_TOOLS: &[&str] = &[
+    "open_panel",
+    "get_panel_state",
+    "interact_panel",
+    "capture_panel",
+    "computer_use_panel",
+    "set_panel_layout",
+    "get_workspace_state",
+];
+/// The shell's live docks and workspace replace the saved ones; panels the
+/// window registered natively join the kernel's registrations.
+fn live_layout(mut saved: Value, live: &Value) -> Value {
+    if !live.is_object() {
+        return saved;
+    }
+    for key in ["workspace", "docks"] {
+        if !live[key].is_null() {
+            saved[key] = live[key].clone();
+        }
+    }
+    let mut panels = saved["registeredPanels"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for panel in live["registeredPanels"].as_array().into_iter().flatten() {
+        if !panels.iter().any(|p| p["id"] == panel["id"]) {
+            panels.push(panel.clone());
+        }
+    }
+    saved["registeredPanels"] = json!(panels);
+    saved
+}
 struct Transaction {
     snapshot: Value,
     mark: ActorHistoryMark,
@@ -32,6 +65,9 @@ struct Active {
     publications: u32,
     committed: bool,
     external_actions: bool,
+    /// Panel controls ran during this run (main's `panelActions`): their own
+    /// editor Undo applies, so the run never snapshot-restores over them.
+    panel_actions: bool,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -69,6 +105,8 @@ impl McpSession {
                     "sample_media_frames",
                     "media_contact_sheet",
                     "media_waveform",
+                    "capture_panel",
+                    "computer_use_panel",
                 ]
                 .contains(&name) =>
             {
@@ -204,7 +242,14 @@ impl McpSession {
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
             }
-            return host.panel_layout(session.project.as_deref());
+            let project = session.project.clone();
+            let saved = host.panel_layout(project.as_deref())?;
+            let Some(surfaces) = host.surfaces.clone() else {
+                return Ok(saved);
+            };
+            drop(host);
+            let live = surfaces.call(name, project.as_deref(), args)?;
+            return Ok(live_layout(saved, &live));
         }
         if name == "validate_effect" {
             if let Some(id) = &session.project {
@@ -234,6 +279,111 @@ impl McpSession {
                 crate::extensions::fork(extensions.as_ref(), id, args["forkId"].as_str(), &staging)
             };
         }
+        if PANEL_TOOLS.contains(&name) {
+            // As with the Store reads, a host without the capability says so
+            // before arguments are parsed.
+            if host.surfaces.is_none() {
+                return Err(Error::unavailable(catalog::backing(name)));
+            }
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            if ["interact_panel", "computer_use_panel"].contains(&name)
+                && matches!(args["panelId"].as_str(), Some("agent" | "library"))
+            {
+                return Err(Error::invalid(
+                    "The agent cannot operate its own conversation or permission controls.",
+                ));
+            }
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            let project = session.project.clone();
+            let acting = ["interact_panel", "computer_use_panel"].contains(&name);
+            if acting && let Some(id) = project.as_deref() {
+                let revision = host.revision(id)?;
+                if session.transaction.is_none() {
+                    session.transaction = Some(Transaction {
+                        snapshot: host.read_document(id)?,
+                        mark: host.history_mark(id, self.writer)?,
+                        revision,
+                        changed: false,
+                        interleaved: false,
+                        label: "Use panel".into(),
+                    });
+                }
+                if session
+                    .transaction
+                    .as_ref()
+                    .is_some_and(|tx| tx.revision != revision)
+                {
+                    return Err(Error::invalid(
+                        "The project changed. Read get_project_state before using another panel control.",
+                    ));
+                }
+                session.panel_actions = true;
+            }
+            let base = match name {
+                "get_workspace_state" => Some(host.workspace_state(project.as_deref())?),
+                "set_panel_layout" => Some(host.panel_layout(project.as_deref())?),
+                _ => None,
+            };
+            drop(host);
+            let live = surfaces.call(name, project.as_deref(), args);
+            if acting && let Some(id) = project.as_deref() {
+                // Panel handlers may edit asynchronously; later reads see it.
+                let host = shared
+                    .lock()
+                    .map_err(|_| Error::unavailable("headless host stopped"))?;
+                let revision = host.revision(id)?;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.changed |= tx.snapshot["revision"].as_u64() != Some(revision);
+                    tx.revision = revision;
+                }
+            }
+            let live = live?;
+            return Ok(match (name, base) {
+                ("get_workspace_state", Some(mut state)) => {
+                    let layout = live_layout(state["layout"].take(), &live["layout"]);
+                    for (key, value) in live.as_object().into_iter().flatten() {
+                        if key == "project" {
+                            for (field, v) in value.as_object().into_iter().flatten() {
+                                state["project"][field] = v.clone();
+                            }
+                        } else {
+                            state[key] = value.clone();
+                        }
+                    }
+                    state["layout"] = layout;
+                    state
+                }
+                ("set_panel_layout", Some(saved)) => {
+                    let mut result = live;
+                    result["layout"] = live_layout(saved, &result["layout"]);
+                    result
+                }
+                _ => live,
+            });
+        }
+        if ["thread_launch", "thread_send", "thread_cancel"].contains(&name) {
+            // The window's Agent panel owns provider runs; only the app has one.
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let project = session.project.clone();
+            drop(host);
+            let mut call = args.clone();
+            call["callerAccess"] = json!(session.access);
+            call["callerRunId"] = json!(session.run);
+            return surfaces.call(name, project.as_deref(), &call);
+        }
         if ["thread_list", "thread_read"].contains(&name) {
             catalog::validate(name, args)?;
             if let Some(id) = &session.project {
@@ -241,9 +391,27 @@ impl McpSession {
             }
             let threads = host
                 .threads
-                .as_deref()
+                .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
-            return threads.read(name, session.project.as_deref(), args);
+            let surfaces = host.surfaces.clone();
+            drop(host);
+            let project = session.project.clone();
+            let mut read = threads.read(name, project.as_deref(), args)?;
+            // A live run's trace and open questions come from the window's panel.
+            if name == "thread_read"
+                && let Some(surfaces) = surfaces
+                && let Ok(live) = surfaces.call("thread_live", project.as_deref(), args)
+                && live.is_object()
+            {
+                read["activity"] = live["activity"].clone();
+                read["questions"] = live["questions"].clone();
+                if live["busy"] == true {
+                    read["thread"]["busy"] = json!(true);
+                    read["thread"]["status"] = json!("running");
+                    read["thread"]["runId"] = live["runId"].clone();
+                }
+            }
+            return Ok(read);
         }
         if ["store_search", "store_extension", "store_source"].contains(&name) {
             if let Some(id) = &session.project {
@@ -748,6 +916,7 @@ impl McpSession {
             publications: 1,
             committed: false,
             external_actions: false,
+            panel_actions: false,
         });
         Ok(result)
     }
@@ -768,6 +937,16 @@ impl McpSession {
             let Some(tx) = session.transaction.as_ref() else {
                 return Ok(json!({"changed":session.committed}));
             };
+            if session.panel_actions {
+                let changed =
+                    tx.changed || tx.snapshot["revision"].as_u64() != Some(host.revision(&id)?);
+                if !commit && changed {
+                    return Err(Error::invalid(
+                        "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
+                    ));
+                }
+                return Ok(json!({"changed":session.committed || changed,"historyId":null}));
+            }
             let changed = tx.changed;
             let mut history_id = None;
             if !commit && changed {
@@ -964,6 +1143,11 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
     if tx.interleaved {
         return Err(Error::conflict(
             "Other edits occurred during this run. Use the editor Undo command to undo agent changes without restoring over that work.",
+        ));
+    }
+    if session.panel_actions {
+        return Err(Error::conflict(
+            "Panel controls use their normal editor Undo. Their actions cannot be automatically rolled back; use the editor Undo command.",
         ));
     }
     if !tx.changed {

@@ -19,6 +19,9 @@ use std::{
 };
 
 /// Native surfaces by the opaque `surface` lease a `canvas`/`frame` node mounts.
+#[path = "v4_agent.rs"]
+pub mod agent;
+
 #[derive(Clone, Default)]
 pub struct Natives {
     pub views: Rc<RefCell<BTreeMap<String, AnyView>>>,
@@ -118,6 +121,10 @@ pub struct SurfaceView {
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
+    /// While an agent tool draws (`agent::probe`), controls record where they
+    /// were drawn so a panel point maps to the control under it.
+    probing: bool,
+    targets: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
     scrub_ops: VecDeque<ScrubOp>,
@@ -167,6 +174,8 @@ impl SurfaceView {
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
+            probing: false,
+            targets: Default::default(),
             capture: None,
             scrub: None,
             scrub_ops: VecDeque::new(),
@@ -446,8 +455,14 @@ impl SurfaceView {
             .get("label")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let composer = node
+            .props
+            .get("metadata")
+            .is_some_and(|m| m.get("submitOnReturn") == Some(&Value::Bool(true)));
         let kind = if number {
             TextKind::DenseNumber
+        } else if node.r#type == "textarea" && composer {
+            TextKind::Composer
         } else if node.r#type == "textarea" {
             TextKind::Multiline
         } else {
@@ -498,6 +513,31 @@ impl SurfaceView {
                             json!(value)
                         };
                         this.change(id, value, cx);
+                    }
+                    // Return in a composer: the panel sees the text as typed,
+                    // then the key, as a keyboard would deliver them.
+                    TextEvent::Submitted(value) => {
+                        let listens = |event: &str| {
+                            this.publication
+                                .surface
+                                .node(id)
+                                .is_some_and(|n| n.listeners.contains_key(event))
+                        };
+                        let (input, keydown) = (listens("input"), listens("keydown"));
+                        if input {
+                            let detail = EventDetail {
+                                value: Some(json!(value)),
+                                ..Default::default()
+                            };
+                            this.send(id, "input", detail, cx);
+                        }
+                        if keydown {
+                            let detail = EventDetail {
+                                key: Some("Enter".into()),
+                                ..Default::default()
+                            };
+                            this.send(id, "keydown", detail, cx);
+                        }
                     }
                     TextEvent::Cancelled => {
                         if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
@@ -1072,7 +1112,11 @@ impl SurfaceView {
             return div().into_any_element();
         }
         if let Some(control) = self.controls.get(&id) {
-            return div().flex_none().child(control.clone()).into_any_element();
+            return div()
+                .flex_none()
+                .child(control.clone())
+                .children(self.probe(id))
+                .into_any_element();
         }
         if let Some(field) = self.fields.get(&id) {
             return self.field_element(node, field, cx);
@@ -1167,7 +1211,7 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let element = element.children(children);
+        let element = element.children(children).children(self.probe(node.id));
         self.place(element.into_any_element(), node, window, cx)
     }
     /// Anchored kit surfaces escape the panel clip and stack above it.
@@ -1603,7 +1647,8 @@ impl SurfaceView {
             .when(in_row, |d| d.flex_1())
             .when(!in_row, |d| d.flex_none().w_full())
             .min_w(px(0.))
-            .child(field.clone());
+            .child(field.clone())
+            .children(self.probe(id));
         if let Some(ax) = &node.ax {
             if let Some(role) = ax.role {
                 wrapper = wrapper.role(role);

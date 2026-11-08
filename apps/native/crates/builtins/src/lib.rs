@@ -2,7 +2,9 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+mod chrome;
 pub use agent_host::AgentCarry;
+pub use models::APPLICATION_AGENT_STORE;
 #[cfg(test)]
 mod agent_tests;
 mod data;
@@ -78,6 +80,16 @@ pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::Pat
     }
 }
 
+/// Built-in panels that park while closed. The viewer and timeline are always
+/// shown; the agent holds live runs; Settings and Export are windows.
+pub const PARKABLE: &[&str] = &["assets", "layer-effects", "inspector", "fxbrowser"];
+/// A v4 extension's viewer overlay publishes as `<panel>@viewer`.
+pub const VIEWER_OVERLAY: &str = "@viewer";
+/// A `themes.activate` request: its number, panel and theme id (`None`: the
+/// built-in look).
+pub type ThemeRequest = (u64, String, Option<String>);
+/// A deduplicated agent-tool thread request: fingerprint, thread, run.
+type ThreadRequest = (String, String, Option<String>);
 #[derive(Clone, Debug)]
 pub struct Publication {
     pub panel: String,
@@ -98,6 +110,8 @@ struct Entry {
     router: HostRouter<HostDataService<data::Data>>,
     surface: Surface,
     interaction: Interaction,
+    /// A v4 extension's viewer overlay (`overlays.viewer`), display only.
+    overlay: Surface,
 }
 /// Completed byte receipts stay native; the JSX panel receives metadata only.
 #[derive(Clone)]
@@ -116,6 +130,9 @@ pub struct Builtins {
     /// Built-in panels by id; a fork that replaces one runs in its place here.
     realms: Mutex<BTreeMap<String, Realm>>,
     extension_realms: Mutex<BTreeMap<String, Realm>>,
+    /// User forks running in place of a built-in (`replace`): the fork's id
+    /// and module graph by panel, so a parked fork starts again as itself.
+    forks: Mutex<BTreeMap<String, (String, Value)>>,
 }
 struct Broker {
     /// Third-party v4 surface extensions mounted in this window.
@@ -139,9 +156,28 @@ struct Broker {
     carried: Mutex<Option<agent_host::SharedAgent>>,
     /// Set once `carry_agent` hands the runs on: closing no longer stops them.
     agent_released: std::sync::atomic::AtomicBool,
+    /// Agent-tool thread requests by caller and clientRequestId: the request's
+    /// fingerprint, its thread and run (main dedupes retries the same way).
+    thread_requests: Mutex<BTreeMap<String, ThreadRequest>>,
     /// Commands each extension realm registered (`commands.register`), by panel,
     /// with a revision that moves on every change.
     commands: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Themes each extension realm offers (`themes.register`), by panel.
+    themes: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// The latest `themes.activate` in this window: a counter, and the last
+    /// request (its number, panel and theme id, `None` for the built-in look).
+    theme_request: Mutex<(u64, Option<ThemeRequest>)>,
+    /// Realms with a clip painter (`timeline.paint`), and a revision that
+    /// moves whenever one arrives or leaves.
+    painters: Mutex<(u64, std::collections::BTreeSet<String>)>,
+    /// The `timeline.chrome` writer (`chrome.rs`), started on first use.
+    chrome: Mutex<Option<std::sync::mpsc::Sender<chrome::ChromeEdit>>>,
+    /// Set while the window closes: its realms' ends are not removals.
+    closing: std::sync::atomic::AtomicBool,
+    /// Built-in panels parked while closed (`Builtins::park`).
+    parked: Mutex<std::collections::BTreeSet<String>>,
+    /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
+    overlays_cleared: Mutex<Vec<String>>,
 }
 impl Builtins {
     pub fn new(
@@ -182,6 +218,400 @@ impl Builtins {
             .store(true, std::sync::atomic::Ordering::Release);
         Some(carry)
     }
+    /// thread_launch, thread_send and thread_cancel from an agent tool, through
+    /// this window's Agent panel and its provider runs (main's controlThread):
+    /// the composer's own send, steer, answer and stop effects, without
+    /// switching the person's visible thread. New threads and new turns run at
+    /// the caller's access (`callerAccess`); a caller never steers a thread
+    /// with broader access. Call it off the main thread: saves and launches
+    /// reach the kernel and disk, and a reconfiguration waits for a stop.
+    pub fn agent_thread_control(
+        &self,
+        tool: &str,
+        args: &Value,
+    ) -> std::result::Result<Value, String> {
+        use pm_agents::Access;
+        use pm_agents::Provider;
+        let closed = || {
+            "Open the Agent panel in this project's window before controlling its threads."
+                .to_owned()
+        };
+        let missing = || "This thread does not exist in the current project.".to_owned();
+        let failed = |e: pm_panel_agentpanel::Error| format!("{e:?}");
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| closed())?;
+            let backend = backend.lock().unwrap();
+            let agent = backend.native.agent.clone().ok_or_else(closed)?;
+            (agent, backend.native.agent_link.clone())
+        };
+        // An unknown caller gets the narrowest access: planning.
+        let caller = match args["callerAccess"].as_str() {
+            Some("project") => "project",
+            _ => "editor",
+        };
+        let caller_run = args["callerRunId"].as_str().unwrap_or_default();
+        let thread_arg = args["threadId"].as_str().unwrap_or_default().to_owned();
+        let describe = |thread: &str, extra: Value| -> std::result::Result<Value, String> {
+            let state = agent.lock().unwrap();
+            let session = state.panel.session(thread).map_err(|_| missing())?;
+            let mut out = json!({"threadId":thread,"runId":session.run.as_ref().map(|r| r.id.clone()),
+                "busy":session.run.is_some(),"provider":session.settings.provider.name(),
+                "model":session.settings.model,"reasoningEffort":session.settings.effort,
+                "access":if session.settings.access == Access::Editor { "editor" } else { "project" },
+                "status":if session.run.is_some() { "running" } else if tool == "thread_cancel" { "cancelled" } else { "idle" }});
+            if let (Some(out), Some(extra)) = (out.as_object_mut(), extra.as_object()) {
+                out.extend(extra.clone());
+            }
+            Ok(out)
+        };
+        let run_effect = |effect: &pm_panel_agentpanel::model::Effect| {
+            agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                effect,
+            )
+        };
+        let save = |state: &mut agent_host::AgentState| {
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| format!("{e:?}"))
+        };
+        if tool == "thread_cancel" {
+            let effect = {
+                let mut state = agent.lock().unwrap();
+                let running = state
+                    .panel
+                    .session(&thread_arg)
+                    .map_err(|_| missing())?
+                    .run
+                    .is_some();
+                running
+                    .then(|| state.panel.stop(&thread_arg))
+                    .transpose()
+                    .map_err(failed)?
+            };
+            if let Some(effect) = effect {
+                run_effect(&effect)?;
+            }
+            link.touch();
+            return describe(&thread_arg, json!({}));
+        }
+        if self.broker.application && caller == "editor" {
+            return Err("Start an app thread with Project access. Planning threads need an attached project.".into());
+        }
+        // A retried request returns its first answer; a reused id refuses.
+        let target = &args["target"];
+        let fingerprint = json!({"title":args["title"],"message":args["message"],"target":target,"access":caller}).to_string();
+        let request_key = args["clientRequestId"].as_str().map(|id| {
+            format!(
+                "{tool}\u{0}{caller_run}\u{0}{}\u{0}{id}",
+                if tool == "thread_send" {
+                    thread_arg.as_str()
+                } else {
+                    ""
+                }
+            )
+        });
+        if let Some(key) = &request_key
+            && let Some((seen, thread, run)) = self
+                .broker
+                .thread_requests
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+        {
+            if seen != fingerprint {
+                return Err(if tool == "thread_launch" {
+                    "This clientRequestId belongs to another thread launch.".into()
+                } else {
+                    "This clientRequestId belongs to another message.".into()
+                });
+            }
+            return describe(
+                &thread,
+                if tool == "thread_launch" {
+                    json!({})
+                } else {
+                    json!({"runId":run,"delivery":"already_sent"})
+                },
+            );
+        }
+        if tool == "thread_send" && request_key.is_some() {
+            let prefix = format!("thread_send\u{0}{caller_run}\u{0}{thread_arg}\u{0}");
+            if self
+                .broker
+                .thread_requests
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .count()
+                >= 64
+            {
+                return Err("This thread has reached its saved update limit. Start a new thread for further orchestrated work.".into());
+            }
+        }
+        let provider_of = |name: &str| match name {
+            "chatgpt" => Provider::Chatgpt,
+            "claude" => Provider::Claude,
+            _ => Provider::Compatible,
+        };
+        let message = args["message"].as_str().unwrap_or_default();
+        let now = agent_host::now_ms();
+        // What the request asks for, against the thread's current settings.
+        let (thread, steer, reconfigure) = {
+            let mut state = agent.lock().unwrap();
+            let base = if tool == "thread_send" {
+                thread_arg.clone()
+            } else {
+                state.panel.active_id().to_owned()
+            };
+            let session = state.panel.session(&base).map_err(|_| missing())?;
+            let provider = target["providerInstanceId"]
+                .as_str()
+                .map_or(session.settings.provider, provider_of);
+            if !link.available(provider) {
+                let name = match provider {
+                    Provider::Chatgpt => "ChatGPT",
+                    Provider::Claude => "Claude",
+                    Provider::Compatible => "your compatible provider",
+                };
+                return Err(format!(
+                    "Sign in to {name} in Settings › Agents before starting a run."
+                ));
+            }
+            if tool == "thread_launch" {
+                let id = pm_kernel::new_id("agent-thread");
+                state.panel.launch_background(&id, now).map_err(failed)?;
+                (id, None, false)
+            } else {
+                let busy = session.run.as_ref().map(|r| r.id.clone());
+                if busy.is_some()
+                    && (session.settings.access == Access::Computer
+                        || caller == "editor" && session.settings.access != Access::Editor)
+                {
+                    return Err("This thread has broader permissions than the caller.".into());
+                }
+                if session.applying {
+                    return Err("This thread is applying its current change. Wait before sending new direction.".into());
+                }
+                let changes = target["providerInstanceId"]
+                    .as_str()
+                    .is_some_and(|p| provider_of(p) != session.settings.provider)
+                    || target["model"]
+                        .as_str()
+                        .is_some_and(|m| m != session.settings.model)
+                    || target["options"]["reasoningEffort"]
+                        .as_str()
+                        .is_some_and(|e| e != session.settings.effort);
+                (
+                    thread_arg.clone(),
+                    busy.clone().filter(|_| !changes),
+                    busy.is_some() && changes,
+                )
+            }
+        };
+        // A reconfigured run stops first; the new turn carries the request on.
+        if reconfigure {
+            let effect = agent.lock().unwrap().panel.stop(&thread).map_err(failed)?;
+            run_effect(&effect)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while agent
+                .lock()
+                .unwrap()
+                .panel
+                .session(&thread)
+                .is_ok_and(|s| s.run.is_some())
+            {
+                if std::time::Instant::now() > deadline {
+                    return Err("The running turn did not stop in time. Its work continues; try again shortly.".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        let effect = {
+            let mut state = agent.lock().unwrap();
+            if steer.is_none() {
+                // A new turn runs at the caller's access and the target settings.
+                if let Some(effect) = state.panel.set_access(&thread, caller).map_err(failed)? {
+                    drop(state);
+                    run_effect(&effect)?;
+                    state = agent.lock().unwrap();
+                }
+                if let Some(provider) = target["providerInstanceId"].as_str().map(provider_of) {
+                    let model = target["model"].as_str().unwrap_or_default().to_owned();
+                    state
+                        .panel
+                        .set_provider(&thread, provider, model, link.catalog(provider))
+                        .map_err(failed)?;
+                }
+                let current = state
+                    .panel
+                    .session(&thread)
+                    .map_err(|_| missing())?
+                    .settings
+                    .clone();
+                let model = target["model"]
+                    .as_str()
+                    .map_or(current.model.clone(), str::to_owned);
+                let effort = target["options"]["reasoningEffort"]
+                    .as_str()
+                    .map_or(current.effort.clone(), str::to_owned);
+                if model != current.model || effort != current.effort {
+                    state
+                        .panel
+                        .set_model(&thread, model, effort)
+                        .map_err(failed)?;
+                }
+                agent_host::admit_send(&state, &thread)?;
+            }
+            let run = steer.clone().unwrap_or_else(|| pm_kernel::new_id("run"));
+            let effect = state
+                .panel
+                .send_message(
+                    &thread,
+                    message,
+                    &[],
+                    &run,
+                    &pm_kernel::new_id("request"),
+                    now,
+                )
+                .map_err(failed)?;
+            if tool == "thread_launch"
+                && let Some(title) = args["title"].as_str()
+            {
+                let _ = state.panel.generated_title(&thread, message, title, now);
+            }
+            save(&mut state)?;
+            effect
+        };
+        let delivery = match (&effect.kind, steer.is_some()) {
+            (pm_panel_agentpanel::model::EffectKind::Answer { .. }, _) => "answered",
+            (_, true) => "live",
+            _ => "started",
+        };
+        run_effect(&effect)?;
+        link.touch();
+        let result = describe(
+            &thread,
+            if tool == "thread_send" {
+                json!({"delivery":delivery})
+            } else {
+                json!({})
+            },
+        )?;
+        if let Some(key) = request_key {
+            self.broker.thread_requests.lock().unwrap().insert(
+                key,
+                (
+                    fingerprint,
+                    thread,
+                    result["runId"].as_str().map(str::to_owned),
+                ),
+            );
+        }
+        Ok(result)
+    }
+    /// Files the person chose with Add Attachments, as attachment records
+    /// (`{id, name, type, size, dataUrl | content | dataBase64}`), into the
+    /// visible thread's message. At most six per message, as on main.
+    pub fn agent_attach(&self, records: Vec<Value>) -> std::result::Result<(), String> {
+        let (agent, link) = {
+            let backend = self
+                .backend("agent")
+                .map_err(|_| "The Agent panel closed.")?;
+            let backend = backend.lock().unwrap();
+            (
+                backend
+                    .native
+                    .agent
+                    .clone()
+                    .ok_or("The Agent panel closed.")?,
+                backend.native.agent_link.clone(),
+            )
+        };
+        let files = records
+            .into_iter()
+            .map(pm_panel_agentpanel::composer::Attachment::from_record)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| format!("{e:?}"))?;
+        {
+            let mut state = agent.lock().unwrap();
+            let thread = state.panel.active_id().to_owned();
+            state
+                .panel
+                .add_attachments(&thread, files, agent_host::now_ms())
+                .map_err(|e| match e {
+                    pm_panel_agentpanel::Error::Invalid("six attachments per message") => {
+                        "A message can carry six attachments.".to_owned()
+                    }
+                    e => format!("{e:?}"),
+                })?;
+            // Called off the main thread: the archive write happens here.
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        link.touch();
+        link.publish_now();
+        Ok(())
+    }
+    /// What `thread_read` adds from this window's live Agent panel: the
+    /// running trace as text, open questions, and the run. `None` when the
+    /// panel holds no session for the thread.
+    pub fn agent_thread_live(&self, thread: &str) -> Option<Value> {
+        let shared = {
+            let backend = self.backend("agent").ok()?;
+            let state = backend.lock().unwrap().native.agent.clone();
+            state.or_else(|| self.broker.carried.lock().unwrap().clone())?
+        };
+        let state = shared.lock().unwrap();
+        let session = state.panel.session(thread).ok()?;
+        let busy = session.run.is_some();
+        let steps: Vec<Value> = session.trace.rows.values().cloned().collect();
+        let mut activity = if busy {
+            pm_agents::conversation::message_text(&json!({"role":"trace","steps":steps}))
+        } else {
+            String::new()
+        };
+        // Main keeps the last 20,000 UTF-16 units.
+        let units: Vec<u16> = activity.encode_utf16().collect();
+        if units.len() > 20_000 {
+            activity = String::from_utf16_lossy(&units[units.len() - 20_000..]);
+        }
+        let questions: Vec<Value> = session
+            .trace
+            .rows
+            .page(0..session.trace.rows.len())
+            .iter()
+            .filter(|row| row.value["kind"] == "question" && row.value["status"] == "open")
+            .map(|row| {
+                json!({"itemId":row.id,"blocking":row.value["blocking"] != false,
+                    "questions":row.value["questions"].clone()})
+            })
+            .collect();
+        Some(
+            json!({"busy":busy,"runId":session.run.as_ref().map(|run| run.id.clone()),
+            "activity":activity,"questions":questions}),
+        )
+    }
     fn create(
         kernel: KernelHandle,
         project: &str,
@@ -210,7 +640,15 @@ impl Builtins {
             agent,
             carried: Mutex::new(carried),
             agent_released: Default::default(),
+            thread_requests: Default::default(),
             commands: Default::default(),
+            themes: Default::default(),
+            overlays_cleared: Default::default(),
+            parked: Default::default(),
+            theme_request: Default::default(),
+            painters: Default::default(),
+            chrome: Default::default(),
+            closing: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -225,6 +663,7 @@ impl Builtins {
                 // Reserved per isolate at its heap ceiling (64 MiB), for the
                 // plan's 64-isolate budget per window: the nine built-ins and
                 // the user's v4 extensions, each in its own isolate (§3.4/§3.7).
+                // Closed panels park to give theirs back.
                 admission: Admission::new(64 * 64 * 1024 * 1024),
             },
         )?;
@@ -233,12 +672,38 @@ impl Builtins {
             broker,
             realms: Mutex::default(),
             extension_realms: Mutex::default(),
+            forks: Mutex::default(),
         })
     }
     /// Ticket is awaited off the UI handler. First publication is delivered only
     /// after Rust accepts the complete atomic surface commit.
     pub fn mount(&mut self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.mount_builtin(panel)
+    }
+    /// Parks a closed built-in panel: its isolate goes and its reservation
+    /// returns to the cage account; `unpark` starts it again from its first
+    /// commit. Waits (bounded) for the isolate: call off the main thread.
+    pub fn park(&self, panel: &str) -> bool {
+        if !PARKABLE.contains(&panel) || !self.realms.lock().unwrap().contains_key(panel) {
+            return false;
+        }
+        self.retire(panel);
+        self.broker.parked.lock().unwrap().insert(panel.into());
+        true
+    }
+    /// A parked panel opened again, as the fork that replaced it if any.
+    pub fn unpark(&self, panel: &str) -> Option<Result<Ticket<Evaluation>>> {
+        if !self.broker.parked.lock().unwrap().remove(panel) {
+            return None;
+        }
+        let fork = self.forks.lock().unwrap().get(panel).cloned();
+        Some(match fork {
+            Some((fork, graph)) => self.start(panel, fork_source(&fork, &graph, panel)),
+            None => self.mount_builtin(panel),
+        })
+    }
+    pub fn is_parked(&self, panel: &str) -> bool {
+        self.broker.parked.lock().unwrap().contains(panel)
     }
     fn mount_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         if !LIVE_PANELS.contains(&panel)
@@ -277,6 +742,10 @@ impl Builtins {
         self.broker.entries.lock().unwrap().remove(panel);
         self.broker.publications.lock().unwrap().remove(panel);
         self.broker.forget_commands(panel);
+        self.broker.forget_themes(panel);
+        self.broker.forget_overlay(panel);
+        self.broker.forget_timeline(panel, None);
+        self.broker.forget_painter(panel);
     }
     /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
     /// it: same realm identity, routes and host operations, the fork's code.
@@ -288,20 +757,37 @@ impl Builtins {
             return Err(Error::Invalid("unregistered built-in"));
         }
         self.retire(panel);
-        self.start(
-            panel,
-            format!(
-                "{BUNDLE}\n__pmBuiltin.mountExtension({},{},{})",
-                json!(fork),
-                json!(graph.to_string()),
-                json!(panel)
-            ),
-        )
+        self.forks
+            .lock()
+            .unwrap()
+            .insert(panel.into(), (fork.into(), graph.clone()));
+        self.start(panel, fork_source(fork, graph, panel))
     }
     /// The fork went away: the shipped panel comes back.
     pub fn restore(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.retire(panel);
+        self.forks.lock().unwrap().remove(panel);
+        self.broker.parked.lock().unwrap().remove(panel);
         self.mount_builtin(panel)
+    }
+    /// Realms running user code: third-party extensions and forks of
+    /// built-ins. Menus, clip painters and viewer overlays come from these.
+    fn user_realms(&self) -> Vec<(String, Realm)> {
+        let forks = self.forks.lock().unwrap();
+        let realms = self.realms.lock().unwrap();
+        let mut out: Vec<(String, Realm)> = forks
+            .keys()
+            .filter_map(|panel| Some((panel.clone(), realms.get(panel)?.clone())))
+            .collect();
+        drop((realms, forks));
+        out.extend(
+            self.extension_realms
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, realm)| (id.clone(), realm.clone())),
+        );
+        out
     }
     /// What agent runs may use. Without this the panel reports no connection.
     pub fn set_agent_environment(
@@ -349,9 +835,32 @@ impl Builtins {
         // Its surface and router go too; a late call from it is a stale generation.
         self.broker.entries.lock().unwrap().remove(id);
         self.broker.forget_commands(id);
+        self.broker.forget_themes(id);
+        self.broker.forget_overlay(id);
+        self.broker.forget_timeline(id, None);
+        self.broker.forget_painter(id);
     }
     /// Every extension command in this window when they changed since `seen`:
     /// `(revision, [{panel, id, title, key}])`.
+    /// Themes v4 extensions offer, when they changed since `seen`: each
+    /// `{panel, id, title, tokens}`.
+    pub fn themes_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let themes = self.broker.themes.lock().unwrap();
+        (themes.0 != seen).then(|| {
+            let list = themes
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |t| {
+                        let mut t = t.clone();
+                        t["panel"] = json!(panel);
+                        t
+                    })
+                })
+                .collect();
+            (themes.0, list)
+        })
+    }
     pub fn commands_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
         let commands = self.broker.commands.lock().unwrap();
         (commands.0 != seen).then(|| {
@@ -368,6 +877,61 @@ impl Builtins {
         })
     }
     /// Runs a command an extension registered, in that extension's realm.
+    /// True while any user realm runs (context menus ask them).
+    pub fn has_extensions(&self) -> bool {
+        !self.forks.lock().unwrap().is_empty() || !self.extension_realms.lock().unwrap().is_empty()
+    }
+    /// The latest `themes.activate` in this window: `(number, panel, id)`,
+    /// with `id` `None` for the built-in look. Numbers only grow.
+    pub fn theme_request(&self) -> Option<ThemeRequest> {
+        self.broker.theme_request.lock().unwrap().1.clone()
+    }
+    /// Every v4 extension's items for a menu opening at `location` (each
+    /// realm waits at most 100 ms on its own contributions).
+    pub fn gather_menus(
+        &self,
+        location: &str,
+        ctx: &Value,
+    ) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let script = format!("__pmBuiltin.gatherMenu({},{})", json!(location), ctx);
+        self.user_realms()
+            .into_iter()
+            .map(|(id, realm)| (id, realm.eval(script.clone())))
+            .collect()
+    }
+    /// The person chose `key` from the items `panel` gave the last gather.
+    pub fn run_menu(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.runMenu({})", json!(key)))
+    }
+    /// Clip decorations for the timeline's visible clips from each realm
+    /// with a painter (`timeline.paint`); each answers JSON text.
+    pub fn paint_clips(&self, clips: &Value) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let script = format!("__pmBuiltin.paintClips({clips})");
+        let painters = self.broker.painters.lock().unwrap().1.clone();
+        self.user_realms()
+            .into_iter()
+            .filter(|(id, _)| painters.contains(id))
+            .map(|(id, realm)| (id, realm.eval(script.clone())))
+            .collect()
+    }
+    /// 0 with no clip painter; otherwise moves whenever one arrives or leaves.
+    pub fn painters_revision(&self) -> u64 {
+        let painters = self.broker.painters.lock().unwrap();
+        if painters.1.is_empty() { 0 } else { painters.0 }
+    }
+    /// Viewer overlays whose extension took them down since the last look.
+    pub fn take_cleared_overlays(&self) -> Vec<String> {
+        std::mem::take(&mut *self.broker.overlays_cleared.lock().unwrap())
+    }
+    /// Where the composition sits in the viewer, for extension overlays:
+    /// `{x, y, width, height, scale}` in overlay points.
+    pub fn viewer_frame(&self, frame: &Value) {
+        let script = format!("__pmBuiltin.viewerFrame({frame})");
+        for (_, realm) in self.user_realms() {
+            let _ = realm.eval(script.clone());
+        }
+    }
     pub fn run_command(&self, panel: &str, id: &str, args: &[Value]) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval(format!(
             "__pmBuiltin.runCommand({},{})",
@@ -734,6 +1298,9 @@ impl Builtins {
         }
     }
     pub fn close(&self) {
+        self.broker
+            .closing
+            .store(true, std::sync::atomic::Ordering::Release);
         if !self
             .broker
             .agent_released
@@ -843,6 +1410,7 @@ impl EngineProxy for Broker {
                     backend,
                     router,
                     surface: Surface::default(),
+                    overlay: Surface::default(),
                     interaction: Interaction::default(),
                 })),
             );
@@ -943,6 +1511,44 @@ impl EngineProxy for Broker {
                 entry.router.retire().map_err(Error::Host)?;
                 Ok(Value::Null)
             }
+            "themes.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 32
+                        && list.iter().all(|t| {
+                            t["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && t["title"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && t["tokens"].as_object().is_some_and(|m| m.len() <= 256)
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("themes need an id, a title and tokens"));
+                }
+                let mut themes = self.themes.lock().unwrap();
+                themes.0 += 1;
+                themes.1.insert(panel.into(), input.clone());
+                drop(themes);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            // `themes.activate(id)`: the latest request in the window wins.
+            "themes.activate" => {
+                let id = match input {
+                    Value::Null => None,
+                    Value::String(id) if (1..=128).contains(&id.len()) => Some(id.clone()),
+                    _ => return Err(Error::Invalid("a theme id or null")),
+                };
+                let mut request = self.theme_request.lock().unwrap();
+                request.0 += 1;
+                request.1 = Some((request.0, panel.into(), id));
+                drop(request);
+                self.themes.lock().unwrap().0 += 1;
+                (self.wake)();
+                Ok(Value::Null)
+            }
             "commands.set" => {
                 let valid = input.as_array().is_some_and(|list| {
                     list.len() <= 64
@@ -988,6 +1594,71 @@ impl EngineProxy for Broker {
                         json!({"accepted":false,"revision":entry.surface.revision(),"error":error.to_string()}),
                     ),
                 }
+            }
+            "overlay.commit" => {
+                let commit = serde_json::from_value(input.clone())
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                match entry.overlay.apply(commit) {
+                    Ok(_) => {
+                        self.publications.lock().unwrap().insert(
+                            format!("{panel}{VIEWER_OVERLAY}"),
+                            Publication {
+                                panel: format!("{panel}{VIEWER_OVERLAY}"),
+                                generation: generation.number,
+                                surface: Arc::new(entry.overlay.clone()),
+                            },
+                        );
+                        (self.wake)();
+                        Ok(json!({"accepted":true,"revision":entry.overlay.revision()}))
+                    }
+                    Err(error) => Ok(
+                        json!({"accepted":false,"revision":entry.overlay.revision(),"error":error.to_string()}),
+                    ),
+                }
+            }
+            "timeline.chrome" => {
+                // The native timeline doesn't draw these yet: refuse rather
+                // than accept a change nobody sees.
+                if ["showLayerNumbers", "showTypeBadges", "toolbarDensity"]
+                    .iter()
+                    .any(|key| input.get(key).is_some())
+                {
+                    return Err(Error::Invalid(
+                        "showLayerNumbers, showTypeBadges and toolbarDensity aren't drawn by the native timeline yet",
+                    ));
+                }
+                let patch = timeline_patch(input);
+                if patch.as_object().is_none_or(|p| p.is_empty()) {
+                    return Err(Error::Invalid(
+                        "timeline chrome needs at least one known field",
+                    ));
+                }
+                self.chrome_edit(chrome::ChromeEdit::Set {
+                    panel: panel.into(),
+                    generation: generation.number,
+                    patch,
+                });
+                Ok(Value::Null)
+            }
+            "timeline.painted" => {
+                // A painter came (`true`) or went: the timeline asks again.
+                let mut painters = self.painters.lock().unwrap();
+                painters.0 += 1;
+                if input == &json!(true) {
+                    painters.1.insert(panel.into());
+                } else {
+                    painters.1.remove(panel);
+                }
+                drop(painters);
+                (self.wake)();
+                Ok(Value::Null)
+            }
+            "overlay.clear" => {
+                // A publication not yet drawn goes too, so it can't come back.
+                entry.overlay = Surface::default();
+                self.forget_overlay(panel);
+                (self.wake)();
+                Ok(Value::Null)
             }
             "export.observe" => {
                 let mut backend = entry.backend.lock().unwrap();
@@ -1142,14 +1813,31 @@ impl KernelHooks for Broker {
         Err(Error::StaleGeneration)
     }
     fn revoke_generation(&self, generation: &Generation) {
-        if let Ok(panel) = self.panel(generation)
-            && let Some(entry) = self.entry(panel)
-        {
-            let mut entry = entry.lock().unwrap();
-            if entry.generation == generation.number {
-                let _ = entry.router.retire();
-            }
+        let Ok(panel) = self.panel(generation) else {
+            return;
+        };
+        let Some(entry) = self.entry(panel) else {
+            return;
+        };
+        let mut entry = entry.lock().unwrap();
+        if entry.generation != generation.number {
+            return;
         }
+        let _ = entry.router.retire();
+        // A generation that failed (a quota, a crash) takes down what it put
+        // up; a closing window's realms just end.
+        if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        entry.overlay = Surface::default();
+        drop(entry);
+        let panel = panel.to_owned();
+        self.forget_overlay(&panel);
+        self.forget_timeline(&panel, Some(generation.number));
+        self.forget_painter(&panel);
+        self.forget_themes(&panel);
+        self.forget_commands(&panel);
+        (self.wake)();
     }
     fn seal_open_gestures(&self, _: &Generation) {}
 }
@@ -1159,6 +1847,40 @@ impl Broker {
     }
     fn all_entries(&self) -> Vec<Arc<Mutex<Entry>>> {
         self.entries.lock().unwrap().values().cloned().collect()
+    }
+    /// Queues a `timeline.chrome` edit for this window's chrome writer.
+    fn chrome_edit(&self, edit: chrome::ChromeEdit) {
+        let mut writer = self.chrome.lock().unwrap();
+        let tx = writer
+            .get_or_insert_with(|| chrome::spawn_writer(self.kernel.clone(), self.project.clone()));
+        let _ = tx.send(edit);
+    }
+    /// An extension (or one failed generation of it) leaving puts back the
+    /// timeline chrome it set.
+    fn forget_timeline(&self, panel: &str, generation: Option<u64>) {
+        if self.chrome.lock().unwrap().is_some() {
+            self.chrome_edit(chrome::ChromeEdit::Forget {
+                panel: panel.into(),
+                generation,
+            });
+        }
+    }
+    fn forget_painter(&self, panel: &str) {
+        let mut painters = self.painters.lock().unwrap();
+        if painters.1.remove(panel) {
+            painters.0 += 1;
+        }
+    }
+    fn forget_overlay(&self, panel: &str) {
+        let id = format!("{panel}{VIEWER_OVERLAY}");
+        self.publications.lock().unwrap().remove(&id);
+        self.overlays_cleared.lock().unwrap().push(id);
+    }
+    fn forget_themes(&self, panel: &str) {
+        let mut themes = self.themes.lock().unwrap();
+        if themes.1.remove(panel).is_some() {
+            themes.0 += 1;
+        }
     }
     fn forget_commands(&self, panel: &str) {
         let mut commands = self.commands.lock().unwrap();
@@ -1194,3 +1916,49 @@ impl WatchdogHooks for Broker {
 
 #[cfg(test)]
 mod tests;
+
+/// A fork's mount script: the fork's module graph drawing built-in `panel`.
+fn fork_source(fork: &str, graph: &Value, panel: &str) -> String {
+    format!(
+        "{BUNDLE}\n__pmBuiltin.mountExtension({},{},{})",
+        json!(fork),
+        json!(graph.to_string()),
+        json!(panel)
+    )
+}
+
+/// v1–3's `sanitizeInterfaceEdit` for the timeline: known fields, v1's ranges.
+fn timeline_patch(input: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    let number = |key: &str, low: f64, high: f64, round: bool| {
+        input[key]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(|v| if round { v.round() } else { v }.clamp(low, high))
+    };
+    for (key, low, high, round) in [
+        ("rowHeight", 22., 48., true),
+        ("gutterWidth", 160., 360., true),
+        ("rulerHeight", 20., 42., true),
+        ("clipRadius", 0., 12., false),
+        ("keyframeSize", 4., 12., false),
+    ] {
+        if let Some(v) = number(key, low, high, round) {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    for key in ["showLayerNumbers", "showTypeBadges"] {
+        if let Some(v) = input[key].as_bool() {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    for (key, allowed) in [
+        ("toolbarDensity", ["compact", "normal"]),
+        ("surfaceOrder", ["normal", "reversed"]),
+    ] {
+        if let Some(v) = input[key].as_str().filter(|v| allowed.contains(v)) {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    Value::Object(out)
+}

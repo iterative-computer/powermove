@@ -146,7 +146,21 @@ pub struct Catalog {
     pub models: Vec<(String, String)>,
     pub providers: Vec<(String, String)>,
     pub efforts: Vec<String>,
+    /// Each listed model's own reasoning efforts (main's per-model choices).
+    pub model_efforts: Vec<(String, Vec<String>)>,
     pub claude: bool,
+}
+impl Catalog {
+    /// The efforts `model` takes: its own when the provider listed them, else
+    /// every listed effort (the provider's default model). `""` is Default.
+    pub fn efforts_for(&self, model: &str) -> Vec<String> {
+        match self.model_efforts.iter().find(|(id, _)| id == model) {
+            Some((_, own)) => std::iter::once(String::new())
+                .chain(own.iter().cloned())
+                .collect(),
+            None => self.efforts.clone(),
+        }
+    }
 }
 pub fn slash_choices(draft: &str, catalog: &Catalog, working: bool, blocked: bool) -> Vec<Choice> {
     if !draft.starts_with('/') || draft.contains(['\r', '\n']) {

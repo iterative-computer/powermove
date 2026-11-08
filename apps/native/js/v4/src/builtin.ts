@@ -29,6 +29,106 @@ export interface BuiltinEnv {
   hot?: Hot;
   /** Extensions only: commands in the palette and keymap (see `Commands`). */
   commands?: Commands;
+  /** Extensions only: themes for the whole window (see `Themes`). */
+  themes?: Themes;
+  /** Extensions only: context-menu items (see `Menus`). */
+  menus?: Menus;
+  /** Extensions only: drawing over the viewer (see `Overlays`). */
+  overlays?: Overlays;
+  /** Extensions only: the timeline's columns and metrics (see `Timeline`). */
+  timeline?: Timeline;
+}
+
+/**
+ * The timeline's chrome, as v1–3 extensions set `workspace.chrome.timeline`:
+ * `chrome({ rowHeight, gutterWidth, rulerHeight, clipRadius, keyframeSize,
+ * showLayerNumbers, showTypeBadges, toolbarDensity, surfaceOrder })`, each
+ * optional, within v1's ranges. What an extension changes is put back when it
+ * leaves.
+ */
+export interface Timeline {
+  chrome(patch: {
+    rowHeight?: number;
+    gutterWidth?: number;
+    rulerHeight?: number;
+    clipRadius?: number;
+    keyframeSize?: number;
+    showLayerNumbers?: boolean;
+    showTypeBadges?: boolean;
+    toolbarDensity?: "compact" | "normal";
+    surfaceOrder?: "normal" | "reversed";
+  }): void;
+  /**
+   * Paints on the timeline's clips, as v1–3 extensions drew on its canvas.
+   * `painter(clips)` runs when the visible clips change (scroll, zoom,
+   * edits), never per playback frame. Each clip is `{ id, layerId, width,
+   * height, from, duration }` (points and seconds); return
+   * `{ [clipId]: shapes }` with shapes in clip points:
+   * `{ rect: [x, y, w, h], color: "#rrggbb", opacity?, radius? }` or
+   * `{ text, x, y, color, size? }`. Returns a function that removes it.
+   */
+  paint(painter: (clips: Json[]) => Record<string, unknown[]>): () => void;
+}
+
+/**
+ * Drawing over the composition in the viewer, as v1–3 extensions drew on the
+ * viewer's overlay canvas: `viewer(Component)` renders `<Component frame />`
+ * above the picture and below the transform gizmos, where `frame` is
+ * `{ x, y, width, height, scale }`, the composition's rectangle in the
+ * overlay's points (`scale` = points per composition pixel). Display only:
+ * pointer input goes to the viewer. Returns a function that removes it.
+ */
+export interface Overlays {
+  viewer(component: (props: { frame: Json }) => unknown): () => void;
+}
+
+/**
+ * Context-menu items, as v1–3's `menus.contribute`: `items(ctx)` runs on every
+ * open of that menu (`"panel:context"`, with `ctx.panelId`) and returns items:
+ * `"-"`, `{ header }`, or `{ label, kb?, on?, disabled?, run?, submenu? }`. A
+ * Promise is waited for at most 100 ms. Returns a function that removes them.
+ */
+export interface Menus {
+  contribute(
+    location:
+      | "panel:context"
+      | "layer:context"
+      | "timeline:context"
+      | "viewer:context"
+      | "titlebar:right",
+    items: (
+      ctx: Record<string, Json>,
+    ) => MenuContribution[] | Promise<MenuContribution[]>,
+  ): () => void;
+}
+export type MenuContribution =
+  | "-"
+  | { header: string }
+  | {
+      label: string;
+      kb?: string | null;
+      on?: boolean;
+      disabled?: boolean;
+      run?: () => unknown;
+      submenu?: MenuContribution[];
+    };
+
+/**
+ * Themes an extension offers. Each is listed in the command palette as
+ * "Theme: <title>"; choosing it restyles the window's chrome and every panel.
+ * `tokens` names design tokens (`"colors.accent"`, `"metrics.gap"`,
+ * `"translucency.panel"`, …): colours as `"#rrggbb"`, the rest as numbers.
+ * Unknown tokens are refused. `register` returns a function that removes it.
+ */
+export interface Themes {
+  register(theme: {
+    id: string;
+    title: string;
+    tokens: Record<string, string | number>;
+  }): () => void;
+  /** Shows a registered theme in every window now, as v1–3's
+   *  `theme.activate`; `null` puts the built-in look back. */
+  activate(id: string | null): void;
 }
 
 /**

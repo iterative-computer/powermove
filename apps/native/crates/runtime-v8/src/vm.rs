@@ -207,15 +207,24 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
         throw(s, "Host argument quota");
         return;
     }
-    let result = serde_json::from_str(&arg)
-        .map_err(|e| e.to_string())
-        .and_then(|v| {
-            if op == "engine" {
-                engine_op(&state, v)
-            } else {
-                host_op(&mut state.lock().unwrap(), &op, v).map(|v| v.to_string())
-            }
-        });
+    // A Rust panic can't unwind through V8's frames (the process would abort
+    // with "failed to initiate panic"): a panicking host operation ends this
+    // generation instead, and the panic is reported by the panic hook.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        serde_json::from_str(&arg)
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                if op == "engine" {
+                    engine_op(&state, v)
+                } else {
+                    host_op(&mut state.lock().unwrap(), &op, v).map(|v| v.to_string())
+                }
+            })
+    }));
+    let Ok(result) = result else {
+        s.terminate_execution();
+        return;
+    };
     if state.lock().unwrap().cancellation.is_cancelled() {
         s.terminate_execution();
         return;

@@ -372,6 +372,7 @@ fn restored_computer_intent_is_not_a_live_authority() {
             Catalog {
                 models: vec![("m".into(), "Model".into())],
                 efforts: vec!["high".into()],
+                model_efforts: vec![],
                 ..Default::default()
             },
         )
@@ -391,6 +392,7 @@ fn provider_cannot_switch_during_run_and_model_uses_catalog_ids() {
         providers: vec![("claude".into(), "Claude".into())],
         models: vec![("sonnet".into(), "Sonnet".into())],
         efforts: vec!["high".into()],
+        model_efforts: vec![],
         claude: true,
     };
     p.set_provider("t", Provider::Claude, "sonnet".into(), catalog.clone())
@@ -1079,6 +1081,7 @@ fn new_ui_thread_preserves_provider_model_effort_and_requires_its_own_computer_g
             providers: vec![("claude".into(), "Claude".into())],
             models: vec![("sonnet".into(), "Sonnet".into())],
             efforts: vec!["high".into()],
+            model_efforts: vec![],
             claude: true,
         },
     )
@@ -1118,4 +1121,35 @@ fn rejected_answer_after_same_run_settles_closes_its_archived_acknowledgement() 
     let q = p.session("t").unwrap().question("q").unwrap();
     assert_eq!(q["status"], "closed");
     assert!(q.get("answers").is_none());
+}
+
+#[test]
+fn switching_models_keeps_only_an_effort_the_new_model_takes() {
+    let mut p = panel();
+    let catalog = Catalog {
+        providers: vec![("chatgpt".into(), "ChatGPT".into())],
+        models: vec![
+            ("fast".into(), "Fast".into()),
+            ("deep".into(), "Deep".into()),
+        ],
+        efforts: vec!["".into(), "low".into(), "xhigh".into()],
+        model_efforts: vec![
+            ("fast".into(), vec!["low".into()]),
+            ("deep".into(), vec!["low".into(), "xhigh".into()]),
+        ],
+        claude: false,
+    };
+    p.set_provider("t", Provider::Chatgpt, "deep".into(), catalog)
+        .unwrap();
+    p.set_model("t", "deep".into(), "xhigh".into()).unwrap();
+    // The carried effort doesn't exist on Fast: it falls back to Default.
+    p.set_model("t", "fast".into(), "xhigh".into()).unwrap();
+    let settings = &p.session("t").unwrap().settings;
+    assert_eq!(
+        (settings.model.as_str(), settings.effort.as_str()),
+        ("fast", "")
+    );
+    // Asking Fast for an effort it lacks fails.
+    assert!(p.set_model("t", "fast".into(), "xhigh".into()).is_err());
+    p.set_model("t", "fast".into(), "low".into()).unwrap();
 }

@@ -22,7 +22,7 @@ pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features
 pm-render = { path = "../../../../engine/crates/pm-render" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
-gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["frame-capture"] }
 metal = "0.33"
 foreign-types = "0.5"
 objc2 = "0.6"
@@ -51,7 +51,7 @@ pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
 raw-window-handle = "0.6"
 pm-promedia = { path = "../promedia" }
 pm-proxy = { path = "../../../../engine/crates/pm-proxy" }
-gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos" }
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", features = ["frame-capture"] }
 
 pm-panel-media = { path = "../panel-media" }
 pm-first-launch = { path = "../first-launch" }

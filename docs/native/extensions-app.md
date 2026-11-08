@@ -203,3 +203,19 @@ window is open is shown in it.
 - Each window reserves 64 MiB per isolate for up to 64 isolates, so many windows
   can together reserve past the shared 4 GB cage; idle isolates are not parked.
 - Store panels have no recorder canvases, and `ui.*` from a helper is not attached.
+
+## v4 parity with v1–3 (2026-11-08)
+
+What a v1–3 extension could change and where v4 stands, without forking:
+
+| v1–3 could | v4 now |
+|---|---|
+| Commands, keybindings, panels | `commands.register`, `view()` / `mount(env)` |
+| Themes: tokens and CSS (`theme.register`, `theme.activate`) | `themes.register` / `themes.activate` (tokens). v1–3 CSS themes reach native chrome through the translator, and the timeline surface (track, gutter, accent, text, line, surface order); other surface rules aren't applied natively yet. |
+| Context menus (`menus.contribute`) | `menus.contribute` for panel, layer, timeline and viewer; `titlebar:right` accepted and not shown, as on main |
+| Viewer overlays (drawing on `ViewerService.ov` or the stage DOM) | `overlays.viewer` (display only) |
+| Timeline chrome (`workspace.chrome.timeline`: rows, gutter, ruler, keys, columns) | `timeline.chrome`; the native timeline follows rows, gutter, ruler, key size, clip radius and surface order. Layer numbers, type badges and toolbar density aren't drawn yet (v4 refuses them) |
+| Timeline painting (`TimelineService.cv`) | `timeline.paint` (shapes per clip; TL-PAINT-1 p95 0.11 ms for 1,000 clips) |
+| Titlebar/toolbar items | None on main either: tool strips are panels |
+
+Agent flows (publish → visible → revert) run with `scripts/agent-flows.py`.

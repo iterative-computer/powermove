@@ -23,16 +23,35 @@ pub trait Delegate: 'static {
     /// Run a shell command by name, as its menu item or chord would.
     fn command(&self, name: &str, cx: &mut App);
     /// `choose` runs with the picked row, on the main thread, once tracking ends.
-    /// Extensions' rows for `locations` follow the native ones.
     fn menu(
         &self,
-        locations: Vec<(&'static str, serde_json::Value)>,
         items: Vec<serde_json::Value>,
         window: &mut Window,
         cx: &mut App,
         choose: Choose,
     );
+    /// Asks extension clip painters (`timeline.paint`) for decorations of
+    /// `clips`; `done` gets `{clipId: shapes}` merged, on the main thread.
+    fn paint_clips(&self, _clips: serde_json::Value, _done: PaintDone, _cx: &mut App) {}
+    /// Moves when a clip painter arrives or leaves.
+    fn painters_revision(&self, _cx: &App) -> u64 {
+        0
+    }
+    /// A context menu whose native rows come first, then what extensions add
+    /// for each of `locations` (v1–3's `MenuLocation` and what it was opened on).
+    fn extension_menu(
+        &self,
+        _locations: Vec<(&'static str, serde_json::Value)>,
+        items: Vec<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Choose,
+    ) {
+        self.menu(items, window, cx, choose);
+    }
 }
+/// Receives extension clip decorations, and whether every painter answered.
+pub type PaintDone = Box<dyn FnOnce(pm_panel_timeline::render::Decorations, bool, &mut App)>;
 /// Runs with the picked row index once a native menu closes.
 pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
 #[derive(Clone, Debug)]
@@ -146,6 +165,13 @@ pub struct TimelineSurface {
     cursor: CursorStyle,
     /// A wheel or pinch view change waiting for the gesture to rest.
     idle_persist: Option<Task<()>>,
+    /// Extension clip decorations by clip id (`timeline.paint`), and what
+    /// they were asked for (painter revision, visible clips) and the request
+    /// in flight; `late` is when a request some painter missed was asked.
+    decorations: Arc<pm_panel_timeline::render::Decorations>,
+    painted: Option<(u64, String)>,
+    painting: bool,
+    late: Option<std::time::Instant>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -186,6 +212,10 @@ impl TimelineSurface {
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
             idle_persist: None,
+            decorations: Default::default(),
+            painted: None,
+            painting: false,
+            late: None,
         };
         this.restore_view();
         cx.spawn(async move |this, cx| {
@@ -245,7 +275,18 @@ impl TimelineSurface {
     }
     pub fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
         if self.tokens != tokens {
+            // A layer column the person never dragged follows the theme's
+            // (workspace timeline chrome); a dragged one stays.
+            let (old, new) = (
+                self.tokens.metrics.layer_column as f64,
+                tokens.metrics.layer_column as f64,
+            );
+            let follows = (self.view.layer_column - old).abs() < 0.5 && old != new;
             self.tokens = tokens;
+            if follows {
+                self.view.layer_column = new;
+                self.changed(false, cx);
+            }
             self.frame = None;
             self.published(cx);
         }
@@ -456,8 +497,67 @@ impl TimelineSurface {
             crate::playback::set_view(self.view.pps, self.view.scroll_time, self.view.layer_column);
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
             self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
+            if let Some(frame) = self.frame.clone() {
+                self.ask_painters(&frame, cx);
+            }
         }
         self.frame.clone()
+    }
+    /// A clip painter arrived or left: ask again on the next frame.
+    pub fn repaint_decorations(&mut self, cx: &mut Context<Self>) {
+        self.painted = None;
+        self.frame = None;
+        cx.notify();
+    }
+    /// Extension painters run when the visible clips change (scroll, zoom,
+    /// edits), never per playback frame; their shapes land asynchronously.
+    fn ask_painters(&mut self, frame: &Frame, cx: &mut Context<Self>) {
+        let revision = self.delegate.painters_revision(cx);
+        if revision == 0 {
+            if !self.decorations.is_empty() {
+                self.decorations = Default::default();
+            }
+            return;
+        }
+        let clips: Vec<serde_json::Value> = frame
+            .ops
+            .iter()
+            .filter_map(|op| {
+                let id = op.id.strip_prefix("clip:")?;
+                Some(serde_json::json!({"id":id,"layerId":id,
+                    "width":(op.bounds.width * 10.).round() / 10.,"height":(op.bounds.height * 10.).round() / 10.,
+                    "from":op.detail["from"],"duration":op.detail["duration"]}))
+            })
+            .collect();
+        let key = (
+            revision,
+            serde_json::Value::Array(clips.clone()).to_string(),
+        );
+        // A painter that missed the deadline (a cold realm) is asked again on
+        // a later frame, at most every half second.
+        let retry = self
+            .late
+            .is_some_and(|at| at.elapsed() >= std::time::Duration::from_millis(500));
+        if self.painting || (self.painted.as_ref() == Some(&key) && !retry) {
+            return;
+        }
+        let asked = std::time::Instant::now();
+        self.painting = true;
+        self.painted = Some(key);
+        let weak = cx.entity().downgrade();
+        self.delegate.clone().paint_clips(
+            serde_json::Value::Array(clips),
+            Box::new(move |shapes, complete, cx| {
+                let _ = weak.update(cx, |s, cx| {
+                    s.painting = false;
+                    s.late = (!complete).then_some(asked);
+                    s.decorations = Arc::new(shapes);
+                    s.frame = None;
+                    cx.notify();
+                });
+            }),
+            cx,
+        );
     }
     fn local(&self, position: Point<Pixels>) -> (f64, f64) {
         let at = position - self.bounds.origin;
@@ -1061,7 +1161,7 @@ impl TimelineSurface {
             .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
             .collect();
         let weak = cx.entity().downgrade();
-        self.delegate.clone().menu(
+        self.delegate.clone().extension_menu(
             locations,
             rows,
             window,
@@ -1090,15 +1190,22 @@ impl TimelineSurface {
             self.pump(cx);
         }
         let delegate = self.delegate.clone();
+        let mut layers: Vec<String> = self.model.selection.layers().to_vec();
+        if !layers.contains(&id) {
+            layers = vec![id.clone()];
+        }
         let time = self.delegate.time(cx);
         let locations = vec![
-            ("layer:context", serde_json::json!({ "layerId": id })),
+            (
+                "layer:context",
+                serde_json::json!({"layerId": id, "layerIds": layers}),
+            ),
             (
                 "timeline:context",
                 serde_json::json!({"kind":"layer","layerId":id,"time":time}),
             ),
         ];
-        self.delegate.clone().menu(
+        self.delegate.clone().extension_menu(
             locations,
             crate::layer_commands::layer_menu_rows(),
             window,
@@ -1482,6 +1589,7 @@ impl Render for TimelineSurface {
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
         let graph = self.graph_area().and_then(|area| self.graph_ops(area));
+        let decorations = self.decorations.clone();
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
                 point(origin.x.min(at.x), origin.y.min(at.y)),
@@ -1534,6 +1642,11 @@ impl Render for TimelineSurface {
                             // copy would sit stale beneath it.
                             for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
                                 paint(op, bounds.origin, &tokens, window, cx);
+                            }
+                            for op in
+                                pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
+                            {
+                                paint(&op, bounds.origin, &tokens, window, cx);
                             }
                         }
                         for op in graph.iter().flatten() {

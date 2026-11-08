@@ -2025,3 +2025,488 @@ fn the_masks_section_adds_edits_and_removes_masks() {
     model.sync(kernel.published("synthetic").unwrap());
     assert!(masks(&mut presenter, &mut model).is_empty());
 }
+
+#[test]
+fn an_extension_offers_a_theme_the_window_can_apply() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                export function activate({ themes }) {
+                    themes.register({ id: 'warm', title: 'Warm', tokens: { 'colors.accent': '#ff8800', 'metrics.gap': 8 } });
+                    themes.activate('warm');
+                }
+                export function view() { return jsx('text', { children: 'Themed' }); }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(
+        panels
+            .mount_extension("synthetic-theme", &graph, None)
+            .unwrap(),
+    );
+    let (revision, list) = panels.themes_since(0).expect("registered");
+    assert_eq!(
+        list,
+        vec![json!({"panel":"synthetic-theme","id":"warm","title":"Warm",
+            "tokens":{"colors.accent":"#ff8800","metrics.gap":8}})]
+    );
+    assert!(panels.themes_since(revision).is_none());
+    let (_, panel, id) = panels.theme_request().expect("activated");
+    assert_eq!(
+        (panel.as_str(), id.as_deref()),
+        ("synthetic-theme", Some("warm"))
+    );
+    // Its themes leave with it.
+    panels.unmount_extension("synthetic-theme");
+    let (_, list) = panels.themes_since(revision).expect("removed");
+    assert!(list.is_empty());
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn an_extension_adds_items_to_a_panel_context_menu() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                import { useState } from 'powermove/hooks';
+                let mark = () => {};
+                export function activate({ menus }) {
+                    menus.contribute('panel:context', (ctx) => [
+                        { header: 'Synthetic' },
+                        { label: 'Mark ' + ctx.panelId, run: () => mark() },
+                        '-',
+                        { label: 'More', submenu: [{ label: 'Off', disabled: true }] },
+                    ]);
+                    menus.contribute('panel:context', () => new Promise(() => {}));
+                }
+                export function view() {
+                    const [n, setN] = useState(0);
+                    mark = () => setN((v) => v + 1);
+                    return jsx('text', { children: 'Marked ' + n });
+                }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {
+                "powermove/jsx-runtime":"runtime:powermove/jsx-runtime",
+                "powermove/hooks":"runtime:powermove/hooks"
+            }
+        }
+    });
+    finish(
+        panels
+            .mount_extension("synthetic-menu", &graph, None)
+            .unwrap(),
+    );
+    assert!(panels.has_extensions());
+    let asked = Instant::now();
+    let gathered = panels.gather_menus("panel:context", &json!({"panelId":"timeline"}));
+    let (panel, ticket) = gathered.into_iter().next().unwrap();
+    let value = finish(ticket.unwrap()).value;
+    // A contribution that never answers is left out after 100 ms.
+    assert!(asked.elapsed() < Duration::from_secs(2));
+    let text: String = serde_json::from_str::<Value>(&value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or(value);
+    let items: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(panel, "synthetic-menu");
+    assert_eq!(items[0], json!({"header":"Synthetic"}));
+    assert_eq!(items[1]["label"], "Mark timeline");
+    assert_eq!(items[2], "-");
+    assert_eq!(items[3]["submenu"][0]["disabled"], true);
+    let key = items[1]["key"].as_str().unwrap().to_owned();
+    finish(panels.run_menu("synthetic-menu", &key).unwrap());
+    assert!(text_of(&panels, "synthetic-menu").contains(&"Marked 1".to_owned()));
+    panels.unmount_extension("synthetic-menu");
+    assert!(!panels.has_extensions());
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn an_extension_draws_a_viewer_overlay_that_follows_the_frame() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                export function activate({ overlays }) {
+                    overlays.viewer(({ frame }) => jsx('div', { style: { position: 'absolute',
+                        left: frame.x, width: frame.width, background: '#5a1f8c' },
+                        children: jsx('text', { children: 'Frame ' + frame.width }) }));
+                }
+                export function view() { return jsx('text', { children: 'Panel' }); }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(
+        panels
+            .mount_extension("synthetic-overlay", &graph, None)
+            .unwrap(),
+    );
+    let overlay = "synthetic-overlay@viewer";
+    let text = |panels: &Builtins| -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(p) = panels
+                .take_publications()
+                .into_iter()
+                .find(|p| p.panel == overlay)
+            {
+                return p.surface.nodes().values().map(|n| n.text.clone()).collect();
+            }
+            assert!(Instant::now() < deadline, "no overlay publication");
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    assert!(text(&panels).contains(&"Frame 0".to_owned()));
+    panels.viewer_frame(&json!({"x":10,"y":20,"width":640,"height":360,"scale":0.5}));
+    assert!(text(&panels).contains(&"Frame 640".to_owned()));
+    // The same frame again draws nothing: a still overlay stays idle.
+    panels.viewer_frame(&json!({"x":10,"y":20,"width":640,"height":360,"scale":0.5}));
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        panels
+            .take_publications()
+            .iter()
+            .all(|p| p.panel != overlay)
+    );
+    panels.unmount_extension("synthetic-overlay");
+    assert_eq!(panels.take_cleared_overlays(), vec![overlay.to_owned()]);
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn an_extension_paints_on_a_thousand_timeline_clips() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                export function activate({ timeline }) {
+                    timeline.paint((clips) => Object.fromEntries(clips.map((c) =>
+                        [c.id, [{ rect: [0, 0, c.width, c.height], color: '#5a1f8c', opacity: 0.5 }]])));
+                }
+                export function view() { return jsx('text', { children: 'Painter' }); }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    assert_eq!(panels.painters_revision(), 0, "no painter yet");
+    finish(
+        panels
+            .mount_extension("synthetic-painter", &graph, None)
+            .unwrap(),
+    );
+    assert_ne!(panels.painters_revision(), 0);
+    let clips: Vec<Value> = (0..1000)
+        .map(|i| json!({"id":format!("L{i}"),"layerId":format!("L{i}"),"width":80,"height":20,"from":0,"duration":1}))
+        .collect();
+    let started = Instant::now();
+    let (_, ticket) = panels
+        .paint_clips(&json!(clips))
+        .into_iter()
+        .next()
+        .unwrap();
+    let text = finish(ticket.unwrap()).value;
+    eprintln!(
+        "JS painter for 1,000 clips (debug, off the main thread): {:?}",
+        started.elapsed()
+    );
+    let text: String = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or(text);
+    let shapes: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(shapes.as_object().unwrap().len(), 1000);
+    assert_eq!(shapes["L7"][0]["color"], "#5a1f8c");
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn a_closed_panel_parks_its_isolate_and_starts_again_when_opened() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("fxbrowser").unwrap());
+    assert!(!panels.is_parked("fxbrowser"));
+    // The viewer and timeline never park; a panel that isn't running can't.
+    assert!(!panels.park("viewer"));
+    assert!(panels.park("fxbrowser"));
+    assert!(panels.is_parked("fxbrowser"));
+    assert!(panels.unpark("fxbrowser").expect("parked").is_ok());
+    assert!(!panels.is_parked("fxbrowser"));
+    assert!(panels.unpark("fxbrowser").is_none());
+    panels.close();
+    actor.shutdown();
+}
+
+/// A synthetic v4 extension's module graph from its `index.tsx`.
+fn graph_of(index: &str) -> Value {
+    json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": format!("import {{ jsx }} from 'powermove/jsx-runtime';\n{index}"),
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    })
+}
+/// The project's published `chrome` once `done` holds for it.
+fn chrome_when(actor: &KernelActor, done: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let chrome = actor
+            .handle()
+            .published("synthetic")
+            .and_then(|p| {
+                serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(&p.workspace))
+                    .ok()
+            })
+            .map_or(Value::Null, |w| w["chrome"].clone());
+        if done(&chrome) {
+            return chrome;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "chrome never became right: {chrome}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+fn overlay_text(panels: &Builtins, overlay: &str, want: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if panels
+            .take_publications()
+            .into_iter()
+            .any(|p| p.panel == overlay && p.surface.nodes().values().any(|n| n.text == want))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{overlay} never showed {want}: {:?}",
+            panels.take_errors()
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+#[test]
+fn timeline_chrome_edits_stack_per_extension_and_none_is_lost() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    // Two edits in a row: the second must not replace the first.
+    let a = graph_of(
+        "let refused = '';
+        export function activate({ timeline }) {
+            timeline.chrome({ rowHeight: 40 });
+            timeline.chrome({ gutterWidth: 340 });
+            try { timeline.chrome({ showTypeBadges: false }); } catch (e) { refused = String(e.message ?? e); }
+        }
+        export const view = () => jsx('text', { children: 'Refused ' + refused });",
+    );
+    let b = graph_of(
+        "export function activate({ timeline }) { timeline.chrome({ rowHeight: 30, surfaceOrder: 'reversed' }); }
+        export const view = () => jsx('text', { children: 'B' });",
+    );
+    finish(panels.mount_extension("chrome-a", &a, None).unwrap());
+    assert!(
+        text_of(&panels, "chrome-a")
+            .iter()
+            .any(|t| t.contains("aren't drawn by the native timeline")),
+        "fields the native timeline can't draw are refused"
+    );
+    chrome_when(&actor, |c| {
+        c["timeline"] == json!({"rowHeight":40,"gutterWidth":340})
+    });
+    finish(panels.mount_extension("chrome-b", &b, None).unwrap());
+    chrome_when(&actor, |c| {
+        c["timeline"] == json!({"rowHeight":30,"gutterWidth":340,"surfaceOrder":"reversed"})
+            && c["timelineSurfaceOrder"] == "reversed"
+    });
+    // A leaving under B: B's row height stays; A's gutter goes back.
+    panels.unmount_extension("chrome-a");
+    chrome_when(&actor, |c| {
+        c["timeline"] == json!({"rowHeight":30,"surfaceOrder":"reversed"})
+    });
+    // B leaving puts back the original, sibling field included.
+    panels.unmount_extension("chrome-b");
+    chrome_when(&actor, |c| {
+        c["timeline"] == json!({}) && c.get("timelineSurfaceOrder").is_none()
+    });
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn a_failed_generation_takes_down_its_overlay_chrome_and_painter() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = graph_of(
+        "export function activate({ overlays, timeline, commands }) {
+            overlays.viewer(() => jsx('text', { children: 'Shown' }));
+            timeline.chrome({ rowHeight: 44 });
+            timeline.paint(() => ({}));
+            commands.register({ id: 'blow', title: 'Blow' }, () => {
+                globalThis.kept = new Uint8Array(64 * 1024 * 1024);
+            });
+        }
+        export const view = () => jsx('text', { children: 'Failing' });",
+    );
+    finish(panels.mount_extension("failing", &graph, None).unwrap());
+    overlay_text(&panels, "failing@viewer", "Shown");
+    chrome_when(&actor, |c| c["timeline"]["rowHeight"] == 44);
+    assert_ne!(panels.painters_revision(), 0);
+    // Over the isolate's external-memory quota: the generation fails.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let ticket = panels.run_command("failing", "blow", &[]).unwrap();
+    let failed = loop {
+        if let Some(result) = ticket.try_take() {
+            break result;
+        }
+        assert!(Instant::now() < deadline, "the command never ended");
+        thread::sleep(Duration::from_millis(2));
+    };
+    assert!(failed.is_err(), "{failed:?}");
+    chrome_when(&actor, |c| c["timeline"].get("rowHeight").is_none());
+    assert!(
+        panels
+            .take_cleared_overlays()
+            .contains(&"failing@viewer".to_owned())
+    );
+    assert_eq!(panels.painters_revision(), 0);
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn a_fork_parks_as_itself_and_gets_painters_overlays_and_menus() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let fork = graph_of(
+        "export function activate({ overlays, timeline, menus }) {
+            overlays.viewer(({ frame }) => jsx('text', { children: 'Fork frame ' + frame.width }));
+            timeline.paint((clips) => Object.fromEntries(clips.map((c) => [c.id, [{ rect: [0, 0, 4, 4], color: '#5a1f8c' }]])));
+            menus.contribute('layer:context', () => [{ label: 'Fork item', run: () => {} }]);
+        }
+        export const view = () => jsx('text', { children: 'Fork view' });",
+    );
+    finish(panels.mount_builtin("inspector").unwrap());
+    text_of(&panels, "inspector");
+    finish(
+        panels
+            .replace("inspector", "inspector-fork", &fork)
+            .unwrap(),
+    );
+    assert!(text_of(&panels, "inspector").contains(&"Fork view".to_owned()));
+    assert!(panels.has_extensions());
+    // Painters and overlay frames reach a fork, not only third-party realms.
+    assert_ne!(panels.painters_revision(), 0);
+    let painted = panels.paint_clips(&json!([{"id":"L1"}]));
+    assert_eq!(painted.len(), 1);
+    let (panel, ticket) = painted.into_iter().next().unwrap();
+    assert_eq!(panel, "inspector");
+    assert!(finish(ticket.unwrap()).value.contains("#5a1f8c"));
+    panels.viewer_frame(&json!({"x":0,"y":0,"width":320,"height":180,"scale":1}));
+    overlay_text(&panels, "inspector@viewer", "Fork frame 320");
+    let (_, ticket) = panels
+        .gather_menus("layer:context", &json!({}))
+        .into_iter()
+        .next()
+        .expect("the fork contributes");
+    assert!(finish(ticket.unwrap()).value.contains("Fork item"));
+    // Closed and opened again, it is still the fork.
+    assert!(panels.park("inspector"));
+    assert_eq!(panels.painters_revision(), 0, "its painter left with it");
+    finish(panels.unpark("inspector").expect("parked").unwrap());
+    assert!(text_of(&panels, "inspector").contains(&"Fork view".to_owned()));
+    // Restored, the shipped panel comes back and user realms are gone.
+    finish(panels.restore("inspector").unwrap());
+    assert!(!text_of(&panels, "inspector").contains(&"Fork view".to_owned()));
+    assert!(!panels.has_extensions());
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn the_latest_theme_activation_wins_and_a_repeat_counts() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let theme = |id: &str, colour: &str| {
+        graph_of(&format!(
+            "export function activate({{ themes, commands }}) {{
+                themes.register({{ id: '{id}', title: '{id}', tokens: {{ 'colors.accent': '{colour}' }} }});
+                themes.activate('{id}');
+                commands.register({{ id: 'again', title: 'Again' }}, () => themes.activate('{id}'));
+            }}
+            export const view = () => jsx('text', {{ children: '{id}' }});"
+        ))
+    };
+    // `aa` sorts first but activated first: `zz`, activated later, wins.
+    finish(
+        panels
+            .mount_extension("aa", &theme("red", "#ff0000"), None)
+            .unwrap(),
+    );
+    finish(
+        panels
+            .mount_extension("zz", &theme("blue", "#0000ff"), None)
+            .unwrap(),
+    );
+    let (first, panel, id) = panels.theme_request().unwrap();
+    assert_eq!((panel.as_str(), id.as_deref()), ("zz", Some("blue")));
+    finish(panels.run_command("aa", "again", &[]).unwrap());
+    let (second, panel, id) = panels.theme_request().unwrap();
+    assert_eq!((panel.as_str(), id.as_deref()), ("aa", Some("red")));
+    assert!(second > first);
+    finish(panels.run_command("aa", "again", &[]).unwrap());
+    assert!(
+        panels.theme_request().unwrap().0 > second,
+        "a repeat is a new request"
+    );
+    panels.close();
+    actor.shutdown();
+}
+#[test]
+fn a_replaced_viewer_overlay_publishes_from_its_own_first_commit() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = graph_of(
+        "export function activate({ overlays, commands }) {
+            overlays.viewer(() => jsx('text', { children: 'First' }));
+            commands.register({ id: 'swap', title: 'Swap' }, () => {
+                overlays.viewer(() => jsx('text', { children: 'Second' }));
+            });
+        }
+        export const view = () => jsx('text', { children: 'Overlay owner' });",
+    );
+    finish(panels.mount_extension("swapper", &graph, None).unwrap());
+    overlay_text(&panels, "swapper@viewer", "First");
+    finish(panels.run_command("swapper", "swap", &[]).unwrap());
+    overlay_text(&panels, "swapper@viewer", "Second");
+    // The first root's teardown never lands on the second.
+    thread::sleep(Duration::from_millis(200));
+    for p in panels.take_publications() {
+        assert!(
+            p.panel != "swapper@viewer" || p.surface.nodes().values().any(|n| n.text == "Second")
+        );
+    }
+    assert!(panels.take_errors().iter().all(|e| !e.contains("revision")));
+    panels.close();
+    actor.shutdown();
+}

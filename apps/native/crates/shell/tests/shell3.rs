@@ -201,6 +201,24 @@ fn theme_patch_applies_on_every_token_build_and_keeps_contrast_floors() {
     let env = theme::native_tokens(&t);
     assert_eq!(env.len(), Tokens::PATCHABLE.len());
     assert_eq!(env["metrics.gap"], serde_json::json!(4.0));
+    // A v1–3 theme has a patch per appearance: switching needs no new theme.
+    theme::set_schemes(
+        vec![("colors.accent".into(), 0x111111 as f64)],
+        vec![("colors.accent".into(), 0xeeeeee as f64)],
+    )
+    .unwrap();
+    assert_eq!(
+        theme::tokens(Scheme::Dark, Accessibility::default())
+            .colors
+            .accent,
+        0x111111
+    );
+    assert_eq!(
+        theme::tokens(Scheme::Light, Accessibility::default())
+            .colors
+            .accent,
+        0xeeeeee
+    );
     theme::clear();
     assert_eq!(
         theme::tokens(Scheme::Dark, Accessibility::default()),

@@ -237,6 +237,12 @@ export function ViewerPanel({
         }}
       >
         <canvas
+          id="viewer.overlays"
+          surface="viewer.overlays"
+          label="Extension overlays"
+          style={{ position: "absolute", inset: "fill" }}
+        />
+        <canvas
           id="viewer.gizmos"
           surface="viewer.gizmos"
           label="Transform gizmos"

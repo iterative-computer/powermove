@@ -465,3 +465,89 @@ mod tests {
         sweep_cache(&directory.path().join("absent")).unwrap();
     }
 }
+
+/// The Agent panel's attachment records for chosen files, as main keeps them:
+/// images as data URLs, text as content, anything else as base64. Files over
+/// 20 MB are refused by name.
+pub fn attachment_records(paths: &[std::path::PathBuf]) -> Result<Vec<serde_json::Value>, String> {
+    use base64::Engine;
+    const LIMIT: u64 = 20 * 1024 * 1024;
+    let mut records = vec![];
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Attachment".into());
+        let size = std::fs::metadata(path)
+            .map_err(|e| format!("“{name}” can’t be read: {e}"))?
+            .len();
+        if size > LIMIT {
+            return Err(format!(
+                "“{name}” is larger than 20 MB, too large to attach."
+            ));
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("“{name}” can’t be read: {e}"))?;
+        let extension = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let image = match extension.as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "gif" => Some("image/gif"),
+            "webp" => Some("image/webp"),
+            _ => None,
+        };
+        let mut record =
+            serde_json::json!({"id":pm_kernel::new_id("attachment"),"name":name,"size":size});
+        let encoded = || base64::engine::general_purpose::STANDARD.encode(&bytes);
+        match (image, std::str::from_utf8(&bytes)) {
+            (Some(mime), _) => {
+                record["type"] = mime.into();
+                record["dataUrl"] = format!("data:{mime};base64,{}", encoded()).into();
+            }
+            (None, Ok(text)) => {
+                record["type"] = "text/plain".into();
+                record["content"] = text.into();
+            }
+            (None, Err(_)) => {
+                record["type"] = "application/octet-stream".into();
+                record["dataBase64"] = encoded().into();
+            }
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::attachment_records;
+    #[::core::prelude::v1::test]
+    fn chosen_files_become_main_shaped_attachment_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let (png, text, data) = (
+            dir.path().join("Frame.PNG"),
+            dir.path().join("notes.md"),
+            dir.path().join("blob.bin"),
+        );
+        std::fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();
+        std::fs::write(&text, "hello").unwrap();
+        std::fs::write(&data, [0xff, 0xfe, 0x00]).unwrap();
+        let records = attachment_records(&[png, text, data]).unwrap();
+        assert_eq!(records[0]["type"], "image/png");
+        assert!(
+            records[0]["dataUrl"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,iVBORw")
+        );
+        assert_eq!(records[1]["content"], "hello");
+        assert_eq!(records[2]["dataBase64"], "//4A");
+        assert!(
+            records
+                .iter()
+                .all(|r| r["id"].is_string() && r["size"].is_u64())
+        );
+    }
+}

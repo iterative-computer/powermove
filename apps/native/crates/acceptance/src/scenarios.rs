@@ -1042,25 +1042,19 @@ fn engine_hook() -> Check {
 }
 struct RecordingSurface(Mutex<Vec<Value>>);
 impl SurfaceHook for RecordingSurface {
-    fn list_panels(&self) -> pm_mcp::Result<Value> {
-        Ok(json!([{"id":"synthetic.timeline"}]))
-    }
-    fn inspect(&self, panel: &str, element: Option<&str>) -> pm_mcp::Result<Value> {
-        if panel != "synthetic.timeline" {
+    fn call(&self, tool: &str, _: Option<&str>, args: &Value) -> pm_mcp::Result<Value> {
+        if args["panelId"] != "synthetic.timeline" {
             return Err(pm_mcp::Error::invalid("unknown panel"));
         }
-        Ok(json!({"panelId":panel,"elementId":element,"testDouble":true}))
-    }
-    fn drive(&self, panel: &str, element: &str, action: &Value) -> pm_mcp::Result<Value> {
-        self.inspect(panel, Some(element))?;
-        if element != "play" {
-            return Err(pm_mcp::Error::invalid("unknown element"));
+        match tool {
+            "get_panel_state" => Ok(json!({"panelId":args["panelId"],"testDouble":true})),
+            "interact_panel" if args["ref"] == "play" => {
+                self.0.lock().unwrap().push(args.clone());
+                Ok(json!({"testDouble":true}))
+            }
+            "interact_panel" => Err(pm_mcp::Error::invalid("unknown element")),
+            _ => Err(pm_mcp::Error::unavailable("needs macOS: real panel pixels")),
         }
-        self.0.lock().unwrap().push(action.clone());
-        Ok(json!({"testDouble":true}))
-    }
-    fn capture(&self, _: &str) -> pm_mcp::Result<Value> {
-        Err(pm_mcp::Error::unavailable("needs macOS: real panel pixels"))
     }
 }
 fn surface_hook() -> Check {
@@ -1068,18 +1062,26 @@ fn surface_hook() -> Check {
     let surface = Arc::new(RecordingSurface(Mutex::new(vec![])));
     let mut host = f.host.lock().unwrap();
     host.surfaces = Some(surface.clone());
-    assert_eq!(host.list_panels().unwrap()[0]["id"], "synthetic.timeline");
+    let hook = host.surfaces.clone().ok_or("no surface hook")?;
+    let panel = json!({"panelId":"synthetic.timeline"});
     assert_eq!(
-        host.inspect_element("synthetic.timeline", Some("play"))
-            .unwrap()["elementId"],
-        "play"
+        hook.call("get_panel_state", None, &panel).unwrap()["panelId"],
+        "synthetic.timeline"
     );
-    host.drive_element("synthetic.timeline", "play", &json!({"type":"press"}))
-        .map_err(|e| e.to_string())?;
+    hook.call(
+        "interact_panel",
+        None,
+        &json!({"panelId":"synthetic.timeline","ref":"play","action":"click"}),
+    )
+    .map_err(|e| e.to_string())?;
     assert_eq!(surface.0.lock().unwrap().len(), 1);
     assert!(
-        host.drive_element("synthetic.timeline", "missing", &json!({}))
-            .is_err()
+        hook.call(
+            "interact_panel",
+            None,
+            &json!({"panelId":"synthetic.timeline","ref":"missing","action":"click"})
+        )
+        .is_err()
     );
     Ok(())
 }

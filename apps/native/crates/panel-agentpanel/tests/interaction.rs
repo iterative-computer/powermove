@@ -129,6 +129,7 @@ fn slash_model_prefix_and_value_choose_a_catalog_model() {
         Catalog {
             models: vec![("m".into(), "Model".into())],
             efforts: vec!["high".into()],
+            model_efforts: vec![],
             ..Default::default()
         },
     )
@@ -184,6 +185,7 @@ fn frozen_slash_oracle_matches_78_source_executions() {
             ("claude".into(), "Claude".into()),
         ],
         efforts: vec!["low".into(), "high".into(), "xhigh".into()],
+        model_efforts: vec![],
         claude: true,
     };
     let cases = fixture["cases"].as_array().unwrap();

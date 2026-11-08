@@ -123,6 +123,7 @@ fn slash_choices_follow_phase_and_provider_catalog_without_new_copy() {
         models: vec![("sol".into(), "Sol 6.1".into())],
         providers: vec![("claude".into(), "Claude".into())],
         efforts: vec!["high".into()],
+        model_efforts: vec![],
         claude: true,
     };
     assert_eq!(slash_choices("/", &catalog, false, false).len(), 6);
@@ -308,4 +309,24 @@ fn provider_connection_actions_are_generation_bound_and_duplicate_safe() {
         c.begin(false).unwrap().action,
         ConnectionAction::OpenSettings
     );
+}
+#[test]
+fn each_model_offers_its_own_efforts() {
+    let catalog = Catalog {
+        models: vec![
+            ("fast".into(), "Fast".into()),
+            ("deep".into(), "Deep".into()),
+        ],
+        providers: vec![],
+        efforts: vec!["".into(), "low".into(), "xhigh".into()],
+        model_efforts: vec![
+            ("fast".into(), vec!["low".into()]),
+            ("deep".into(), vec!["low".into(), "xhigh".into()]),
+        ],
+        claude: false,
+    };
+    assert_eq!(catalog.efforts_for("fast"), vec!["", "low"]);
+    assert_eq!(catalog.efforts_for("deep"), vec!["", "low", "xhigh"]);
+    // The provider's default model takes any listed effort.
+    assert_eq!(catalog.efforts_for(""), vec!["", "low", "xhigh"]);
 }

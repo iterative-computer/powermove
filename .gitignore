@@ -51,3 +51,5 @@ apps/desktop/src/renderer/public/engine/
 
 # Locally assembled Node CLI native runtimes (copied into dist for packaging)
 packages/cli/prebuilds/
+__pycache__/
+*.pyc

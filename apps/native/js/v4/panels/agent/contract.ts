@@ -74,11 +74,18 @@ export interface NativeFacts {
   bindings: { access: string; model: string };
 }
 export type Action =
-  | { type: "draft"; text: string; selection: [number, number] }
+  | {
+      type: "draft";
+      text: string;
+      selection: [number, number];
+      /** The draft the person saw when they typed (from the publication). */
+      base?: string;
+    }
   | { type: "focus"; focused: boolean }
   | { type: "key"; key: EventDetail }
   | {
       type:
+        | "attach"
         | "submit"
         | "stop"
         | "newThread"

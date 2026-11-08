@@ -621,7 +621,7 @@ fn automation_events_and_unwired_hooks_are_truthful() {
     let event = events.recv().unwrap();
     assert_eq!(event.project_id, id);
     assert!(event.revision > 0);
-    assert!(h.list_panels().is_err());
+    assert!(h.surfaces.is_none());
     assert!(
         h.capture_frames(&pm_mcp::CaptureRequest {
             project_id: id.clone(),

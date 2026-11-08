@@ -1364,11 +1364,19 @@ impl Panel {
             .sessions
             .get_mut(id)
             .ok_or_else(|| Error::UnknownId(id.into()))?;
-        if !s.catalog.efforts.contains(&effort)
-            || !(s.catalog.models.iter().any(|(m, _)| *m == model)
-                || s.settings.provider == Provider::Claude && crate::input::valid_claude_id(&model))
+        if !(s.catalog.models.iter().any(|(m, _)| *m == model)
+            || s.settings.provider == Provider::Claude && crate::input::valid_claude_id(&model))
         {
             return Err(Error::Invalid("model or effort"));
+        }
+        // Each model takes its own efforts. Switching to a model without the
+        // current effort falls back to Default; asking for one it lacks fails.
+        let mut effort = effort;
+        if !s.catalog.efforts_for(&model).contains(&effort) {
+            if effort != s.settings.effort {
+                return Err(Error::Invalid("model or effort"));
+            }
+            effort = String::new();
         }
         s.settings_dirty = true;
         s.settings.model = model;

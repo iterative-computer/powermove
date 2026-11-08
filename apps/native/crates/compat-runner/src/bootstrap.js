@@ -1,5 +1,27 @@
 // Runs in the actual Compat V8 owner. Missing app capabilities are errors, never test doubles.
+// The editor window's size, as Electron's `window` had it (v1–3 extensions
+// size docks from it); the host keeps it current. Defaults until it does.
+for (const [key, value] of [
+  ["innerWidth", 1440],
+  ["innerHeight", 900],
+  ["outerWidth", 1440],
+  ["outerHeight", 900],
+  ["devicePixelRatio", 2],
+])
+  globalThis[key] = value;
 globalThis.__compat = {
+  /** The editor window's viewport changed (points and backing scale). */
+  viewport(width, height, scale) {
+    const changed =
+      globalThis.innerWidth !== width || globalThis.innerHeight !== height;
+    for (const target of [globalThis, globalThis.window].filter(Boolean)) {
+      target.innerWidth = target.outerWidth = width;
+      target.innerHeight = target.outerHeight = height;
+      target.devicePixelRatio = scale;
+    }
+    if (changed && this.realm)
+      this.realm.task(() => globalThis.window?.dispatchEvent?.(new Event("resize")));
+  },
   create(initial) {
     const call = (operation, input = {}) => runtime.engine(operation, input);
     initial ??= call("kernel.publication");
@@ -593,6 +615,8 @@ globalThis.__compat = {
       kernel.status,
     ])
       registry.onChange(changed);
+    // Activating a theme changes no registry, but the shell follows it.
+    kernel.events.on("theme:changed", changed, "powermove-host");
     if (this.dom && PowermoveCompat.controlStores)
       this.controls = PowermoveCompat.connectControlState(
         this.realm,
@@ -736,8 +760,21 @@ globalThis.__compat = {
         side: item.side,
       })),
       theme: kernel.theme.activeId,
+      nativeTheme: this.nativeTheme(),
       definitions: this.definitions(),
     };
+  },
+  /** The active theme as native token patches (translator in this realm). */
+  nativeTheme() {
+    const kernel = this.realm.kernel;
+    const active = kernel.theme.activeId;
+    const entry = kernel.themes.entries().find(({ id }) => id === active);
+    if (!entry) return { id: active, dark: {}, light: {}, blockers: [] };
+    try {
+      return PowermoveCompat.nativeTheme(entry.item, kernel.theme.scheme);
+    } catch (error) {
+      return { id: active, error: String(error?.message ?? error) };
+    }
   },
   definitions() {
     return PowermoveCompat.definitionSnapshots(this.realm.kernel, (id, error) =>

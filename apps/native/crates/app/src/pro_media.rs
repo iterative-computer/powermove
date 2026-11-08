@@ -1375,12 +1375,7 @@ impl ProMedia {
 
     /// Create Proxies on import: probes `assets` (id, title, path) on the
     /// file thread and queues the ones `prefs` asks for.
-    pub fn create_on_import(
-        &self,
-        project: String,
-        prefs: Preferences,
-        assets: Vec<Original>,
-    ) {
+    pub fn create_on_import(&self, project: String, prefs: Preferences, assets: Vec<Original>) {
         self.inner.io(move |inner| {
             let wanted: Vec<_> = assets
                 .into_iter()

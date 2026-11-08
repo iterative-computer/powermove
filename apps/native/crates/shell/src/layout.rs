@@ -892,10 +892,43 @@ pub struct LayoutStore {
     /// User-named workspaces, shared by every project (Window ▸ Workspace).
     #[serde(default)]
     pub saved: std::collections::BTreeMap<String, Layout>,
+    /// The saved layout new projects start with (an agent's set_panel_layout).
+    #[serde(default)]
+    pub default_layout: Option<String>,
 }
 /// Longest accepted saved-layout name, in characters.
-pub const LAYOUT_NAME_MAX: usize = 64;
+pub const LAYOUT_NAME_MAX: usize = 80;
 /// Trims and validates a saved-layout name.
+/// set_panel_layout's write, off the main thread: the latest store from disk
+/// gains `layout` under a free name (a taken name gets a number), new projects
+/// start with it, and `project` shows it. Returns the store and the name.
+pub fn save_agent_layout(
+    path: Option<&Path>,
+    project: &str,
+    name: &str,
+    layout: &Layout,
+) -> anyhow::Result<(LayoutStore, String)> {
+    layout.validate()?;
+    let mut store = match path.filter(|p| p.exists()) {
+        Some(p) => LayoutStore::load(p)?,
+        None => LayoutStore::default(),
+    };
+    let base = layout_name(name)?;
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while store.saved.contains_key(&candidate) {
+        candidate = format!("{base} {n}");
+        n += 1;
+    }
+    let saved = store.save_named(&candidate, layout)?;
+    store.default_layout = Some(saved.clone());
+    store.put(project, layout.clone());
+    store.version = 1;
+    if let Some(p) = path {
+        store.save(p)?;
+    }
+    Ok((store, saved))
+}
 pub fn layout_name(name: &str) -> anyhow::Result<String> {
     let name = name.trim();
     anyhow::ensure!(!name.is_empty(), "Enter a name for the workspace.");
@@ -942,6 +975,11 @@ impl LayoutStore {
             .get(project)
             .and_then(|p| p.get(workspace))
             .cloned()
+            .or_else(|| {
+                self.default_layout
+                    .as_deref()
+                    .and_then(|name| self.named(name, workspace))
+            })
             .unwrap_or_else(|| Layout::preset(workspace))
     }
     pub fn load(path: &Path) -> anyhow::Result<Self> {

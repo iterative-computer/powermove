@@ -152,6 +152,11 @@ pub fn import_paths(
     choose_paths(window, folders, multiple, extensions, "Import")
 }
 
+/// Files for the Agent panel's Add Attachments.
+pub fn attach_paths(window: &NSWindow) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, false, true, &[], "Attach")
+}
+
 /// An open panel sheet whose default button reads `prompt`.
 pub fn choose_paths(
     window: &NSWindow,
@@ -383,4 +388,16 @@ pub fn export_destination(
     });
     panel.beginSheetModalForWindow_completionHandler(window, &done);
     rx
+}
+
+/// The AppKit window behind a GPUI window (a panel's own window, for sheets).
+pub fn ns_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    let view: Retained<objc2_app_kit::NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast())? };
+    view.window()
 }
