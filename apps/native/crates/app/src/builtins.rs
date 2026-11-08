@@ -1111,7 +1111,7 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                     Value::Object(merged)
                 })
                 .await;
-            let _ = cx.update(|cx| done(shapes, cx));
+            cx.update(|cx| done(shapes, cx));
         })
         .detach();
     }
