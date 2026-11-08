@@ -52,6 +52,11 @@ const ROLES: &[(&str, &str)] = &[
         "colors.selected_fill",
         "Neutral selected row / segment fill",
     ),
+    (
+        "colors.selected_secondary",
+        "Metadata on a selected row (muted fails there)",
+    ),
+    ("colors.selected_danger", "Danger words on a selected row"),
     ("colors.focus", "Keyboard focus ring"),
     (
         "colors.accent_text",
@@ -347,6 +352,15 @@ const ROLES: &[(&str, &str)] = &[
         "translucency.line",
         "Header, column and status dividers in `text` ink",
     ),
+    ("translucency.tick_minor", "Minor ruler tick, as `text` ink"),
+    (
+        "translucency.tick_major",
+        "Labelled ruler tick, as `text` ink",
+    ),
+    (
+        "translucency.grid",
+        "Time grid under the timeline tracks, as `text` ink",
+    ),
 ];
 
 fn root() -> PathBuf {
@@ -505,6 +519,15 @@ fn contrast_rules_from_language() {
             contrast(c.text, c.selected_fill) >= 7.,
             "{name}: selected row"
         );
+        for (what, ink) in [
+            ("metadata", c.selected_secondary),
+            ("danger words", c.selected_danger),
+        ] {
+            assert!(
+                contrast(ink, c.selected_fill) >= 4.5,
+                "{name}: {what} on a selected row"
+            );
+        }
         for (label, fill) in Labels::NAMES.iter().zip(c.labels.all()) {
             assert!(
                 contrast(c.text, fill) >= 7.,

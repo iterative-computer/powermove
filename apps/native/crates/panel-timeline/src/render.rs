@@ -616,7 +616,16 @@ impl Scene {
         let mut ops = vec![];
         let m = t.metrics;
         let c = &t.colors;
-        ops.push(Op::new("ground", "rect", v.rect(), c.panel));
+        // The track ground is the panel material (a theme's panel colour at
+        // the material alpha; opaque under Reduce Transparency). The shell
+        // leaves this panel's body to it.
+        let mut ground = Op::new("ground", "rect", v.rect(), c.panel);
+        ground.opacity = if t.translucent() {
+            t.translucency.panel as f64
+        } else {
+            1.
+        };
+        ops.push(ground);
         ops.push(Op::new(
             "gutter",
             "rect",
@@ -752,6 +761,22 @@ impl Scene {
                 ops.push(o);
             }
         }
+        // The layer column's edge, over row fills and clips: a hairline (the
+        // resize handle's mark).
+        let (edge, edge_alpha) = t.line();
+        let mut o = Op::new(
+            "column-edge",
+            "rect",
+            Rect::new(
+                v.layer_column - m.border as f64,
+                0.,
+                m.border as f64,
+                v.height,
+            ),
+            edge,
+        );
+        o.opacity = edge_alpha as f64;
+        ops.push(o);
         Ok(Frame {
             viewport: v,
             range,
@@ -799,7 +824,10 @@ impl Scene {
         let (tick, major) = if t.accessibility.increase_contrast {
             ((c.separator, 1.), (c.secondary, 1.))
         } else {
-            ((c.text, MINOR_TICK_INK), (c.text, MAJOR_TICK_INK))
+            (
+                (c.text, t.translucency.tick_minor as f64),
+                (c.text, t.translucency.tick_major as f64),
+            )
         };
         // Literal spec chooses the largest candidate retaining >=8pt spacing.
         let step = [1. / self.fps, 0.25, 1., 5.]
@@ -853,7 +881,7 @@ impl Scene {
                     Rect::new(x, h, m.border as f64, (v.height - h).max(0.)),
                     c.text,
                 );
-                o.opacity = GRID_INK;
+                o.opacity = t.translucency.grid as f64;
                 ops.push(o);
             }
             let mut o = Op::new(
@@ -956,10 +984,6 @@ fn span(a: f64, b: f64, y: f64, h: f64, v: Viewport) -> Option<Rect> {
     let end = b.min(v.width);
     (end > x).then_some(Rect::new(x, y, end - x, h.max(0.)))
 }
-/// Ruler tick and grid inks (alpha of `text`).
-const MINOR_TICK_INK: f64 = 0.14;
-const MAJOR_TICK_INK: f64 = 0.3;
-const GRID_INK: f64 = 0.04;
 fn mix(a: u32, b: u32, amount: f64) -> u32 {
     [0, 8, 16].into_iter().fold(0, |out, s| {
         out | (((((a >> s) & 255) as f64 * (1. - amount) + ((b >> s) & 255) as f64 * amount).round()

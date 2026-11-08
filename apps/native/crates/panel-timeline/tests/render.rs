@@ -345,3 +345,26 @@ fn every_paint_operation_has_a_unique_id_even_for_summary_and_property_keys() {
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(ids.len(), f.ops.len());
 }
+#[test]
+fn track_ground_is_the_themed_panel_material() {
+    for reduce_transparency in [false, true] {
+        let mut t = Tokens::new(
+            Scheme::Dark,
+            Accessibility {
+                reduce_transparency,
+                ..Default::default()
+            },
+        );
+        // A theme's `--bg-panel` arrives as a `colors.panel` patch.
+        t.apply_patch([("colors.panel", 0x203040 as f64)]).unwrap();
+        let f = scene(&t).prepare(viewport(&t), &t).unwrap();
+        let ground = f.ops.iter().find(|o| o.id == "ground").unwrap();
+        assert_eq!(ground.color, 0x203040);
+        let alpha = if reduce_transparency {
+            1.
+        } else {
+            t.translucency.panel as f64
+        };
+        assert_eq!(ground.opacity, alpha);
+    }
+}

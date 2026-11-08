@@ -33,6 +33,10 @@ pub struct Colors {
     pub accent: u32,
     pub selected_text: u32,
     pub selected_fill: u32,
+    /// Metadata on a selected row (`selected_fill`): ≥ 4.5:1 where `muted` is not.
+    pub selected_secondary: u32,
+    /// `danger` words on a selected row (`Missing`): ≥ 4.5:1 on `selected_fill`.
+    pub selected_danger: u32,
     /// Keyboard focus ring on GPUI surfaces: neutral, never the accent (owner rule).
     pub focus: u32,
     /// Accent used as text or a thin mark on panels; meets 4.5:1 on `panel`.
@@ -239,6 +243,10 @@ pub struct Translucency {
     pub panel: f32,
     pub edge: f32,
     pub line: f32,
+    /// Timeline ruler ticks and the time grid under the tracks, as `text` ink.
+    pub tick_minor: f32,
+    pub tick_major: f32,
+    pub grid: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -375,6 +383,8 @@ impl Tokens {
                 accent: 0xff6019,
                 selected_text: 0xffffff,
                 selected_fill: 0x3a3a3a,
+                selected_secondary: 0xb4b4b4,
+                selected_danger: 0xff8a80,
                 focus: 0x9a9a9a,
                 accent_text: 0xff8a55,
                 accent_wash: 0x3c241a,
@@ -411,6 +421,8 @@ impl Tokens {
                 accent: 0xf0580a,
                 selected_text: 0xffffff,
                 selected_fill: 0xd5d5da,
+                selected_secondary: 0x52545a,
+                selected_danger: 0xa82319,
                 focus: 0x76767c,
                 accent_text: 0xb93800,
                 accent_wash: 0xfbe9e1,
@@ -476,7 +488,7 @@ impl Tokens {
                 track_row: 28.,
                 property_row: 22.,
                 ruler: 24.,
-                layer_column: 266.,
+                layer_column: 360.,
                 clip_radius: 4.,
                 playhead: 1.5,
                 symbol_toolbar: 15.,
@@ -558,6 +570,9 @@ impl Tokens {
                     panel: 1.,
                     edge: 0.06,
                     line: 0.07,
+                    tick_minor: 0.14,
+                    tick_major: 0.3,
+                    grid: 0.04,
                 },
                 (Scheme::Light, true) => Translucency {
                     ground: 0xeeeef1,
@@ -565,6 +580,9 @@ impl Tokens {
                     panel: 1.,
                     edge: 0.08,
                     line: 0.09,
+                    tick_minor: 0.14,
+                    tick_major: 0.3,
+                    grid: 0.04,
                 },
                 (Scheme::Dark, false) => Translucency {
                     ground: 0x080808,
@@ -572,6 +590,9 @@ impl Tokens {
                     panel: 0.7,
                     edge: 0.06,
                     line: 0.07,
+                    tick_minor: 0.14,
+                    tick_major: 0.3,
+                    grid: 0.04,
                 },
                 (Scheme::Light, false) => Translucency {
                     ground: 0xeeeef1,
@@ -579,6 +600,9 @@ impl Tokens {
                     panel: 0.66,
                     edge: 0.08,
                     line: 0.09,
+                    tick_minor: 0.14,
+                    tick_major: 0.3,
+                    grid: 0.04,
                 },
             },
         };
@@ -595,6 +619,7 @@ impl Tokens {
             Scheme::Dark => {
                 c.separator = 0x888888;
                 c.secondary = 0xdddddd;
+                c.selected_secondary = 0xdddddd;
                 c.muted = 0xbfbfbf;
                 c.focus = 0xe0e0e0;
                 c.accent_text = 0xffa073;
@@ -602,6 +627,7 @@ impl Tokens {
             Scheme::Light => {
                 c.separator = 0x686868;
                 c.secondary = 0x303036;
+                c.selected_secondary = 0x303036;
                 c.muted = 0x414148;
                 c.focus = 0x3c3c42;
                 c.accent_text = 0x9a2f00;

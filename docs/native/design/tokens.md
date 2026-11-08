@@ -112,7 +112,9 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.scope_green` | Green channel scope trace on the dark viewer | `#4FD58A` | `#4FD58A` | `#4FD58A` | `#4FD58A` |
 | `colors.scope_red` | Red channel scope trace on the dark viewer | `#FF6B62` | `#FF6B62` | `#FF6B62` | `#FF6B62` |
 | `colors.secondary` | Row labels, secondary text | `#52545A` | `#B4B4B4` | `#303036` | `#DDDDDD` |
+| `colors.selected_danger` | Danger words on a selected row | `#A82319` | `#FF8A80` | `#A82319` | `#FF8A80` |
 | `colors.selected_fill` | Neutral selected row / segment fill | `#D5D5DA` | `#3A3A3A` | `#D5D5DA` | `#3A3A3A` |
+| `colors.selected_secondary` | Metadata on a selected row (muted fails there) | `#52545A` | `#B4B4B4` | `#303036` | `#DDDDDD` |
 | `colors.selected_text` | Text and glyphs on an accent fill | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
 | `colors.separator` | Hairline separators and panel edges | `#D4D4D8` | `#303030` | `#686868` | `#888888` |
 | `colors.success` | Completed, online, rendered | `#117A52` | `#3FCF8E` | `#117A52` | `#3FCF8E` |
@@ -149,7 +151,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.keyboard_step` | Splitter arrow-key step | 10 | 10 | 10 | 10 |
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
 | `metrics.kind_badge` | Layer-kind badge square in the timeline and Project list | 18 | 18 | 18 | 18 |
-| `metrics.layer_column` | Timeline layer list column width | 266 | 266 | 266 | 266 |
+| `metrics.layer_column` | Timeline layer list column width | 360 | 360 | 360 | 360 |
 | `metrics.mark_bracket` | Width of In and Out brackets on rulers and scrubbers | 6 | 6 | 6 | 6 |
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
@@ -225,9 +227,12 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `motion.tooltip_warm` | Time window for an immediate tooltip swap to a neighbouring control (s) | 0.6 | 0.6 | 0.6 | 0.6 |
 | `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
 | `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.06 | 0.08 | 0.06 |
+| `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#080808` | `#EEEEF1` | `#080808` |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.09 | 0.07 | 0.09 | 0.07 |
 | `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.66 | 0.7 | 0.66 | 0.7 |
+| `translucency.tick_major` | Labelled ruler tick, as `text` ink | 0.3 | 0.3 | 0.3 | 0.3 |
+| `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |
 | `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.82 | 0.62 | 0.82 |
 <!-- tokens:end -->
 
