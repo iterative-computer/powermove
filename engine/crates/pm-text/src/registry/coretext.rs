@@ -1166,10 +1166,12 @@ impl CoreTextRegistry {
     }
 
     /// `MatchByPostscriptNameNS`.
+    /// Compares in AppKit as Chromium does (`caseInsensitiveCompare:`), with
+    /// no Rust string per installed font.
     fn match_by_postscript_ns(&self, family: &str, size: f64) -> Option<Retained<NSFont>> {
-        let lower = family.to_lowercase();
+        let desired = NSString::from_str(family);
         for name in self.fm.availableFonts().iter() {
-            if name.to_string().to_lowercase() == lower {
+            if desired.caseInsensitiveCompare(&name) == objc2_foundation::NSComparisonResult::Same {
                 return NSFont::fontWithName_size(&name, size);
             }
         }
