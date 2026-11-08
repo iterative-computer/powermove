@@ -104,6 +104,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 
 - **On-canvas text** is an invisible P-TEXT canvas `NSTextView` (typing, IME, dictation, emoji, spelling) over engine-rendered text; the session is one kernel gesture ("Add Text" / "Edit Text"), the caret is the system `NSTextInsertionIndicator`, and frame, selection, misspellings and the marked-text underline are drawn from the engine's `textLayout`. Labels follow the kernel's title case.
 - **Pen and Text overlays draw in GPUI over the paused viewer** (plan §3.3 static case); transform gizmos stay engine-drawn.
+- **Viewer text questions** (caret geometry, picks, text boxes) go through one font-fed query mirror per project (`text_host::query`): missing fonts come from the registry, then the question runs again. Additive engine API: `Engine::add_font_bytes`, `font_outlines`, query `textFontOffset`; kernel `QueryContext::text_layout` / `text_font_offset`.
+- **Canvas text input methods** place candidates at the engine's caret (`firstRectForCharacterRange:` answers the staged rect). Text at an angle gets its caret drawn along the glyphs; the system insertion point can only stand upright.
 - **Shape variants** live in the toolbar Shape segment's menu; Q on the Shape tool cycles them (as on `main`); only Rectangle and Ellipse become masks.
 
 ## Look lane decisions (2026-11-08)
