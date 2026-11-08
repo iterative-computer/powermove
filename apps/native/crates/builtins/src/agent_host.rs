@@ -33,6 +33,9 @@ pub(crate) struct AgentLink {
     realms: Mutex<Vec<Realm>>,
     closing: AtomicBool,
     sequence: AtomicU64,
+    /// The last whole-text draft typing set, by thread: typing that arrives
+    /// after an unrelated republish still applies while the draft is unchanged.
+    typed: Mutex<Option<(String, String)>>,
 }
 impl Default for AgentLink {
     fn default() -> Self {
@@ -42,6 +45,7 @@ impl Default for AgentLink {
             realms: Mutex::default(),
             closing: AtomicBool::new(false),
             sequence: AtomicU64::new(1),
+            typed: Mutex::default(),
         }
     }
 }
@@ -86,6 +90,30 @@ impl AgentLink {
     }
     pub fn touch(&self) {
         self.sequence.fetch_add(1, Ordering::AcqRel);
+    }
+    /// The sequence a v4 action is admitted against. A whole-text draft
+    /// (`{type:"draft", text, base}`) from an older publication is admitted
+    /// when the host hasn't changed the draft since: it still reads `base`
+    /// (what the person saw), or what their own typing last set. A draft the
+    /// host cleared (a send) or replaced stays fenced.
+    pub fn admitted_sequence(&self, envelope: &Value, thread: &str, draft: &str) -> u64 {
+        let action = &envelope["action"];
+        let unchanged = action["type"] == "draft"
+            && (action["base"].as_str() == Some(draft)
+                || self
+                    .typed
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(t, text)| t == thread && text == draft));
+        match envelope["sequence"].as_u64() {
+            Some(sequence) if unchanged => sequence,
+            _ => self.sequence(),
+        }
+    }
+    /// Typing set `text` as `thread`'s draft.
+    pub fn typed(&self, thread: &str, text: &str) {
+        *self.typed.lock().unwrap() = Some((thread.into(), text.into()));
     }
     /// A run needs its runtime and a signed-in account.
     pub fn available(&self, provider: Provider) -> bool {
@@ -522,6 +550,24 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn typing_is_fenced_by_the_draft_not_by_unrelated_republishes() {
+        let link = AgentLink::default();
+        link.touch();
+        link.touch();
+        let typing = |text: &str, base: &str| json!({"sequence":1,"action":{"type":"draft","text":text,"selection":[0,0],"base":base}});
+        // The panel republished twice since the person's view; the draft is
+        // still what they saw, or what their typing set: admitted as is.
+        assert_eq!(link.admitted_sequence(&typing("Hi", ""), "t", ""), 1);
+        link.typed("t", "Hi");
+        assert_eq!(link.admitted_sequence(&typing("Hi!", ""), "t", "Hi"), 1);
+        // A send cleared it (or the host replaced it): the late typing is stale.
+        assert_eq!(link.admitted_sequence(&typing("Hi!", "Hi"), "t", ""), 3);
+        assert_eq!(link.admitted_sequence(&typing("Hi!", ""), "other", "Hi"), 3);
+        // Other actions keep the exact sequence.
+        let key = json!({"sequence":1,"action":{"type":"key","key":{}}});
+        assert_eq!(link.admitted_sequence(&key, "t", ""), 3);
+    }
     #[test]
     fn absent_provider_rejects_submission_but_still_reaches_a_live_run() {
         for action in [

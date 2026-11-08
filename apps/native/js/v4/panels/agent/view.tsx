@@ -658,6 +658,7 @@ export function AgentView({
                 type: "draft",
                 text,
                 selection: [text.length, text.length],
+                base: s.draft.text,
               });
             }}
             onKeyDown={(event) => {

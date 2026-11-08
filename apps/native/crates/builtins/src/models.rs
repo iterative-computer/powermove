@@ -1088,6 +1088,7 @@ impl Backend {
                     let thread = state.panel.active_id().to_owned();
                     let session = state.panel.session(&thread).map_err(|e| format!("{e:?}"))?;
                     let (provider, live) = (session.settings.provider, session.run.is_some());
+                    let sequence = link.admitted_sequence(args, &thread, &session.draft.text());
                     let action = &args["action"];
                     if action["type"] == "retryConnection" {
                         if let Some(accounts) = link.accounts() {
@@ -1117,7 +1118,7 @@ impl Backend {
                     let catalogs = |provider| link.catalog(provider);
                     let effect = pm_panel_agentpanel::v4::dispatch_at(
                         &mut state.panel,
-                        link.sequence(),
+                        sequence,
                         args,
                         pm_panel_agentpanel::v4::Context {
                             run: &run,
@@ -1129,6 +1130,11 @@ impl Backend {
                         },
                     )
                     .map_err(|e| format!("{e:?}"))?;
+                    if action["type"] == "draft"
+                        && let Some(text) = action["text"].as_str()
+                    {
+                        link.typed(&thread, text);
+                    }
                     let now = crate::agent_host::now_ms();
                     // Typing reaches the archive at the next checkpoint, not per key.
                     if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key"))

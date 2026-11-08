@@ -277,6 +277,37 @@ fn typed_message_runs_a_bundled_provider_and_its_reply_survives_reopen() {
     reopened.panels.close();
 }
 #[test]
+fn typing_lands_after_the_panel_republished_for_something_else() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.text();
+    // A status or a streaming run republishes before the keystroke arrives.
+    panel.panels.broker.agent.touch();
+    panel.press_seen(
+        "agent-composer-text",
+        "input",
+        EventDetail {
+            value: Some(json!("Hi")),
+            ..Default::default()
+        },
+    );
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    let text = agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .draft
+        .text();
+    assert_eq!(text, "Hi");
+    drop(agent);
+    panel.panels.close();
+}
+#[test]
 fn stop_cancels_a_held_run_through_the_provider() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
