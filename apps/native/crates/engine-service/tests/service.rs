@@ -159,8 +159,15 @@ fn export_resolver_never_silently_uses_proxies() {
             ("b".into(), "proxy-only.mov".into()),
         ]
         .into(),
+        optimized: [("a".into(), "optimized.mov".into())].into(),
+        ..Default::default()
     };
     assert_eq!(c.export_paths(false).paths.len(), 1);
+    assert_eq!(
+        c.export_paths(true).paths.len(),
+        2,
+        "optimized media never exports"
+    );
     assert_eq!(
         c.export_paths(false).paths["a"].to_str(),
         Some("original.mov")

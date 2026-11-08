@@ -115,6 +115,13 @@ pub type LockedOverlayProvider =
 pub struct MediaCatalog {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     pub proxies: BTreeMap<String, std::path::PathBuf>,
+    /// Optimized media: full-size high-quality transcodes the viewer plays
+    /// in Automatic in place of their originals (Final Cut's optimized
+    /// media). Exports never read them.
+    pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// Always Play Original: these assets never play a proxy or optimized
+    /// media, in any mode.
+    pub play_original: std::collections::BTreeSet<String>,
 }
 /// What the viewer plays for each clip (View › Media). Exports read
 /// originals whatever this says; only an explicit draft export uses proxies.
@@ -141,14 +148,23 @@ impl MediaCatalog {
     }
     /// The file the viewer reads for each asset in `mode`.
     pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
-        let (first, second) = match mode {
-            MediaMode::Automatic => (&self.originals, Some(&self.proxies)),
-            MediaMode::Originals => (&self.originals, None),
-            MediaMode::ProxyPreferred => (&self.proxies, Some(&self.originals)),
-            MediaMode::ProxyOnly => (&self.proxies, None),
+        // Most preferred last: each later map overrides the earlier ones.
+        let order: &[&BTreeMap<String, std::path::PathBuf>] = match mode {
+            MediaMode::Automatic => &[&self.proxies, &self.originals, &self.optimized],
+            MediaMode::Originals => &[&self.originals],
+            MediaMode::ProxyPreferred => &[&self.originals, &self.optimized, &self.proxies],
+            MediaMode::ProxyOnly => &[&self.proxies],
         };
-        let mut paths = second.cloned().unwrap_or_default();
-        paths.extend(first.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut paths = BTreeMap::new();
+        for map in order {
+            paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        for id in &self.play_original {
+            match self.originals.get(id) {
+                Some(original) => paths.insert(id.clone(), original.clone()),
+                None => paths.remove(id),
+            };
+        }
         paths
     }
     /// Assets the viewer draws from a proxy in `mode`.
