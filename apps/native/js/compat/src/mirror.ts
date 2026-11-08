@@ -210,6 +210,74 @@ export function rebase(ops: Patch[], before: Data, after: Data): Patch[] {
 /** A raw record or array of the live tree, and where it was last seen. */
 type Link = { parent: Data; key: string | number };
 const raws = new WeakMap<object, object>();
+/**
+ * `value` with project views replaced by the records they show, for natives
+ * that refuse proxies (structured clone). Containers are copied only on the
+ * way to a view; a view's own subtree holds no views.
+ */
+export function unwrapViews(value: unknown): unknown {
+  const seen = new Map<object, unknown>();
+  const visit = (v: any): any => {
+    if (v === null || typeof v !== "object") return v;
+    const raw = raws.get(v);
+    if (raw) return raw;
+    if (seen.has(v)) return seen.get(v);
+    const proto = Object.getPrototypeOf(v);
+    if (Array.isArray(v)) {
+      const out: any[] = [];
+      seen.set(v, out);
+      let changed = false;
+      for (let i = 0; i < v.length; i++) {
+        out[i] = visit(v[i]);
+        changed ||= out[i] !== v[i];
+      }
+      if (!changed) seen.set(v, v);
+      return changed ? out : v;
+    }
+    if (v instanceof Map) {
+      const out = new Map();
+      seen.set(v, out);
+      let changed = false;
+      for (const [k, item] of v) {
+        const key = visit(k),
+          next = visit(item);
+        changed ||= key !== k || next !== item;
+        out.set(key, next);
+      }
+      if (!changed) seen.set(v, v);
+      return changed ? out : v;
+    }
+    if (v instanceof Set) {
+      const out = new Set();
+      seen.set(v, out);
+      let changed = false;
+      for (const item of v) {
+        const next = visit(item);
+        changed ||= next !== item;
+        out.add(next);
+      }
+      if (!changed) seen.set(v, v);
+      return changed ? out : v;
+    }
+    if (proto !== Object.prototype && proto !== null) return v;
+    const out: Data = Object.create(proto);
+    seen.set(v, out);
+    let changed = false;
+    for (const key of Object.keys(v)) {
+      out[key] = visit(v[key]);
+      changed ||= out[key] !== v[key];
+    }
+    if (!changed) seen.set(v, v);
+    return changed ? out : v;
+  };
+  return visit(value);
+}
+/** Lets the realm's `structuredClone` take project records as Electron did. */
+export function cloneAcceptingViews(
+  clone: (value: any, options?: any) => any,
+): (value: any, options?: any) => any {
+  return (value, options) => clone(unwrapViews(value), options);
+}
 const slots = (value: Data): unknown[] => {
   const out: unknown[] = [];
   for (const key of Object.keys(value)) out.push(key, value[key]);
@@ -290,7 +358,9 @@ export class DocumentMirror {
             parent: target,
             key: Array.isArray(target) ? Number(key) : (key as string),
           });
-        return mirror.view(value);
+        // The extension's own records read back as themselves, as in
+        // Electron: they are tracked slot by slot, not through a view.
+        return mirror.adopted.has(value) ? value : mirror.view(value);
       },
       set(target, key, value) {
         const slot = Array.isArray(target) ? Number(key) : (key as string);
