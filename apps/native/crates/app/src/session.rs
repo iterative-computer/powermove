@@ -540,7 +540,21 @@ impl Controller {
             Plan::Inline => {
                 let _span = crate::diag::span("refresh.rows");
                 if self.rows.accept(key, rows::list(&p.snapshot), Some(key)) {
-                    self.keyframes = rows::keyframe_count(&p.snapshot);
+                    // O(keyframes): a baked project holds hundreds of thousands.
+                    let snapshot = p.snapshot.clone();
+                    cx.spawn(async move |this, cx| {
+                        let count = cx
+                            .background_executor()
+                            .spawn(async move { rows::keyframe_count(&snapshot) })
+                            .await;
+                        let _ = this.update(cx, |v, cx| {
+                            if v.published.as_ref().map(|p| rows::key(&p.snapshot)) == Some(key) {
+                                v.keyframes = count;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                 }
             }
             Plan::Worker => {
@@ -952,7 +966,6 @@ impl Controller {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
-        let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
         self.message = format!("Opening “{name}”…");
         self.opening_name = Some(name.clone());
@@ -984,6 +997,7 @@ impl Controller {
                                 v.errors.borrow_mut().push("Project", &prompt.alert.message);
                             }
                             v.recovery_pending = true;
+                            v.mcp.awaiting_recovery(Some(name.clone()));
                             crate::surfaces::recovery_macos::sheet(
                                 &prompt,
                                 &v.host.borrow().window,
@@ -993,6 +1007,7 @@ impl Controller {
                             Ok(rx) => rx.recv().await.ok(),
                             Err(_) => None,
                         };
+                        let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
                         let call = response
                             .and_then(|r| r.action)
                             .and_then(|action| recovery.decision(action));
@@ -1002,15 +1017,6 @@ impl Controller {
                     }
                 }
             }
-            let media = if let Some(Ok(ShellReply::Opened { session, .. })) = &result {
-                let published = kernel.published(&session.project).unwrap();
-                cx.background_executor()
-                    .spawn(async move { crate::media_refresh::resolve(&published, &cache) })
-                    .await
-                    .map(Some)
-            } else {
-                Ok(None)
-            };
             let mut previous_save_failed = false;
             if matches!(&result, Some(Ok(ShellReply::Opened { .. })))
                 && let Some(old) = old
@@ -1038,14 +1044,8 @@ impl Controller {
                         decision,
                         info,
                     })) => {
-                        let media = match media {
-                            Ok(m) => m,
-                            Err(e) => {
-                                v.message = format!("Media could not be resolved: {e}");
-                                None
-                            }
-                        };
-                        v.adopt(session, decision, info.history_rejected, media, cx);
+                        // Media resolves on a worker after the project shows.
+                        v.adopt(session, decision, info.history_rejected, cx);
                         if previous_save_failed {
                             v.message.push_str(
                                 " · Previous project could not be saved; its recovery journal is retained",
@@ -1099,7 +1099,6 @@ impl Controller {
         session: SessionHandle,
         decision: pm_kernel::locks::OpenDecision,
         history_rejected: bool,
-        media: Option<crate::media_refresh::Resolved>,
         cx: &mut Context<Self>,
     ) {
         if let Some(viewer) = self.viewer.take() {
@@ -1110,18 +1109,6 @@ impl Controller {
         self.session = Some(session);
         self.media_refresh.reset();
         self.media = MediaCatalog::default();
-        let mut offline = 0;
-        if let Some(resolved) = media
-            && self
-                .session
-                .as_ref()
-                .and_then(|s| self.kernel.published(&s.project))
-                .is_some_and(|p| resolved.inputs.matches(&p))
-        {
-            offline = resolved.resolution.failed.len();
-            self.media = resolved.resolution.catalog;
-            self.media_refresh.adopt(resolved.inputs);
-        }
         self.mirror = None;
         self.selected = None;
         self.refresh(cx);
@@ -1131,7 +1118,6 @@ impl Controller {
             copy_notice(&decision).map(str::to_owned),
             history_rejected
                 .then(|| "Undo history from the last session couldn’t be restored.".to_owned()),
-            (offline > 0).then(|| crate::media::failure_note(offline)),
             notice,
         ]
         .into_iter()
@@ -1204,36 +1190,11 @@ impl Controller {
         let Some(session) = current else {
             return;
         };
-        let Some(p) = self.kernel.published(&session.project) else {
+        if self.kernel.published(&session.project).is_none() {
             return;
-        };
-        let cache = crate::media::cache_root(&self.profile);
-        self.opening = true;
-        cx.spawn(async move |this, cx| {
-            let history_rejected = false;
-            let media = cx
-                .background_executor()
-                .spawn(async move { crate::media_refresh::resolve(&p, &cache) })
-                .await;
-            let _ = this.update(cx, |v, cx| {
-                v.opening = false;
-                if v.mcp.current().as_ref() == Some(&session) {
-                    match media {
-                        Ok(media) => v.adopt(
-                            session,
-                            pm_kernel::locks::OpenDecision::Writable,
-                            history_rejected,
-                            Some(media),
-                            cx,
-                        ),
-                        Err(e) => v.message = format!("Media could not be resolved: {e}"),
-                    }
-                    cx.notify();
-                }
-                v.follow_mcp(cx);
-            });
-        })
-        .detach();
+        }
+        self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
+        cx.notify();
     }
     pub fn load_recent(&mut self, cx: &mut Context<Self>) {
         let pending = self.kernel.shell(ShellCall::Recent);

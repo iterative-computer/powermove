@@ -262,6 +262,7 @@ pub struct DocumentStore {
     /// Durable changes since the last [`take_tap`](Self::take_tap), when
     /// enabled (the kernel journal).
     tap: Option<Vec<Tap>>,
+    upgraded_on_open: bool,
 }
 
 impl std::fmt::Debug for DocumentStore {
@@ -308,8 +309,12 @@ impl DocumentStore {
         history: History,
         history_owned: bool,
     ) -> DocumentStore {
-        let (mut document, history) =
-            crate::commands::scene3d::upgrade_document_history(document, history);
+        let upgraded_on_open = crate::commands::scene3d::needs_upgrade(&document, &history);
+        let (mut document, history) = if upgraded_on_open {
+            crate::commands::scene3d::upgrade_document_history(document, history)
+        } else {
+            (document, history)
+        };
         // Native saves preserve the original effect-generation evidence even
         // though the envelope's own application version changes on Save.
         let version = file
@@ -349,7 +354,14 @@ impl DocumentStore {
             next_listener: 1,
             save_ticket: Weak::new(),
             tap: None,
+            upgraded_on_open,
         }
+    }
+
+    /// Opening upgraded the document or its history (old 3D objects), so it
+    /// no longer matches the file or slot it came from.
+    pub fn upgraded_on_open(&self) -> bool {
+        self.upgraded_on_open
     }
 
     // ── reading ────────────────────────────────────────────────────────────
@@ -1374,6 +1386,15 @@ impl DocumentStore {
             .media
             .iter()
             .filter(|m| {
+                // A file holds an asset's bytes as its own: proxy-only bytes
+                // there would reopen as the original. They stay in the library.
+                if self
+                    .file
+                    .media
+                    .is_proxy_only(m.id.as_str().unwrap_or_default())
+                {
+                    return false;
+                }
                 if self.root().is_some_and(|root| {
                     crate::media_versions::redundant_active_original(root, &self.file.media, m)
                 }) {
@@ -1657,6 +1678,12 @@ impl DocumentStore {
         Ok(())
     }
 
+    /// Bytes the library's media store holds for assets the file lacks.
+    pub(crate) fn hydrate_library_media(&mut self, store: &std::path::Path) {
+        if let Some(root) = self.root().cloned() {
+            crate::library_media::hydrate(&root, &self.history, &mut self.file.media, store);
+        }
+    }
     pub(crate) fn hydrate_originals(&mut self, archive: &crate::media_archive::Archive) {
         if let Some(root) = self.root().cloned() {
             crate::media_versions::hydrate_archive(&root, &mut self.file.media, archive);

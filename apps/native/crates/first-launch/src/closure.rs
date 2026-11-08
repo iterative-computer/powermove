@@ -258,20 +258,26 @@ fn add(
         // A record's storage revision is NOT the project's document revision.
         // Only accept a textual identity, never synthesize one from a number.
         let mut candidates = Vec::new();
-        for (s, records) in batches {
+        for (batch, (s, records)) in batches.iter().enumerate() {
             for record in records {
                 if (record.key == r.key || record.key == id)
                     && r.revision
                         .as_ref()
                         .is_none_or(|rev| record.revision() == Some(rev))
                 {
-                    candidates.push((s, record));
+                    candidates.push((batch, s, record));
                 }
             }
         }
-        if candidates.iter().any(|(_, rec)| rec.key == r.key) {
-            candidates.retain(|(_, rec)| rec.key == r.key);
+        if candidates.iter().any(|(_, _, rec)| rec.key == r.key) {
+            candidates.retain(|(_, _, rec)| rec.key == r.key);
         }
+        // Another origin (a development server's) can hold a copy of the
+        // same record; the shipped app's origin is captured first and wins.
+        if let Some(&(first, _, _)) = candidates.first() {
+            candidates.retain(|(batch, _, _)| *batch == first);
+        }
+        let candidates: Vec<_> = candidates.into_iter().map(|(_, s, r)| (s, r)).collect();
         ensure!(
             candidates.len() <= 1,
             "ambiguous media identity in checkpoint"

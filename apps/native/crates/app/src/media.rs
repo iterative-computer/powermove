@@ -38,7 +38,32 @@ pub fn failure_note(count: usize) -> String {
     }
 }
 
-fn extension(media_type: &str) -> &'static str {
+/// The cache object's extension. Decoders read better with the right one, so a
+/// generic type (old projects store `application/octet-stream`) falls back
+/// to the asset's `format`, then its file name.
+fn extension(media_type: &str, asset: Option<&pm_model::Node>) -> String {
+    let known = mime_extension(media_type);
+    if known != "bin" {
+        return known.into();
+    }
+    let field = |key| asset?.get(key).and_then(crate::node_string);
+    let name_extension = field("name")
+        .and_then(|name| Path::new(name).extension()?.to_str())
+        .map(str::to_ascii_lowercase);
+    field("format")
+        .map(str::to_ascii_lowercase)
+        .into_iter()
+        .chain(name_extension)
+        .find(|e| KNOWN_EXTENSIONS.contains(&e.as_str()))
+        .unwrap_or_else(|| "bin".into())
+}
+
+const KNOWN_EXTENSIONS: [&str; 22] = [
+    "mp4", "mov", "m4v", "webm", "mkv", "png", "jpg", "jpeg", "gif", "tif", "tiff", "heic", "avif",
+    "webp", "svg", "wav", "mp3", "ogg", "flac", "aac", "m4a", "glb",
+];
+
+fn mime_extension(media_type: &str) -> &'static str {
     match media_type {
         "video/mp4" => "mp4",
         "video/quicktime" => "mov",
@@ -98,14 +123,14 @@ fn object_key(item: &MediaEntry) -> String {
     format!("{hash:x}")
 }
 
-fn resolve(item: &MediaEntry, objects: &Path) -> Result<PathBuf> {
+fn resolve(item: &MediaEntry, asset: Option<&pm_model::Node>, objects: &Path) -> Result<PathBuf> {
     if let MediaSource::File { path, length, .. } = &item.source
         && path.extension().is_some_and(|e| e != "media")
     {
         anyhow::ensure!(fs::metadata(path)?.len() == *length, "media source changed");
         return Ok(path.clone());
     }
-    let extension = extension(&item.media_type.to_string());
+    let extension = extension(&item.media_type.to_string(), asset);
     let name = format!("{}.{extension}", object_key(item));
     let object = objects.join(&name);
     if let Ok(found) = fs::metadata(&object)
@@ -192,24 +217,24 @@ fn for_session_within(
         {
             continue;
         }
-        let resolved = match resolve(item, &objects) {
+        let resolved = match resolve(item, assets.and_then(|a| a.get(&id)), &objects) {
             Ok(resolved) => resolved,
             Err(_) => {
                 failed.push(id);
                 continue;
             }
         };
-        if pm_builtins::delivery::embedded_proxy(snapshot, &id) {
+        // Proxy bytes never stand in for an original (plan §6), whether the
+        // asset says so or the first launch found the original gone.
+        if pm_builtins::delivery::embedded_proxy(snapshot, &id) || media.is_proxy_only(&id) {
             catalog.proxies.insert(id, resolved);
         } else {
             catalog.originals.insert(id, resolved);
         }
     }
     // Linked originals already have public document descriptors. No proxy fallback.
-    if let Some(root) = snapshot.document.to_value()
-        && let Some(assets) = root.get("assets").and_then(|v| v.as_object())
-    {
-        for (id, value) in assets {
+    if let Some(pm_model::NodeKind::Object(assets)) = assets.map(pm_model::Node::kind) {
+        for (id, value) in assets.iter() {
             let id = id.to_string();
             // Ownership selects verified bytes; old path metadata is not
             // authority to substitute a different original on failure.
@@ -222,7 +247,7 @@ fn for_session_within(
             if let Some(p) = value
                 .get("sourcePath")
                 .or_else(|| value.get("path"))
-                .and_then(|v| v.as_str())
+                .and_then(crate::node_string)
             {
                 let p = Path::new(p);
                 let p = if p.is_absolute() {
@@ -307,6 +332,26 @@ mod tests {
             .collect();
         found.sort();
         found
+    }
+
+    #[test]
+    fn proxy_only_bytes_are_a_proxy_and_never_a_normal_export_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("media-cache");
+        let mut media = table(&[("b", b"original")]);
+        media.insert_proxy_only(MediaEntry {
+            id: "a".into(),
+            media_type: "image/png".into(),
+            revision: "1".into(),
+            source: MediaSource::Memory(Arc::from(&b"proxy"[..])),
+        });
+        let catalog = for_session(&snapshot(), &media, None, &cache)
+            .unwrap()
+            .catalog;
+        assert!(catalog.proxies.contains_key("a"));
+        assert!(!catalog.originals.contains_key("a"));
+        assert!(!catalog.export_paths(false).paths.contains_key("a"));
+        assert!(catalog.export_paths(true).paths.contains_key("a"));
     }
 
     #[test]

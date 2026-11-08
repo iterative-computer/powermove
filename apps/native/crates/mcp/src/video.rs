@@ -152,7 +152,13 @@ fn protected(l: &Value, layers: &[Value], seen: &mut HashSet<String>) -> bool {
         .find(|l| l["id"] == group)
         .is_some_and(|g| protected(g, layers, seen))
 }
-pub fn plan(p: &Value, a: &Value, registry: Option<&dyn media::MediaRegistry>) -> Result<Plan> {
+/// `project`: the kernel's id for the open project.
+pub fn plan(
+    p: &Value,
+    project: &str,
+    a: &Value,
+    registry: Option<&dyn media::MediaRegistry>,
+) -> Result<Plan> {
     let op = a["operation"].as_str().unwrap_or("");
     let layers = p["layers"]
         .as_array()
@@ -161,7 +167,7 @@ pub fn plan(p: &Value, a: &Value, registry: Option<&dyn media::MediaRegistry>) -
     let comp_dur = p["dur"].as_f64().unwrap_or(0.);
     let runtime = |asset: &str| {
         registry
-            .map(|r| r.state(p["id"].as_str().unwrap_or(""), asset))
+            .map(|r| r.state(project, asset))
             .unwrap_or_default()
     };
     let source_dur = |asset: &str| {

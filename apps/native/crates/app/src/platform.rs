@@ -4,6 +4,52 @@ use objc2_app_kit::*;
 use objc2_foundation::NSString;
 use std::path::PathBuf;
 
+static TERMINATE: std::sync::OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
+    std::sync::OnceLock::new();
+static TERMINATE_HEARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Call first in `main`, before any thread exists: every thread inherits
+/// SIGTERM blocked, and one waits for it, so SIGTERM runs the quit path
+/// ([`terminations`]) instead of killing the process mid-write.
+pub fn route_sigterm() {
+    let tx = TERMINATE
+        .get_or_init(|| async_channel::bounded(1))
+        .0
+        .clone();
+    // SAFETY: plain signal-set calls on a local set, before other threads.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    let _ = std::thread::Builder::new()
+        .name("pm-sigterm".into())
+        .spawn(move || {
+            loop {
+                let mut signal = 0;
+                // SAFETY: waits on the blocked set built above.
+                if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
+                    continue;
+                }
+                if !TERMINATE_HEARD.load(std::sync::atomic::Ordering::Acquire) {
+                    // No window yet, so nothing is open to close.
+                    std::process::exit(0);
+                }
+                let _ = tx.try_send(());
+            }
+        });
+}
+/// SIGTERMs from [`route_sigterm`], for the quit coordinator.
+pub fn terminations() -> async_channel::Receiver<()> {
+    TERMINATE_HEARD.store(true, std::sync::atomic::Ordering::Release);
+    TERMINATE
+        .get_or_init(|| async_channel::bounded(1))
+        .1
+        .clone()
+}
+
 /// An open sheet that takes `.cube` files.
 pub fn cube_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = async_channel::bounded(1);

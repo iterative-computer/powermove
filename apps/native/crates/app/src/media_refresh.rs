@@ -22,9 +22,6 @@ impl Inputs {
             media: p.media.clone(),
         }
     }
-    pub(crate) fn matches(&self, published: &Published) -> bool {
-        self.same(&Self::published(published))
-    }
     pub(crate) fn same(&self, other: &Self) -> bool {
         fn same_node(a: Option<&Node>, b: Option<&Node>) -> bool {
             match (a.map(Node::kind), b.map(Node::kind)) {
@@ -90,20 +87,17 @@ impl Inputs {
         Some(changed)
     }
 }
-pub(crate) struct Resolved {
-    pub inputs: Inputs,
-    pub resolution: crate::media::Resolution,
-}
-/// Run only on a worker, carrying the exact inputs into initial adoption too.
-pub(crate) fn resolve(published: &Published, cache: &std::path::Path) -> anyhow::Result<Resolved> {
-    let inputs = Inputs::published(published);
-    let resolution = crate::media::for_session(
+/// Run only on a worker.
+fn resolve(
+    published: &Published,
+    cache: &std::path::Path,
+) -> anyhow::Result<crate::media::Resolution> {
+    crate::media::for_session(
         &published.snapshot,
         &published.media,
         published.path.as_deref(),
         cache,
-    )?;
-    Ok(Resolved { inputs, resolution })
+    )
 }
 #[derive(Default)]
 pub struct Refresh {
@@ -125,7 +119,8 @@ impl Refresh {
         self.settled = None;
         self.pending = None;
     }
-    /// Initial open already resolved these exact inputs on its open worker.
+    /// Settled at `inputs` (what a finished job leaves).
+    #[cfg(test)]
     pub fn adopt(&mut self, inputs: Inputs) {
         self.reset();
         self.visible = Some(inputs.clone());
@@ -229,7 +224,7 @@ impl Controller {
                     .finish(job, latest.as_deref().map(Inputs::published))
                 {
                     match result {
-                        Ok(resolved) => v.adopt_media(resolved.resolution),
+                        Ok(resolution) => v.adopt_media(resolution),
                         Err(error) => v.message = format!("Media could not be resolved: {error}"),
                     }
                     v.update_builtins(cx);

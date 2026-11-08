@@ -1223,7 +1223,28 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
     };
     assert_eq!(recovery_copies.len(), 1);
     let reader = LibraryStore::open(&profile);
-    assert!(reader.load("P").unwrap().is_some());
+    // The entry stays, naming its file; the file was its only body.
+    assert!(reader.load("P").unwrap().is_none());
+    assert!(
+        reader
+            .read("projectMeta.P")
+            .unwrap()
+            .unwrap()
+            .get("file")
+            .and_then(|f| f.get("path"))
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| p.ends_with("source.pmv"))
+    );
+    assert!(
+        reader
+            .read("projects")
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.get("id").and_then(|id| id.as_str()) == Some("P"))
+    );
     let p = reader.load(&recovery_copies[0]).unwrap().unwrap();
     let mut copy = Kernel::new(Default::default());
     copy.open("copy", OpenSource::Library(p)).unwrap();
@@ -1459,5 +1480,140 @@ fn saving_in_place_keeps_the_file_mode() {
     assert_eq!(
         fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o644
+    );
+}
+#[test]
+fn a_session_killed_unchanged_or_after_saving_reopens_without_asking() {
+    let dir = common::TempDir::new("saved-then-killed");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    let prepare = |k: &mut Kernel| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(path.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    let checkpoints = || {
+        fs::read_dir(profile.join("journals/P"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|s| fs::read_dir(s.path()).into_iter().flatten().flatten())
+            .filter(|f| f.file_name().to_string_lossy().starts_with("checkpoint-"))
+            .count()
+    };
+    {
+        // Opened and never changed: nothing rewrites the project.
+        let mut k = kernel(&profile);
+        open(&mut k, "P", SessionSource::File(path.clone()));
+        k.sync_all();
+        assert_eq!(checkpoints(), 0);
+        assert!(!profile.join("store/project.P.json").exists());
+    }
+    let h = {
+        let mut k = kernel(&profile);
+        let ShellReply::Opened { session, .. } = prepare(&mut k) else {
+            panic!("an unchanged session asked to recover")
+        };
+        edit(&mut k, "P", 41.0);
+        k.shell(ShellCall::Save(session.clone())).unwrap();
+        k.sync_all();
+        session
+    };
+    drop(h);
+    {
+        // Killed after saving: the file holds everything the journal does.
+        let mut k = kernel(&profile);
+        let ShellReply::Opened { .. } = prepare(&mut k) else {
+            panic!("a saved session asked to recover")
+        };
+        assert_eq!(
+            common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+            Some(41.0)
+        );
+        assert!(!k.project("P").unwrap().store().history().is_empty());
+        edit(&mut k, "P", 12.0);
+        k.sync_all();
+    }
+    // Killed with an unsaved edit: that is worth asking about.
+    let mut k = kernel(&profile);
+    assert!(matches!(
+        prepare(&mut k),
+        ShellReply::RecoveryRequired { .. }
+    ));
+}
+#[test]
+fn opening_the_entry_of_a_deleted_file_recovers_its_unsaved_work() {
+    let dir = common::TempDir::new("deleted-file-open");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    {
+        let mut k = kernel(&profile);
+        open(&mut k, "P", SessionSource::File(path.clone()));
+        edit(&mut k, "P", 17.0);
+        k.sync_all();
+    }
+    fs::remove_file(&path).unwrap();
+    let mut k = kernel(&profile);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::Library {
+                profile: profile.clone(),
+                project: "P".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::Opened { session, .. } = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(
+        common::opacity_of(k.project(&session.project).unwrap().store(), "layer0"),
+        Some(17.0)
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    // The work is a library project now; the entry still names its file.
+    let reader = LibraryStore::open(&profile);
+    assert!(
+        reader
+            .projects()
+            .unwrap()
+            .iter()
+            .any(|r| r.name.ends_with("— Recovered"))
+    );
+    assert!(reader.read("projectMeta.P").unwrap().is_some());
+}
+#[test]
+fn duplicating_the_entry_of_a_deleted_file_copies_its_newest_work() {
+    let dir = common::TempDir::new("deleted-file-duplicate");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    {
+        let mut k = kernel(&profile);
+        open(&mut k, "P", SessionSource::File(path.clone()));
+        edit(&mut k, "P", 23.0);
+        k.sync_all();
+    }
+    fs::remove_file(&path).unwrap();
+    let mut k = kernel(&profile);
+    k.shell(ShellCall::Duplicate {
+        project: "P".into(),
+        id: "copy".into(),
+        name: "Copy".into(),
+    })
+    .unwrap();
+    let copy = LibraryStore::open(&profile).load("copy").unwrap().unwrap();
+    assert!(copy.session.as_ref().and_then(|m| m.get("file")).is_none());
+    let mut fresh = Kernel::new(Default::default());
+    fresh.open("copy", OpenSource::Library(copy)).unwrap();
+    assert_eq!(
+        common::opacity_of(fresh.project("copy").unwrap().store(), "layer0"),
+        Some(23.0)
     );
 }

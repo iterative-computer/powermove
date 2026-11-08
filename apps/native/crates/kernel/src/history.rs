@@ -512,6 +512,72 @@ impl History {
     }
 
     /// A copy for a save on another thread (records are shared, not copied).
+    /// Whether both save as the same `to_saved()` form, compared record by
+    /// record without building it. A false answer may still mean equal saves
+    /// (an entry kept as operations on one side), never the reverse.
+    pub fn saves_as(&self, other: &History) -> bool {
+        fn documents(records: &[HistoryRecord]) -> impl Iterator<Item = &HistoryRecord> {
+            records.iter().filter(|r| r.is_document())
+        }
+        documents(&self.entries).count() == documents(&other.entries).count()
+            && documents(&self.entries[..self.cursor]).count()
+                == documents(&other.entries[..other.cursor]).count()
+            && documents(&self.entries)
+                .zip(documents(&other.entries))
+                .all(|(a, b)| {
+                    a.label == b.label
+                        && ((a.forward == b.forward && a.inverse == b.inverse)
+                            || a.saved_form() == b.saved_form())
+                })
+    }
+    /// Whether `self`'s document steps are `saved`'s, consecutive runs of
+    /// them merged into one step as a squash merges them (operations
+    /// concatenated in order), with nothing to redo on either side. Every
+    /// undo state of `self` is then one of `saved`'s.
+    pub fn regroups(&self, saved: &History) -> bool {
+        fn documents(records: &[HistoryRecord]) -> Vec<&HistoryRecord> {
+            records.iter().filter(|r| r.is_document()).collect()
+        }
+        fn merged(run: &[&HistoryRecord], step: &HistoryRecord) -> bool {
+            let forward: Vec<Op> = run.iter().flat_map(|r| r.forward.iter().cloned()).collect();
+            let inverse: Vec<Op> = run
+                .iter()
+                .rev()
+                .flat_map(|r| r.inverse.iter().cloned())
+                .collect();
+            if *step.forward == *forward && *step.inverse == *inverse {
+                return true;
+            }
+            let forms: Option<Vec<_>> = run.iter().map(|r| r.saved_form()).collect();
+            forms.zip(step.saved_form()).is_some_and(|(forms, (f, b))| {
+                let fwd: Vec<_> = forms.iter().flat_map(|(f, _)| f.iter().cloned()).collect();
+                let bwd: Vec<_> = forms
+                    .iter()
+                    .rev()
+                    .flat_map(|(_, b)| b.iter().cloned())
+                    .collect();
+                f == fwd && b == bwd
+            })
+        }
+        if self.can_redo() || saved.can_redo() {
+            return false;
+        }
+        let (mine, theirs) = (documents(&self.entries), documents(&saved.entries));
+        let mut next = 0;
+        for step in mine {
+            let start = next;
+            loop {
+                if next == theirs.len() {
+                    return false;
+                }
+                next += 1;
+                if merged(&theirs[start..next], step) {
+                    break;
+                }
+            }
+        }
+        next == theirs.len()
+    }
     pub fn snapshot(&self) -> HistorySnapshot {
         HistorySnapshot {
             records: self.entries.clone(),

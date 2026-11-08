@@ -71,6 +71,7 @@ pub mod history;
 pub mod journal;
 pub mod kernel;
 pub mod library;
+pub mod library_media;
 pub mod media_archive;
 pub mod media_versions;
 pub mod model;

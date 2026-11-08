@@ -205,6 +205,9 @@ pub struct MediaTable {
     /// Explicit provenance, independent of File vs Memory. Generated/imported
     /// owned files must never be mistaken for source links.
     linked: Arc<HashSet<JsString>>,
+    /// Bytes known to be a playback proxy whatever the asset record says
+    /// (the first launch found the original gone). Never an export's original.
+    proxy_only: Arc<HashSet<JsString>>,
 }
 
 impl MediaTable {
@@ -232,6 +235,7 @@ impl MediaTable {
     /// Adds or replaces an entry by id; an existing id keeps its position.
     pub fn insert(&mut self, entry: MediaEntry) {
         Arc::make_mut(&mut self.linked).remove(&entry.id);
+        Arc::make_mut(&mut self.proxy_only).remove(&entry.id);
         let entries = Arc::make_mut(&mut self.entries);
         match entries.iter_mut().find(|e| e.id == entry.id) {
             Some(slot) => *slot = entry,
@@ -260,10 +264,23 @@ impl MediaTable {
         self.linked.contains(id)
     }
 
+    /// Adds bytes that are a playback proxy of an original that is gone.
+    pub fn insert_proxy_only(&mut self, entry: MediaEntry) {
+        let id = entry.id.clone();
+        self.insert(entry);
+        Arc::make_mut(&mut self.proxy_only).insert(id);
+    }
+
+    /// Whether `id`'s bytes are a proxy whose original is gone.
+    pub fn is_proxy_only(&self, id: &str) -> bool {
+        self.proxy_only.iter().any(|p| *p == *id)
+    }
+
     pub fn remove(&mut self, id: &str) -> Option<MediaEntry> {
         let pos = self.entries.iter().position(|e| e.id == *id)?;
         let entry = Arc::make_mut(&mut self.entries).remove(pos);
         Arc::make_mut(&mut self.linked).remove(&entry.id);
+        Arc::make_mut(&mut self.proxy_only).remove(&entry.id);
         Some(entry)
     }
 }

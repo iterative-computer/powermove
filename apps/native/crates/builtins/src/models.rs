@@ -29,6 +29,10 @@ type TimelineJob = Pin<
 pub(crate) struct Models {
     pub properties: Properties,
     pub timeline: Option<TimelineClient>,
+    /// Where the timeline client comes from, until a panel first asks for it:
+    /// indexing every channel of a large project costs seconds, and only the
+    /// Timeline panel reads it.
+    timeline_source: Option<(KernelHandle, String, Caller)>,
     pub viewer: pm_panel_viewerchrome::v4::Session,
     viewer_projection: Option<(
         pm_panel_viewerchrome::Stamp,
@@ -59,6 +63,16 @@ pub(crate) struct Models {
     timeline_editor: Option<TimelineEditor>,
 }
 impl Models {
+    /// The timeline client, made on first use ([`Models::timeline_source`]).
+    pub(crate) fn ensure_timeline(&mut self) -> Result<(), String> {
+        if self.timeline.is_none()
+            && let Some((kernel, project, caller)) = self.timeline_source.take()
+        {
+            self.timeline =
+                Some(TimelineClient::new(kernel, &project, caller).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
     pub fn new(
         kernel: KernelHandle,
         project: &str,
@@ -66,11 +80,7 @@ impl Models {
         application: bool,
         loads_agent: bool,
     ) -> Result<Self, String> {
-        let timeline = if application {
-            None
-        } else {
-            Some(TimelineClient::new(kernel.clone(), project, caller).map_err(|e| e.to_string())?)
-        };
+        let timeline_source = (!application).then(|| (kernel.clone(), project.to_owned(), caller));
         let agent = if loads_agent {
             let mut store = KernelStore::new(kernel, application);
             let panel = pm_panel_agentpanel::model::Panel::load(
@@ -88,7 +98,8 @@ impl Models {
         };
         Ok(Self {
             properties: Properties::default(),
-            timeline,
+            timeline: None,
+            timeline_source,
             viewer: Default::default(),
             viewer_projection: None,
             project: ProjectBridge::default(),
@@ -203,6 +214,7 @@ impl Backend {
     }
     pub(crate) fn timeline_frame(&mut self, request: &Value) -> Result<Value, String> {
         self.sync()?;
+        self.native.ensure_timeline()?;
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
         let p = self.published().ok_or("closed")?;
@@ -633,6 +645,7 @@ impl Backend {
             return Err("Timeline command pending".into());
         }
         let p = self.published().ok_or("closed")?;
+        self.native.ensure_timeline()?;
         let mut client = self.native.timeline.take().ok_or("Timeline closed")?;
         let time = self.time();
         self.native.timeline_job = Some(Box::pin(async move {
@@ -766,6 +779,7 @@ impl Backend {
                         ))
                     }
                     Some(TimelineEditor::Time) => {
+                        self.native.ensure_timeline()?;
                         let fps = self
                             .native
                             .timeline
@@ -788,6 +802,7 @@ impl Backend {
     /// row sends back. Graph options come from the model's own menu.
     fn timeline_menu(&mut self, args: &Value) -> Result<Value, String> {
         use pm_panel_timeline::v4;
+        self.native.ensure_timeline()?;
         let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
         if args["type"] == "graphOptions" {
             let context = pm_panel_timeline::Context::Graph { series: 0 };

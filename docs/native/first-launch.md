@@ -46,7 +46,10 @@ Window ▸ Error Log and the status bar, and resumes next launch.
    owners remapped to stable copy ids, every project with its history, names unchanged.
    Trash stays trash. Refused histories and unreadable slots stay in the checkpoint.
 4. Stream media into the host layout, BLAKE3 verified. The closure records verified,
-   proxy-only, offline, missing, unclassified and poster outcomes.
+   proxy-only, offline, missing, unclassified and poster outcomes. The shipped app's
+   IndexedDB origin (`app_powermove_*`) is captured first; a development server's
+   origin holding the same key never overrides it. Opened projects read these bytes
+   from `Media Store` by `storageKey` (kernel `library_media`).
 5. Import localStorage, register extensions (`extensions-shared` read-only, plus an
    overlay), then secrets.
 

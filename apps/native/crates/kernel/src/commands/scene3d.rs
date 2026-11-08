@@ -555,6 +555,46 @@ impl pm_scene3d::migration::LegacySampler for LegacySampler {
     }
 }
 
+/// Whether the document or its history holds old 3D objects, read in place
+/// (a large project is not copied out just to learn it has none).
+pub(crate) fn needs_upgrade(document: &pm_model::Document, history: &crate::History) -> bool {
+    fn node(n: &pm_model::doc::Node) -> bool {
+        use pm_model::doc::NodeKind;
+        match n.kind() {
+            NodeKind::Object(m) => m.get(b"definition".as_slice()).is_some_and(
+                |d| matches!(d.kind(), NodeKind::String(s) if s.as_str().is_some_and(is_old_3d)),
+            ) || m.iter().any(|(_, v)| node(v)),
+            NodeKind::Array(a) => a.iter().any(node),
+            _ => false,
+        }
+    }
+    fn value(v: &Value) -> bool {
+        match v {
+            Value::Object(m) => {
+                m.get("definition")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_old_3d)
+                    || m.iter().any(|(_, v)| value(v))
+            }
+            Value::Array(a) => a.iter().any(value),
+            _ => false,
+        }
+    }
+    document.root().is_some_and(node)
+        || history
+            .records()
+            .iter()
+            .flat_map(|r| r.forward.iter().chain(r.inverse.iter()))
+            .any(|op| matches!(op, pm_model::Op::Leaf(p) if p.value.as_ref().is_some_and(value)))
+}
+
+fn is_old_3d(definition: &str) -> bool {
+    matches!(
+        definition,
+        schema::SCENE | schema::OBJECT | schema::LIGHT | schema::CAMERA | "powermove.3d.obj-model"
+    )
+}
+
 /// Upgrade each imported history state as well as the current document. Stable
 /// deterministic migration IDs make before/after diffs preserve Undo and Redo.
 /// A complete original logical history remains archived for recovery.
@@ -562,40 +602,10 @@ pub(crate) fn upgrade_document_history(
     document: pm_model::Document,
     history: crate::History,
 ) -> (pm_model::Document, crate::History) {
-    fn contains(v: &Value) -> bool {
-        match v {
-            Value::Object(m) => {
-                m.get("definition")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| {
-                        matches!(
-                            s,
-                            schema::SCENE
-                                | schema::OBJECT
-                                | schema::LIGHT
-                                | schema::CAMERA
-                                | "powermove.3d.obj-model"
-                        )
-                    })
-                    || m.iter().any(|(_, v)| contains(v))
-            }
-            Value::Array(a) => a.iter().any(contains),
-            _ => false,
-        }
-    }
-    let Some(root) = document.root() else {
-        return (document, history);
-    };
-    let current = root.to_value();
-    let relevant = contains(&current)
-        || history
-            .records()
-            .iter()
-            .flat_map(|r| r.forward.iter().chain(r.inverse.iter()))
-            .any(|op| matches!(op,pm_model::Op::Leaf(p) if p.value.as_ref().is_some_and(contains)));
-    if !relevant {
+    if !needs_upgrade(&document, &history) {
         return (document, history);
     }
+    let current = document.root().expect("checked").to_value();
     let upgraded = upgrade_project(current.clone());
     if current
         .get("native3dHistoryVersion")

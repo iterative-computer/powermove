@@ -845,6 +845,28 @@ pub fn without_captions(document: &Document) -> Option<Document> {
         }
         changed
     }
+    // Most projects have none: look before copying the document out.
+    fn has_captions(layers: Option<&pm_model::Node>) -> bool {
+        layers.is_some_and(|layers| {
+            (0..).map_while(|i| layers.at(i)).any(|layer| {
+                layer.get("type").is_some_and(|t| {
+                    matches!(t.kind(), pm_model::NodeKind::String(s) if s.as_str() == Some("captions"))
+                })
+            })
+        })
+    }
+    let tree = document.root()?;
+    let comps = tree.get("comps");
+    let any = has_captions(tree.get("layers"))
+        || comps.is_some_and(|comps| match comps.kind() {
+            pm_model::NodeKind::Object(map) => {
+                map.iter().any(|(_, c)| has_captions(c.get("layers")))
+            }
+            _ => false,
+        });
+    if !any {
+        return None;
+    }
     let mut root = document.to_value()?;
     let Value::Object(map) = &mut root else {
         return None;
