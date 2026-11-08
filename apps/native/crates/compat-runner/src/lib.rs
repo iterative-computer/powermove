@@ -73,6 +73,7 @@ pub(crate) fn limits() -> Limits {
         max_ops: 4096,
         max_response_bytes: 64 * 1024 * 1024,
         max_engine_response_bytes: 256 * 1024 * 1024,
+        queue_fetches: true,
         ..Limits::default()
     }
 }

@@ -113,6 +113,11 @@ pub struct Limits {
     pub max_engine_response_bytes: usize,
     pub host_timeout: Duration,
     pub queue_capacity: usize,
+    /// Fetches that do not fit the reservation budget wait for room instead of
+    /// failing, as a browser queues connections, and always leave room for one
+    /// synchronous engine reply. For a realm whose engine channel must never be
+    /// refused by its own pending fetches.
+    pub queue_fetches: bool,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -127,6 +132,7 @@ impl Default for Limits {
             max_engine_response_bytes: 8 * 1024 * 1024,
             host_timeout: Duration::from_secs(30),
             queue_capacity: 64,
+            queue_fetches: false,
         }
     }
 }

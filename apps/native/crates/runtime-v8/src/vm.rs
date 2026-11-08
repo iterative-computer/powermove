@@ -83,6 +83,8 @@ pub(crate) fn snapshot(kind: SnapshotKind) -> Arc<Vec<u8>> {
 pub(crate) struct NativeState {
     pub limits: Limits,
     pub queued: Vec<(u64, FetchRequest)>,
+    /// Accepted fetches waiting for reservation room (`Limits::queue_fetches`).
+    pub deferred: std::collections::VecDeque<(u64, FetchRequest)>,
     pub aborted: Vec<u64>,
     pub logs: Vec<(String, String)>,
     pub in_flight: usize,
@@ -97,6 +99,27 @@ pub(crate) struct NativeState {
     sync_calls: usize,
 }
 impl NativeState {
+    /// Room a fetch leaves for a synchronous engine reply.
+    pub fn engine_headroom(&self) -> usize {
+        if self.limits.queue_fetches {
+            self.limits
+                .max_engine_response_bytes
+                .min(self.limits.external_bytes)
+        } else {
+            0
+        }
+    }
+    /// Starts waiting fetches while they fit; the rest keep waiting in order.
+    pub fn admit_deferred(&mut self) {
+        let reserve = self.limits.max_response_bytes;
+        while !self.deferred.is_empty() && self.admits_response(reserve + self.engine_headroom()) {
+            let (id, mut request) = self.deferred.pop_front().unwrap();
+            // Its time starts when it starts, not while it waited.
+            request.deadline = Instant::now() + self.limits.host_timeout;
+            self.reserved += reserve;
+            self.queued.push((id, request));
+        }
+    }
     fn admits_response(&self, bytes: usize) -> bool {
         self.sampled_external
             .checked_add(self.reserved)
@@ -270,7 +293,15 @@ fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value
                 return Err("Host operation quota".into());
             }
             let reserve = n.limits.max_response_bytes;
-            if !n.admits_response(reserve) {
+            let headroom = n.engine_headroom();
+            let start = n.admits_response(reserve + headroom);
+            // Waiting helps only when other fetches hold the room it needs.
+            let fits_alone = n
+                .sampled_external
+                .checked_add(n.engine_reserved)
+                .and_then(|v| v.checked_add(reserve + headroom))
+                .is_some_and(|v| v <= n.limits.external_bytes);
+            if !start && !(n.limits.queue_fetches && fits_alone) {
                 return Err("External memory reservation quota".into());
             }
             let url = url::Url::parse(v["url"].as_str().ok_or("Missing URL")?)
@@ -302,8 +333,7 @@ fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value
                 .collect::<std::result::Result<Vec<_>, String>>()?;
             n.next_id += 1;
             n.in_flight += 1;
-            n.reserved += reserve;
-            n.queued.push((
+            let request = (
                 n.next_id,
                 FetchRequest {
                     url: url.into(),
@@ -313,7 +343,13 @@ fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value
                     max_response_bytes: reserve,
                     deadline: Instant::now() + n.limits.host_timeout,
                 },
-            ));
+            );
+            if start {
+                n.reserved += reserve;
+                n.queued.push(request);
+            } else {
+                n.deferred.push_back(request);
+            }
             Ok(json!(n.next_id))
         }
         "abort" => {
@@ -513,6 +549,7 @@ impl Vm {
         let native_state = Arc::new(Mutex::new(NativeState {
             limits: limits.clone(),
             queued: vec![],
+            deferred: Default::default(),
             aborted: vec![],
             logs: vec![],
             in_flight: 0,

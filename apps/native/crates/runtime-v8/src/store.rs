@@ -633,6 +633,8 @@ fn limits_read(v: &Value) -> Result<Limits> {
         max_engine_response_bytes: engine_response,
         host_timeout: Duration::from_millis(number(v, "timeout_ms")?),
         queue_capacity: number(v, "queue")? as usize,
+        // Store helpers stay contained: a fetch past their budget fails.
+        queue_fetches: false,
     })
 }
 
