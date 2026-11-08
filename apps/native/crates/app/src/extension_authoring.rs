@@ -28,15 +28,19 @@ const ACTIVATION: Duration = Duration::from_secs(10);
 
 pub struct AppExtensions {
     profile: PathBuf,
+    roots: Vec<PathBuf>,
 }
 impl AppExtensions {
     pub fn new(profile: PathBuf) -> Self {
-        Self { profile }
+        Self {
+            roots: crate::extensions::roots(&profile),
+            profile,
+        }
     }
 }
 impl ExtensionHost for AppExtensions {
     fn roots(&self) -> Vec<PathBuf> {
-        crate::extensions::roots(&self.profile)
+        self.roots.clone()
     }
     fn history(&self) -> PathBuf {
         self.profile.join("agent-change-history")
