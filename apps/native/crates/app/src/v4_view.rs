@@ -383,10 +383,18 @@ impl SurfaceView {
     ) {
         let id = view.id;
         let value = node.props.get("value").map(value_text).unwrap_or_default();
+        let placeholder = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("placeholder"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
+                f.set_placeholder(&placeholder);
                 f.set_value(&value, cx);
             });
             return;
@@ -405,7 +413,11 @@ impl SurfaceView {
             TextKind::DenseText
         };
         let tokens = self.table.tokens.clone();
-        let field = cx.new(|cx| TextField::new(kind, label, &value, tokens, window, cx));
+        let field = cx.new(|cx| {
+            let mut field = TextField::new(kind, label, &value, tokens, window, cx);
+            field.set_placeholder(&placeholder);
+            field
+        });
         self.subscriptions.entry(id).or_default().push(cx.subscribe(
             &field,
             move |this, _, event, cx| {

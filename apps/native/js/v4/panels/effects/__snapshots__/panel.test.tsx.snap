@@ -312,6 +312,9 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
         "disabled": true,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -1127,9 +1130,6 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -1187,10 +1187,10 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -1492,6 +1492,9 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -1756,9 +1759,6 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -1785,10 +1785,10 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -2536,9 +2536,6 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -2565,10 +2562,10 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -2870,6 +2867,9 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -3134,9 +3134,6 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -3163,10 +3160,10 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -3914,9 +3911,6 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -3943,10 +3937,10 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -4248,6 +4242,9 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -4512,9 +4509,6 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -4541,10 +4535,10 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -5289,9 +5283,6 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -5318,10 +5309,10 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -5623,6 +5614,9 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -5887,9 +5881,6 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -5916,10 +5907,10 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -6664,9 +6655,6 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -6693,10 +6681,10 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -6998,6 +6986,9 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -7262,9 +7253,6 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -7291,10 +7279,10 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -7918,6 +7906,9 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -8172,9 +8163,6 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -8201,10 +8189,10 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -8854,9 +8842,6 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -8914,10 +8899,10 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -9219,6 +9204,9 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -9483,9 +9471,6 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -9512,10 +9497,10 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -10165,9 +10150,6 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -10225,10 +10207,10 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -10530,6 +10512,9 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -10794,9 +10779,6 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -10823,10 +10805,10 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -11489,9 +11471,6 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -11549,10 +11528,10 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -11908,6 +11887,9 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -12172,9 +12154,6 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -12201,10 +12180,10 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -12475,6 +12454,9 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -12898,6 +12880,9 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -13516,6 +13501,9 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -14540,6 +14528,9 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -15232,9 +15223,6 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -15261,10 +15249,10 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -15597,6 +15585,9 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -15860,9 +15851,6 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -15889,10 +15877,10 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -16483,6 +16471,9 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",
@@ -16737,9 +16728,6 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
           "fontSize": {
             "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
           "height": {
             "token": "metrics.row",
           },
@@ -16766,10 +16754,10 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "props": {
         "style": {
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
           "fontSize": {
-            "token": "typography.body",
+            "token": "typography.minimum",
           },
         },
       },
@@ -18527,6 +18515,9 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
+        "metadata": {
+          "placeholder": "Search",
+        },
         "preventDefault": {
           "keydown": [
             "Escape",

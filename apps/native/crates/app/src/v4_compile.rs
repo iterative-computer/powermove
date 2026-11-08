@@ -289,7 +289,16 @@ fn compile(
     let t = &table.tokens;
     let component = Component::of(node);
     let mut style = surface.computed_style(node.id).unwrap_or_default();
-    if panel_id == "viewer" {
+    // The shell (or the panel's own window) paints the panel material. A panel
+    // root that repeats `colors.panel` would turn the translucent material opaque.
+    let root_fill = ["background", "backgroundColor"].iter().any(|k| {
+        style
+            .get(*k)
+            .and_then(|v| v.get("token"))
+            .and_then(Value::as_str)
+            == Some("colors.panel")
+    });
+    if panel_id == "viewer" || (root_fill && (node.id == 0 || node.parent == Some(0))) {
         style.remove("background");
         style.remove("backgroundColor");
     }
@@ -302,10 +311,26 @@ fn compile(
     if let Some(recipe) = panel.components.get(&node.id) {
         let radius = recipe.radius.unwrap_or(t.metrics.control_radius);
         sheet = match component {
-            Some(Component::InspectorRow | Component::ListItem | Component::TreeItem) => {
+            Some(Component::InspectorRow) => {
                 sheet.flex_row().items_center().min_h(px(t.metrics.row))
             }
-            Some(Component::ToolbarItem | Component::DisclosureButton) => sheet
+            // Quiet source-list rows: selection and hover inset from the panel
+            // edge by `gap`, text a further `gap` in (language §9 Lists).
+            Some(Component::ListItem | Component::TreeItem) => sheet
+                .flex_row()
+                .items_center()
+                .min_h(px(t.metrics.row))
+                .mx(px(t.metrics.gap))
+                .px(px(t.metrics.gap)),
+            // A section heading reads from the leading edge, chevron first.
+            Some(Component::DisclosureButton) => sheet
+                .flex_row()
+                .items_center()
+                .w_full()
+                .gap(px(t.metrics.inner_radius))
+                .min_h(px(recipe.hit))
+                .rounded(px(radius)),
+            Some(Component::ToolbarItem) => sheet
                 .flex_row()
                 .items_center()
                 .justify_center()

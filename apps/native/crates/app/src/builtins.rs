@@ -1031,8 +1031,13 @@ impl Render for SurfaceWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = window.viewport_size();
         let panel = self.panel.clone();
+        let mut fill = 0;
         let body = self.owner.update(cx, |v, cx| {
-            let header = v.host.borrow().tokens.metrics.header;
+            let (header, colour) = {
+                let t = &v.host.borrow().tokens;
+                (t.metrics.header, t.colors.panel)
+            };
+            fill = colour;
             v.builtin_panel(
                 &panel,
                 pm_shell::layout::Rect {
@@ -1045,6 +1050,10 @@ impl Render for SurfaceWindow {
                 cx,
             )
         });
-        div().size_full().overflow_hidden().children(body)
+        div()
+            .size_full()
+            .overflow_hidden()
+            .bg(rgb(fill))
+            .children(body)
     }
 }

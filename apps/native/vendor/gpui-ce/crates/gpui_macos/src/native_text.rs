@@ -266,6 +266,12 @@ impl NativeTextSlot {
             Editor::Multiline(v) => v.setFont(Some(&font)),
         }
     }
+    /// Placeholder for single-line fields (AppKit draws it while editing).
+    pub fn set_placeholder(&self, text: &str) {
+        if let Editor::Field(v) = &self.state.editor {
+            v.setPlaceholderString(Some(&NSString::from_str(text)));
+        }
+    }
     pub fn on_event(&self, wake: Rc<dyn Fn()>) {
         *self.state.wake.borrow_mut() = Some(wake);
     }

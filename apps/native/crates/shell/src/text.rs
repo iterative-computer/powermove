@@ -12,6 +12,7 @@ pub struct TextField {
     slot: Rc<NativeTextSlot>,
     kind: TextKind,
     value: String,
+    placeholder: SharedString,
     tokens: pm_design::Tokens,
 }
 impl EventEmitter<TextEvent> for TextField {}
@@ -60,7 +61,15 @@ impl TextField {
             slot,
             kind,
             value: value.into(),
+            placeholder: SharedString::default(),
             tokens,
+        }
+    }
+    /// Muted hint shown while the field is empty (`metadata.placeholder`).
+    pub fn set_placeholder(&mut self, text: &str) {
+        if self.placeholder != text {
+            self.slot.set_placeholder(text);
+            self.placeholder = text.to_owned().into();
         }
     }
     pub fn keep(&self) {
@@ -117,10 +126,14 @@ impl Render for TextField {
                     cx.notify();
                 }),
             )
-            .child(if dense && !editing {
-                self.value.clone()
-            } else {
-                String::new()
+            .flex()
+            .items_center()
+            .when(dense && !editing && self.value.is_empty(), |d| {
+                d.text_color(rgb(self.tokens.colors.muted))
+                    .child(self.placeholder.clone())
+            })
+            .when(dense && !editing && !self.value.is_empty(), |d| {
+                d.child(self.value.clone())
             })
             .child(
                 canvas(
