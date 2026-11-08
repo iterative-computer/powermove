@@ -70,6 +70,26 @@ pub fn paths_named(
     rx
 }
 
+/// While held, macOS neither App Naps nor throttles the app, so a project that is
+/// opening keeps going when the window is behind others or the screen locks.
+/// Idle system sleep stays allowed.
+pub struct Busy(Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>);
+impl Busy {
+    pub fn begin(reason: &str) -> Self {
+        let options = objc2_foundation::NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
+        Self(
+            objc2_foundation::NSProcessInfo::processInfo()
+                .beginActivityWithOptions_reason(options, &NSString::from_str(reason)),
+        )
+    }
+}
+impl Drop for Busy {
+    fn drop(&mut self) {
+        // SAFETY: the token beginActivity returned, ended once.
+        unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.0) }
+    }
+}
+
 /// Hands a web link to the default browser.
 pub fn open_url(url: &str) -> bool {
     objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))

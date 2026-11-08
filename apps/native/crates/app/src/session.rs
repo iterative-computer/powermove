@@ -40,6 +40,8 @@ pub struct Controller {
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     pub opening: bool,
+    /// Held while a project opens: no App Nap or background throttling.
+    pub(crate) busy: Option<crate::platform::Busy>,
     /// The project an open is reading, shown until it lands or fails, and
     /// then until the panels have drawn it (`settling`).
     pub opening_name: Option<String>,
@@ -303,6 +305,7 @@ impl Controller {
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
             opening: false,
+            busy: None,
             opening_name: None,
             settling: None,
             rows: Default::default(),
@@ -957,6 +960,7 @@ impl Controller {
         let kernel = self.kernel.clone();
         let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
+        self.busy = Some(crate::platform::Busy::begin("Opening a project"));
         self.message = format!("Opening “{name}”…");
         self.opening_name = Some(name.clone());
         cx.notify();
@@ -1025,6 +1029,7 @@ impl Controller {
             }
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
+                v.busy = None;
                 v.recovery_pending = false;
                 // Panels say it's opening until they've mounted for the project.
                 v.settling = match &result {
@@ -1212,6 +1217,7 @@ impl Controller {
         };
         let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
+        self.busy = Some(crate::platform::Busy::begin("Opening a project"));
         cx.spawn(async move |this, cx| {
             let history_rejected = false;
             let media = cx
@@ -1220,6 +1226,7 @@ impl Controller {
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
+                v.busy = None;
                 if v.mcp.current().as_ref() == Some(&session) {
                     match media {
                         Ok(media) => v.adopt(
