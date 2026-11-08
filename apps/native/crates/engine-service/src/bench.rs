@@ -4,7 +4,7 @@
 //! `--project=COPY.pmv [--definitions=FILE] [--width=1920 --height=1080]`
 //! plays a real project (a private copy: its embedded media are extracted to
 //! a scratch folder) and then seeks it at random, as the viewer does.
-//! `--from=SECONDS` loops the window starting there instead of the start.
+//! `--from=SECONDS` starts the run there instead of at the start.
 use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
 use pm_protocol::{
     clock::TransportCommand,
