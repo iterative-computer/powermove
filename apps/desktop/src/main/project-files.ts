@@ -31,10 +31,22 @@ type OpenedProject = { path: string; projectId: string; token: string; size: num
 type FullProject = OpenedProject & { document: any; documentRange?: ProjectRecord };
 type RangeProject = OpenedProject & { document?: never; documentRange: ProjectRecord };
 type HashResult = { ok: true; hash: string } | { ok: false; error: unknown };
+type OpenReader = { handle: FileHandle; size: number; mtime: number; ctime: number; hash: string; busy: boolean };
+/** Cloud sync clients and macOS (sandbox grants, provenance, Spotlight) write
+ * xattrs on files people open, which moves ctime alone. Prove the bytes are
+ * unchanged before reporting that the project changed while opening. */
+async function unchangedSinceOpen(reader: Omit<OpenReader, 'busy'>): Promise<boolean> {
+  const info = await reader.handle.stat();
+  if (info.size !== reader.size || info.mtimeMs !== reader.mtime) return false;
+  if (info.ctimeMs === reader.ctime) return true;
+  if (await hashProjectFile(reader.handle, reader.size) !== reader.hash) return false;
+  const after = await reader.handle.stat();
+  return after.size === reader.size && after.mtimeMs === reader.mtime;
+}
 
 /** Main-process-only grants: renderer data can never invent an overwrite path. */
 export class ProjectFiles {
-  private readers = new Map<string, { handle: FileHandle; size: number; mtime: number; ctime: number; busy: boolean }>();
+  private readers = new Map<string, OpenReader>();
   private associations = new Map<string, Association>();
   private ready: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
@@ -53,23 +65,40 @@ export class ProjectFiles {
     } catch (error: any) {
       if (error.code !== 'ENOENT') console.warn('Project file associations unavailable; Save As will be used.', error);
     }
-    // A file commit can outlive a failed registry write. Reconcile only an
-    // exact matching committed file; never grant an overwrite from stale intent.
+    await this.reconcileJournals();
+  }
+  /** A file commit can outlive a failed registry write. Reconcile only an
+   * exact matching committed file; never grant an overwrite from stale intent.
+   * At startup every journal is settled; before a save, only that project's
+   * journals naming the bytes currently on disk are adopted. */
+  private async reconcileJournals(only?: { id: string; path: string; hash: string }): Promise<boolean> {
     const directory = path.dirname(this.registryPath), prefix = path.basename(this.registryPath) + '.pending-';
+    let adopted = false;
     for (const name of await readdir(directory).catch(() => [])) {
       if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
       const journal = path.join(directory, name);
       try {
         const value = JSON.parse(await readFile(journal, 'utf8'));
-        if (typeof value.id === 'string' && PROJECT_ID.test(value.id) && typeof value.path === 'string' && path.isAbsolute(value.path)
-          && typeof value.hash === 'string' && Number.isSafeInteger(value.generation) && value.generation > (this.associations.get(value.id)?.generation || 0)
-          && (await fileVersion(value.path))?.hash === value.hash) {
+        const valid = typeof value.id === 'string' && PROJECT_ID.test(value.id) && typeof value.path === 'string' && path.isAbsolute(value.path)
+          && typeof value.hash === 'string' && Number.isSafeInteger(value.generation);
+        if (only && (!valid || value.id !== only.id || value.path !== only.path || value.hash !== only.hash)) continue;
+        if (valid && value.generation > (this.associations.get(value.id)?.generation || 0)
+          && (only ? only.hash : (await fileVersion(value.path))?.hash) === value.hash) {
           this.associations.set(value.id, { path: value.path, hash: value.hash, generation: value.generation });
           await this.persist();
+          adopted = true;
         }
         await unlink(journal);
       } catch (error) { console.warn('Project save metadata needs recovery.', error); }
     }
+    return adopted;
+  }
+  /** The bytes on disk differ from the last recorded save. Accept them only if
+   * an interrupted save of ours proves they are exactly what we wrote. */
+  private async confirmKnown(id: string, destination: string, previous: FileVersion | undefined): Promise<void> {
+    const known = this.associations.get(id);
+    if (!known || previous?.hash === known.hash) return;
+    if (!previous || known.path !== destination || !await this.reconcileJournals({ id, path: destination, hash: previous.hash })) throw changedFile();
   }
   private async persist(): Promise<void> {
     await mkdir(path.dirname(this.registryPath), { recursive: true });
@@ -183,6 +212,12 @@ export class ProjectFiles {
       await this.retain(id).catch(error => console.warn('Version cleanup will be retried after the next save.', error));
       return destination;
     } catch (error) {
+      // A conflict can leave our bytes in place with the other version kept
+      // beside them. publishFile recorded that; make the record durable.
+      if (this.associations.get(id)?.generation === generation && this.associations.get(id)?.hash === hash) {
+        try { await this.persist(); await unlink(journal); }
+        catch (persistError) { console.warn('Project saved; its file association will be repaired on restart.', persistError); }
+      }
       if (backup) {
         const current = await fileVersion(destination).catch(() => undefined);
         if (previous && current?.hash === previous.hash) await unlink(backup).catch(() => undefined);
@@ -203,7 +238,7 @@ export class ProjectFiles {
       if (!destination) throw new Error('Choose a destination with Save As.');
       if (this.saving.has(destination)) throw new Error('A save to this project file is already in progress.');
       const previous = await fileVersion(destination);
-      if (!selectedPath && known && previous?.hash !== known.hash) throw changedFile();
+      if (!selectedPath) await this.confirmKnown(id, destination, previous);
       this.saving.add(destination);
       try {
         return await ProjectSave.create(destination, previous, media, documentBytes,
@@ -220,7 +255,7 @@ export class ProjectFiles {
       if (!destination) throw new Error('Choose a destination with Save As.');
       if (this.saving.has(destination)) throw new Error('A save to this project file is already in progress.');
       const previous = await fileVersion(destination);
-      if (!selectedPath && known && previous?.hash !== known.hash) throw changedFile();
+      if (!selectedPath) await this.confirmKnown(id, destination, previous);
       const digest = createHash('sha256');
       async function* writing() {
         for await (const chunk of data instanceof Uint8Array ? [data] : data) {
@@ -304,11 +339,11 @@ export class ProjectFiles {
         const hashed: HashResult = hashing ? await hashing : { ok: true, hash: await hashProjectFile(handle, info.size, mediaToVerify) };
         if (!hashed.ok) throw hashed.error;
         const hash = hashed.hash;
-        const after = await handle.stat();
-        if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) throw new Error('The project changed while opening. Try opening it again.');
+        const reader: OpenReader = { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, hash, busy: false };
+        if (!await unchangedSinceOpen(reader)) throw new Error('The project changed while opening. Try opening it again.');
         const projectId = randomUUID(), token = randomUUID();
         if (!options.copy) { this.associations.set(projectId, { path: filePath, hash }); await this.persist(); }
-        this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
+        this.readers.set(token, reader);
         const opened = { path: filePath, projectId, token, size: info.size };
         return rangeValidated ? { ...opened, media, documentRange: documentRange! }
           : { ...opened, document, media, ...(documentRange ? { documentRange } : {}) };
@@ -335,8 +370,7 @@ export class ProjectFiles {
     this.readers.delete(token);
     try {
       if (verify) {
-        const info = await reader.handle.stat();
-        if (info.size !== reader.size || info.mtimeMs !== reader.mtime || info.ctimeMs !== reader.ctime) throw new Error('The project changed while opening. Try opening it again.');
+        if (!await unchangedSinceOpen(reader)) throw new Error('The project changed while opening. Try opening it again.');
       }
     } finally { await reader.handle.close(); }
   }

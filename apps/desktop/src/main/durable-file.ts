@@ -1,7 +1,8 @@
 import { readWithRetry } from './read-retry';
 import { createHash, type Hash, randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
-import { copyFile, lstat, open, rename, unlink, type FileHandle } from 'node:fs/promises';
+import { copyFile, link, lstat, open, rename, unlink, type FileHandle } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 type NativeFiles = typeof import('@powermove/macos-haptics');
 let native: Promise<NativeFiles | null> | undefined;
@@ -55,18 +56,76 @@ const samePermissions = (a: Stats, b: Stats) => a.mode === b.mode && a.uid === b
 export const sameFile = (a: Stats, b: Stats) => sameIdentity(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 export const changedFile = () => new Error('The project file was moved, deleted, or changed outside Powermove. Your edits are still open. Use Save As with a different name to keep both versions.');
 export interface FileVersion { info: Stats; hash: string; digest: Hash }
-export async function fileVersion(destination: string): Promise<FileVersion | undefined> {
+/** Same inode, length and modification time: only status metadata (ctime) may
+ * differ. Cloud sync clients, Spotlight, quarantine/provenance and sandbox
+ * grants (com.apple.macl) bump ctime by writing xattrs, without touching bytes. */
+const sameContentStat = (a: Stats, b: Stats) => sameIdentity(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs;
+/** Waits between unstable reads. iCloud Drive's file provider rewrites the
+ * displaced inode's metadata ~40–200 ms after most exchanges (measured on
+ * macOS 27), sometimes twice; outside cloud folders it never does. */
+export const SETTLE_DELAYS_MS = [25, 75, 150, 300, 600];
+const transientReadError = (error: unknown) => {
+  const failure = error as NodeJS.ErrnoException;
+  return failure?.errno === -11 || failure?.code === 'EDEADLK' || failure?.code === 'EAGAIN' || failure?.code === 'Unknown system error -11';
+};
+type VersionRead = { info: Stats; last: Stats; stable: boolean; metadataOnly: boolean; hash: string; digest: Hash };
+async function readVersion(destination: string): Promise<VersionRead | undefined | 'vanished'> {
   let info: Stats;
   try { info = await lstat(destination); } catch (error: any) { if (error.code === 'ENOENT') return; throw error; }
   // Never write through or replace a symlink supplied in a destination.
   if (!info.isFile()) throw new Error('The destination cannot be safely backed up. Choose another file with Save As.');
-  const handle = await open(destination, 'r');
+  let handle: FileHandle;
+  try { handle = await open(destination, 'r'); } catch (error: any) { if (error.code === 'ENOENT') return 'vanished'; throw error; }
   try {
-    if (!sameFile(info, await handle.stat())) throw changedFile();
+    const opened = await handle.stat();
     const digest = await hashHandle(handle);
-    if (!sameFile(info, await handle.stat()) || !sameFile(info, await lstat(destination))) throw changedFile();
-    return { info, hash: digest.copy().digest('hex'), digest };
+    const after = await handle.stat();
+    let named: Stats | undefined;
+    try { named = await lstat(destination); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    const stats = [opened, after, named];
+    return {
+      info, last: named ?? after, hash: digest.copy().digest('hex'), digest,
+      stable: stats.every(stat => stat && sameFile(info, stat)),
+      metadataOnly: stats.every(stat => stat && sameContentStat(info, stat)),
+    };
   } finally { await handle.close(); }
+}
+/** Hash a file whose stat stayed unchanged across the whole read. Metadata-only
+ * churn during the read is retried; if it never settles, two consecutive reads
+ * of the same inode/length/mtime with identical bytes are accepted. A content
+ * change, move or replacement is never accepted. */
+export async function fileVersion(destination: string): Promise<FileVersion | undefined> {
+  let previous: VersionRead | undefined;
+  for (let attempt = 0; ; attempt++) {
+    let read: Awaited<ReturnType<typeof readVersion>>;
+    try { read = await readVersion(destination); }
+    catch (error) {
+      // File coordination (iCloud uploading or evicting the file) can refuse
+      // reads for longer than readWithRetry waits. Give it the settle window.
+      if (!transientReadError(error) || attempt >= SETTLE_DELAYS_MS.length) throw error;
+      await delay(SETTLE_DELAYS_MS[attempt]!);
+      continue;
+    }
+    if (read === undefined) return;
+    if (read !== 'vanished') {
+      if (read.stable) return { info: read.info, hash: read.hash, digest: read.digest };
+      if (read.metadataOnly && previous?.metadataOnly && previous.hash === read.hash && sameContentStat(previous.last, read.info)) {
+        return { info: read.last, hash: read.hash, digest: read.digest };
+      }
+    }
+    previous = read === 'vanished' ? undefined : read;
+    if (attempt >= SETTLE_DELAYS_MS.length) throw changedFile();
+    await delay(SETTLE_DELAYS_MS[attempt]!);
+  }
+}
+/** An already open handle still holds the expected bytes. Timestamps alone do
+ * not prove a change: re-hash the same inode before rejecting a metadata bump. */
+export async function verifyOpenFile(handle: FileHandle, expected: FileVersion): Promise<void> {
+  const current = await handle.stat();
+  if (sameFile(expected.info, current)) return;
+  if (!sameIdentity(expected.info, current) || current.size !== expected.info.size) throw changedFile();
+  const hash = (await hashHandle(handle)).digest('hex');
+  if (hash !== expected.hash || !sameContentStat(current, await handle.stat())) throw changedFile();
 }
 export async function checkVersion(destination: string, expected?: FileVersion, verifyContent = false): Promise<void> {
   let current: Stats | undefined;
@@ -89,11 +148,34 @@ export class RecoveryFileError extends Error {
     super(`${message} The other version was preserved at ${recoveryPath}`, { cause });
   }
 }
+/** Local time without characters Finder or other platforms reject in names. */
+const recoveryStamp = (date = new Date()) => {
+  const two = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}.${two(date.getMinutes())}.${two(date.getSeconds())}`;
+};
+/** Move without replacing: macOS exclusive rename, else hard link + unlink. */
+async function moveExclusive(source: string, target: string): Promise<void> {
+  if (await (await nativeFiles())?.installFile(source, target)) return;
+  await link(source, target);
+  await unlink(source).catch(() => undefined);
+}
+/** Name the other version next to the project, visibly, e.g.
+ * "Film (other version 2026-11-07 22.59.20).pmv", so people can find it in
+ * Finder. Hidden staging names are only a fallback. Never overwrites a file. */
 async function preserveConflict(temporary: string, destination: string, message: string): Promise<never> {
   let preserved = temporary;
   try {
-    const recovery = `${temporary}.conflict.pmv`;
-    await rename(temporary, recovery); preserved = recovery;
+    const extension = path.extname(destination) || '.pmv', base = path.basename(destination, path.extname(destination));
+    const stamp = recoveryStamp();
+    for (let index = 1; preserved === temporary && index <= 50; index++) {
+      const candidate = path.join(path.dirname(destination), `${base} (other version ${stamp}${index > 1 ? ` ${index}` : ''})${extension}`);
+      try { await moveExclusive(temporary, candidate); preserved = candidate; }
+      catch (error: any) { if (error?.code !== 'EEXIST') break; }
+    }
+    if (preserved === temporary) {
+      const recovery = `${temporary}.conflict.pmv`;
+      await rename(temporary, recovery); preserved = recovery;
+    }
     await syncDirectory(path.dirname(destination));
   } catch (error) {
     throw new RecoveryFileError(`${message} Recovery finalization failed.`, preserved, error);
@@ -116,7 +198,12 @@ export async function publishFile(temporary: string, destination: string, expect
       let displaced: FileVersion | undefined;
       try { displaced = await fileVersion(temporary); }
       catch {
-        await preserveConflict(temporary, destination, 'Could not verify the displaced project.');
+        // Our bytes are already in place and the unverifiable version is kept
+        // beside them. Record what is actually at the destination, otherwise
+        // every later save reports a false outside change.
+        const current = await fileVersion(destination).catch(() => undefined);
+        if (current?.hash === newHash && sameIdentity(current.info, incomingInfo)) onPublished();
+        await preserveConflict(temporary, destination, 'Could not verify the previous version of the project.');
       }
       if (!displaced || displaced.hash !== expected.hash || !sameIdentity(displaced.info, expected.info) || !samePermissions(displaced.info, expected.info)) {
         // Only roll back our own published bytes. If another writer has already
@@ -142,7 +229,6 @@ export async function publishFile(temporary: string, destination: string, expect
       // appearing after the check cannot be overwritten by first Save/Save As.
       if (await (await nativeFiles())?.installFile(temporary, destination)) committed();
       else {
-        const { link } = await import('node:fs/promises');
         await link(temporary, destination);
         committed();
         await unlink(temporary);

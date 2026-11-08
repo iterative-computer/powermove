@@ -1,7 +1,7 @@
 import { createHash, type Hash } from 'node:crypto';
 import { chmod, open, unlink, type FileHandle } from 'node:fs/promises';
 import { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter, readIncrementalIndex, type IncrementalMedia, type ProjectIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
-import { checkVersion, changedFile, copySnapshot, hashHandle, readExactly, RecoveryFileError, sameFile, syncFile, temporarySibling, type FileVersion } from './durable-file';
+import { checkVersion, changedFile, copySnapshot, hashHandle, readExactly, RecoveryFileError, syncFile, temporarySibling, verifyOpenFile, type FileVersion } from './durable-file';
 import { FILE_CHUNK_BYTES } from './file-upload';
 
 type Incoming = { id: string | null; length: number; received: number; offset: number; digest: Hash; source?: SaveMedia };
@@ -46,7 +46,7 @@ export class ProjectSave {
       let index: ProjectIndex | undefined;
       if (previous && reusePrevious) {
         source = await open(destination, 'r');
-        if (!sameFile(previous.info, await source.stat())) throw changedFile();
+        await verifyOpenFile(source, previous);
         if (isIncrementalProject(await readExactly(source, 0, Math.min(5, previous.info.size)))) {
           index = await readIncrementalIndex(previous.info.size, (offset, length) => readExactly(source!, offset, length), nativeHash);
         }
@@ -88,7 +88,7 @@ export class ProjectSave {
         }
         // Compaction read directly from this source; a verified clone does not
         // need this timestamp check because its complete prefix was hashed.
-        if (source && previous && !sameFile(previous.info, await source.stat())) throw changedFile();
+        if (source && previous) await verifyOpenFile(source, previous);
       }
       await checkVersion(destination, previous);
       const required = new Set(save.required);

@@ -1,5 +1,6 @@
 import { constants, fstatSync } from 'node:fs';
-import { chmod, copyFile, link, mkdtemp, readFile, readdir, rename, rm, unlink, utimes, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, copyFile, link, mkdtemp, readFile, readdir, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +10,16 @@ import { temporarySibling } from './durable-file';
 
 const native = vi.hoisted(() => ({ cloneFile: vi.fn(), swapFiles: vi.fn(), installFile: vi.fn(), fullSync: vi.fn() }));
 vi.mock('@powermove/macos-haptics', () => ({ default: native }));
+// Lets a test run a side effect in the middle of a file being hashed.
+const reads = vi.hoisted(() => ({ before: undefined as undefined | (() => Promise<void>) }));
+vi.mock('./read-retry', async importOriginal => {
+  const actual = await importOriginal<typeof import('./read-retry')>();
+  return { ...actual, readWithRetry: async <T>(read: () => Promise<T>) => {
+    const hook = reads.before; reads.before = undefined;
+    await hook?.();
+    return actual.readWithRetry(read);
+  } };
+});
 
 // Exercise the native protocol on every CI host with real temporary files.
 // This models exchange checkpoints; it does NOT validate APFS syscall behavior.
@@ -30,7 +41,7 @@ beforeEach(async () => {
   destination = path.join(directory, 'Project.pmv'); registry = path.join(directory, 'registry.json');
   files = new ProjectFiles(registry, path.join(directory, 'backups'));
 });
-afterEach(async () => { vi.unstubAllGlobals(); vi.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); });
+afterEach(async () => { reads.before = undefined; vi.unstubAllGlobals(); vi.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); });
 async function save(name: string, target?: string) {
   const json = document(name), upload = await files.beginIncremental('one', [], json.length, target);
   await upload.write(null, json); return upload.finish();
@@ -91,7 +102,7 @@ describe('native save publication protocol', () => {
     });
     await expect(save('second')).rejects.toThrow('preserved at');
     expect(await readFile(destination, 'utf8')).toBe('external work after exchange');
-    const conflict = (await readdir(directory)).find(name => name.endsWith('.conflict.pmv'))!;
+    const conflict = (await readdir(directory)).find(name => /^Project \(other version \d{4}-\d\d-\d\d \d\d\.\d\d\.\d\d\)\.pmv$/.test(name))!;
     expect(await readFile(path.join(directory, conflict), 'utf8')).toBe('external work before exchange');
   });
   it('preserves a writer racing the rollback itself instead of deleting its bytes in dispose', async () => {
@@ -105,8 +116,70 @@ describe('native save publication protocol', () => {
     });
     await expect(save('second')).rejects.toThrow('preserved at');
     expect(await readFile(destination, 'utf8')).toBe('external work before exchange');
-    const conflict = (await readdir(directory)).find(name => name.endsWith('.conflict.pmv'))!;
+    const conflict = (await readdir(directory)).find(name => /^Project \(other version \d{4}-\d\d-\d\d \d\d\.\d\d\.\d\d\)\.pmv$/.test(name))!;
     expect(await readFile(path.join(directory, conflict), 'utf8')).toBe('external work just before rollback');
+  });
+  it('saves repeatedly when a cloud provider touches the displaced file\'s metadata after every exchange', async () => {
+    await save('first', destination);
+    // iCloud Drive's file provider rewrites xattrs on the displaced inode
+    // ~45-160 ms after each exchange: ctime moves, bytes do not.
+    native.swapFiles.mockImplementation(async (source, target) => {
+      await exchange(source, target);
+      // Lands while the displaced file is being hashed for verification.
+      const mode = (await stat(source)).mode & 0o777;
+      reads.before = async () => { await new Promise(resolve => setTimeout(resolve, 5)); await chmod(source, mode); };
+      return true;
+    });
+    for (let i = 0; i < 5; i++) await save(`cloud revision ${i}`);
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('cloud revision 4');
+    expect((await readdir(directory)).filter(name => name !== 'Project.pmv' && name !== 'registry.json' && name !== 'backups')).toEqual([]);
+  });
+  it('accepts its own interrupted save instead of blocking every later save', async () => {
+    await save('first', destination);
+    let displaced = '';
+    native.swapFiles.mockImplementationOnce(async (source, target) => {
+      await exchange(source, target);
+      displaced = source;
+      // The previous version cannot be verified (e.g. a sync client holds it).
+      await chmod(source, 0o000);
+      return true;
+    });
+    const failure = await save('second').catch(error => error);
+    await chmod(path.join(directory, (await readdir(directory)).find(name => name.includes('(other version'))!), 0o600);
+    expect(failure.message).toContain('Could not verify the previous version');
+    expect(failure.recoveryPath).not.toBe(displaced);
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('second');
+    // Later saves work in this session and after restart.
+    await save('third');
+    files = new ProjectFiles(registry, path.join(directory, 'backups'));
+    await save('after restart');
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('after restart');
+    await writeFile(destination, 'external');
+    await expect(save('must not overwrite')).rejects.toThrow('changed');
+  });
+  it('resumes saving when a pending save note proves the bytes on disk are its own', async () => {
+    await save('first', destination);
+    const registryValue = JSON.parse(await readFile(registry, 'utf8'));
+    // Model the field failure: our publish landed, but the registry kept the
+    // previous hash and only the pending journal records the new one.
+    await save('second');
+    const landed = createHash('sha256').update(await readFile(destination)).digest('hex');
+    await writeFile(registry, JSON.stringify(registryValue));
+    files = new ProjectFiles(registry, path.join(directory, 'backups'));
+    await files.destination('one');
+    await expect(save('blocked')).rejects.toThrow('changed');
+    // The note appears while the app is running (not only at startup).
+    await writeFile(registry + '.pending-test.json', JSON.stringify({ ...registryValue.one, id: 'one', hash: landed, generation: 99 }));
+    await save('third');
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('third');
+  });
+  it('still refuses a different file even with an unrelated pending save note', async () => {
+    await save('first', destination);
+    await writeFile(destination, 'external');
+    const registryValue = JSON.parse(await readFile(registry, 'utf8'));
+    await writeFile(registry + '.pending-test.json', JSON.stringify({ ...registryValue.one, id: 'one', hash: 'f'.repeat(64), generation: 99 }));
+    await expect(save('second')).rejects.toThrow('changed');
+    expect(await readFile(destination, 'utf8')).toBe('external');
   });
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0).each(['incremental', 'legacy'])('retains displaced work even if its recovery rename fails (%s)', async format => {
     await save('first', destination);

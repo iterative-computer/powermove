@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, open } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -139,6 +139,22 @@ describe('real project files', () => {
     expect((await readdir(directory)).some(name => name.endsWith('.tmp'))).toBe(false);
     await files.save('one', bytes('retry'));
     expect(await readFile(destination)).toEqual(bytes('retry'));
+  });
+  it('finishes opening when only metadata changed, as cloud sync and macOS file grants do', async () => {
+    const destination = path.join(directory, 'cloud.pmv');
+    await writeFile(destination, bytes('before'));
+    const opened = await files.open(destination);
+    await chmod(destination, 0o644); // moves ctime only
+    await expect(files.close(opened.token)).resolves.toBeUndefined();
+  });
+  it('still rejects same-size edits whose modification time was put back', async () => {
+    const destination = path.join(directory, 'forged.pmv');
+    await writeFile(destination, bytes('before'));
+    const info = await stat(destination);
+    const opened = await files.open(destination);
+    await writeFile(destination, bytes('BEFORE'));
+    await utimes(destination, info.atime, info.mtime);
+    await expect(files.close(opened.token)).rejects.toThrow('changed while opening');
   });
   it('rejects changed files at the end of import and releases the read handle', async () => {
     const destination = path.join(directory, 'changed.pmv');
