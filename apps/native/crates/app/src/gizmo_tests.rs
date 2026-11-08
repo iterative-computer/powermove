@@ -1364,6 +1364,61 @@ fn the_first_pen_click_makes_a_path_layer_in_one_undo_step(cx: &mut TestAppConte
     s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
     assert_eq!(count(&s), before, "two clicks, two steps, nothing left");
 }
+/// A new path layer's path closes on a click on its first vertex, as a
+/// mask path does.
+#[gpui::test]
+fn a_click_on_the_first_vertex_closes_a_new_path_layer(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.recorder.tool.set(Some(Tool::Pen));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let click = |s: &mut Stage, cx: &mut TestAppContext, at: [f64; 2]| {
+        let p = s.point_of(at);
+        s.vcx.simulate_click(p, Modifiers::none());
+        let surface = s.surface.clone();
+        settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+        s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    };
+    for (n, at) in [[300., 100.], [400., 100.], [400., 250.], [300., 250.]]
+        .into_iter()
+        .enumerate()
+    {
+        click(&mut s, cx, at);
+        let surface = s.surface.clone();
+        settle(cx, move |cx| {
+            surface.read_with(cx, |g, _| g.pen_paths() == [n + 1])
+        });
+    }
+    click(&mut s, cx, [300., 100.]);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        let p = kernel.published(PROJECT).unwrap();
+        let id = p.selection.layers().first().cloned();
+        id.and_then(|id| layer_value(&kernel, &id))
+            .is_some_and(|l| closed_somewhere(&l))
+    });
+}
+/// Whether any `closed` channel under `v` is on (a mask's or a shape path's).
+fn closed_somewhere(v: &pm_model::Value) -> bool {
+    if let Some(map) = v.as_object() {
+        let on = map
+            .get("closed")
+            .and_then(|c| c.get("v").or(Some(c)))
+            .is_some_and(|c| *c == pm_model::Value::Bool(true));
+        return on || map.values().any(closed_somewhere);
+    }
+    v.as_array().is_some_and(|a| a.iter().any(closed_somewhere))
+}
 /// Escape during a marquee leaves the selection as it was.
 #[gpui::test]
 fn escape_during_a_marquee_keeps_the_selection(cx: &mut TestAppContext) {
