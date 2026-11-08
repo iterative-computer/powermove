@@ -37,39 +37,63 @@ pub struct ExportRequest {
     pub disk_reserve: u64,
 }
 /// An export frame's raster override answer from the window that has the
-/// document open: `None` passes the layer through; `Some` is straight RGBA8
+/// document open: `None` passes the layer through; `Some` is premultiplied RGBA8
 /// with the quad's size and anchor (layer pixels).
 pub type CompatReply = Option<(u32, u32, Vec<u8>, [f64; 2], [f64; 2])>;
-/// Answers export frames' raster override needs (`compat`, layer, seconds,
-/// scale), on the job's reader thread.
+/// One layer an export frame needs an override answer for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompatJobNeed {
+    pub composition: String,
+    pub layer: String,
+    pub seconds: f64,
+    pub scale: f64,
+}
+/// Answers a batch of export needs, in order, on the job's reader thread.
 pub type CompatAnswerer =
-    Arc<dyn Fn(&str, &str, f64, f64) -> std::result::Result<CompatReply, String> + Send + Sync>;
+    Arc<dyn Fn(&[CompatJobNeed]) -> std::result::Result<Vec<CompatReply>, String> + Send + Sync>;
 struct CompatProducer {
     producing: Arc<dyn Fn() -> bool + Send + Sync>,
     answer: CompatAnswerer,
 }
-static COMPAT: Mutex<Option<CompatProducer>> = Mutex::new(None);
-/// The window whose extensions wrap `raster` (none: exports draw natively).
+/// Each open document's producer, by kernel `doc_id` (the job's session).
+static COMPAT: Mutex<Option<std::collections::HashMap<u64, CompatProducer>>> = Mutex::new(None);
+/// Whose extensions wrap `raster` for document `doc_id` (none: its exports
+/// draw natively).
 pub fn set_compat_answerer(
+    doc_id: u64,
     producer: Option<(Arc<dyn Fn() -> bool + Send + Sync>, CompatAnswerer)>,
 ) {
-    *COMPAT.lock().unwrap() =
-        producer.map(|(producing, answer)| CompatProducer { producing, answer });
+    let mut all = COMPAT.lock().unwrap();
+    let all = all.get_or_insert_with(Default::default);
+    match producer {
+        Some((producing, answer)) => {
+            all.insert(doc_id, CompatProducer { producing, answer });
+        }
+        None => {
+            all.remove(&doc_id);
+        }
+    }
 }
 /// A compat need's reply on the child's stdin. Pixels go through a private
 /// file the child reads and removes, never through the pipe.
-fn compat_reply(id: u64, answered: std::result::Result<CompatReply, String>) -> String {
-    let body = match answered {
-        Ok(None) => serde_json::json!({"id": id, "native": true}),
-        Ok(Some((width, height, rgba, size, anchor))) => {
-            let path = std::env::temp_dir()
-                .join(format!("powermove-compat-{}-{id}.rgba", std::process::id()));
+fn compat_reply(id: u64, answered: std::result::Result<Vec<CompatReply>, String>) -> String {
+    let answer = |(i, reply): (usize, CompatReply)| match reply {
+        None => serde_json::json!({"native": true}),
+        Some((width, height, rgba, size, anchor)) => {
+            let path = std::env::temp_dir().join(format!(
+                "powermove-compat-{}-{id}-{i}.rgba",
+                std::process::id()
+            ));
             match std::fs::write(&path, &rgba) {
-                Ok(()) => serde_json::json!({"id": id, "width": width, "height": height,
+                Ok(()) => serde_json::json!({"width": width, "height": height,
                     "size": size, "anchor": anchor, "file": path}),
-                Err(e) => serde_json::json!({"id": id, "error": e.to_string()}),
+                Err(e) => serde_json::json!({"error": e.to_string()}),
             }
         }
+    };
+    let body = match answered {
+        Ok(replies) => serde_json::json!({"id": id,
+            "answers": replies.into_iter().enumerate().map(answer).collect::<Vec<_>>()}),
         Err(error) => serde_json::json!({"id": id, "error": error}),
     };
     format!("{}\n", serde_json::json!({ "compatAnswer": body }))
@@ -195,11 +219,14 @@ impl ExportHandle {
         interactive: Arc<AtomicBool>,
     ) -> Result<Self> {
         // An export draws what the viewer draws: a raster override's layers too.
-        let answerer = COMPAT
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|c| (c.producing)().then(|| c.answer.clone()));
+        let session = match &request.spec {
+            JobSpec::Export { session, .. } => Some(session.get()),
+            _ => None,
+        };
+        let answerer = COMPAT.lock().unwrap().as_ref().and_then(|all| {
+            let c = all.get(&session?)?;
+            (c.producing)().then(|| c.answer.clone())
+        });
         if answerer.is_some()
             && let JobSpec::Export { settings, .. } = &mut request.spec
             && !settings
@@ -252,16 +279,13 @@ impl ExportHandle {
                 if let Ok(text) = line.as_deref()
                     && text.starts_with("{\"compat\"")
                 {
-                    let need: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
-                    let need = &need["compat"];
-                    let id = need["id"].as_u64().unwrap_or(0);
+                    let asked: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+                    let id = asked["compat"]["id"].as_u64().unwrap_or(0);
+                    let needs: Vec<CompatJobNeed> =
+                        serde_json::from_value(asked["compat"]["needs"].clone())
+                            .unwrap_or_default();
                     let answered = match &answerer {
-                        Some(answer) => answer(
-                            need["composition"].as_str().unwrap_or_default(),
-                            need["layer"].as_str().unwrap_or_default(),
-                            need["seconds"].as_f64().unwrap_or(0.),
-                            need["scale"].as_f64().unwrap_or(1.),
-                        ),
+                        Some(answer) => answer(&needs),
                         None => Err("No window has this project's extensions open".into()),
                     };
                     let mut input = compat_input.lock().unwrap();
@@ -559,15 +583,21 @@ pub fn run_child() -> Result<()> {
 }
 
 /// An export's raster override layers, asked of the parent (which asks the
-/// window's extensions) one layer at a time; the frame waits for each, as an
-/// export has no per-frame deadline. A need with no answer fails the frame.
+/// window's extensions) as the frame reaches each one; the frame waits (an
+/// export has no per-frame deadline). A need with no answer fails the frame.
+/// Asking a frame's layers in one batch measured slower: the realm's work
+/// then runs ahead of, not between, the frame's GPU work.
 #[derive(Default)]
 struct JobRasters {
     next: std::sync::atomic::AtomicU64,
     waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>,
-    answered: Mutex<
-        std::collections::HashMap<(String, String, u64, u64), pm_render::compat::CompatAnswer>,
-    >,
+    answered: Mutex<JobAnswers>,
+}
+type JobKey = (String, String, u64, u64);
+#[derive(Default)]
+struct JobAnswers {
+    map: std::collections::HashMap<JobKey, pm_render::compat::CompatAnswer>,
+    time: u64,
 }
 impl JobRasters {
     fn reply(&self, text: &str) {
@@ -577,6 +607,28 @@ impl JobRasters {
             && let Some(tx) = self.waiting.lock().unwrap().remove(&id)
         {
             let _ = tx.send(body);
+        }
+    }
+    fn raster(item: &serde_json::Value) -> pm_render::compat::CompatAnswer {
+        use pm_render::compat::CompatAnswer;
+        if item["native"] == true {
+            return CompatAnswer::Native;
+        }
+        let Some(file) = item["file"].as_str() else {
+            return CompatAnswer::Missing;
+        };
+        let data = std::fs::read(file);
+        let _ = std::fs::remove_file(file);
+        let number = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.);
+        match data {
+            Ok(data) => crate::compat::override_raster(
+                item["width"].as_u64().unwrap_or(0) as u32,
+                item["height"].as_u64().unwrap_or(0) as u32,
+                data,
+                [number(&item["size"], 0), number(&item["size"], 1)],
+                [number(&item["anchor"], 0), number(&item["anchor"], 1)],
+            ),
+            Err(_) => CompatAnswer::Missing,
         }
     }
 }
@@ -603,47 +655,54 @@ impl pm_render::compat::CompatRasters for JobRasters {
             time.to_bits(),
             scale.to_bits(),
         );
-        if let Some(answer) = self.answered.lock().unwrap().get(&key) {
-            return answer.clone();
-        }
+        let needs = {
+            let mut answered = self.answered.lock().unwrap();
+            if let Some(answer) = answered.map.get(&key) {
+                return answer.clone();
+            }
+            // A new frame: only its answers are kept (an export never comes back).
+            if answered.time != key.2 {
+                answered.map.clear();
+                answered.time = key.2;
+            }
+            let needs = vec![CompatJobNeed {
+                composition: composition.to_owned(),
+                layer: layer.to_owned(),
+                seconds: time,
+                scale,
+            }];
+            needs
+        };
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::channel();
         self.waiting.lock().unwrap().insert(id, tx);
-        let need = serde_json::json!({"compat": {"id": id, "composition": composition,
-            "layer": layer, "seconds": time, "scale": scale}});
+        let line = serde_json::json!({"compat": {"id": id, "needs": needs}});
         {
             let mut out = std::io::stdout().lock();
-            if writeln!(out, "{need}").and_then(|_| out.flush()).is_err() {
+            if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
                 return CompatAnswer::Missing;
             }
         }
         let Ok(body) = rx.recv_timeout(std::time::Duration::from_secs(120)) else {
             return CompatAnswer::Missing;
         };
-        let answer = if body["native"] == true {
-            CompatAnswer::Native
-        } else if let Some(file) = body["file"].as_str() {
-            let data = std::fs::read(file);
-            let _ = std::fs::remove_file(file);
-            let number = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.);
-            match data {
-                Ok(data) => crate::compat::override_raster(
-                    body["width"].as_u64().unwrap_or(0) as u32,
-                    body["height"].as_u64().unwrap_or(0) as u32,
-                    data,
-                    [number(&body["size"], 0), number(&body["size"], 1)],
-                    [number(&body["anchor"], 0), number(&body["anchor"], 1)],
-                ),
-                Err(_) => CompatAnswer::Missing,
-            }
-        } else {
-            CompatAnswer::Missing
-        };
-        // Only the frame being drawn is kept: an export never comes back.
+        let items = body["answers"].as_array().cloned().unwrap_or_default();
         let mut answered = self.answered.lock().unwrap();
-        answered.retain(|(_, _, t, _), _| *t == key.2);
-        answered.insert(key, answer.clone());
-        answer
+        let mut mine = CompatAnswer::Missing;
+        for (need, item) in needs.iter().zip(&items) {
+            let answer = Self::raster(item);
+            let k = (
+                need.composition.clone(),
+                need.layer.clone(),
+                key.2,
+                need.scale.to_bits(),
+            );
+            if k == key {
+                mine = answer.clone();
+            }
+            answered.map.insert(k, answer);
+        }
+        mine
     }
 }
 /// Inherited-pipe admission. Exactly one renderer band per grant; never a

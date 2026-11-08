@@ -678,7 +678,7 @@ impl Viewer {
 pub struct EngineService {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
-    compat: Arc<compat::CompatStore>,
+    compat: Arc<compat::CompatStores>,
     layer_rasters: Option<Arc<compat::LayerRasters>>,
 }
 impl EngineService {
@@ -710,9 +710,13 @@ impl EngineService {
     pub fn layer_rasters(&self) -> Option<Arc<compat::LayerRasters>> {
         self.layer_rasters.clone()
     }
-    /// The viewers' raster override answers (`compat::CompatStore`).
-    pub fn compat(&self) -> Arc<compat::CompatStore> {
-        self.compat.clone()
+    /// A document's raster override answers (`compat::CompatStore`).
+    pub fn compat(&self, doc_id: u64) -> Arc<compat::CompatStore> {
+        self.compat.document(doc_id)
+    }
+    /// A document closed: its answers go.
+    pub fn forget_compat(&self, doc_id: u64) {
+        self.compat.forget(doc_id);
     }
     fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
@@ -730,7 +734,7 @@ impl EngineService {
             invalid_call: Default::default(),
         });
         // Answers that land redraw every viewer, as a font change does.
-        let compat = Arc::new(compat::CompatStore::default());
+        let compat = Arc::new(compat::CompatStores::default());
         let redraw = Arc::downgrade(&shared);
         compat.set_redraw(Arc::new(move || {
             if let Some(shared) = redraw.upgrade() {
@@ -1483,6 +1487,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             }));
             engine.mastering = mastering;
             engine.set_resources(resources);
+            engine.use_compat_document(stamp.doc_id);
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes

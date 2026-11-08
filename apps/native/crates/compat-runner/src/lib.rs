@@ -159,11 +159,12 @@ pub struct BaseRasterReply {
 pub enum RasterAnswer {
     /// Passed through: the engine draws the layer itself.
     Native,
-    /// The override's canvas: straight RGBA8 rows, the quad's size and anchor.
+    /// The override's canvas: premultiplied RGBA8 rows (a canvas's backing
+    /// store), the quad's size and anchor.
     Raster {
         width: u32,
         height: u32,
-        straight_rgba: Vec<u8>,
+        premultiplied_rgba: Vec<u8>,
         size: [f64; 2],
         anchor: [f64; 2],
     },
@@ -618,15 +619,15 @@ mod tests {
                         crate::RasterAnswer::Raster {
                             width,
                             height,
-                            straight_rgba,
+                            premultiplied_rgba,
                             size,
                             anchor,
                         } => json!([
                             batch,
                             width,
                             height,
-                            &straight_rgba[..4],
-                            &straight_rgba[12..16],
+                            &premultiplied_rgba[..4],
+                            &premultiplied_rgba[12..16],
                             size,
                             anchor
                         ]),

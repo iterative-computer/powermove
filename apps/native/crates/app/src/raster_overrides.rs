@@ -35,14 +35,18 @@ pub(crate) struct Overrides {
     rasters: Option<Arc<pm_engine_service::compat::LayerRasters>>,
     kernel: KernelHandle,
     project: String,
+    /// The document this window's extensions answer for.
+    doc_id: u64,
     batches: Arc<Mutex<Batches>>,
     realm: Arc<Mutex<Option<Realm>>>,
 }
 
 impl Overrides {
     pub(crate) fn new(engine: &EngineService, kernel: KernelHandle, project: String) -> Self {
+        let doc_id = kernel.published(&project).map_or(0, |p| p.snapshot.doc_id);
         Self {
-            store: engine.compat(),
+            store: engine.compat(doc_id),
+            doc_id,
             rasters: engine.layer_rasters(),
             kernel,
             project,
@@ -99,10 +103,10 @@ impl Overrides {
                         RasterAnswer::Raster {
                             width,
                             height,
-                            straight_rgba,
+                            premultiplied_rgba,
                             size,
                             anchor,
-                        } => override_raster(width, height, straight_rgba, size, anchor),
+                        } => override_raster(width, height, premultiplied_rgba, size, anchor),
                     };
                     (need, answer)
                 })
@@ -115,17 +119,22 @@ impl Overrides {
             self.project.clone(),
         );
         let export = self.export_answerer();
+        let doc_id = self.doc_id;
         let producing = Arc::new(move |on: bool| {
             let revision = kernel.published(&project).map_or(0, |p| p.revision());
             store.set_state(on, revision);
             // Exports started while an override is registered ask this realm.
             let store = store.clone();
-            pm_engine_service::jobs::set_compat_answerer(on.then(|| {
-                (
-                    Arc::new(move || store.producing_now()) as Arc<dyn Fn() -> bool + Send + Sync>,
-                    export.clone(),
-                )
-            }));
+            pm_engine_service::jobs::set_compat_answerer(
+                doc_id,
+                on.then(|| {
+                    (
+                        Arc::new(move || store.producing_now())
+                            as Arc<dyn Fn() -> bool + Send + Sync>,
+                        export.clone(),
+                    )
+                }),
+            );
         });
         RasterHooks {
             base,
@@ -137,7 +146,7 @@ impl Overrides {
     /// job's reader thread (never the main thread).
     fn export_answerer(&self) -> pm_engine_service::jobs::CompatAnswerer {
         let (batches, realm) = (self.batches.clone(), self.realm.clone());
-        Arc::new(move |composition, layer, seconds, scale| {
+        Arc::new(move |needs: &[pm_engine_service::jobs::CompatJobNeed]| {
             let realm = realm
                 .lock()
                 .unwrap()
@@ -149,24 +158,30 @@ impl Overrides {
             let batch = open.next;
             open.open.insert(batch, Asker::Export(tx));
             drop(open);
-            realm(
-                batch,
-                json!([{"composition": composition, "layer": layer,
-                    "seconds": seconds, "scale": scale}]),
-            );
+            let wire: Vec<Value> = needs
+                .iter()
+                .map(|n| {
+                    json!({"composition": n.composition, "layer": n.layer,
+                    "seconds": n.seconds, "scale": n.scale})
+                })
+                .collect();
+            realm(batch, Value::Array(wire));
             let answers = rx
                 .recv_timeout(std::time::Duration::from_secs(60))
                 .map_err(|_| "The extension did not draw the layer in time".to_owned())?;
-            Ok(match answers.into_iter().next() {
-                Some(RasterAnswer::Raster {
-                    width,
-                    height,
-                    straight_rgba,
-                    size,
-                    anchor,
-                }) => Some((width, height, straight_rgba, size, anchor)),
-                _ => None,
-            })
+            Ok(answers
+                .into_iter()
+                .map(|answer| match answer {
+                    RasterAnswer::Raster {
+                        width,
+                        height,
+                        premultiplied_rgba,
+                        size,
+                        anchor,
+                    } => Some((width, height, premultiplied_rgba, size, anchor)),
+                    RasterAnswer::Native => None,
+                })
+                .collect())
         })
     }
     /// The store's needs go to this window's realm, a batch at a time.
@@ -199,7 +214,7 @@ impl Overrides {
 /// A new publication: frames are drawn at its revision, and asked ahead a
 /// frame of its open composition at a time.
 pub(crate) fn published(engine: &EngineService, p: &pm_kernel::Published) {
-    let store = engine.compat();
+    let store = engine.compat(p.snapshot.doc_id);
     store.set_state(store.producing_now(), p.revision());
     let fps = p
         .snapshot

@@ -155,7 +155,9 @@ pub struct Engine {
     resources: Arc<crate::resources::ResourceSnapshot>,
     /// Why a contributed definition cannot draw, for the viewer's status.
     pub definition_failure: Option<String>,
-    compat: Option<Arc<crate::compat::CompatStore>>,
+    compat: Option<Arc<crate::compat::CompatStores>>,
+    /// The store of the document whose frame is rendering.
+    compat_document: Option<Arc<crate::compat::CompatStore>>,
     /// The peaks of the content on screen, and the output tone of its frames.
     hdr: Option<((u64, u64, String), Option<crate::color::HdrView>)>,
     output_tone: Option<pm_render::OutputTone>,
@@ -310,6 +312,7 @@ impl Engine {
             resources: Arc::default(),
             definition_failure: None,
             compat: None,
+            compat_document: None,
             hdr: None,
             output_tone: None,
             scope_frames: None,
@@ -317,16 +320,25 @@ impl Engine {
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
-    pub fn set_compat(&mut self, store: Option<Arc<crate::compat::CompatStore>>) {
-        self.renderer.set_compat_rasters(
-            store
-                .clone()
-                .map(|s| s as Arc<dyn pm_render::compat::CompatRasters>),
-        );
-        self.compat = store;
+    pub fn set_compat(&mut self, stores: Option<Arc<crate::compat::CompatStores>>) {
+        self.compat = stores;
+        self.compat_document = None;
+        self.renderer.set_compat_rasters(None);
+    }
+    /// The next frames are `doc_id`'s: they ask that document's store.
+    pub(crate) fn use_compat_document(&mut self, doc_id: u64) {
+        let store = self.compat.as_ref().map(|stores| stores.document(doc_id));
+        if store.as_ref().map(Arc::as_ptr) != self.compat_document.as_ref().map(Arc::as_ptr) {
+            self.renderer.set_compat_rasters(
+                store
+                    .clone()
+                    .map(|s| s as Arc<dyn pm_render::compat::CompatRasters>),
+            );
+            self.compat_document = store;
+        }
     }
     pub(crate) fn compat(&self) -> Option<&Arc<crate::compat::CompatStore>> {
-        self.compat.as_ref()
+        self.compat_document.as_ref()
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
         self.fonts = Some(fonts);

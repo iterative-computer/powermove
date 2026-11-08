@@ -286,6 +286,37 @@ impl CompatStore {
     }
 }
 
+/// One [`CompatStore`] per open document (kernel `doc_id`): each window's
+/// extensions answer for their own project's frames.
+#[derive(Default)]
+pub struct CompatStores {
+    stores: Mutex<HashMap<u64, Arc<CompatStore>>>,
+    redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+impl CompatStores {
+    pub(crate) fn set_redraw(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
+        *self.redraw.lock().unwrap() = Some(redraw);
+    }
+    /// The document's store, made on first use.
+    pub fn document(&self, doc_id: u64) -> Arc<CompatStore> {
+        self.stores
+            .lock()
+            .unwrap()
+            .entry(doc_id)
+            .or_insert_with(|| {
+                let store = Arc::new(CompatStore::default());
+                if let Some(redraw) = self.redraw.lock().unwrap().clone() {
+                    store.set_redraw(redraw);
+                }
+                store
+            })
+            .clone()
+    }
+    /// A closed document's answers go.
+    pub fn forget(&self, doc_id: u64) {
+        self.stores.lock().unwrap().remove(&doc_id);
+    }
+}
 impl CompatRasters for CompatStore {
     fn producing(&self, source: CompatSource) -> bool {
         source == CompatSource::RasterOverride && self.answers.lock().unwrap().producing
@@ -313,22 +344,22 @@ impl CompatRasters for CompatStore {
     }
 }
 
-/// A realm canvas as an override's raster: straight RGBA8 rows, the quad's
-/// size and anchor in layer pixels.
+/// A realm canvas as an override's raster: premultiplied RGBA8 rows (the
+/// engine's fast upload path), the quad's size and anchor in layer pixels.
 pub fn override_raster(
     width: u32,
     height: u32,
-    straight_rgba: Vec<u8>,
+    premultiplied_rgba: Vec<u8>,
     size: [f64; 2],
     anchor: [f64; 2],
 ) -> CompatAnswer {
     CompatAnswer::Raster(Arc::new(CompatRaster {
         width,
         height,
-        format: pm_protocol::snapshot::CompatFormat::Rgba8Straight,
+        format: pm_protocol::snapshot::CompatFormat::Rgba8Premultiplied,
         anchor,
         size,
         uv: [0.0, 0.0, 1.0, 1.0],
-        data: Arc::new(straight_rgba),
+        data: Arc::new(premultiplied_rgba),
     }))
 }

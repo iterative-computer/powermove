@@ -71,6 +71,17 @@ pub struct NativeHost {
     frames: Mutex<Option<crate::FrameRenderer>>,
     rasters: Mutex<Option<crate::RasterHooks>>,
 }
+/// Straight RGBA8 to premultiplied, as a canvas's backing store holds it.
+fn premultiply(straight: &[u8]) -> Vec<u8> {
+    let mut out = straight.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
+            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+    out
+}
 pub(crate) fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
 }
@@ -247,7 +258,7 @@ impl NativeHost {
                     crate::RasterAnswer::Raster {
                         width,
                         height,
-                        straight_rgba: pixels.bytes().to_vec(),
+                        premultiplied_rgba: premultiply(pixels.bytes()),
                         size: [
                             number("w", f64::from(width)),
                             number("h", f64::from(height)),
