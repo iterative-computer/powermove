@@ -11,7 +11,7 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     anchor: 0,
     subscription: "export",
   });
+  // The export panel already has `show()`, which reveals its sheet.
   const mounted: Mounted = p;
-  mounted.show = () => p.show();
   return mounted;
 }
