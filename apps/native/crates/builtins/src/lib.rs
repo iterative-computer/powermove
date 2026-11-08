@@ -300,7 +300,13 @@ impl Builtins {
     }
     /// A third-party v4 extension: its own isolate, the same host and native
     /// surface path as a built-in, and a module graph from the native compiler.
-    pub fn mount_extension(&self, id: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
+    /// `hot` is what the previous version left in `api.hot.data` (`hot()`).
+    pub fn mount_extension(
+        &self,
+        id: &str,
+        graph: &Value,
+        hot: Option<&str>,
+    ) -> Result<Ticket<Evaluation>> {
         let mut extensions = self.extension_realms.lock().unwrap();
         if LIVE_PANELS.contains(&id) || extensions.contains_key(id) || self.broker.application {
             return Err(Error::Invalid("extension panel id is taken"));
@@ -308,12 +314,17 @@ impl Builtins {
         self.broker.extensions.lock().unwrap().insert(id.into());
         let realm = self.pool.realm(RealmKind::V4Extension(id.into()))?;
         let ticket = realm.eval(format!(
-            "{BUNDLE}\n__pmBuiltin.mountExtension({},{})",
+            "{BUNDLE}\n__pmBuiltin.mountExtension({},{},undefined,{})",
             json!(id),
-            json!(graph.to_string())
+            json!(graph.to_string()),
+            hot.map_or(Value::Null, |h| json!(h)),
         ))?;
         extensions.insert(id.into(), realm);
         Ok(ticket)
+    }
+    /// Before a rebuilt extension reloads: its `api.hot.data` as JSON text.
+    pub fn hot(&self, id: &str) -> Result<Ticket<Evaluation>> {
+        self.realm_of(id)?.eval("__pmBuiltin.hot()")
     }
     /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
     /// its writer on the isolate owner; the same id can mount again.

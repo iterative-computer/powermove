@@ -25,6 +25,17 @@ export interface BuiltinEnv {
   fields(names: string[]): any;
   activatePanel(id: string): void;
   report(error: unknown): void;
+  /** Extensions only: state handed across a reload (see `Hot`). */
+  hot?: Hot;
+}
+
+/**
+ * `hot.data` holds what the previous version of this extension left in it
+ * from its `hot.dispose` callbacks, which run just before a reload. JSON only.
+ */
+export interface Hot {
+  data: Record<string, Json>;
+  dispose(callback: (data: Record<string, Json>) => void): void;
 }
 
 export interface Mounted {

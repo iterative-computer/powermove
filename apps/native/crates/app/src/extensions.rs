@@ -33,6 +33,8 @@ const STORE: &str = "extension.store";
 const INSTALL: &str = "extension.install:";
 const UNDO: &str = "extension.undo";
 /// Longer than the realm's own deadline; a hung realm never holds a menu back.
+/// How long a reloading extension may take to hand over `api.hot.data`.
+const HOT_HANDOFF: std::time::Duration = std::time::Duration::from_millis(500);
 const MENU_DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
 const OWNER: &str = "extension:";
 /// Keys this window's list of contributed panels in the shell.
@@ -425,13 +427,36 @@ impl Controller {
             .map(|(id, _)| id.clone())
             .collect();
         for id in &gone {
-            runtime.unmount_extension(id);
             self.builtins.forget_surface(id);
-            self.extensions.surfaces.remove(id);
-            if !wanted.iter().any(|s| s["id"] == id.as_str()) {
+            let Some(rebuilt) = wanted.iter().find(|s| s["id"] == id.as_str()) else {
+                runtime.unmount_extension(id);
+                self.extensions.surfaces.remove(id);
                 let shell = self.host.borrow();
                 shell.send_command(&format!("panel:close:{id}"), vec![]);
-            }
+                continue;
+            };
+            // A new version: the old one hands over `api.hot.data`, then goes.
+            let title = rebuilt["manifest"]["name"].as_str().unwrap_or(id).to_owned();
+            let hash = source(rebuilt).unwrap_or_default();
+            self.extensions.surfaces.insert(id.clone(), (title, hash));
+            let (runtime, extension, graph) = (runtime.clone(), id.clone(), rebuilt["graph"].clone());
+            let ticket = cx.background_executor().spawn(async move {
+                let hot = runtime.hot(&extension).ok().and_then(|ticket| {
+                    let deadline = std::time::Instant::now() + HOT_HANDOFF;
+                    loop {
+                        if let Some(result) = ticket.try_take() {
+                            return result.ok().map(|e| e.value);
+                        }
+                        if std::time::Instant::now() > deadline {
+                            return None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                });
+                runtime.unmount_extension(&extension);
+                runtime.mount_extension(&extension, &graph, hot.as_deref())
+            });
+            self.await_panel(id.clone(), id.clone(), ticket, cx);
         }
         let unforked: Vec<(String, String)> = self
             .extensions
@@ -483,7 +508,7 @@ impl Controller {
                 .unwrap_or(&id)
                 .to_owned();
             self.extensions.surfaces.insert(id.clone(), (title, hash));
-            let ticket = runtime.mount_extension(&id, &surface["graph"]);
+            let ticket = runtime.mount_extension(&id, &surface["graph"], None);
             self.await_panel(id.clone(), id.clone(), Task::ready(ticket), cx);
             if self.extensions.mounted_once.insert(id.clone()) && self.extensions.booted {
                 self.host

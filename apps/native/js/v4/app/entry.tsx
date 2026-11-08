@@ -17,7 +17,7 @@ import {
   type HostPublication,
 } from "../src/host-api";
 import { type Json, type NativeEvent, type Transport } from "../src/protocol";
-import type { BuiltinEnv, Mount, Mounted } from "../src/builtin";
+import type { BuiltinEnv, Hot, Mount, Mounted } from "../src/builtin";
 import { mount as layerEffects } from "../panels/effect-controls/mount";
 import { mount as fxbrowser } from "../panels/effects/mount";
 import { mount as timeline } from "../panels/timeline/mount";
@@ -117,9 +117,26 @@ const RUNTIME: Record<string, any> = {
  * `mount(env)`, which gets the same environment as a built-in panel. With
  * `replaces`, it is a fork drawing that built-in's panel in its place.
  */
-async function mountExtension(id: string, text: string, replaces?: string) {
+/** `api.hot`: data an extension hands to its next version when it reloads. */
+const hot = {
+  data: {} as Record<string, Json>,
+  disposers: [] as ((data: Record<string, Json>) => void)[],
+};
+async function mountExtension(
+  id: string,
+  text: string,
+  replaces?: string,
+  hotData?: string,
+) {
   if (mounted) throw new Error("Panel already mounted");
-  const env = environment(replaces ?? id);
+  hot.data = hotData ? JSON.parse(hotData) : {};
+  const api: Hot = {
+    data: hot.data,
+    dispose: (callback) => {
+      hot.disposers.push(callback);
+    },
+  };
+  const env = { ...environment(replaces ?? id), hot: api };
   (globalThis as any).__powermove_runtime = RUNTIME;
   const graph = JSON.parse(text);
   const url = (name: string) =>
@@ -161,7 +178,7 @@ async function mountExtension(id: string, text: string, replaces?: string) {
   if (typeof namespace.view !== "function")
     throw new Error("A v4 extension exports view() or mount(env)");
   const root = env.root();
-  await namespace.activate?.({ host, id });
+  await namespace.activate?.({ host, id, hot: api });
   // A component, so the view's hooks have one to belong to.
   const View = namespace.view;
   await root.render(<View />);
@@ -172,6 +189,11 @@ async function mountExtension(id: string, text: string, replaces?: string) {
 (globalThis as any).__pmBuiltin = {
   mount,
   mountExtension,
+  /** Before a reload: the extension's `hot.dispose` callbacks fill `hot.data`. */
+  hot() {
+    for (const dispose of hot.disposers) dispose(hot.data);
+    return JSON.stringify(hot.data);
+  },
   async publish() {
     for (const p of native("host.publications") as HostPublication[])
       host.publish(p);

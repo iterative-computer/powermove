@@ -1544,7 +1544,7 @@ fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_th
             "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
         }
     });
-    finish(panels.mount_extension("synthetic-surface", &graph).unwrap());
+    finish(panels.mount_extension("synthetic-surface", &graph, None).unwrap());
     let publication = panels
         .take_publications()
         .into_iter()
@@ -1565,7 +1565,7 @@ fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_th
             }
         }
     });
-    finish(panels.mount_extension("synthetic-hooks", &hooks).unwrap());
+    finish(panels.mount_extension("synthetic-hooks", &hooks, None).unwrap());
     let hooked = panels
         .take_publications()
         .into_iter()
@@ -1579,12 +1579,58 @@ fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_th
             .any(|n| n.text == "Hooked 7")
     );
     // Unmounting frees the id for a rebuilt graph.
-    assert!(panels.mount_extension("synthetic-hooks", &hooks).is_err());
+    assert!(panels.mount_extension("synthetic-hooks", &hooks, None).is_err());
     panels.unmount_extension("synthetic-hooks");
-    finish(panels.mount_extension("synthetic-hooks", &hooks).unwrap());
-    assert!(panels.mount_extension("timeline", &graph).is_err());
+    finish(panels.mount_extension("synthetic-hooks", &hooks, None).unwrap());
+    assert!(panels.mount_extension("timeline", &graph, None).is_err());
     let errors = panels.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+fn text_of(panels: &Builtins, panel: &str) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(p) = panels.take_publications().into_iter().find(|p| p.panel == panel) {
+            return p.surface.nodes().values().map(|n| n.text.clone()).collect();
+        }
+        assert!(Instant::now() < deadline, "no publication for {panel}");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+#[test]
+fn a_reloaded_extension_gets_its_hot_data_and_a_fork_takes_a_built_in_panel_and_gives_it_back() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime'; let data = {};
+                export function activate({ hot }) { data = hot.data; hot.dispose((d) => { d.count = (d.count ?? 0) + 1; }); }
+                export const view = () => jsx('text', { children: 'Count ' + (data.count ?? 0) });"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(panels.mount_extension("synthetic-hot", &graph, None).unwrap());
+    assert!(text_of(&panels, "synthetic-hot").contains(&"Count 0".to_owned()));
+    let data = finish(panels.hot("synthetic-hot").unwrap()).value;
+    assert_eq!(serde_json::from_str::<Value>(&data).unwrap(), json!({"count":1}));
+    panels.unmount_extension("synthetic-hot");
+    finish(panels.mount_extension("synthetic-hot", &graph, Some(&data)).unwrap());
+    assert!(text_of(&panels, "synthetic-hot").contains(&"Count 1".to_owned()));
+
+    // A fork draws the built-in's panel id with the built-in's routes.
+    finish(panels.mount_builtin("viewer").unwrap());
+    text_of(&panels, "viewer");
+    finish(panels.replace("viewer", "viewer-fork", &graph).unwrap());
+    assert!(text_of(&panels, "viewer").contains(&"Count 0".to_owned()));
+    finish(panels.restore("viewer").unwrap());
+    assert!(!text_of(&panels, "viewer").iter().any(|t| t.starts_with("Count")));
+    assert!(panels.replace("not-a-panel", "fork", &graph).is_err());
+    panels.close();
+    actor.shutdown();
 }
 
 #[test]

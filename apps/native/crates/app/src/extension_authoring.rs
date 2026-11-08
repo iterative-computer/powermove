@@ -115,7 +115,7 @@ pub fn check(dir: &Path, manifest: &Value) -> Result<(), String> {
         let id = manifest["id"].as_str().unwrap_or_default();
         let ticket = match replaced_panel(manifest) {
             Some(panel) => panels.replace(panel, id, &graph.to_json()),
-            None => panels.mount_extension(id, &graph.to_json()),
+            None => panels.mount_extension(id, &graph.to_json(), None),
         };
         let settled = ticket.map_err(|e| e.to_string()).and_then(settle);
         let errors = panels.take_errors();
