@@ -144,18 +144,21 @@ impl AgentLink {
             .map_or_else(Vec::new, |accounts| accounts.models(provider));
         let mut models = vec![(String::new(), "Default".to_owned())];
         let mut efforts = vec![String::new()];
+        let mut model_efforts = vec![];
         for model in listed {
-            models.push((model.id, model.label));
-            for effort in model.efforts {
-                if !efforts.contains(&effort) {
-                    efforts.push(effort);
+            for effort in &model.efforts {
+                if !efforts.contains(effort) {
+                    efforts.push(effort.clone());
                 }
             }
+            model_efforts.push((model.id.clone(), model.efforts));
+            models.push((model.id, model.label));
         }
         Catalog {
             models,
             providers,
             efforts,
+            model_efforts,
             claude: provider == Provider::Claude,
         }
     }

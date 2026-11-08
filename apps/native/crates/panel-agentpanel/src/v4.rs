@@ -117,7 +117,7 @@ impl Window {
         );
         value["slash"] = json!({"visible":session.slash.visible(&text,session.applying,&choices),
             "index":session.slash.index,"choices":choices.iter().map(|c|json!({"id":c.id,"value":c.value})).collect::<Vec<_>>()});
-        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":session.catalog.efforts});
+        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":session.catalog.efforts_for(&session.settings.model)});
         Ok(value)
     }
 }
