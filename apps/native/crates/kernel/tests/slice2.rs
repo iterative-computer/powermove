@@ -652,8 +652,13 @@ fn a_clean_close_leaves_no_journal_for_quit_or_the_next_open() {
         panic!()
     };
     assert_eq!(projects, 0);
+    // Closing what is already saved leaves the file alone.
+    let saved = fs::read(&file).unwrap();
+    let modified = fs::metadata(&file).unwrap().modified().unwrap();
     let session = open(&mut k);
     k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(fs::read(&file).unwrap(), saved);
+    assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), modified);
 }
 #[test]
 fn a_project_from_before_compositions_opens_with_one_stable_composition() {

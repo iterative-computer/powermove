@@ -376,9 +376,20 @@ impl Kernel {
             ShellCall::Close(handle) => {
                 self.ensure_idle(&handle)?;
                 self.flush_project(&handle.project)?;
-                let saved = self.save_session(&handle, None)?;
-                let ShellReply::Saved { recovery_copy, .. } = saved else {
-                    unreachable!()
+                // A file that already holds everything is not rewritten.
+                let unchanged = matches!(
+                    self.sessions[&handle.project].destination,
+                    Destination::File(_)
+                ) && !self.project(&handle.project).unwrap().store().needs_save();
+                let recovery_copy = if unchanged {
+                    self.save_session_meta(&handle.project)?;
+                    None
+                } else {
+                    let saved = self.save_session(&handle, None)?;
+                    let ShellReply::Saved { recovery_copy, .. } = saved else {
+                        unreachable!()
+                    };
+                    recovery_copy
                 };
                 self.flush_project(&handle.project)?;
                 self.durability_barrier()?;
@@ -1478,6 +1489,31 @@ impl Kernel {
                 .store_mut()
                 .mark_library_saved();
         }
+        Ok(())
+    }
+}
+
+impl Kernel {
+    /// The library entry's view state alone, for a file closed unchanged:
+    /// where the person left off, without rewriting the project body.
+    fn save_session_meta(&mut self, id: &str) -> Result<(), KernelFailure> {
+        let Some(writer) = &self.library else {
+            return Ok(());
+        };
+        let p = self.project(id).unwrap();
+        let session = &self.sessions[id];
+        let meta = self
+            .state
+            .ui
+            .get(id)
+            .map(|ui| ui.to_session())
+            .unwrap_or_else(|| session.meta.clone());
+        let meta = file_metadata(meta, p.store());
+        writer
+            .set(&format!("projectMeta.{id}"), meta.clone())
+            .and_then(|()| writer.flush())
+            .map_err(failure)?;
+        self.sessions.get_mut(id).unwrap().meta = meta;
         Ok(())
     }
 }
