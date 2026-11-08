@@ -162,6 +162,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.panel_radius` | Panel corner radius | 8 | 8 | 8 | 8 |
 | `metrics.pasteboard_opacity` | Opacity of selected layers drawn outside the frame | 0.35 | 0.35 | 0.35 | 0.35 |
 | `metrics.playhead` | Playhead line width | 1.5 | 1.5 | 1.5 | 1.5 |
+| `metrics.popover_radius` | Corner of popovers Powermove frames itself (agent popover) | 16 | 16 | 16 | 16 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
 | `metrics.property_row` | Timeline property sub-row | 22 | 22 | 22 | 22 |
 | `metrics.rotation_stem` | Rotation handle stem length | 18 | 18 | 18 | 18 |

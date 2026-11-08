@@ -157,6 +157,8 @@ pub struct Metrics {
     /// Minimum pointer target. Smaller glyphs get padded hit areas.
     pub hit: f32,
     pub popover_width: f32,
+    /// Corner of floating popovers drawn by Powermove (the agent popover).
+    pub popover_radius: f32,
     pub sheet_width: f32,
     pub agent_width: f32,
     /// Indent per outline level.
@@ -476,6 +478,7 @@ impl Tokens {
                 symbol_inline: 11.,
                 hit: 24.,
                 popover_width: 260.,
+                popover_radius: 16.,
                 sheet_width: 480.,
                 agent_width: 360.,
                 tree_indent: 16.,

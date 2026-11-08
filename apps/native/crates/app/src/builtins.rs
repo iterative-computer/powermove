@@ -566,6 +566,7 @@ impl Controller {
         }
         .into();
         let id = id.to_owned();
+        let popover = (id == "agent").then(|| self.host.borrow().tokens.clone());
         // Opening GPUI renders the new root synchronously. Do it after this
         // Controller update so the window can acquire its published panel safely.
         cx.spawn(async move |this, cx| {
@@ -583,9 +584,13 @@ impl Controller {
             if !current {
                 return;
             }
+            let mut options = WindowOptions::new().kind(kind);
+            if popover.is_some() {
+                // Clear GPUI content over the popover material (language §12).
+                options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
+            }
             let result = cx.open_window(
-                WindowOptions::new()
-                    .kind(kind)
+                options
                     .titlebar(Some(TitlebarOptions {
                         title: Some(title),
                         ..Default::default()
@@ -594,7 +599,10 @@ impl Controller {
                         origin,
                         size(px(width), px(height)),
                     )))),
-                |_, cx| {
+                |window, cx| {
+                    if let Some(tokens) = &popover {
+                        pm_shell::popover_frame(window, tokens);
+                    }
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
                         SurfaceWindow { owner, panel }
@@ -1092,10 +1100,12 @@ impl Render for SurfaceWindow {
                 cx,
             )
         });
+        // The agent popover's material is native (glass); other panel
+        // windows paint the solid panel colour.
         div()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(fill))
+            .when(self.panel != "agent", |d| d.bg(rgb(fill)))
             .children(body)
     }
 }

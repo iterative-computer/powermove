@@ -242,6 +242,46 @@ pub fn material(
         }
     }
 }
+/// Frames a borderless GPUI window as a popover: `Surface::Popover` material
+/// (glass on macOS 26, a visual-effect popover before, solid `floating`
+/// under Reduce Transparency) under the transparent GPUI view, rounded to
+/// `popover_radius`, with the system shadow. The GPUI content stays clear.
+pub fn popover_frame(w: &gpui::Window, t: &Tokens) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let gpui: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let Some(window) = gpui.window() else {
+        return;
+    };
+    let Some(content) = window.contentView() else {
+        return;
+    };
+    appearance(&window, t);
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setHasShadow(true);
+    let radius = t.metrics.popover_radius as f64;
+    let mat = material(mtm, content.bounds(), t, Surface::Popover);
+    mat.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    if let Ok(glass) = mat.clone().downcast::<NSGlassEffectView>() {
+        glass.setCornerRadius(radius);
+    } else if let Ok(solid) = mat.clone().downcast::<NSBox>() {
+        solid.setCornerRadius(radius);
+    }
+    content.setWantsLayer(true);
+    if let Some(layer) = content.layer() {
+        layer.setCornerRadius(radius);
+        layer.setMasksToBounds(true);
+    }
+    content.addSubview_positioned_relativeTo(&mat, NSWindowOrderingMode::Below, Some(&gpui));
+    window.invalidateShadow();
+}
 pub fn contents(v: &NSView) -> Retained<NSView> {
     unsafe {
         if objc2::runtime::AnyClass::get(c"NSGlassEffectView")

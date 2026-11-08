@@ -179,6 +179,10 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.symbol_inline", "SF Symbol size inside rows"),
     ("metrics.hit", "Minimum pointer target"),
     ("metrics.popover_width", "Default popover width"),
+    (
+        "metrics.popover_radius",
+        "Corner of popovers Powermove frames itself (agent popover)",
+    ),
     ("metrics.sheet_width", "Default sheet width"),
     ("metrics.agent_width", "Default agent panel width"),
     ("metrics.tree_indent", "Indent per outline level"),

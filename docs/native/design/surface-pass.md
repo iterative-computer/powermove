@@ -60,3 +60,12 @@ uses. The governing rules stay in [language.md](language.md).
   sized to their title (`ControlSpec::inline`, viewer panel only), as in the
   owner's demo; inspector and sheet pop-ups keep the bezel at `value_column`.
 - The Fit row is titled `Fit (54 %)`, so the closed pop-up names the zoom.
+
+## 6. Agent popover
+
+- The Agent window is a borderless popover framed natively
+  (`pm_shell::popover_frame`): `Surface::Popover` material under a clear
+  GPUI view (glass on macOS 26, `NSVisualEffectView` popover before, solid
+  `floating` with a `separator` edge under Reduce Transparency), corners at
+  `metrics.popover_radius` (16), system shadow. The window no longer paints
+  `colors.panel`. Plan §3.10 puts the agent composer on glass.
