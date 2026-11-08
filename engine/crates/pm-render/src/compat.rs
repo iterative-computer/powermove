@@ -235,29 +235,26 @@ fn upload_bytes(
     }
 }
 
-/// The texture of a raster: premultiplied E values as `rgba32float` at
-/// 32-bit precision, `rgba16float` otherwise.
-/// The textures of the rasters frames are drawing now. A raster is immutable,
-/// so one upload serves every band and redraw that draws it; an entry goes
-/// with the last holder of its raster.
-static UPLOADS: std::sync::Mutex<
-    Vec<(
-        std::sync::Weak<CompatRaster>,
-        pm_protocol::color::Precision,
-        wgpu::TextureView,
-    )>,
-> = std::sync::Mutex::new(Vec::new());
+/// The textures of the rasters a renderer's frames are drawing now. A raster
+/// is immutable, so one upload serves every band and redraw that draws it; an
+/// entry goes with the last holder of its raster. Each renderer keeps its own
+/// (on its own device): a renderer rebuilt after device loss uploads again.
+pub(crate) type Uploads = Vec<(
+    std::sync::Weak<CompatRaster>,
+    pm_protocol::color::Precision,
+    wgpu::TextureView,
+)>;
 
-/// [`upload`] once per raster and precision.
+/// [`upload`] once per raster and precision on this renderer.
 pub(crate) fn upload_cached(
+    uploads: &mut Uploads,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     raster: &Arc<CompatRaster>,
     precision: pm_protocol::color::Precision,
 ) -> wgpu::TextureView {
-    let mut uploads = UPLOADS.lock().unwrap();
     uploads.retain(|(held, ..)| held.strong_count() > 0);
-    if let Some((_, _, view)) = uploads
+    if let Some((.., view)) = uploads
         .iter()
         .find(|(held, p, _)| *p == precision && std::ptr::eq(held.as_ptr(), Arc::as_ptr(raster)))
     {
@@ -268,6 +265,8 @@ pub(crate) fn upload_cached(
     view
 }
 
+/// The texture of a raster: premultiplied E values as `rgba32float` at
+/// 32-bit precision, `rgba16float` otherwise.
 pub(crate) fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

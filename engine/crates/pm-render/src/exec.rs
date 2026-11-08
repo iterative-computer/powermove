@@ -556,6 +556,7 @@ impl Exec<'_> {
                         // top row first, like a text raster (linear light
                         // decodes them).
                         r.view = Some(crate::compat::upload_cached(
+                            &mut self.binds.compat,
                             self.device,
                             self.queue,
                             &compat.0,

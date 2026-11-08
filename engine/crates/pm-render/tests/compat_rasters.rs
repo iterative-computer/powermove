@@ -178,6 +178,19 @@ fn a_producer_s_raster_replaces_the_layer_on_its_own_quad_through_the_layer_s_tr
 }
 
 #[test]
+fn one_raster_drawn_on_a_new_device_is_uploaded_there() {
+    // A renderer rebuilt (device loss) draws the answers it already holds:
+    // each device gets its own texture of the same raster.
+    let red = raster(200, 80, [255, 0, 0, 255], [100.0, 40.0], [50.0, 20.0]);
+    for _ in 0..2 {
+        let mut renderer = Renderer::headless().unwrap();
+        renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Raster(red.clone()))));
+        let center = px(&render(&mut renderer, &doc(100.0), 0.0).unwrap(), 128, 128);
+        assert!(center[0] > 0.99 && center[3] > 0.99, "{center:?}");
+    }
+}
+
+#[test]
 fn rasters_are_premultiplied_canvas_values_with_the_layer_s_opacity_applied() {
     let mut renderer = Renderer::headless().unwrap();
     // Half-transparent premultiplied white, as a canvas stores it.
