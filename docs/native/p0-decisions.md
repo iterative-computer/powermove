@@ -139,3 +139,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - A journal session that starts from exactly what its file or slot holds writes checkpoint 0 at its first change, not at open; until then recovery replays from that base, including its undo history and workspace. A save deletes the sessions it made redundant at once.
 - A journal whose document and undo history equal the saved file retires without asking; a newer panel layout in it is kept silently.
 - SIGTERM runs the normal Quit path; a clean quit releases `library.lock` (`ShellCall::ReleaseLibrary`, internal).
+- Library projects read media the first launch moved out of IndexedDB from `<profile>/Media Store` (by `storageKey`, then `media:<fingerprint>`, then asset id) when their file lacks it; library saves don't copy store-backed media into a backing file. Save As embeds it, as v1 did.
+- Reopening a library project unchanged rewrites only its row and view state, never its slot.
+- A record that a development-server IndexedDB origin also holds migrates from the shipped app's origin (`app_powermove_*`, captured first).
+- The window shows a project as soon as the kernel opens it; its media catalog follows from the background refresh.

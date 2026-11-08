@@ -274,6 +274,16 @@ impl LibraryWriter {
             (format!("projectJournal.{id}"), None),
         ])
     }
+    /// A library project opened unchanged: first in recents, with its view
+    /// state, and its body left as it is.
+    pub fn touch_entry(&self, id: &str, summary: &Value, meta: Value) -> Result<(), LibraryError> {
+        let (rows, trash) = self.entry_rows(id, summary, true)?;
+        self.batch(vec![
+            (format!("projectMeta.{id}"), Some(meta)),
+            ("projects".into(), Some(Value::Array(rows))),
+            ("projectTrash".into(), Some(Value::Array(trash))),
+        ])
+    }
     /// `projects` with `id`'s row first (unless it stays trashed), and
     /// `projectTrash` without it.
     fn entry_rows(

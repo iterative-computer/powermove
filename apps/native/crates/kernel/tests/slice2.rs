@@ -1534,7 +1534,7 @@ fn a_session_killed_unchanged_or_after_saving_reopens_without_asking() {
             common::opacity_of(k.project("P").unwrap().store(), "layer0"),
             Some(41.0)
         );
-        assert!(k.project("P").unwrap().store().history().len() > 0);
+        assert!(!k.project("P").unwrap().store().history().is_empty());
         edit(&mut k, "P", 12.0);
         k.sync_all();
     }

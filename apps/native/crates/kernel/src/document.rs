@@ -1669,6 +1669,12 @@ impl DocumentStore {
         Ok(())
     }
 
+    /// Bytes the library's media store holds for assets the file lacks.
+    pub(crate) fn hydrate_library_media(&mut self, store: &std::path::Path) {
+        if let Some(root) = self.root().cloned() {
+            crate::library_media::hydrate(&root, &mut self.file.media, store);
+        }
+    }
     pub(crate) fn hydrate_originals(&mut self, archive: &crate::media_archive::Archive) {
         if let Some(root) = self.root().cloned() {
             crate::media_versions::hydrate_archive(&root, &mut self.file.media, archive);

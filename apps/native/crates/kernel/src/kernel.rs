@@ -295,6 +295,13 @@ impl Kernel {
                 .map_err(|e| KernelFailure::Storage(e.to_string()))?;
             store.hydrate_originals(&archive);
         }
+        if let Some(profile) = self
+            .library
+            .as_ref()
+            .and_then(|writer| writer.store().dir().parent())
+        {
+            store.hydrate_library_media(&profile.join(crate::library_media::DIR));
+        }
         let mut project = Project::new(store);
         project.set_workspace(workspace.clone());
         let journal = match (&self.durability, self.project_dir(id)) {

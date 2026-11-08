@@ -1122,8 +1122,10 @@ impl Kernel {
                     workspace: saved.as_ref().map(|(_, w)| w),
                 }),
             );
+            // A journal of an older base can also end where the file is now
+            // (a save that could not start a new journal before the kill).
             if matches!(mode, RecoveryMode::Ask)
-                && let Recovery::Recovered(r) = &recovered
+                && let Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } = &recovered
                 && !r.truncated
                 && r.document
                     .root()
@@ -1325,7 +1327,19 @@ impl Kernel {
                 | OpenSource::Untitled(_)
         )
         .then(|| base.clone());
+        // The library slot already holds exactly what opened from it.
+        let slot_current = known.is_some()
+            && match (&source, &destination) {
+                (
+                    OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. },
+                    Destination::Library(slot),
+                ) => slot == &lib.id && lib.journal_applied == 0 && !lib.from_autosave,
+                _ => false,
+            };
         let mut info = self.open_known(&id, source, known)?;
+        let slot_current = slot_current
+            && !info.history_rejected
+            && !self.project(&id).unwrap().store().upgraded_on_open();
         let ui = crate::state::UiState::from_session(meta.clone());
         std::sync::Arc::make_mut(&mut self.state.ui).insert(id.clone(), ui);
         if !info.history_rejected {
@@ -1347,7 +1361,28 @@ impl Kernel {
             },
         );
         // A new/copy project gets a rollback-readable slot immediately.
-        if matches!(
+        if slot_current {
+            // Reopening a library project rewrites none of it, however large.
+            let p = self.project(&handle.project).unwrap();
+            let summary = entry_summary(p.store().root());
+            let session = &self.sessions[&handle.project];
+            let Destination::Library(slot) = &session.destination else {
+                unreachable!("slot_current is a library destination")
+            };
+            if let Err(e) = self
+                .library
+                .as_ref()
+                .ok_or_else(|| failure("Attach a native library first"))
+                .and_then(|w| {
+                    w.touch_entry(slot, &summary, session.meta.clone())
+                        .map_err(failure)
+                })
+            {
+                self.sessions.remove(&handle.project);
+                self.close(&handle.project);
+                return Err(e);
+            }
+        } else if matches!(
             self.sessions[&handle.project].destination,
             Destination::Library(_)
         ) {
@@ -1534,8 +1569,17 @@ impl Kernel {
             None
         };
         value = with_identity(value, slot, name.as_deref());
-        if !self.project(id).unwrap().store().media().is_empty()
-            && (recovery || matches!(self.sessions[id].destination, Destination::Library(_)))
+        let store_dir = self
+            .library
+            .as_ref()
+            .and_then(|w| w.store().dir().parent())
+            .map(|profile| profile.join(crate::library_media::DIR));
+        // Bytes the library's media store keeps need no backing file.
+        if self.project(id).unwrap().store().media().iter().any(|e| {
+            !store_dir
+                .as_deref()
+                .is_some_and(|d| crate::library_media::is_stored(e, d))
+        }) && (recovery || matches!(self.sessions[id].destination, Destination::Library(_)))
         {
             let w = self
                 .library
