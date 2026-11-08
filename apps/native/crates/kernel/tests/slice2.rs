@@ -1310,3 +1310,154 @@ fn rollback_compaction_does_not_resurrect_trashed_projects() {
     assert!(reader.projects().unwrap().is_empty());
     assert_eq!(reader.trash().unwrap()[0].raw, before);
 }
+/// Crashes `id`'s session for `file` with opacity `n` unsaved.
+fn crash_with_edit(profile: &Path, id: &str, file: &Path, n: f64) {
+    let mut k = kernel(profile);
+    open(&mut k, id, SessionSource::File(file.into()));
+    edit(&mut k, id, n);
+    k.sync_all();
+}
+fn prepare(k: &mut Kernel, id: &str, source: SessionSource) -> (String, RecoveryResult) {
+    match k
+        .shell(ShellCall::PrepareOpen {
+            id: id.into(),
+            source,
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::RecoveryRequired { ticket, recovery } => (ticket, recovery),
+        other => panic!("expected a recovery question: {other:?}"),
+    }
+}
+fn decide(k: &mut Kernel, ticket: String, decision: RecoveryDecision) -> SessionHandle {
+    match k
+        .shell(ShellCall::DecideRecovery { ticket, decision })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    }
+}
+fn live_sessions(profile: &Path, id: &str) -> usize {
+    pm_kernel::journal::sessions(&profile.join("journals").join(id)).len()
+}
+#[test]
+fn recovering_a_file_from_recents_recovers_it_in_place() {
+    let dir = common::TempDir::new("recents-recover");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    let library = SessionSource::Library {
+        profile: profile.clone(),
+        project: "F".into(),
+    };
+    let (ticket, recovery) = prepare(&mut k, "F", library);
+    assert!(
+        matches!(recovery, RecoveryResult::Recovered { .. }),
+        "the file is unchanged, so its journal recovers in place: {recovery:?}"
+    );
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    assert_eq!(
+        common::opacity_of(k.project("F").unwrap().store(), "layer0"),
+        Some(45.0)
+    );
+    let rows = LibraryStore::open(&profile).projects().unwrap();
+    assert_eq!(rows.len(), 1, "no recovery copy: {rows:?}");
+    let lock = parse(&fs::read_to_string(project_lock_path(&file)).unwrap()).unwrap();
+    assert_eq!(
+        lock.get("pid").and_then(Value::as_f64),
+        Some(f64::from(std::process::id())),
+        "the file stays held in place"
+    );
+    k.shell(ShellCall::Save(session.clone())).unwrap();
+    assert_eq!(
+        common::opacity_of(&common::open_store(&file), "layer0"),
+        Some(45.0)
+    );
+    assert_ne!(fs::read(&file).unwrap(), before);
+}
+#[test]
+fn recovering_as_a_copy_retires_the_crashed_session_and_quit_leaves_the_file_alone() {
+    let dir = common::TempDir::new("copy-retires");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    // Someone else saves the file: the journal's base no longer matches.
+    fs::write(&file, PROJECT.replace("Fixture", "Elsewhere")).unwrap();
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    let (ticket, recovery) = prepare(&mut k, "F", SessionSource::File(file.clone()));
+    assert!(matches!(recovery, RecoveryResult::OfferCopy { .. }));
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    k.shell(ShellCall::Close(session)).unwrap();
+    assert_eq!(live_sessions(&profile, "F"), 0, "the copy holds that work");
+    let ShellReply::Compacted {
+        recovery_copies, ..
+    } = k.shell(ShellCall::PrepareQuit).unwrap()
+    else {
+        panic!()
+    };
+    assert!(recovery_copies.is_empty(), "{recovery_copies:?}");
+    assert_eq!(fs::read(&file).unwrap(), before);
+    let copies = LibraryStore::open(&profile)
+        .projects()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.name.ends_with("— Recovered"))
+        .count();
+    assert_eq!(copies, 1);
+}
+#[test]
+fn quit_never_writes_an_unopened_file_and_its_next_open_asks() {
+    let dir = common::TempDir::new("quit-no-file-write");
+    let file = dir.path("original.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    k.shell(ShellCall::PrepareQuit).unwrap();
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        before,
+        "no save without the person"
+    );
+    let (_, recovery) = prepare(&mut k, "F", SessionSource::File(file.clone()));
+    assert!(matches!(recovery, RecoveryResult::Recovered { .. }));
+}
+#[test]
+fn dont_save_after_recovering_a_file_from_before_compositions_leaves_it_alone() {
+    let dir = common::TempDir::new("legacy-dont-save");
+    let file = dir.path("legacy.pmv");
+    fs::write(&file, r##"{"v":"1.0.0","proj":{"id":"Plegacy1","name":"Legacy","w":200,"h":100,"fps":30,"dur":2,"bg":"#000000","assets":{},"layers":[{"id":"layer0","type":"shape","name":"Layer","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[],"expr":null}}}]}}"##).unwrap();
+    let profile = dir.path("native");
+    crash_with_edit(&profile, "F", &file, 45.0);
+    let before = fs::read(&file).unwrap();
+    let mut k = kernel(&profile);
+    let (ticket, _) = prepare(&mut k, "F", SessionSource::File(file.clone()));
+    let session = decide(&mut k, ticket, RecoveryDecision::Recover);
+    k.shell(ShellCall::DiscardClose(session)).unwrap();
+    k.shell(ShellCall::PrepareQuit).unwrap();
+    assert_eq!(fs::read(&file).unwrap(), before);
+}
+#[test]
+fn saving_in_place_keeps_the_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("keep-mode");
+    let file = dir.path("shared.pmv");
+    fs::write(&file, PROJECT).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut k = kernel(&dir.path("native"));
+    let session = open(&mut k, "F", SessionSource::File(file.clone()));
+    edit(&mut k, "F", 30.0);
+    k.shell(ShellCall::Save(session)).unwrap();
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
