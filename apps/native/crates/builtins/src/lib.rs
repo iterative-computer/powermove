@@ -1142,12 +1142,12 @@ impl KernelHooks for Broker {
         Err(Error::StaleGeneration)
     }
     fn revoke_generation(&self, generation: &Generation) {
-        if let Ok(panel) = self.panel(generation) {
-            if let Some(entry) = self.entry(panel) {
-                let mut entry = entry.lock().unwrap();
-                if entry.generation == generation.number {
-                    let _ = entry.router.retire();
-                }
+        if let Ok(panel) = self.panel(generation)
+            && let Some(entry) = self.entry(panel)
+        {
+            let mut entry = entry.lock().unwrap();
+            if entry.generation == generation.number {
+                let _ = entry.router.retire();
             }
         }
     }

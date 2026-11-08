@@ -92,7 +92,7 @@ struct OpenMenu {
 struct SurfaceMenu {
     key: u64,
     rows: Vec<Value>,
-    choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    choose: crate::timeline_surface::Choose,
     window: AnyWindowHandle,
 }
 /// Rows and their descendants, in the menu's preorder index space.
@@ -510,7 +510,7 @@ impl Controller {
         &mut self,
         locations: Vec<(&str, Value)>,
         rows: Vec<Value>,
-        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+        choose: crate::timeline_surface::Choose,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
