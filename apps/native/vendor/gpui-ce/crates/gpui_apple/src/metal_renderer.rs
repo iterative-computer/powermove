@@ -693,7 +693,7 @@ impl MetalRenderer {
         );
         let supplied = self.display_link_drawable.take();
         let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
-            supplied.as_deref().or_else(|| layer.next_drawable())
+            supplied.as_deref().or_else(|| next_drawable(&layer))
         }) {
             drawable
         } else {
@@ -3092,6 +3092,20 @@ mod tests {
 }
 
 // Powermove opt-in CPU diagnostics; no timing/log work in ordinary draws.
+/// While a CAMetalDisplayLink drives the layer, `-[CAMetalLayer nextDrawable]`
+/// raises CAMetalLayerInvalidOperation instead of returning nil. The synchronous
+/// present on a key-window change has no link-supplied drawable, and an
+/// Objective-C exception must not unwind into GPUI's AppKit callbacks (they
+/// cannot unwind, so the app aborts). That frame is skipped; the link draws next.
+fn next_drawable(layer: &metal::MetalLayerRef) -> Option<&metal::MetalDrawableRef> {
+    match objc2::exception::catch(std::panic::AssertUnwindSafe(|| layer.next_drawable())) {
+        Ok(drawable) => drawable,
+        Err(exception) => {
+            log::debug!("nextDrawable raised: {exception:?}");
+            None
+        }
+    }
+}
 fn measure_native<R>(label: &str, f: impl FnOnce() -> R) -> R {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ENABLED.get_or_init(|| std::env::var("ZED_MEASUREMENTS").as_deref() == Ok("1")) {
