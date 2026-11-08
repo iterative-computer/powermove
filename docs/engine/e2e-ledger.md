@@ -441,7 +441,9 @@ binary run to completion with `RUST_TEST_THREADS=3`, as `--no-fail-fast` does.
 | After this lane's fixes | 188 | 2,815 | 6 | 74 | `text_corpus`, perf `ratchet` |
 
 **Missing captures no longer pass.** On a machine with the corpus, a missing
-capture family fails the gate; with no corpus it prints `NOT RUN`. The newest
+capture family fails the gate; with no corpus it prints `NOT RUN`. The same
+holds for the scene3d, glTF and motion witnesses and the generated media
+corpus (`pm-render` `color`, `retime`, `scene3d*`, `pm-export` `bars`). The newest
 capture is chosen by manifest `createdAt`: `threed-*` had resolved by name to a
 one-project capture instead of the three-project roles/maps capture. Tests that
 still did not run in the second run, counted as not run: 4 `pm-audio`
@@ -490,9 +492,35 @@ synthetic ticks, Auto).** 87 s project: 0 skipped targets and 0 stand-ins over
 25 s, Auto dropped to half resolution; frame cost p50 7.7 ms, p95 25 ms (after
 removing a per-frame whole-document walk: p50 was 9 to 11 ms). The section 5
 headroom (p95 ≤ 8.3 ms) is **not met**. Random seeks to a full-quality frame:
-p50 3 to 5 ms, p95 27 to 35 ms, max 49 ms. On screen (release build, window
-behind the owner's windows) 7 to 30% of presented frames reached the glass;
-an occluded window does not present, so on-glass drops are unmeasured.
+p50 3 to 5 ms, p95 27 to 35 ms, max 49 ms.
+
+**On screen, 2026-11-08 (release app, `PM_ENGINE_TRACE`, private copies).**
+Review found playback presenting no new frame after the first and a paused
+viewer at 260% CPU. Cause: the layer's drawable no longer matched the
+configured output, and the engine dropped the drawable and asked for the same
+frame again at once; the flood also overflowed the effect watchdog, whose
+dropped frame left a mapped readback that wgpu then refused. Both fixed
+(drawn at the drawable's size; a dropped frame unmaps its readback). Paused
+CPU is now 1.4 to 1.7%. Playback presents every frame it draws:
+
+| Project | Rate | Frames | Late (completed after target) | Hitches (gap ≥ 3 vsyncs) | Frame cost p50 / p95 / max |
+|---|---|---|---|---|---|
+| 87 s, 30 fps | 60 Hz display | 2,836 over ~95 s | 223 | ~35 | 4.3 / 20.1 / 160 ms |
+| 74 s, 24 fps, 4K video | 60 Hz display | 1,322 | 330 | 15 target gaps | 3.0 / 47.4 / 132 ms |
+
+Not 0 dropped frames. The hitches repeat each loop at the same media times
+(4.0 to 5.8 s on the 30 fps project, 9 to 11 s and 18 to 22 s on the 24 fps
+one). Sampled there: text coverage geometry rebuilt for every animated
+transform (`CoveragePathCache::prepare`, keyed by exact linear transform, about
+40% of the engine thread), one command buffer submission per vector raster
+miss (`VectorCache::render_scene`, about 45% at 4 to 6 s), and plan building.
+Planning media ahead of the playhead no longer delays the frame it follows.
+A frame missing a layer (an effect no installed extension provides) now says
+so in the viewer status line.
+
+The review's compiler-busy export case does not occur in the app: every export
+(app and MCP) runs in its own `--engine-job` process with its own compiler
+pool, and one renderer compiles at a time there.
 
 ### WIP owner handoff
 
