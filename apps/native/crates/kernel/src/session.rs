@@ -61,6 +61,9 @@ pub enum ShellCall {
     /// External files are never written: their unsaved work stays in the
     /// journal and the next open asks the person about it.
     PrepareQuit,
+    /// The last call of a quit: flush and unlock the library (no open
+    /// sessions may remain). Later library calls fail.
+    ReleaseLibrary,
     AbortSave {
         session: SessionHandle,
         ticket: String,
@@ -205,6 +208,24 @@ fn with_identity(mut v: Value, id: &str, name: Option<&str>) -> Value {
         }
     }
     v
+}
+/// The opened project as a value (the base recovery replays onto).
+fn source_value(source: &OpenSource) -> Value {
+    match source {
+        OpenSource::File(opened) => opened.document.to_value().unwrap_or(Value::Null),
+        OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => lib.project.clone(),
+        OpenSource::Untitled(value) => value.clone(),
+        _ => Value::Null,
+    }
+}
+fn set_workspace(source: &mut OpenSource, workspace: Value) {
+    match source {
+        OpenSource::File(opened) => opened.file.envelope.workspace = Some(workspace),
+        OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
+            lib.workspace = Some(workspace)
+        }
+        _ => {}
+    }
 }
 // A durable rebase checkpoint after a clean close contains no unsaved work.
 // Compare history and workspace too; document equality alone would hide edits.
@@ -368,6 +389,18 @@ impl Kernel {
                 self.durability_barrier()?;
                 Ok(result)
             }
+            ShellCall::ReleaseLibrary => {
+                if !self.sessions.is_empty() {
+                    return Err(failure("Close every project before releasing the library"));
+                }
+                if let Some(writer) = self.library.take() {
+                    let flushed = writer.flush();
+                    // Dropping the writer stops it and releases library.lock.
+                    drop(writer);
+                    flushed.map_err(failure)?;
+                }
+                Ok(ShellReply::Durable)
+            }
             ShellCall::Save(handle) => {
                 self.check_session(&handle)?;
                 self.save_session(&handle, None)
@@ -485,11 +518,10 @@ impl Kernel {
                     self.duplicate_slot(&id, &name, copy, Some(p.store().file().clone()))?;
                     return Ok(ShellReply::Changed(true));
                 }
-                let p = w
-                    .store()
-                    .load(&project)
-                    .map_err(failure)?
-                    .ok_or_else(|| failure("Missing project"))?;
+                let p = match w.store().load(&project).map_err(failure)? {
+                    Some(p) => p,
+                    None => self.file_entry_project(&project)?,
+                };
                 let associated = p
                     .session
                     .as_ref()
@@ -754,9 +786,12 @@ impl Kernel {
             }) {
                 continue;
             }
-            if !into_files && self.file_entry(&id).is_some() {
+            let file = self.file_entry(&id);
+            if !into_files && file.is_some() {
                 continue;
             }
+            // A file's entry has no body: the file is the project.
+            let file = file.filter(|path| path.is_file());
             let p = self
                 .library
                 .as_ref()
@@ -764,31 +799,34 @@ impl Kernel {
                 .store()
                 .load(&id)
                 .map_err(failure)?;
-            let Some(p) = p else {
-                // Untitled/crashed work without a slot: materialize a recovery copy.
-                match self.recover(&id, None, None) {
-                    Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
-                        recovery_copies.push(self.recovery_copy(r, None)?);
-                        projects += 1;
-                    }
-                    Recovery::Nothing => {}
-                    Recovery::Unrecoverable { reason, .. } => return Err(failure(reason)),
-                }
-                continue;
-            };
-            let file = p
-                .session
-                .as_ref()
-                .and_then(|s| s.get("file"))
-                .and_then(|f| f.get("path"))
-                .and_then(Value::as_str)
-                .map(PathBuf::from);
-            let source = match file {
-                Some(path) if path.is_file() => SessionSource::File(path),
-                _ => SessionSource::Library {
-                    profile: self.library.as_ref().unwrap().store().dir().to_path_buf(),
-                    project: id.clone(),
+            let source = match (p, file) {
+                (_, Some(path)) => SessionSource::File(path),
+                (Some(p), None) => match p
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.get("file"))
+                    .and_then(|f| f.get("path"))
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                {
+                    Some(path) if path.is_file() => SessionSource::File(path),
+                    _ => SessionSource::Library {
+                        profile: self.library.as_ref().unwrap().store().dir().to_path_buf(),
+                        project: id.clone(),
+                    },
                 },
+                (None, None) => {
+                    // Untitled/crashed work without a slot: materialize a recovery copy.
+                    match self.recover(&id, None, None) {
+                        Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
+                            recovery_copies.push(self.recovery_copy(r, None)?);
+                            projects += 1;
+                        }
+                        Recovery::Nothing => {}
+                        Recovery::Unrecoverable { reason, .. } => return Err(failure(reason)),
+                    }
+                    continue;
+                }
             };
             let ShellReply::Opened {
                 session, recovery, ..
@@ -873,7 +911,7 @@ impl Kernel {
         let mut lock = None;
         let mut meta = Value::Object(Map::new());
         let mut rejected_history = None;
-        let (mut source, mut destination, base, base_value) = match source {
+        let (mut source, mut destination, base) = match source {
             SessionSource::New(value) => {
                 let w = self
                     .library
@@ -885,10 +923,9 @@ impl Kernel {
                 let value = with_identity(value, &id, None);
                 let hash = crate::kernel::base_hash_of(&value);
                 (
-                    OpenSource::Untitled(value.clone()),
+                    OpenSource::Untitled(value),
                     Destination::Library(id.clone()),
                     hash,
-                    value,
                 )
             }
             SessionSource::Library { profile, project } => {
@@ -898,10 +935,19 @@ impl Kernel {
                     return Err(KernelFailure::AlreadyOpen(s.handle.project.clone()));
                 }
                 let reader = LibraryStore::open(&profile);
-                let p = reader
-                    .load(&project)
-                    .map_err(failure)?
-                    .ok_or_else(|| failure("Library project is missing"))?;
+                let p = reader.load(&project).map_err(failure)?.ok_or_else(|| {
+                    // A file's entry has no body of its own (save_file_entry).
+                    let file = reader
+                        .read(&format!("projectMeta.{project}"))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|m| m.get("file").is_some());
+                    failure(if file {
+                        "The project’s file isn’t available"
+                    } else {
+                        "Library project is missing"
+                    })
+                })?;
                 let owned = self.library.as_ref().is_some_and(|w| {
                     w.store().dir().canonicalize().ok() == reader.dir().canonicalize().ok()
                 });
@@ -926,7 +972,6 @@ impl Kernel {
                 meta = p.session.clone().unwrap_or(meta);
                 rejected_history = p.history.clone();
                 let hash = crate::kernel::base_hash_of(&p.project);
-                let value = p.project.clone();
                 let media_only = meta.get("file").is_none() && meta.get("embeddedMedia").is_some();
                 let association = meta.get("file").or_else(|| meta.get("embeddedMedia"));
                 let associated = association
@@ -998,7 +1043,7 @@ impl Kernel {
                     Some(file) => OpenSource::LibraryWithFile { lib: p, file },
                     None => OpenSource::Library(p),
                 };
-                (source, target, hash, value)
+                (source, target, hash)
             }
 
             SessionSource::File(path) => {
@@ -1042,14 +1087,13 @@ impl Kernel {
                 }
                 let opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
-                let value = opened.document.to_value().unwrap_or(Value::Null);
-                let hash = crate::kernel::base_hash_of(&value);
-                (
-                    OpenSource::File(opened),
-                    Destination::File(path),
-                    hash,
-                    value,
-                )
+                // The opened tree is canonical already: hash it in place.
+                let hash = opened
+                    .document
+                    .root()
+                    .map(pm_model::hash::canonical_hash)
+                    .unwrap_or_else(|| crate::kernel::base_hash_of(&Value::Null));
+                (OpenSource::File(opened), Destination::File(path), hash)
             }
         };
         let recovery_file = match &source {
@@ -1061,26 +1105,42 @@ impl Kernel {
             Destination::Library(slot) => slot.as_str(),
             _ => id.as_str(),
         };
-        let mut recovered = self.recover(
-            recovery_id,
-            Some(&base),
-            Some(&crate::model::to_canonical(base_value)),
-        );
-        if matches!(mode, RecoveryMode::Ask)
-            && let Recovery::Recovered(r) = &recovered
-            && !r.truncated
-            && r.document
-                .root()
-                .map(pm_model::hash::canonical_hash)
-                .as_deref()
-                == Some(&base)
-            && saved_state(&source).is_some_and(|(history, workspace)| {
-                r.history.snapshot().to_saved_packed() == history && r.workspace == workspace
-            })
-        {
-            // Keep old checkpoints on disk; the base already holds these exact
-            // document/history/workspace facts, so there is nothing to decide.
-            recovered = Recovery::Nothing;
+        // Only a journal left behind needs the base as a value.
+        let journaled = self
+            .project_dir(recovery_id)
+            .is_some_and(|dir| !crate::journal::sessions(&dir).is_empty());
+        let mut recovered = Recovery::Nothing;
+        if journaled {
+            let document = crate::model::to_canonical(source_value(&source));
+            let saved = saved_state(&source);
+            recovered = self.recover_from(
+                recovery_id,
+                Some(&base),
+                Some(crate::journal::Base {
+                    document: &document,
+                    history: saved.as_ref().map(|(h, _)| h),
+                    workspace: saved.as_ref().map(|(_, w)| w),
+                }),
+            );
+            if matches!(mode, RecoveryMode::Ask)
+                && let Recovery::Recovered(r) = &recovered
+                && !r.truncated
+                && r.document
+                    .root()
+                    .map(pm_model::hash::canonical_hash)
+                    .as_deref()
+                    == Some(&base)
+                && let Some((history, workspace)) = &saved
+                && r.history.snapshot().to_saved_packed() == *history
+            {
+                // The base already holds this document and undo history, so
+                // there is nothing to decide. A panel layout changed since is
+                // kept without asking. Old sessions stay on disk.
+                if r.workspace != *workspace {
+                    set_workspace(&mut source, r.workspace.clone());
+                }
+                recovered = Recovery::Nothing;
+            }
         }
         let file_stamp = recovery_file
             .as_ref()
@@ -1256,7 +1316,16 @@ impl Kernel {
                 ));
             }
         }
-        let mut info = self.open(&id, source)?;
+        // Unless recovery replaced it, the document opened is the one hashed.
+        let known = matches!(
+            source,
+            OpenSource::File(_)
+                | OpenSource::Library(_)
+                | OpenSource::LibraryWithFile { .. }
+                | OpenSource::Untitled(_)
+        )
+        .then(|| base.clone());
+        let mut info = self.open_known(&id, source, known)?;
         let ui = crate::state::UiState::from_session(meta.clone());
         std::sync::Arc::make_mut(&mut self.state.ui).insert(id.clone(), ui);
         if !info.history_rejected {
@@ -1436,6 +1505,10 @@ impl Kernel {
         slot: &str,
         recovery: bool,
     ) -> Result<(), KernelFailure> {
+        if !recovery && slot == id && matches!(self.sessions[id].destination, Destination::File(_))
+        {
+            return self.save_file_entry(id);
+        }
         let mut value = realize(self, id)?;
         let name = if recovery {
             Some(format!(
@@ -1568,6 +1641,56 @@ impl Kernel {
         let backing = w.store().dir().parent()?.join("recovery-files");
         (!path.starts_with(backing)).then_some(path)
     }
+    /// A closed file entry as a library project, read from its file.
+    fn file_entry_project(
+        &self,
+        id: &str,
+    ) -> Result<crate::library::LibraryProject, KernelFailure> {
+        let path = self
+            .file_entry(id)
+            .filter(|p| p.is_file())
+            .ok_or_else(|| failure("The project’s file isn’t available"))?;
+        let opened = project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
+        let session = self
+            .library
+            .as_ref()
+            .and_then(|w| w.store().read(&format!("projectMeta.{id}")).ok().flatten());
+        Ok(crate::library::LibraryProject {
+            id: id.into(),
+            project: pm_model::canonical::realize_project(
+                opened.document.to_value().unwrap_or(Value::Null),
+            ),
+            history: opened.history.map(|h| h.snapshot().to_saved_packed()),
+            workspace: opened.file.envelope.workspace.clone(),
+            session,
+            journal_applied: 0,
+            journal_skipped: 0,
+            from_autosave: false,
+        })
+    }
+    /// A file session's library entry: its row and where the file is. The
+    /// file is the project; the journal is its crash recovery.
+    fn save_file_entry(&mut self, id: &str) -> Result<(), KernelFailure> {
+        let p = self.project(id).unwrap();
+        let session = &self.sessions[id];
+        let meta = self
+            .state
+            .ui
+            .get(id)
+            .map(|ui| ui.to_session())
+            .unwrap_or_else(|| session.meta.clone());
+        let meta = file_metadata(meta, p.store());
+        let summary = entry_summary(p.store().root());
+        let writer = self
+            .library
+            .as_ref()
+            .ok_or_else(|| failure("Attach a native library first"))?;
+        writer
+            .save_file_entry(id, &summary, meta.clone(), self.compacting)
+            .map_err(failure)?;
+        self.sessions.get_mut(id).unwrap().meta = meta;
+        Ok(())
+    }
     /// The library entry's view state alone, for a file closed unchanged:
     /// where the person left off, without rewriting the project body.
     fn save_session_meta(&mut self, id: &str) -> Result<(), KernelFailure> {
@@ -1590,6 +1713,31 @@ impl Kernel {
         self.sessions.get_mut(id).unwrap().meta = meta;
         Ok(())
     }
+}
+
+/// A library row's `name`, `w` and `h`, as the realized project has them
+/// (the open composition's size), read without realizing the document.
+fn entry_summary(root: Option<&pm_model::doc::Node>) -> Value {
+    let mut m = Map::new();
+    let Some(root) = root else {
+        return Value::Object(m);
+    };
+    let comp = root
+        .get("compId")
+        .and_then(|id| match id.kind() {
+            pm_model::doc::NodeKind::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .and_then(|id| root.get("comps")?.get(id.as_str()?).cloned());
+    if let Some(name) = root.get("name") {
+        m.insert("name", name.to_value());
+    }
+    for k in ["w", "h"] {
+        if let Some(v) = comp.as_ref().and_then(|c| c.get(k)).or_else(|| root.get(k)) {
+            m.insert(k, v.to_value());
+        }
+    }
+    Value::Object(m)
 }
 
 fn file_metadata(meta: Value, store: &crate::DocumentStore) -> Value {

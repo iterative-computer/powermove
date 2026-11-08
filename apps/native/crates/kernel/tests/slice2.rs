@@ -1223,7 +1223,28 @@ fn offline_external_project_compacts_as_a_copy_and_keeps_its_slot() {
     };
     assert_eq!(recovery_copies.len(), 1);
     let reader = LibraryStore::open(&profile);
-    assert!(reader.load("P").unwrap().is_some());
+    // The entry stays, naming its file; the file was its only body.
+    assert!(reader.load("P").unwrap().is_none());
+    assert!(
+        reader
+            .read("projectMeta.P")
+            .unwrap()
+            .unwrap()
+            .get("file")
+            .and_then(|f| f.get("path"))
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| p.ends_with("source.pmv"))
+    );
+    assert!(
+        reader
+            .read("projects")
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.get("id").and_then(|id| id.as_str()) == Some("P"))
+    );
     let p = reader.load(&recovery_copies[0]).unwrap().unwrap();
     let mut copy = Kernel::new(Default::default());
     copy.open("copy", OpenSource::Library(p)).unwrap();
@@ -1460,4 +1481,67 @@ fn saving_in_place_keeps_the_file_mode() {
         fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o644
     );
+}
+#[test]
+fn a_session_killed_unchanged_or_after_saving_reopens_without_asking() {
+    let dir = common::TempDir::new("saved-then-killed");
+    let path = dir.path("source.pmv");
+    fs::write(&path, PROJECT).unwrap();
+    let profile = dir.path("native");
+    let prepare = |k: &mut Kernel| {
+        k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(path.clone()),
+            electron_profile: None,
+        })
+        .unwrap()
+    };
+    let checkpoints = || {
+        fs::read_dir(profile.join("journals/P"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|s| fs::read_dir(s.path()).into_iter().flatten().flatten())
+            .filter(|f| f.file_name().to_string_lossy().starts_with("checkpoint-"))
+            .count()
+    };
+    {
+        // Opened and never changed: nothing rewrites the project.
+        let mut k = kernel(&profile);
+        open(&mut k, "P", SessionSource::File(path.clone()));
+        k.sync_all();
+        assert_eq!(checkpoints(), 0);
+        assert!(!profile.join("store/project.P.json").exists());
+    }
+    let h = {
+        let mut k = kernel(&profile);
+        let ShellReply::Opened { session, .. } = prepare(&mut k) else {
+            panic!("an unchanged session asked to recover")
+        };
+        edit(&mut k, "P", 41.0);
+        k.shell(ShellCall::Save(session.clone())).unwrap();
+        k.sync_all();
+        session
+    };
+    drop(h);
+    {
+        // Killed after saving: the file holds everything the journal does.
+        let mut k = kernel(&profile);
+        let ShellReply::Opened { .. } = prepare(&mut k) else {
+            panic!("a saved session asked to recover")
+        };
+        assert_eq!(
+            common::opacity_of(k.project("P").unwrap().store(), "layer0"),
+            Some(41.0)
+        );
+        assert!(k.project("P").unwrap().store().history().len() > 0);
+        edit(&mut k, "P", 12.0);
+        k.sync_all();
+    }
+    // Killed with an unsaved edit: that is worth asking about.
+    let mut k = kernel(&profile);
+    assert!(matches!(
+        prepare(&mut k),
+        ShellReply::RecoveryRequired { .. }
+    ));
 }

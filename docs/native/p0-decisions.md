@@ -132,3 +132,10 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
 - Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
 - The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.
+
+## Open, recovery and quit (core lane, 2026-11-08)
+
+- A file project's library entry is its row plus `projectMeta.file`; the `.pmv` is its only body, so open and save never copy it into the library. Entries written by older builds lose their copy on next open. A closed entry's Duplicate and rollback compaction read the file.
+- A journal session that starts from exactly what its file or slot holds writes checkpoint 0 at its first change, not at open; until then recovery replays from that base, including its undo history and workspace. A save deletes the sessions it made redundant at once.
+- A journal whose document and undo history equal the saved file retires without asking; a newer panel layout in it is kept silently.
+- SIGTERM runs the normal Quit path; a clean quit releases `library.lock` (`ShellCall::ReleaseLibrary`, internal).

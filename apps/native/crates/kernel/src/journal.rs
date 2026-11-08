@@ -158,6 +158,8 @@ enum Job {
         /// Told the checkpoint's size, which says whether the document is large.
         measured: Arc<AtomicU64>,
     },
+    /// Sessions a durable save made redundant (deleted in queue order).
+    Retire(Vec<PathBuf>),
     Barrier(mpsc::Sender<()>),
 }
 
@@ -259,6 +261,11 @@ impl Durability {
                                 measured.store(bytes, Ordering::Release);
                                 prune_before(&dir, segment);
                                 for old in supersedes {
+                                    let _ = fs::remove_dir_all(old);
+                                }
+                            }
+                            Job::Retire(old) => {
+                                for old in old {
                                     let _ = fs::remove_dir_all(old);
                                 }
                             }
@@ -364,6 +371,8 @@ pub struct Journal {
     target: Arc<SyncTarget>,
     bytes: u64,
     revisions: u64,
+    /// Checkpoint 0, held back while the session's state is its base.
+    deferred: Option<Box<CheckpointState>>,
 }
 
 fn segment_name(n: u64) -> String {
@@ -418,6 +427,13 @@ impl Journal {
     /// hash is `base`, checkpointing `initial` in the background.
     /// `supersedes`: older sessions (of this project or the one it copies)
     /// to delete once that checkpoint is durable.
+    ///
+    /// `saved`: `initial` is exactly what the project's file or library slot
+    /// durably holds (document, history and workspace). Its checkpoint then
+    /// waits for the first change: until one, recovery starts from that base
+    /// ([`recover_from`]), and a large project is not rewritten just to be
+    /// opened or saved. The superseded sessions hold nothing the base lacks
+    /// and are deleted at once.
     pub fn create(
         durability: &Durability,
         project_dir: &Path,
@@ -425,22 +441,32 @@ impl Journal {
         base: &str,
         initial: CheckpointState,
         supersedes: Vec<PathBuf>,
+        saved: bool,
     ) -> io::Result<Journal> {
         let dir = project_dir.join(session_name());
         fs::create_dir_all(&dir)?;
         sync_dir(project_dir)?;
         let (file, target) = open_segment(durability, &dir, project, base, 0, initial.revision)?;
         let checkpoint_bytes = Arc::new(AtomicU64::new(0));
-        durability.submit(Job::Checkpoint {
-            dir: dir.clone(),
-            project: project.to_owned(),
-            base: base.to_owned(),
-            segment: 0,
-            state: Box::new(initial),
-            supersedes,
-            measured: checkpoint_bytes.clone(),
-        });
+        let mut deferred = None;
+        if saved {
+            if !supersedes.is_empty() {
+                durability.submit(Job::Retire(supersedes));
+            }
+            deferred = Some(Box::new(initial));
+        } else {
+            durability.submit(Job::Checkpoint {
+                dir: dir.clone(),
+                project: project.to_owned(),
+                base: base.to_owned(),
+                segment: 0,
+                state: Box::new(initial),
+                supersedes,
+                measured: checkpoint_bytes.clone(),
+            });
+        }
         Ok(Journal {
+            deferred,
             checkpoint_bytes,
             dir,
             project: project.to_owned(),
@@ -473,6 +499,17 @@ impl Journal {
     ) -> io::Result<()> {
         if taps.is_empty() && workspace.is_none() {
             return Ok(());
+        }
+        if let Some(initial) = self.deferred.take() {
+            durability.submit(Job::Checkpoint {
+                dir: self.dir.clone(),
+                project: self.project.clone(),
+                base: self.base.clone(),
+                segment: 0,
+                state: initial,
+                supersedes: Vec::new(),
+                measured: self.checkpoint_bytes.clone(),
+            });
         }
         let mut buf = String::new();
         for tap in taps {
@@ -859,10 +896,41 @@ pub fn recover(
     current_base: Option<&str>,
     base_document: Option<&Value>,
 ) -> Recovery {
+    recover_from(
+        project_dir,
+        current_base,
+        base_document.map(|document| Base {
+            document,
+            history: None,
+            workspace: None,
+        }),
+    )
+}
+
+/// What a session's base holds, for replay when no checkpoint landed.
+pub struct Base<'a> {
+    /// The canonical document (its hash is checked against the session's).
+    pub document: &'a Value,
+    /// Its saved undo history and workspace (`None`: none).
+    pub history: Option<&'a Value>,
+    pub workspace: Option<&'a Value>,
+}
+
+/// [`recover`] with the base's undo history and workspace, so a session
+/// replayed from its base keeps them.
+pub fn recover_from(
+    project_dir: &Path,
+    current_base: Option<&str>,
+    base: Option<Base>,
+) -> Recovery {
     let Some(session) = sessions(project_dir).pop() else {
         return Recovery::Nothing;
     };
-    match recover_session(&session, base_document) {
+    if numbered(&session, "checkpoint-", ".json").is_empty() && !has_changes(&session) {
+        // Opened (or saved) and never changed: the base holds all of it.
+        return Recovery::Nothing;
+    }
+    match recover_session(&session, base) {
         Err(reason) => Recovery::Unrecoverable { session, reason },
         Ok(recovered) => match current_base {
             Some(current) if current != recovered.base => Recovery::Copy {
@@ -883,7 +951,22 @@ fn segment_head(path: &Path) -> Option<Map> {
     parse(json).ok()?.as_object().cloned()
 }
 
-fn recover_session(session: &Path, base_document: Option<&Value>) -> Result<Recovered, String> {
+/// Whether any segment of `session` holds an entry after its header.
+fn has_changes(session: &Path) -> bool {
+    numbered(session, "journal-", ".log").into_iter().any(|n| {
+        let mut text = Vec::new();
+        File::open(session.join(segment_name(n)))
+            .and_then(|mut f| f.read_to_end(&mut text))
+            .is_ok_and(|_| {
+                text.split(|&b| b == b'\n')
+                    .filter(|l| !l.is_empty())
+                    .nth(1)
+                    .is_some()
+            })
+    })
+}
+
+fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, String> {
     let segments = numbered(session, "journal-", ".log");
     let first = *segments.first().ok_or("the session has no journal")?;
     let head = segment_head(&session.join(segment_name(first)))
@@ -916,8 +999,8 @@ fn recover_session(session: &Path, base_document: Option<&Value>) -> Result<Reco
             if first != 0 {
                 return Err("no checkpoint covers the oldest journal segment".into());
             }
-            let doc = base_document.ok_or("no checkpoint was written and no base was given")?;
-            if pm_model::hash::canonical_hash(doc) != session_base {
+            let base = base.ok_or("no checkpoint was written and no base was given")?;
+            if pm_model::hash::canonical_hash(base.document) != session_base {
                 return Err("the given document is not this journal's base".into());
             }
             let revision = head.get("revision").and_then(Value::as_f64).unwrap_or(1.0) as u64;
@@ -926,9 +1009,9 @@ fn recover_session(session: &Path, base_document: Option<&Value>) -> Result<Reco
                 Loaded {
                     revision,
                     base: session_base.clone(),
-                    document: doc.clone(),
-                    history: Value::Null,
-                    workspace: Value::Null,
+                    document: base.document.clone(),
+                    history: base.history.cloned().unwrap_or(Value::Null),
+                    workspace: base.workspace.cloned().unwrap_or(Value::Null),
                 },
             )
         }

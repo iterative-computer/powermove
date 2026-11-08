@@ -262,6 +262,7 @@ pub struct DocumentStore {
     /// Durable changes since the last [`take_tap`](Self::take_tap), when
     /// enabled (the kernel journal).
     tap: Option<Vec<Tap>>,
+    upgraded_on_open: bool,
 }
 
 impl std::fmt::Debug for DocumentStore {
@@ -308,8 +309,12 @@ impl DocumentStore {
         history: History,
         history_owned: bool,
     ) -> DocumentStore {
-        let (mut document, history) =
-            crate::commands::scene3d::upgrade_document_history(document, history);
+        let upgraded_on_open = crate::commands::scene3d::needs_upgrade(&document, &history);
+        let (mut document, history) = if upgraded_on_open {
+            crate::commands::scene3d::upgrade_document_history(document, history)
+        } else {
+            (document, history)
+        };
         // Native saves preserve the original effect-generation evidence even
         // though the envelope's own application version changes on Save.
         let version = file
@@ -349,7 +354,14 @@ impl DocumentStore {
             next_listener: 1,
             save_ticket: Weak::new(),
             tap: None,
+            upgraded_on_open,
         }
+    }
+
+    /// Opening upgraded the document or its history (old 3D objects), so it
+    /// no longer matches the file or slot it came from.
+    pub fn upgraded_on_open(&self) -> bool {
+        self.upgraded_on_open
     }
 
     // ── reading ────────────────────────────────────────────────────────────
