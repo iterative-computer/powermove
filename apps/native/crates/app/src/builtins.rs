@@ -1154,40 +1154,52 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             return;
         };
         cx.spawn(async move |cx| {
-            // Each realm answers within 100 ms or is left out of this paint.
+            // One 100 ms deadline for the whole request: a realm that hasn't
+            // answered by then is left out of this paint. Answers are bounded
+            // here, on the worker, before they reach the main thread.
             let shapes = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut merged = serde_json::Map::new();
-                    for (_, ticket) in runtime.paint_clips(&clips) {
+                    let visible: std::collections::HashSet<String> = clips
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                        .collect();
+                    let tickets = runtime.paint_clips(&clips);
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(100);
+                    let mut shapes = pm_panel_timeline::render::Decorations::new();
+                    let mut complete = true;
+                    for (_, ticket) in tickets {
                         let Ok(ticket) = ticket else { continue };
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_millis(100);
-                        let text = loop {
+                        // A painter that threw has answered; one still running
+                        // past the deadline makes this paint incomplete.
+                        let answer = loop {
                             if let Some(result) = ticket.try_take() {
-                                break result.ok().map(|e| e.value);
+                                break Some(result);
                             }
                             if std::time::Instant::now() > deadline {
                                 break None;
                             }
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         };
-                        let value = text
-                            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                            .map(|v| match v {
-                                Value::String(inner) => {
-                                    serde_json::from_str(&inner).unwrap_or(Value::Null)
-                                }
-                                other => other,
-                            });
-                        if let Some(Value::Object(map)) = value {
-                            merged.extend(map);
+                        let Some(Ok(evaluation)) = answer else {
+                            complete &= answer.is_some();
+                            continue;
+                        };
+                        if let Some(answer) = painter_answer(&evaluation.value) {
+                            pm_panel_timeline::render::add_decorations(
+                                &mut shapes,
+                                &answer,
+                                &visible,
+                            );
                         }
                     }
-                    Value::Object(merged)
+                    (shapes, complete)
                 })
                 .await;
-            cx.update(|cx| done(shapes, cx));
+            cx.update(|cx| done(shapes.0, shapes.1, cx));
         })
         .detach();
     }
@@ -1388,6 +1400,19 @@ impl Render for SurfaceWindow {
     }
 }
 
+/// A painter's answer: JSON text (the realm returns `JSON.stringify(…)`),
+/// refused past 4 MiB before parsing.
+fn painter_answer(text: &str) -> Option<Value> {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    if text.len() > LIMIT {
+        return None;
+    }
+    match serde_json::from_str::<Value>(text).ok()? {
+        Value::String(inner) => serde_json::from_str(&inner).ok(),
+        other => Some(other),
+    }
+}
+
 /// v1–3's timeline chrome (`workspace.chrome.timeline`, which extensions set
 /// through `workspace.mutate`) as the timeline's metrics, within v1's ranges:
 /// row height, layer column (gutter) width, ruler height and keyframe size.
@@ -1422,18 +1447,24 @@ pub fn timeline_chrome(
                 .unwrap_or(Value::Null)
         })
         .unwrap_or(Value::Null);
-    let field = |key: &str, low: f64, high: f64| {
+    // Main rounds the three lengths and keeps fractional key and corner sizes.
+    let field = |key: &str, low: f64, high: f64, round: bool| {
         chrome[key]
             .as_f64()
             .filter(|v| v.is_finite())
-            .map(|v| v.round().clamp(low, high))
+            .map(|v| if round { v.round() } else { v }.clamp(low, high))
     };
     let m = &mut t.metrics;
     for (target, value) in [
-        (&mut m.track_row, field("rowHeight", 22., 48.)),
-        (&mut m.layer_column, field("gutterWidth", 160., 640.)),
-        (&mut m.ruler, field("rulerHeight", 20., 42.)),
-        (&mut m.keyframe, field("keyframeSize", 4., 12.)),
+        (&mut m.track_row, field("rowHeight", 22., 48., true)),
+        (&mut m.layer_column, field("gutterWidth", 160., 640., true)),
+        (&mut m.ruler, field("rulerHeight", 20., 42., true)),
+        (&mut m.keyframe, field("keyframeSize", 4., 12., false)),
+        // Main draws clip bars with at most a 5-point corner.
+        (
+            &mut m.clip_radius,
+            field("clipRadius", 0., 12., false).map(|r| r.min(5.)),
+        ),
     ] {
         if let Some(value) = value {
             *target = value as f32;

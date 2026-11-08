@@ -162,13 +162,24 @@ fn timeline_chrome_follows_the_workspace_and_the_theme_surface() {
     use pm_design::{Accessibility, Scheme, Tokens};
     let base = Tokens::new(Scheme::Dark, Accessibility::default());
     let workspace = pm_model::json::parse(
-        r#"{"chrome":{"timeline":{"rowHeight":30,"gutterWidth":900,"rulerHeight":28,"keyframeSize":7},"timelineSurfaceOrder":"normal"}}"#,
+        r#"{"chrome":{"timeline":{"rowHeight":30,"gutterWidth":900,"rulerHeight":28,"keyframeSize":7.5,"clipRadius":9},"timelineSurfaceOrder":"normal"}}"#,
     )
     .unwrap();
     let t = crate::builtins::timeline_chrome(base.clone(), &workspace, &serde_json::Value::Null);
     assert_eq!(t.metrics.track_row, 30.);
     assert_eq!(t.metrics.layer_column, 640., "v1's range");
-    assert_eq!((t.metrics.ruler, t.metrics.keyframe), (28., 7.));
+    assert_eq!(
+        (t.metrics.ruler, t.metrics.keyframe),
+        (28., 7.5),
+        "keys keep fractions"
+    );
+    assert_eq!(
+        t.metrics.clip_radius, 5.,
+        "main's clip bars cap the corner at 5"
+    );
+    let clips = pm_model::json::parse(r#"{"chrome":{"timeline":{"clipRadius":2.5}}}"#).unwrap();
+    let t2 = crate::builtins::timeline_chrome(base.clone(), &clips, &serde_json::Value::Null);
+    assert_eq!(t2.metrics.clip_radius, 2.5);
     let surface = serde_json::json!({"track":0x202020,"gutter":0x101010,"accent":0x123456});
     let t = crate::builtins::timeline_chrome(base.clone(), &workspace, &surface);
     assert_eq!(

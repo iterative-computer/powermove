@@ -35,14 +35,16 @@ impl ViewerOverlays {
     pub fn publish(&mut self, runtime: Arc<Builtins>, p: Publication, cx: &mut Context<Self>) {
         self.runtime = Some(runtime);
         match self.views.get(&p.panel) {
+            // An overlay redrawing (often for the frame it was just told) must
+            // not resend that frame: the realm would render again, forever.
             Some(view) => view.update(cx, |v, cx| v.publish(p, cx)),
             None => {
                 self.pending.insert(p.panel.clone(), p);
+                // A new overlay's realm may not know the frame yet.
+                self.sent = None;
+                cx.notify();
             }
         }
-        // A new overlay needs the frame too.
-        self.sent = None;
-        cx.notify();
     }
     pub fn clear(&mut self, id: &str, cx: &mut Context<Self>) {
         self.views.remove(id);

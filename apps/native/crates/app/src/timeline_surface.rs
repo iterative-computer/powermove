@@ -51,8 +51,8 @@ pub trait Delegate: 'static {
         self.menu(items, window, cx, choose);
     }
 }
-/// Receives extension clip decorations (`{clipId: shapes}`).
-pub type PaintDone = Box<dyn FnOnce(serde_json::Value, &mut App)>;
+/// Receives extension clip decorations, and whether every painter answered.
+pub type PaintDone = Box<dyn FnOnce(pm_panel_timeline::render::Decorations, bool, &mut App)>;
 /// Runs with the picked row index once a native menu closes.
 pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
 #[derive(Clone, Debug)]
@@ -168,11 +168,11 @@ pub struct TimelineSurface {
     idle_persist: Option<Task<()>>,
     /// Extension clip decorations by clip id (`timeline.paint`), and what
     /// they were asked for (painter revision, visible clips) and the request
-    /// in flight.
-    decorations: Arc<serde_json::Map<String, serde_json::Value>>,
+    /// in flight; `late` is when a request some painter missed was asked.
+    decorations: Arc<pm_panel_timeline::render::Decorations>,
     painted: Option<(u64, String)>,
     painting: bool,
-    asked: Option<std::time::Instant>,
+    late: Option<std::time::Instant>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -216,7 +216,7 @@ impl TimelineSurface {
             decorations: Default::default(),
             painted: None,
             painting: false,
-            asked: None,
+            late: None,
         };
         this.restore_view();
         cx.spawn(async move |this, cx| {
@@ -534,25 +534,25 @@ impl TimelineSurface {
             revision,
             serde_json::Value::Array(clips.clone()).to_string(),
         );
-        // An empty answer may have come before a painter registered: ask again
-        // on a later frame, at most every half second.
-        let retry = self.decorations.is_empty()
-            && self
-                .asked
-                .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(500));
+        // A painter that missed the deadline (a cold realm) is asked again on
+        // a later frame, at most every half second.
+        let retry = self
+            .late
+            .is_some_and(|at| at.elapsed() >= std::time::Duration::from_millis(500));
         if self.painting || (self.painted.as_ref() == Some(&key) && !retry) {
             return;
         }
-        self.asked = Some(std::time::Instant::now());
+        let asked = std::time::Instant::now();
         self.painting = true;
         self.painted = Some(key);
         let weak = cx.entity().downgrade();
         self.delegate.clone().paint_clips(
             serde_json::Value::Array(clips),
-            Box::new(move |shapes, cx| {
+            Box::new(move |shapes, complete, cx| {
                 let _ = weak.update(cx, |s, cx| {
                     s.painting = false;
-                    s.decorations = Arc::new(shapes.as_object().cloned().unwrap_or_default());
+                    s.late = (!complete).then_some(asked);
+                    s.decorations = Arc::new(shapes);
                     s.frame = None;
                     cx.notify();
                 });
