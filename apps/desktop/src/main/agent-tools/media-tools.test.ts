@@ -264,6 +264,19 @@ describe('transcribe_media against the transcription seam', () => {
     expect(transcribe).toHaveBeenCalledTimes(2);
   });
 
+  it('rechecks all bytes before reusing a transcript with the same renderer fingerprint', async () => {
+    const file = path.join(directory, 'synced-source.mp4');
+    await writeFile(file, 'original audio');
+    const transcribe = vi.fn(async () => transcript);
+    const media = tools({ transcription: () => service(transcribe) });
+    vi.spyOn(media as any, 'probe').mockResolvedValue({ audio: [{}], video: [], duration: 8 });
+    const target: AgentMediaSource = { ...source(), path: file, contentKey: 'unchanged-sampled-fingerprint' };
+    await media.call('transcribe_media', { assetId: 'a1' }, context(target));
+    await writeFile(file, 'modified audio');
+    await media.call('transcribe_media', { assetId: 'a1' }, context(target));
+    expect(transcribe).toHaveBeenCalledTimes(2);
+  });
+
   it('maps a retimed clip\'s words into composition time and drops what the clip does not play', async () => {
     const transcribe = vi.fn(async () => transcript);
     const layer = { id: 'L1', name: 'Interview', type: 'video', from: 10, duration: 1.5, timing: { constant: true, samples: [[10, 3], [11.5, 6]] as Array<[number, number]> }, sourceStart: 3, sourceEnd: 6 };

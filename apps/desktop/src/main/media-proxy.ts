@@ -5,6 +5,8 @@ import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import { requireLocalMedia } from './file-cloud-state';
+import { FileContentCache } from './file-content-version';
 
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 
@@ -239,6 +241,7 @@ export function stillImageConverter(binary: string): ConvertStill {
 }
 
 export class MediaProxyService {
+  private readonly sourceContent = new FileContentCache();
   readonly #entries = new Map<string, ProxyEntry>();
   readonly #releases = new Map<string, Promise<void>>();
   readonly #releaseListeners = new Set<(token: string) => void>();
@@ -252,7 +255,8 @@ export class MediaProxyService {
     private readonly convert: ConvertPlayback,
     private readonly convertSequence?: ConvertSequence,
     private readonly convertPreview?: Convert,
-    private readonly convertStill?: ConvertStill
+    private readonly convertStill?: ConvertStill,
+    private readonly prepareSource: (file: string) => Promise<void> = requireLocalMedia
   ) {}
 
   #add(entry: ProxyEntry): string {
@@ -345,6 +349,7 @@ export class MediaProxyService {
     if (!path.isAbsolute(sourcePath) || !VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) {
       throw new Error('This video container is not one Powermove can convert');
     }
+    await this.prepareSource(sourcePath);
     const resolved = await realpath(sourcePath);
     const source = await stat(resolved);
     if (!source.isFile() || source.size <= 0) {
@@ -352,7 +357,7 @@ export class MediaProxyService {
     }
 
     signal?.throwIfAborted();
-    const key = `${resolved}\0${source.size}\0${source.mtimeMs}`;
+    const key = `${resolved}\0${await this.sourceContent.hash(resolved)}`;
     let conversion = this.#conversions.get(key);
     if (!conversion) {
       const controller = new AbortController();
@@ -415,6 +420,7 @@ export class MediaProxyService {
       // Only generated names enter FFmpeg's pattern; user filenames never become
       // demuxer directives. Symlinks avoid copying an entire sequence into RAM.
       for (let index = 0; index < frames.length; index++) {
+        await this.prepareSource(frames[index]!.source);
         const source = await realpath(frames[index]!.source);
         const info = await stat(source);
         if (!info.isFile() || info.size <= 0) throw new Error(`Could not read ${frames[index]!.name}`);
@@ -504,6 +510,7 @@ export class MediaProxyService {
     if (!path.isAbsolute(sourcePath) || !needsImageConversion(extension)) {
       throw new Error('This image format does not need converting');
     }
+    await this.prepareSource(sourcePath);
     const resolved = await realpath(sourcePath);
     const source = await stat(resolved);
     if (!source.isFile() || source.size <= 0) throw new Error('The selected image file is not readable');
