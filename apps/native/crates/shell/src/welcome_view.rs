@@ -347,7 +347,13 @@ impl Render for WelcomeView {
             footer = footer.child(self.button(button, cx));
         }
         content = content.child(footer);
+        // The accessibility tree hangs off an identified, labelled root, as in
+        // the editor; without it VoiceOver sees only the traffic lights.
         let mut root = div()
+            .id("welcome")
+            .role(Role::Group)
+            .accessibility_id("shell.welcome")
+            .aria_label(frame.title.clone())
             .relative()
             .size_full()
             .flex()
