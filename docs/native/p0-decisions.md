@@ -85,3 +85,4 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 ## v4 API additions
 
 - **`onPointerEnter` / `onPointerLeave` (2026-11-07, additive):** typed on every intrinsic element; the host already delivered `pointerenter`/`pointerleave` to listeners. Timeline rows use them to show their switches on hover.
+- **`EventPlan.semantic` (2026-11-08, additive, host↔renderer wire):** optional; the host sets it to the target's `id` when it planned an activation on an identified element, and the renderer then accepts the event even if a render restyled that element first (a hovered row stays clickable).
