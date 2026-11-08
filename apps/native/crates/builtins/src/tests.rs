@@ -1976,7 +1976,7 @@ fn the_masks_section_adds_edits_and_removes_masks() {
             .clone()
     };
     assert!(masks(&mut presenter, &mut model).is_empty());
-    let mut run = |request: Request| {
+    let run = |request: Request| {
         let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
         assert!(
             !matches!(ack.reply, pm_kernel::Reply::Throw(_)),

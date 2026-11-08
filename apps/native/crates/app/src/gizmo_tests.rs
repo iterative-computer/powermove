@@ -994,7 +994,6 @@ fn return_edits_the_selected_text_and_undo_reverts_it(cx: &mut TestAppContext) {
 fn the_pen_draws_a_closed_mask_path_on_the_selected_layer(cx: &mut TestAppContext) {
     let mut s = stage(cx);
     s.recorder.tool.set(Some(Tool::Pen));
-    let mut vertices = 0;
     let press =
         |s: &mut Stage, cx: &mut TestAppContext, at: [f64; 2], by: Option<Point<Pixels>>| {
             let p = s.point_of(at);
@@ -1008,13 +1007,16 @@ fn the_pen_draws_a_closed_mask_path_on_the_selected_layer(cx: &mut TestAppContex
             }
             s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
         };
-    for (at, by) in [
+    for (vertices, (at, by)) in [
         ([300., 100.], None),
         ([400., 100.], Some(point(px(30.), px(0.)))),
         ([400., 250.], None),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let vertices = vertices + 1;
         press(&mut s, cx, at, by);
-        vertices += 1;
         let surface = s.surface.clone();
         settle(cx, move |cx| {
             surface.read_with(cx, |g, _| g.pen_vertices() == vertices)

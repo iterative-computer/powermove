@@ -462,7 +462,7 @@ impl GizmoSurface {
                 (p.layer.clone(), p.kind.clone(), world)
             }
             None => {
-                if published.selection.layers().first().is_some() && pose.is_none() {
+                if !published.selection.layers().is_empty() && pose.is_none() {
                     // A locked layer is selected: nothing to draw on.
                     let locked = published.snapshot.root().is_some_and(|root| {
                         pm_kernel::model::list_layers(root, None).iter().any(|l| {

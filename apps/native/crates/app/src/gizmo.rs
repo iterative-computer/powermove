@@ -259,7 +259,7 @@ pub struct GizmoSurface {
     /// A Select-tool drag from empty canvas.
     marquee: Option<marquee::Marquee>,
     /// Snapping guides of the move in progress, composition points.
-    guides: Vec<([f64; 2], [f64; 2])>,
+    guides: Vec<snap::Guide>,
 }
 struct Sketch {
     origin: Point<Pixels>,

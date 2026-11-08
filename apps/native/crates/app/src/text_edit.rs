@@ -1411,75 +1411,6 @@ fn text_under(
         .map(|l| l.id)
 }
 
-#[cfg(test)]
-mod tests {
-    // Not a glob: gpui's own `test` attribute would shadow the standard one.
-    use super::{Align, Layout, Line, first_line, paragraph_range, word_range};
-    fn layout() -> Layout {
-        // Two lines: "ab" at y 0 and "cd" at y 20; 10 px per character.
-        let line = |start: usize, y: f64| Line {
-            len: 2,
-            start,
-            x: 0.,
-            y,
-            width: 20.,
-            boundaries: vec![(start, 0.), (start + 1, 10.), (start + 2, 20.)],
-        };
-        Layout {
-            lines: vec![line(0, 0.), line(3, 20.)],
-            line_height: 20.,
-            size: 16.,
-            length: 5,
-            align: Align::Left,
-            box_width: 0.,
-            box_height: 0.,
-        }
-    }
-    #[test]
-    fn carets_and_hits_follow_the_engine_lines() {
-        let l = layout();
-        assert_eq!(l.caret(1).x, 10.);
-        assert_eq!(l.caret(4).line, 1);
-        // The newline belongs to the first line's end.
-        assert_eq!(l.caret(2).line, 0);
-        assert_eq!(l.index_at(14., 25.), 4);
-        assert_eq!(l.index_at(-50., -50.), 0);
-        assert_eq!(l.index_at(500., 500.), 5);
-    }
-    #[test]
-    fn vertical_moves_keep_the_column() {
-        let l = layout();
-        assert_eq!(l.vertical(1, true, 10.), Some(4));
-        assert_eq!(l.vertical(4, false, 10.), Some(1));
-        assert_eq!(l.vertical(4, true, 10.), None);
-    }
-    #[test]
-    fn a_selection_across_lines_has_one_rect_per_line() {
-        let r = layout().selection_rects(1, 4);
-        assert_eq!(r.len(), 2);
-        assert_eq!((r[0].x, r[0].w), (10., 14.));
-        assert_eq!((r[1].x, r[1].w), (0., 10.));
-    }
-    #[test]
-    fn point_text_frames_its_lines_and_paragraphs_their_box() {
-        let mut l = layout();
-        let f = l.frame();
-        assert_eq!((f.x, f.w), (0., 20.));
-        l.box_width = 300.;
-        l.align = Align::Center;
-        assert_eq!(l.frame().x, -150.);
-    }
-    #[test]
-    fn word_and_paragraph_ranges() {
-        assert_eq!(word_range("hello world", 7), (6, 11));
-        assert_eq!(word_range("hello world", 5), (5, 6));
-        assert_eq!(paragraph_range("ab\ncd\nef", 4), (3, 5));
-        assert_eq!(first_line("\n  Hello  \nthere"), "Hello");
-        let long = "x".repeat(50);
-        assert_eq!(first_line(&long).chars().count(), 40);
-    }
-}
-
 fn ns_rect(b: Bounds<Pixels>) -> objc2_foundation::NSRect {
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     NSRect::new(
@@ -1555,4 +1486,73 @@ pub fn native_input(initial: &str, window: &Window) -> Option<Rc<dyn TextInput>>
         initial,
     );
     Some(Rc::new(NativeInput(slot)))
+}
+
+#[cfg(test)]
+mod tests {
+    // Not a glob: gpui's own `test` attribute would shadow the standard one.
+    use super::{Align, Layout, Line, first_line, paragraph_range, word_range};
+    fn layout() -> Layout {
+        // Two lines: "ab" at y 0 and "cd" at y 20; 10 px per character.
+        let line = |start: usize, y: f64| Line {
+            len: 2,
+            start,
+            x: 0.,
+            y,
+            width: 20.,
+            boundaries: vec![(start, 0.), (start + 1, 10.), (start + 2, 20.)],
+        };
+        Layout {
+            lines: vec![line(0, 0.), line(3, 20.)],
+            line_height: 20.,
+            size: 16.,
+            length: 5,
+            align: Align::Left,
+            box_width: 0.,
+            box_height: 0.,
+        }
+    }
+    #[test]
+    fn carets_and_hits_follow_the_engine_lines() {
+        let l = layout();
+        assert_eq!(l.caret(1).x, 10.);
+        assert_eq!(l.caret(4).line, 1);
+        // The newline belongs to the first line's end.
+        assert_eq!(l.caret(2).line, 0);
+        assert_eq!(l.index_at(14., 25.), 4);
+        assert_eq!(l.index_at(-50., -50.), 0);
+        assert_eq!(l.index_at(500., 500.), 5);
+    }
+    #[test]
+    fn vertical_moves_keep_the_column() {
+        let l = layout();
+        assert_eq!(l.vertical(1, true, 10.), Some(4));
+        assert_eq!(l.vertical(4, false, 10.), Some(1));
+        assert_eq!(l.vertical(4, true, 10.), None);
+    }
+    #[test]
+    fn a_selection_across_lines_has_one_rect_per_line() {
+        let r = layout().selection_rects(1, 4);
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0].x, r[0].w), (10., 14.));
+        assert_eq!((r[1].x, r[1].w), (0., 10.));
+    }
+    #[test]
+    fn point_text_frames_its_lines_and_paragraphs_their_box() {
+        let mut l = layout();
+        let f = l.frame();
+        assert_eq!((f.x, f.w), (0., 20.));
+        l.box_width = 300.;
+        l.align = Align::Center;
+        assert_eq!(l.frame().x, -150.);
+    }
+    #[test]
+    fn word_and_paragraph_ranges() {
+        assert_eq!(word_range("hello world", 7), (6, 11));
+        assert_eq!(word_range("hello world", 5), (5, 6));
+        assert_eq!(paragraph_range("ab\ncd\nef", 4), (3, 5));
+        assert_eq!(first_line("\n  Hello  \nthere"), "Hello");
+        let long = "x".repeat(50);
+        assert_eq!(first_line(&long).chars().count(), 40);
+    }
 }

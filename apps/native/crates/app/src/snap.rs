@@ -6,6 +6,8 @@ use gpui::*;
 use pm_kernel::QueryMirror;
 
 pub const DISTANCE: f64 = 8.;
+/// A guide from where a moved point lands to what it met.
+pub type Guide = ([f64; 2], [f64; 2]);
 /// Layers read for candidates; beyond this a huge composition snaps to its
 /// frame and the first layers only.
 const MAX_LAYERS: usize = 400;
@@ -81,7 +83,7 @@ pub fn snap(
     targets: &[[f64; 2]],
     threshold: f64,
     axes: [bool; 2],
-) -> ([f64; 2], Vec<([f64; 2], [f64; 2])>) {
+) -> ([f64; 2], Vec<Guide>) {
     let best = |axis: usize| {
         let mut best: Option<(f64, f64, [f64; 2], [f64; 2])> = None;
         for &m in moving {
