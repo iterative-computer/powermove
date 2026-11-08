@@ -2255,6 +2255,11 @@ impl PlatformWindow for MacWindow {
         }
         #[cfg(not(feature = "wgpu"))]
         this.renderer.draw(scene);
+        // Committing the slot transaction runs AppKit's display cycle, which
+        // calls back into this window (cursor rects take this lock): release
+        // the lock first, or the main thread deadlocks on itself.
+        drop(this);
+        drop(transaction);
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
