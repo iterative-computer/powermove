@@ -215,7 +215,10 @@ impl Builtins {
                 watchdog_hooks: broker.clone(),
                 engine: Some(broker.clone()),
                 cache: CodeCache::new(4 * 1024 * 1024),
-                admission: Admission::new(640 * 1024 * 1024),
+                // Reserved per isolate at its heap ceiling (64 MiB), for the
+                // plan's 64-isolate budget per window: the nine built-ins and
+                // the user's v4 extensions, each in its own isolate (§3.4/§3.7).
+                admission: Admission::new(64 * 64 * 1024 * 1024),
             },
         )?;
         Ok(Self {
@@ -250,15 +253,23 @@ impl Builtins {
     }
     /// Retire a built-in panel's realm, its writer and its surface, so the next
     /// mount of that id starts from its own first commit.
+    /// Waits (bounded) for the old isolate to go, so its heap reservation is
+    /// back before the next one starts: call off the main thread.
     fn retire(&self, panel: &str) {
-        if let Some(realm) = self.realms.lock().unwrap().remove(panel) {
+        let realm = self.realms.lock().unwrap().remove(panel);
+        if let Some(realm) = realm {
             realm.close();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !realm.is_disposed() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
         self.broker.entries.lock().unwrap().remove(panel);
         self.broker.publications.lock().unwrap().remove(panel);
     }
     /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
     /// it: same realm identity, routes and host operations, the fork's code.
+    /// Waits for the old isolate to close, so call it off the main thread.
     pub fn replace(&self, panel: &str, fork: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
         if !LIVE_PANELS.contains(&panel) || (self.broker.application && !matches!(panel, "settings" | "agent")) {
             return Err(Error::Invalid("unregistered built-in"));

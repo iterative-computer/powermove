@@ -151,6 +151,10 @@ pub struct Extensions {
     surfaces: BTreeMap<String, (String, String)>,
     /// Forks drawing a built-in panel in its place: id to (panel, source).
     forks: BTreeMap<String, (String, String)>,
+    /// Surface ids this window has mounted, and whether the first scan is done:
+    /// a panel published while the window is open is shown, not left in a menu.
+    mounted_once: BTreeSet<String>,
+    booted: bool,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
 }
@@ -176,6 +180,8 @@ impl Default for Extensions {
             commands: BTreeSet::new(),
             surfaces: BTreeMap::new(),
             forks: BTreeMap::new(),
+            mounted_once: BTreeSet::new(),
+            booted: false,
             resources: Arc::default(),
         }
     }
@@ -404,6 +410,7 @@ impl Controller {
             return;
         };
         let wanted = host.surfaces();
+        let ready = host.is_ready();
         let source = |surface: &Value| surface["graph"]["hash"].as_str().map(str::to_owned);
         let still = |id: &str, hash: &str| {
             wanted
@@ -442,7 +449,10 @@ impl Controller {
             });
             if !refork {
                 self.builtins.forget_surface(&panel);
-                let ticket = runtime.restore(&panel);
+                let (runtime, built_in) = (runtime.clone(), panel.clone());
+                let ticket = cx
+                    .background_executor()
+                    .spawn(async move { runtime.restore(&built_in) });
                 self.await_panel(panel, id, ticket, cx);
             }
         }
@@ -461,7 +471,10 @@ impl Controller {
                 }
                 self.extensions.forks.insert(id.clone(), (panel.into(), hash));
                 self.builtins.forget_surface(panel);
-                let ticket = runtime.replace(panel, &id, &surface["graph"]);
+                let (runtime, fork, graph) = (runtime.clone(), id.clone(), surface["graph"].clone());
+                let ticket = cx
+                    .background_executor()
+                    .spawn(async move { runtime.replace(panel, &fork, &graph) });
                 self.await_panel(panel.into(), id, ticket, cx);
                 continue;
             }
@@ -471,19 +484,25 @@ impl Controller {
                 .to_owned();
             self.extensions.surfaces.insert(id.clone(), (title, hash));
             let ticket = runtime.mount_extension(&id, &surface["graph"]);
-            self.await_panel(id.clone(), id, ticket, cx);
+            self.await_panel(id.clone(), id.clone(), Task::ready(ticket), cx);
+            if self.extensions.mounted_once.insert(id.clone()) && self.extensions.booted {
+                self.host
+                    .borrow()
+                    .send_command(&format!("panel:show:{id}"), vec![]);
+            }
         }
+        self.extensions.booted |= ready;
     }
     /// The panel shows once its first commit is accepted; a failure says whose.
     fn await_panel(
         &mut self,
         panel: String,
         source: String,
-        ticket: pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>,
+        ticket: Task<pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>>,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
-            let mounted = match ticket {
+            let mounted = match ticket.await {
                 Ok(ticket) => ticket.await.map(|_| ()),
                 Err(error) => Err(error),
             };
