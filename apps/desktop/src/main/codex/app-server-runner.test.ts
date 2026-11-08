@@ -1,5 +1,6 @@
 import { ORCHESTRATION_TOOL_NAMES } from '../../shared/agent-orchestration';
 // Keep runner tests independent of the developer's configured external services.
+vi.mock('../agent-tools/user-resources', () => ({ prepareUserResources: async () => undefined }));
 vi.mock('../agent-tools/user-mcp', async importOriginal => ({
   ...await importOriginal<typeof import('../agent-tools/user-mcp')>(),
   loadUserMcpServers: vi.fn(async () => ({}))
@@ -8,11 +9,17 @@ vi.mock('../agent-tools/user-mcp', async importOriginal => ({
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { CodexRunRequest } from '../../shared/ipc';
 import { CodexAppServerRunner } from './app-server-runner';
+import { CodexRunner, type CodexRunOptions } from './runner';
+import { agentWorkspaceRoot, sessionPathFor } from './workspace';
+import { agentResultSchema } from './instructions';
 
 class FakeAppServer extends EventEmitter {
   readonly stdin = new PassThrough();
@@ -21,7 +28,7 @@ class FakeAppServer extends EventEmitter {
   readonly stdio = [this.stdin, this.stdout, this.stderr];
   readonly channel = null;
   readonly connected = false;
-  readonly pid = 5252;
+  readonly pid = undefined;
   readonly signalCode = null;
   readonly spawnargs: string[] = [];
   readonly spawnfile = '/fake/codex';
@@ -30,13 +37,19 @@ class FakeAppServer extends EventEmitter {
   readonly messages: Array<Record<string, any>> = [];
   private buffered = '';
 
-  constructor() {
+  constructor(private readonly intercept?: (message: Record<string, any>, child: FakeAppServer) => boolean) {
     super();
     this.stdin.setEncoding('utf8');
     this.stdin.on('data', (chunk: string) => this.receive(chunk));
   }
 
-  kill(): boolean { this.killed = true; return true; }
+  kill(): boolean {
+    this.killed = true;
+    this.exitCode = 0;
+    this.emit('exit', 0, null);
+    this.emit('close', 0, null);
+    return true;
+  }
   notify(method: string, params: Record<string, unknown>): void {
     this.stdout.write(`${JSON.stringify({ method, params })}\n`);
   }
@@ -54,16 +67,17 @@ class FakeAppServer extends EventEmitter {
       if (!line) continue;
       const message = JSON.parse(line) as Record<string, any>;
       this.messages.push(message);
+      if (this.intercept?.(message, this)) continue;
       if (typeof message.id !== 'number') continue;
       if (message.method === 'initialize') this.respond(message.id, {});
-      else if (message.method === 'thread/start') this.respond(message.id, { thread: { id: 'thr_123' } });
+      else if (message.method === 'thread/start' || message.method === 'thread/resume') this.respond(message.id, { thread: { id: 'thr_123' } });
       else if (message.method === 'turn/start') this.respond(message.id, { turn: { id: 'turn_456', status: 'inProgress' } });
       else if (message.method === 'turn/steer') this.respond(message.id, { turnId: 'turn_456' });
       else if (message.method === 'turn/interrupt') this.respond(message.id, {});
     }
   }
 
-  private respond(id: number, result: unknown): void {
+  respond(id: number, result: unknown): void {
     queueMicrotask(() => this.stdout.write(`${JSON.stringify({ id, result })}\n`));
   }
 }
@@ -532,7 +546,9 @@ describe('CodexAppServerRunner questions', () => {
     child.ask(90, 'mcpServer/elicitation/request', { threadId: 'thr_123', turnId: 'turn_456', serverName: 'powermove', mode: 'form' });
     child.ask(91, 'item/commandExecution/requestApproval', { ...scope, itemId: 'cmd' });
     await vi.waitFor(() => expect(child.messages).toContainEqual({ id: 90, result: { action: 'decline', content: null, _meta: null } }));
-    await vi.waitFor(() => expect(child.messages.find((message) => message.id === 91 && message.error)).toBeDefined());
+    await vi.waitFor(() => expect(child.messages).toContainEqual({ id: 91, result: { decision: 'decline' } }));
+    child.ask(92, 'unsupported/request', scope);
+    await vi.waitFor(() => expect(child.messages.find((message) => message.id === 92 && message.error)).toBeDefined());
     complete(child);
     await expect(run).resolves.toMatchObject({ ok: true });
     await runner.shutdown();
@@ -573,5 +589,313 @@ describe('CodexAppServerRunner questions', () => {
     complete(child);
     await expect(run).resolves.toMatchObject({ ok: true });
     await runner.shutdown();
+  });
+});
+
+// Exercise the actual autonomous orchestration, replacing only the RPC process.
+// This keeps workspace/result/publication parity covered across the transport boundary.
+describe('autonomous Codex App Server transport', () => {
+  const cleanups: Array<() => Promise<unknown>> = [];
+  afterEach(async () => {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  });
+  const scope = { threadId: 'thr_123', turnId: 'turn_456' };
+  const report = { summary: 'Original task and steering completed', commands: [], artifacts: [], externalActions: [], notes: [], extensions: [] };
+  function complete(child: FakeAppServer, result: unknown = report) {
+    child.notify('item/completed', { ...scope, item: { id: 'final', type: 'agentMessage', text: typeof result === 'string' ? result : JSON.stringify(result) } });
+    child.notify('turn/completed', { threadId: scope.threadId, turn: { id: scope.turnId, status: 'completed' } });
+  }
+  async function setup(intercept?: (message: Record<string, any>, child: FakeAppServer) => boolean) {
+    const userData = await mkdtemp(path.join(tmpdir(), 'powermove-autonomous-rpc-'));
+    cleanups.push(() => rm(userData, { recursive: true, force: true }));
+    const children: FakeAppServer[] = [];
+    const launches: Array<{ cwd?: string; detached?: boolean }> = [];
+    const appServer = new CodexAppServerRunner({
+      discoverBinary: async () => '/fake/codex', prepareHome: async () => userData,
+      spawnProcess: (_binary, _args, options) => {
+        launches.push(options);
+        const child = new FakeAppServer(intercept);
+        children.push(child);
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }, requestTimeoutMs: 500, turnTimeoutMs: 5_000
+    });
+    cleanups.push(() => appServer.shutdown());
+    const runner = new CodexRunner(appServer);
+    const req: CodexRunRequest = { ...request(), mode: 'autonomous', access: 'project', projectJSON: '{"layers":[]}', schema: null };
+    const options: CodexRunOptions = {
+      userData, extensionsDir: path.join(userData, 'extensions'),
+      apiPackFiles: async () => [{ name: 'EXTENSIONS.md', text: '# Test API pack' }],
+      externalMcpServers: {}, timeoutMs: 5_000
+    };
+    const root = agentWorkspaceRoot(userData, req.projectId);
+    const session = sessionPathFor(root, 'project', req.threadId);
+    async function turn(index = children.length - 1): Promise<FakeAppServer> {
+      await vi.waitFor(() => expect(children[index]?.messages.some(m => m.method === 'turn/start')).toBe(true));
+      return children[index]!;
+    }
+    async function stage(): Promise<string> {
+      const base = path.join(root, '.powermove', 'extension-runs');
+      const entries = await readdir(base);
+      expect(entries).toHaveLength(1);
+      return path.join(base, entries[0]!);
+    }
+    return { appServer, runner, req, options, children, launches, root, session, turn, stage };
+  }
+
+  it('steers the live autonomous turn, preserving workspace inputs, tools, schema and artifacts', async () => {
+    const h = await setup();
+    const trace: unknown[] = [];
+    const run = h.runner.run({ ...h.req, images: [new Uint8Array([1, 2, 3])], attachments: [{ name: 'brief.txt', data: new TextEncoder().encode('brief') }] }, {
+      ...h.options, additionalInstructions: 'Use the native tools.', onTrace: event => trace.push(event),
+      nativeTools: { command: '/fixture/mcp', args: ['tools'], env: { FIXTURE: '1' }, toolTimeoutSec: 321 },
+      externalMcpServers: { studio: { command: 'fixture-server' }, powermove: { command: 'wrong-server' } }
+    });
+    const child = await h.turn(0);
+    expect(h.launches[0]!.cwd).toBe(h.root);
+    if (process.platform !== 'win32') expect(h.launches[0]!.detached).toBe(true);
+    const started = child.messages.find(m => m.method === 'thread/start')!.params;
+    const turn = child.messages.find(m => m.method === 'turn/start')!.params;
+    expect(started).toMatchObject({ cwd: h.root, permissions: 'powermove', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' });
+    expect(started.ephemeral).toBeUndefined();
+    expect(started.sandbox).toBeUndefined();
+    expect(started.config).toMatchObject({ web_search: 'live', default_permissions: 'powermove', permissions: { powermove: { extends: ':workspace', network: { enabled: true } } }, mcp_servers: {
+      studio: { command: 'fixture-server' }, powermove: { command: '/fixture/mcp', tool_timeout_sec: 321, required: true, default_tools_approval_mode: 'approve' }
+    } });
+    expect(started.config.mcp_servers.powermove.enabled_tools).toBeUndefined();
+    expect(turn).toMatchObject({ cwd: h.root, permissions: 'powermove', outputSchema: agentResultSchema(), model: h.req.model, effort: h.req.reasoningEffort });
+    expect(turn.sandboxPolicy).toBeUndefined();
+    expect(turn.input[0].text).toContain('Use the native tools.');
+    expect(turn.input[0].text).toContain('USER REQUEST\n' + h.req.prompt);
+    expect(turn.input[0].text).toContain('SHELL NETWORK');
+    // The stage is already inside cwd's workspace-write sandbox.
+    expect(path.relative(h.root, await h.stage()).startsWith('..')).toBe(false);
+    expect(turn.runtimeWorkspaceRoots).toBeUndefined();
+    expect(await readFile(path.join(h.root, 'inputs', 'powermove-project.json'), 'utf8')).toBe(h.req.projectJSON);
+    expect(await readFile(path.join(h.root, 'inputs', 'attachments', 'brief-txt'), 'utf8')).toBe('brief');
+    expect(await readFile(path.join(h.root, 'powermove-api', 'EXTENSIONS.md'), 'utf8')).toBe('# Test API pack');
+    expect(await readFile(turn.input[1].path)).toEqual(Buffer.from([1, 2, 3]));
+
+    await expect(h.appServer.steer({ id: h.req.id, prompt: 'Also make a note.', images: [new Uint8Array([4, 5])] })).resolves.toBe(true);
+    const steering = child.messages.find(m => m.method === 'turn/steer')!.params;
+    expect(steering).toMatchObject({ threadId: scope.threadId, expectedTurnId: scope.turnId, input: [{ type: 'text', text: 'Also make a note.' }, { type: 'localImage' }] });
+    expect(await readFile(steering.input[1].path)).toEqual(Buffer.from([4, 5]));
+    const artifactBase = path.join(h.root, 'artifacts');
+    const runId = (await readdir(artifactBase))[0]!;
+    await writeFile(path.join(artifactBase, runId, 'note.txt'), 'kept');
+    child.notify('item/started', { ...scope, item: { id: 'compact', type: 'contextCompaction' } });
+    complete(child, { ...report, artifacts: [{ path: 'note.txt', importToTimeline: false }] });
+    const result = await run;
+    expect(result).toMatchObject({ ok: true, access: 'project' });
+    if (!result.ok) throw new Error(result.error);
+    expect(JSON.parse(result.text)).toMatchObject({ projectId: h.req.projectId, artifacts: [{ name: 'note.txt' }] });
+    expect(trace).toContainEqual({ kind: 'tool-start', itemId: 'compact', toolName: 'compact', label: 'Compacting context' });
+    expect(await readFile(h.session, 'utf8')).toBe(scope.threadId);
+    expect(child.killed).toBe(true);
+    await expect(h.appServer.steer({ id: h.req.id, prompt: 'Too late', images: [] })).resolves.toBe(false);
+  });
+
+  it('queues steering before the turn id exists and sends it to the original turn', async () => {
+    const h = await setup(m => m.method === 'turn/start');
+    const run = h.runner.run(h.req, h.options);
+    const child = await h.turn(0);
+    await expect(h.appServer.steer({ id: h.req.id, prompt: 'Queued direction', images: [] })).resolves.toBe(true);
+    expect(child.messages.some(m => m.method === 'turn/steer')).toBe(false);
+    child.respond(child.messages.find(m => m.method === 'turn/start')!.id, { turn: { id: scope.turnId } });
+    await vi.waitFor(() => expect(child.messages.find(m => m.method === 'turn/steer')?.params.expectedTurnId).toBe(scope.turnId));
+    complete(child);
+    await expect(run).resolves.toMatchObject({ ok: true });
+  });
+
+  it('returns false for a rejected steer without failing the original run', async () => {
+    const h = await setup((m, child) => {
+      if (m.method !== 'turn/steer') return false;
+      child.stdout.write(JSON.stringify({ id: m.id, error: { code: -32000, message: 'Turn is no longer steerable' } }) + '\n');
+      return true;
+    });
+    const run = h.runner.run(h.req, h.options);
+    const child = await h.turn(0);
+    await expect(h.appServer.steer({ id: h.req.id, prompt: 'Late direction', images: [] })).resolves.toBe(false);
+    complete(child);
+    await expect(run).resolves.toMatchObject({ ok: true });
+  });
+
+  it('keeps executable report fields out of autonomous traces and preserves activity progress', async () => {
+    const h = await setup();
+    const traces: unknown[] = [];
+    const progress: string[] = [];
+    const run = h.runner.run(h.req, { ...h.options, onTrace: t => traces.push(t), onProgress: t => progress.push(t) });
+    const child = await h.turn(0);
+    child.notify('item/started', { ...scope, item: { id: 'command', type: 'commandExecution', command: 'pwd' } });
+    child.notify('item/agentMessage/delta', { ...scope, itemId: 'final', delta: '{"commands":["private action"],"summary":' });
+    complete(child, { ...report, commands: ['private action'] });
+    await expect(run).resolves.toMatchObject({ ok: true });
+    expect(traces).toContainEqual({ kind: 'answer', text: report.summary });
+    expect(JSON.stringify(traces)).not.toContain('private action');
+    expect(progress).toEqual(['Working with project files and shell tools…', report.summary]);
+  });
+
+  it.each([false, true])('preserves cancelled work and refuses steering (awaiting turn id: %s)', async waiting => {
+    const h = await setup(m => waiting && m.method === 'turn/start');
+    const run = h.runner.run(h.req, h.options);
+    const child = await h.turn(0);
+    const stage = await h.stage();
+    await writeFile(path.join(stage, 'work-in-progress.txt'), 'keep this');
+    await expect(h.runner.cancel(h.req.id)).resolves.toBe(true);
+    await expect(h.appServer.steer({ id: h.req.id, prompt: 'Too late', images: [] })).resolves.toBe(false);
+    if (waiting) child.respond(child.messages.find(m => m.method === 'turn/start')!.id, { turn: { id: scope.turnId } });
+    await expect(run).resolves.toMatchObject({ ok: false, cancelled: true });
+    const checkpoint = JSON.parse(await readFile(h.session + '.checkpoint.json', 'utf8'));
+    expect(await readFile(path.join(checkpoint.stagingDirectory, 'work-in-progress.txt'), 'utf8')).toBe('keep this');
+    expect(child.killed).toBe(true);
+    expect(await readFile(h.session, 'utf8')).toBe(scope.threadId);
+  });
+
+  it('keeps timed-out work as a resumable checkpoint', async () => {
+    const h = await setup();
+    const run = h.runner.run(h.req, { ...h.options, timeoutMs: 100 });
+    await h.turn(0);
+    await expect(run).resolves.toMatchObject({ ok: false, cancelled: false, error: expect.stringContaining('partial work was kept') });
+    expect(JSON.parse(await readFile(h.session + '.checkpoint.json', 'utf8')).projectId).toBe(h.req.projectId);
+    expect(h.children[0]!.messages.some(m => m.method === 'turn/interrupt')).toBe(true);
+    await expect(h.appServer.steer({ id: h.req.id, prompt: 'Too late', images: [] })).resolves.toBe(false);
+  });
+
+  it('times out stalled startup and preserves the prepared workspace', async () => {
+    const h = await setup(m => m.method === 'initialize');
+    await expect(h.runner.run(h.req, { ...h.options, timeoutMs: 100 })).resolves.toMatchObject({
+      ok: false, cancelled: false, error: expect.stringContaining('partial work was kept')
+    });
+    expect(h.children[0]!.killed).toBe(true);
+    expect(h.children[0]!.messages.some(m => m.method === 'turn/start')).toBe(false);
+    expect(JSON.parse(await readFile(h.session + '.checkpoint.json', 'utf8')).projectId).toBe(h.req.projectId);
+    await expect(h.appServer.steer({ id: h.req.id, prompt: 'Too late', images: [] })).resolves.toBe(false);
+  });
+
+  it('resumes only the saved conversation with fresh run-scoped MCP configuration', async () => {
+    const h = await setup();
+    for (const [index, threadId] of ['thread-a', 'thread-b', 'thread-a'].entries()) {
+      const run = h.runner.run({ ...h.req, threadId }, { ...h.options, nativeTools: { command: 'fixture', args: [], env: { RUN: String(index) } } });
+      const child = await h.turn(index);
+      const thread = child.messages.find(m => m.method === (index === 2 ? 'thread/resume' : 'thread/start'));
+      expect(thread).toBeDefined();
+      expect(thread!.params.config.mcp_servers.powermove.env).toEqual({ RUN: String(index) });
+      if (index === 2) expect(thread!.params.threadId).toBe(scope.threadId);
+      complete(child);
+      await expect(run).resolves.toMatchObject({ ok: true });
+    }
+    expect(h.children.every(child => child.killed)).toBe(true);
+  });
+
+  it('retries an unknown saved session once, without replaying a started turn', async () => {
+    const h = await setup((m, child) => {
+      if (m.method !== 'thread/resume') return false;
+      child.stdout.write(JSON.stringify({ id: m.id, error: { message: 'no rollout found for thread id stale-session' } }) + '\n');
+      return true;
+    });
+    let run = h.runner.run(h.req, h.options);
+    complete(await h.turn(0));
+    await run;
+    run = h.runner.run(h.req, h.options);
+    const child = await h.turn(2);
+    expect(h.children[1]!.messages.some(m => m.method === 'thread/resume')).toBe(true);
+    expect(h.children[1]!.messages.some(m => m.method === 'turn/start')).toBe(false);
+    expect(child.messages.some(m => m.method === 'thread/start')).toBe(true);
+    child.notify('turn/completed', { threadId: scope.threadId, turn: { id: scope.turnId, status: 'failed', error: { message: 'thread not found during tool execution' } } });
+    await expect(run).resolves.toMatchObject({ ok: false });
+    expect(h.children).toHaveLength(3);
+    await expect(readFile(h.session, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('checks Full access consent before starting App Server and uses the full sandbox after approval', async () => {
+    const h = await setup();
+    const req = { ...h.req, access: 'computer' as const, consentToken: 'fixture-grant' };
+    await expect(h.runner.run(req, { ...h.options, consumeConsentToken: () => false })).resolves.toMatchObject({ ok: false, error: expect.stringContaining('approval') });
+    expect(h.children).toHaveLength(0);
+    const consumeConsentToken = vi.fn(() => true);
+    const run = h.runner.run(req, { ...h.options, consumeConsentToken });
+    const child = await h.turn(0);
+    expect(consumeConsentToken).toHaveBeenCalledExactlyOnceWith('fixture-grant');
+    expect(child.messages.find(m => m.method === 'thread/start')!.params).toMatchObject({ sandbox: 'danger-full-access', approvalPolicy: 'never' });
+    expect(child.messages.find(m => m.method === 'turn/start')!.params).toMatchObject({ sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never' });
+    complete(child);
+    await expect(run).resolves.toMatchObject({ ok: true, access: 'computer' });
+  });
+
+  it('routes autonomous questions and supervised approvals through the existing callbacks', async () => {
+    const h = await setup();
+    const traces: any[] = [];
+    const requestApproval = vi.fn(async () => ({ allowed: true as const }));
+    const run = h.runner.run({ ...h.req, approval: 'supervised' }, { ...h.options, requestApproval, onTrace: t => traces.push(t) });
+    const child = await h.turn(0);
+    expect(child.messages.find(m => m.method === 'turn/start')!.params.approvalsReviewer).toBe('user');
+    child.ask('approval', 'item/commandExecution/requestApproval', { ...scope, itemId: 'command', command: 'touch /outside/file', reason: 'Install file' });
+    await vi.waitFor(() => expect(child.messages).toContainEqual({ id: 'approval', result: { decision: 'accept' } }));
+    expect(requestApproval).toHaveBeenCalledWith({ title: 'Run a command outside the project sandbox?', detail: 'touch /outside/file', reason: 'Install file' }, expect.any(AbortSignal));
+    child.ask('question', 'item/tool/requestUserInput', { ...scope, itemId: 'question-item', questions: [{ id: 'name', question: 'Which name?' }] });
+    await vi.waitFor(() => expect(traces.some(t => t.kind === 'question')).toBe(true));
+    expect(h.appServer.answer({ id: h.req.id, itemId: 'question-item', answers: { name: ['Example'] } })).toBe(true);
+    expect(child.messages).toContainEqual({ id: 'question', result: { answers: { name: { answers: ['Example'] } } } });
+    child.ask('file-approval', 'item/fileChange/requestApproval', { ...scope, itemId: 'file', grantRoot: '/outside/folder' });
+    child.ask('permission-approval', 'item/permissions/requestApproval', { ...scope, itemId: 'permission', permissions: { network: { enabled: true }, fileSystem: null } });
+    await vi.waitFor(() => expect(child.messages).toContainEqual({ id: 'file-approval', result: { decision: 'accept' } }));
+    await vi.waitFor(() => expect(child.messages).toContainEqual({ id: 'permission-approval', result: { permissions: { network: { enabled: true } }, scope: 'turn' } }));
+    complete(child);
+    await expect(run).resolves.toMatchObject({ ok: true });
+  });
+
+  it('denies a held approval and aborts its callback when cancelled', async () => {
+    const h = await setup();
+    let signal: AbortSignal | undefined;
+    const run = h.runner.run({ ...h.req, approval: 'supervised' }, { ...h.options, requestApproval: async (_request, value) => {
+      signal = value;
+      return new Promise(() => undefined);
+    } });
+    const child = await h.turn(0);
+    child.ask('held', 'item/permissions/requestApproval', { ...scope, itemId: 'permissions', permissions: { network: { enabled: true }, fileSystem: null } });
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    await h.runner.cancel(h.req.id);
+    await expect(run).resolves.toMatchObject({ cancelled: true });
+    expect(signal!.aborted).toBe(true);
+    expect(child.messages).toContainEqual({ id: 'held', result: { permissions: {}, scope: 'turn' } });
+  });
+
+  it('repairs the result in the same session and publishes a validated staged extension once', async () => {
+    const h = await setup();
+    const run = h.runner.run(h.req, h.options);
+    const first = await h.turn(0);
+    const stage = await h.stage();
+    const extension = path.join(stage, 'steering-panel');
+    await mkdir(extension);
+    await writeFile(path.join(extension, 'manifest.json'), JSON.stringify({ id: 'steering-panel', name: 'Steering', version: '1.0.0', apiVersion: 1, entry: 'index.ts', author: 'agent' }));
+    await writeFile(path.join(extension, 'index.ts'), 'export default function activate() {}');
+    complete(first, report); // An unreported extension requires a corrected report.
+    const repair = await h.turn(1);
+    expect(repair.messages.find(m => m.method === 'thread/resume')!.params.threadId).toBe(scope.threadId);
+    expect(repair.messages.find(m => m.method === 'turn/start')!.params.input[0].text).toContain('Correct the completion report');
+    expect(await h.stage()).toBe(stage);
+    complete(repair, { ...report, extensions: [{ id: 'steering-panel', action: 'created', summary: 'Added panel' }] });
+    await expect(run).resolves.toMatchObject({ ok: true, extensions: [{ id: 'steering-panel', action: 'created' }], extensionChangeSetId: expect.any(String) });
+    expect(await readFile(path.join(h.options.extensionsDir, 'steering-panel', 'index.ts'), 'utf8')).toContain('activate');
+    expect(await readdir(path.join(h.options.userData, 'Agent Change History', h.req.projectId))).toHaveLength(1);
+    await expect(readFile(path.join(stage, 'steering-panel', 'index.ts'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('preserves live edits and staged work on publication conflicts without replaying the turn', async () => {
+    const h = await setup();
+    const live = path.join(h.options.extensionsDir, 'steering-panel');
+    await mkdir(live, { recursive: true });
+    await writeFile(path.join(live, 'manifest.json'), JSON.stringify({ id: 'steering-panel', name: 'Steering', version: '1.0.0', apiVersion: 1, entry: 'index.ts', author: 'agent' }));
+    await writeFile(path.join(live, 'index.ts'), 'export default function activate() {}');
+    const run = h.runner.run(h.req, h.options);
+    const child = await h.turn(0);
+    const stage = await h.stage();
+    await writeFile(path.join(stage, 'steering-panel', 'index.ts'), 'export default function activate() { return "agent"; }');
+    await writeFile(path.join(live, 'index.ts'), 'export default function activate() { return "new user edit"; }');
+    complete(child, { ...report, extensions: [{ id: 'steering-panel', action: 'updated', summary: 'Edited panel' }] });
+    await expect(run).resolves.toMatchObject({ ok: false, preserveLiveEdits: true });
+    expect(h.children).toHaveLength(1);
+    expect(await readFile(path.join(live, 'index.ts'), 'utf8')).toContain('new user edit');
+    const checkpoint = JSON.parse(await readFile(h.session + '.checkpoint.json', 'utf8'));
+    expect(await readFile(path.join(checkpoint.stagingDirectory, 'steering-panel', 'index.ts'), 'utf8')).toContain('agent');
   });
 });

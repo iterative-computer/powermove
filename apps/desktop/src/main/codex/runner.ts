@@ -14,7 +14,9 @@ import {
 } from '../../shared/ipc';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/guards';
-import { buildAutonomousArgv, buildEditorArgv } from './adapter';
+import { autonomousPrompt, buildAutonomousArgv, buildEditorArgv } from './adapter';
+import type { CodexAppServerRunner } from './app-server-runner';
+import type { RequestApproval } from '../agent-approvals';
 import { ExtensionPublicationConflictError, publishExtensionChanges, withStageSnapshot } from './change-history';
 import { AgentResultValidationError, repairAgentResult } from './result-repair';
 import { validateStagedExtensions } from './validate-staged-extensions';
@@ -75,6 +77,7 @@ export interface CodexRunOptions {
   workspaceId?: string;
   additionalInstructions?: string;
   externalMcpServers?: UserMcpServers;
+  requestApproval?: RequestApproval;
 }
 
 interface ActiveRun {
@@ -330,6 +333,8 @@ export class CodexRunner {
   private readonly active = new Map<string, ActiveRun>();
   private readonly cancelled = new Set<string>();
 
+  constructor(private readonly appServer?: CodexAppServerRunner) {}
+
   async run(rawRequest: CodexRunRequest, options: CodexRunOptions): Promise<CodexRunResult> {
     if (!isCodexRunRequest(rawRequest)) return failure('Invalid Codex run request.');
     const req = rawRequest;
@@ -376,10 +381,11 @@ export class CodexRunner {
     try {
       if (this.cancelled.has(req.id)) return cancelledResult(state);
 
-      const binary = options.binary ?? await discoverCodexBinary(options.codexBinaryPref ?? null);
+      const useAppServer = req.mode === 'autonomous' && this.appServer !== undefined;
+      const binary = useAppServer ? '' : options.binary ?? await discoverCodexBinary(options.codexBinaryPref ?? null);
       if (this.cancelled.has(req.id)) return cancelledResult(state);
       const [codexHome, externalMcpServers] = await Promise.all([
-        prepareIsolatedCodexHome(options.userData),
+        useAppServer ? Promise.resolve('') : prepareIsolatedCodexHome(options.userData),
         options.externalMcpServers ?? loadUserMcpServers('chatgpt')
       ]);
       if (this.cancelled.has(req.id)) return cancelledResult(state);
@@ -437,7 +443,7 @@ export class CodexRunner {
         if (this.cancelled.has(req.id)) throw new Error('The Codex run was cancelled.');
         // A repair must produce a new report, never reuse the rejected output.
         await rm(layout.outputPath, { force: true });
-        const argv = buildAutonomousArgv({
+        const task = {
           schemaPath: layout.schemaPath,
           outputPath: layout.outputPath,
           instructions: agentInstructions({
@@ -459,10 +465,32 @@ export class CodexRunner {
           sessionId,
           nativeTools: options.nativeTools,
           externalMcpServers
-        });
-        const result = await this.execute(req, state, binary, argv, layout.root, codexHome, layout, options, (timer) => {
-          timeout = timer;
-        });
+        };
+        let result: AttemptResult;
+        if (this.appServer) {
+          let turnStarted = false;
+          const response = await this.appServer.runAutonomous(req, {
+            ...options, externalMcpServers, layout, sessionId,
+            prompt: autonomousPrompt(task), outputSchema: agentResultSchema(),
+            onSession: threadId => {
+              state.sessionWrite = state.sessionWrite.then(() => writeSession(layout.sessionPath, threadId));
+              return state.sessionWrite;
+            },
+            onTurnStarted: () => { turnStarted = true; },
+            onTimeout: () => { state.timedOut = true; this.cancelled.add(req.id); }
+          });
+          if (response.ok) await writeFile(layout.outputPath, response.text);
+          else if (response.cancelled) this.cancelled.add(req.id);
+          result = {
+            code: response.ok ? 0 : 1, signal: null, spawnError: null,
+            stdout: turnStarted ? '{"type":"turn.started"}\n' : '',
+            stderr: response.ok ? '' : response.error
+          };
+        } else {
+          result = await this.execute(req, state, binary, buildAutonomousArgv(task), layout.root, codexHome, layout, options, (timer) => {
+            timeout = timer;
+          });
+        }
         if (this.cancelled.has(req.id)) throw new Error('The Codex run was cancelled.');
         return result;
       };
@@ -559,6 +587,7 @@ export class CodexRunner {
     this.cancelled.add(id);
     const state = this.active.get(id);
     if (!state) return false;
+    await this.appServer?.cancel(id);
     this.terminate(state);
     await this.cleanupCancelled(state);
     return true;
