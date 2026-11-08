@@ -301,7 +301,7 @@ fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value
                 .checked_add(n.engine_reserved)
                 .and_then(|v| v.checked_add(reserve + headroom))
                 .is_some_and(|v| v <= n.limits.external_bytes);
-            if !start && !(n.limits.queue_fetches && fits_alone) {
+            if !start && (!n.limits.queue_fetches || !fits_alone) {
                 return Err("External memory reservation quota".into());
             }
             let url = url::Url::parse(v["url"].as_str().ok_or("Missing URL")?)
