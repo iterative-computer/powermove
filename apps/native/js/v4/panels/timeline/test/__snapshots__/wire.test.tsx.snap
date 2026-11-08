@@ -1539,6 +1539,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -1548,9 +1549,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -2373,6 +2376,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -2382,9 +2386,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -3325,6 +3331,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -3334,9 +3341,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -4277,6 +4286,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -4286,9 +4296,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -5226,6 +5238,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -5235,9 +5248,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -6316,6 +6331,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -6325,9 +6341,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -7169,6 +7187,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -7178,9 +7197,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -8127,6 +8148,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -8136,9 +8158,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -8429,6 +8453,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -8438,9 +8463,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -9395,6 +9422,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -9404,9 +9432,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10229,6 +10259,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -10238,9 +10269,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10413,6 +10446,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -10422,9 +10456,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10597,6 +10633,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -10606,9 +10643,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10781,6 +10820,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -10790,9 +10830,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -10965,6 +11007,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -10974,9 +11017,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11149,6 +11194,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -11158,9 +11204,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11333,6 +11381,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -11342,9 +11391,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11517,6 +11568,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -11526,9 +11578,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11701,6 +11755,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -11710,9 +11765,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -11885,6 +11942,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -11894,9 +11952,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12069,6 +12129,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -12078,9 +12139,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12253,6 +12316,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -12262,9 +12326,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12437,6 +12503,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -12446,9 +12513,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12621,6 +12690,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -12630,9 +12700,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12805,6 +12877,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -12814,9 +12887,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -12989,6 +13064,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -12998,9 +13074,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13173,6 +13251,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -13182,9 +13261,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13357,6 +13438,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -13366,9 +13448,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13541,6 +13625,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -13550,9 +13635,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13725,6 +13812,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -13734,9 +13822,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -13909,6 +13999,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -13918,9 +14009,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14093,6 +14186,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -14102,9 +14196,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14277,6 +14373,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -14286,9 +14383,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14461,6 +14560,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -14470,9 +14570,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14645,6 +14747,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -14654,9 +14757,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -14829,6 +14934,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -14838,9 +14944,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15013,6 +15121,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -15022,9 +15131,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15197,6 +15308,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -15206,9 +15318,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15381,6 +15495,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -15390,9 +15505,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -15565,6 +15682,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -15574,9 +15692,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -16426,6 +16546,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -16435,9 +16556,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -17315,6 +17438,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -17324,9 +17448,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -18948,6 +19074,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -18957,9 +19084,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },
@@ -19858,6 +19987,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "role": "presentation",
                                     "style": {
+                                      "alignItems": "center",
                                       "background": {
                                         "token": "colors.labels.blue",
                                       },
@@ -19867,9 +19997,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "color": {
                                         "token": "colors.text",
                                       },
+                                      "display": "flex",
                                       "height": {
                                         "token": "metrics.kind_badge",
                                       },
+                                      "justifyContent": "center",
                                       "symbolSize": {
                                         "token": "metrics.symbol_inline",
                                       },

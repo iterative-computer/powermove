@@ -316,6 +316,9 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             designTodo: row.layerKind ? null : "native-schema-kind",
           }}
           style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
             width: t("metrics.kind_badge"),
             height: t("metrics.kind_badge"),
             borderRadius: t("metrics.inner_radius"),
