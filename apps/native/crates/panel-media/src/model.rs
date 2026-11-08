@@ -63,11 +63,29 @@ pub enum MenuCommand {
     CompositionSettings(String),
     DuplicateComposition(String),
     DeleteComposition(String),
+    /// Proxy and optimized media for the selected videos.
+    Rendition(RenditionAction),
+}
+/// What the selected videos' renditions get (Project panel, plan section 1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenditionAction {
+    CreateProxy,
+    RebuildProxy,
+    DeleteProxy,
+    /// Use a proxy made elsewhere (camera, DIT); one video at a time.
+    AttachProxy,
+    CreateOptimized,
+    DeleteOptimized,
+    /// Always Play Original on (`true`) or off.
+    PlayOriginal(bool),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuEntry {
     pub command: MenuCommand,
     pub enabled: bool,
+    /// A toggle that is on (Always Play Original).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checked: bool,
 }
 
 /// Effects are semantic host requests. `submit` must enqueue work and return;
@@ -136,6 +154,11 @@ pub enum Effect {
     },
     Focus(Option<ItemId>),
     ScrollMarquee(ScrollDirection),
+    /// Proxy or optimized media work for these videos.
+    Renditions {
+        action: RenditionAction,
+        assets: Vec<String>,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScrollDirection {
@@ -656,6 +679,7 @@ impl MediaPanel {
                     self.select(&id, crate::Modifiers::default(), &mut effects);
                 }
                 if self.selected_count() > 1 {
+                    renditions(c, r, &self.rendition_targets(c, r), false, &mut commands);
                     commands.push((DeleteAssets, true));
                 } else {
                     let a = &c.assets[&id];
@@ -669,6 +693,7 @@ impl MediaPanel {
                             entries: vec![MenuEntry {
                                 command: DeleteAssets,
                                 enabled: true,
+                                checked: false,
                             }],
                             effects,
                         });
@@ -690,7 +715,10 @@ impl MediaPanel {
                         commands.push((MoveOut(ItemId::Asset(id.clone())), true));
                     }
                     if a.source_path.is_some() {
-                        commands.push((Reveal(id), true));
+                        commands.push((Reveal(id.clone()), true));
+                    }
+                    if a.kind == "video" {
+                        renditions(c, r, std::slice::from_ref(&id), true, &mut commands);
                     }
                     commands.push((DeleteAssets, true));
                 }
@@ -732,9 +760,21 @@ impl MediaPanel {
             effects,
             entries: commands
                 .into_iter()
-                .map(|(command, enabled)| MenuEntry { command, enabled })
+                .map(|(command, enabled)| MenuEntry {
+                    checked: command == Rendition(RenditionAction::PlayOriginal(false)),
+                    command,
+                    enabled,
+                })
                 .collect(),
         })
+    }
+    /// The selected videos rendition commands act on.
+    pub(crate) fn rendition_targets(&self, c: &Catalog, _r: &dyn MediaRuntime) -> Vec<String> {
+        self.selected_assets()
+            .iter()
+            .filter(|id| c.assets.get(*id).is_some_and(|a| a.kind == "video"))
+            .cloned()
+            .collect()
     }
     /// Agent/UI entry point. Hosts dispatch exactly these inputs by stable id.
     pub fn dispatch(
@@ -750,4 +790,42 @@ impl MediaPanel {
         outcome.owner = Some(c.stamp.clone());
         Ok(outcome)
     }
+}
+
+/// The rendition commands for `videos` (none: nothing to add). Create needs
+/// an online original; Rebuild and Delete need the rendition; Attach is for
+/// one video. Always Play Original shows checked (as `PlayOriginal(false)`,
+/// which turns it off) when every video has it.
+fn renditions(
+    c: &Catalog,
+    r: &dyn MediaRuntime,
+    videos: &[String],
+    single: bool,
+    commands: &mut Vec<(MenuCommand, bool)>,
+) {
+    use RenditionAction::*;
+    if videos.is_empty() {
+        return;
+    }
+    let states: Vec<_> = videos.iter().map(|id| r.state(&c.stamp, id)).collect();
+    let online = states
+        .iter()
+        .any(|s| matches!(s.availability, Availability::Ready));
+    let ready = |p: &ProxyStatus| matches!(p, ProxyStatus::Ready { .. });
+    let proxied = states.iter().any(|s| ready(&s.proxy));
+    let optimized = states.iter().any(|s| ready(&s.optimized));
+    let all_original = states.iter().all(|s| s.play_original);
+    commands.extend([
+        (MenuCommand::Rendition(CreateProxy), online),
+        (MenuCommand::Rendition(RebuildProxy), online && proxied),
+        (MenuCommand::Rendition(DeleteProxy), proxied),
+    ]);
+    if single {
+        commands.push((MenuCommand::Rendition(AttachProxy), online));
+    }
+    commands.extend([
+        (MenuCommand::Rendition(CreateOptimized), online),
+        (MenuCommand::Rendition(DeleteOptimized), optimized),
+        (MenuCommand::Rendition(PlayOriginal(!all_original)), true),
+    ]);
 }

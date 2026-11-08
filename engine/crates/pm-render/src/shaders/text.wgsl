@@ -1,5 +1,6 @@
 // The direct RG32Float source contains glyph-local points,
-// row table entries and pairs of point indices. All integer metadata stays
+// row table entries and pairs of point indices, from the glyph's base texel
+// (`inv1.y`) in a texture it may share with other glyphs. All integer metadata stays
 // below 2^24, where f32 represents it exactly.
 fn direct_texel(index: u32) -> vec2<f32> {
     let width = u32(it.inv0.w);
@@ -41,8 +42,8 @@ fn direct_area(pixel: vec2<f32>) -> f32 {
         let position = begin + k;
         let pair = direct_texel(u32(it.inv0.y) + position / 2u);
         let edge = u32(select(pair.x, pair.y, (position & 1u) != 0u));
-        let a = direct_texel(edge);
-        let b = direct_texel(edge + 1u);
+        let a = direct_texel(u32(it.inv1.y) + edge);
+        let b = direct_texel(u32(it.inv1.y) + edge + 1u);
         let dy = b.y - a.y;
         if (dy == 0.0) {
             continue;

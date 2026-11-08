@@ -108,7 +108,7 @@
       "text reference gap; original bar: 19591 pixels over 2 CV, max 176, outside independent mask band 19591",
       "paired isolated text passes; engine 32c719ddbb3ffa8662834059cc57a1f73c1928de6ed683542152d6ce8ded68b1"
     ],
-    "measurement_sha256": "cfa35a6f99ef901a41be384198227efd1ac9756924b33f44c0196000f71e3a14"
+    "measurement_sha256": "6dfa4670c28465fef90e992996d66fb64c7e966a255d5bd9b7daed58275fbb3c"
   },
   {
     "frame": "584f54c2b46cc4daa31e6c68308dff3f9adfb7ebe96f01ddcd04af2240794e85",
@@ -172,9 +172,9 @@
     "reason": "nontext content intersects text at pixel 928105: background delta 13.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 15960 pixels over 2 CV, max 188, outside independent mask band 15960",
-      "paired isolated text passes; engine 3465306ed2f09228fceaea3bddca5d4b2dc582382a193fa4ebea9672166c3273"
+      "paired isolated text passes; engine 7d7d979e0f5370ca259b1719a798f89dc1ccaad3824b6d6b3d0ae39a0d002341"
     ],
-    "measurement_sha256": "1207a814573902c55d7290f639358614e0a695f6c2fcf1eac7466dc8c8dfc7dd"
+    "measurement_sha256": "451111939ba91f17e6dd51f8fbcacb37420a78dc884c1bcbf875ce89ec27d466"
   },
   {
     "frame": "6c18195fbb9c649c4675d8b9343837e3f33af61d3a7937052ac39551206592a3",
@@ -437,9 +437,9 @@
     "reason": "nontext content intersects text at pixel 90: background delta 3.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 24240 pixels over 2 CV, max 255, outside independent mask band 24240",
-      "paired isolated text passes; engine 3eb657726fcc0f5a4d11243d114bb7a3ba8488bafa3bdec7de09b1bf48ef3ddc"
+      "paired isolated text passes; engine 1762d42a2ef1c2bc5c2513b725604af6a16573180888dcc4abe167f29d92c38e"
     ],
-    "measurement_sha256": "e4e99fddb49a6e14b6217b2ab2980c51b221fe9bf183fd20db4ce66db8bf2633"
+    "measurement_sha256": "c116ade86fe6cfd6219e2c74e5a75923948518ef264b62177dd4079b88fece1b"
   },
   {
     "frame": "eae15eabb767a0fe142fe02f16151796280e7821a2ea329a81ce6ca98399b8bb",
@@ -449,7 +449,7 @@
       "text reference gap; original bar: 21207 pixels over 2 CV, max 171, outside independent mask band 21207",
       "paired isolated text passes; engine 3945bc861139899dfd977e2cd20c7cfa799eedeb1677b705a2d7370236c3ddbc"
     ],
-    "measurement_sha256": "2f2d6e15d60e52e165b5b58c720fb3ee7e8738d6b7880bd293e6c7a0f2a2a203"
+    "measurement_sha256": "7c4884edb8a4f20849ceaf0a8ebe72a2233ec6cf06ea35256cc776bd8808041a"
   },
   {
     "frame": "ec21e3261b95211c16d97e6767644cefcef2633ff1c596c3d76c5e600318bae7",

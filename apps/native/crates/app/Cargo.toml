@@ -33,6 +33,8 @@ block2 = "0.6"
 async-channel = "2"
 libc = "0.2"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+blake3 = "1"
 tempfile = "3"
 sha2 = "0.10"
 base64 = "0.22"
@@ -48,6 +50,7 @@ pm-surface = { path = "../surface" }
 pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
 raw-window-handle = "0.6"
 pm-promedia = { path = "../promedia" }
+pm-proxy = { path = "../../../../engine/crates/pm-proxy" }
 gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos" }
 
 pm-panel-media = { path = "../panel-media" }
@@ -69,10 +72,12 @@ package = "gpui-ce"
 path = "../../vendor/gpui-ce/crates/gpui"
 default-features = false
 features = ["test-support"]
+# The disk reserve override exists only in test builds (pm-proxy test-hooks).
+[dev-dependencies.pm-proxy]
+path = "../../../../engine/crates/pm-proxy"
+features = ["test-hooks"]
 [dev-dependencies.pm-native-migrate]
 path = "../migrate"
-[dev-dependencies.blake3]
-version = "1"
 [dev-dependencies.fs2]
 version = "0.4"
 [dev-dependencies.pm-export]

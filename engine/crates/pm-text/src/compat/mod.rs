@@ -147,6 +147,7 @@ impl<R: FontResolver> Compat<R> {
     /// choices (a renderer process restart).
     pub fn reset_session(&mut self) {
         self.resolver.reset();
+        self.cache.measured.clear();
     }
 
     /// A measuring context configured for `d`.

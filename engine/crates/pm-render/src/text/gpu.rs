@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use kurbo::{Affine, BezPath, PathEl, Rect, Shape};
+use kurbo::{Affine, BezPath, PathEl, Rect};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_text::render::atlas::{self, Atlas, Cell};
@@ -29,7 +29,12 @@ pub const CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const RETIRED_BYTES: u64 = 2 * 1024 * 1024;
 const IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const DIRECT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
-const DIRECT_UPLOAD_SCRATCH_BYTES: usize = 128 * 1024;
+/// Texels of one glyph's packing at most: every index stays below 2^24,
+/// where the shader's f32 metadata is exact.
+const DIRECT_ARENA_TEXELS: usize = 1 << 24;
+/// Texels of glyphs sharing one direct-source texture (32 KB), the scratch
+/// they are written through, reused across frames.
+const DIRECT_CHUNK_TEXELS: usize = 1 << 12;
 const DIRECT_MAX_SIDE: f64 = 512.0;
 
 #[repr(C)]
@@ -82,20 +87,112 @@ struct Cached {
 #[derive(Clone, Copy)]
 struct DirectMeta {
     origin: [f64; 2],
+    /// Where the glyph's texels start in its texture; `table`, `list` and
+    /// the listed point indices are relative to it.
+    base: u32,
     table: u32,
     list: u32,
     row_start: i32,
     rows: u32,
+    /// The texture's width in texels.
     width: u32,
 }
 
 struct DirectCacheEntry {
-    path: Arc<BezPath>,
-    _texture: wgpu::Texture,
+    // Retaining the lines makes their pointer identity safe as a key.
+    _lines: Arc<BezPath>,
     view: wgpu::TextureView,
     meta: DirectMeta,
+}
+
+type DirectKey = (usize, [u64; 4]);
+
+/// Glyph entries grouped by the chunk texture they share. A chunk's texture
+/// is charged once, when it is made, and leaves with all of its glyphs, so
+/// the retained textures stay within the bound however glyphs share them.
+struct DirectCache<C, E> {
+    entries: HashMap<DirectKey, (u64, E)>,
+    chunks: HashMap<u64, DirectChunk<C>>,
     bytes: u64,
+    limit: u64,
+    next: u64,
+}
+
+struct DirectChunk<C> {
+    _payload: C,
+    bytes: u64,
+    keys: Vec<DirectKey>,
     used: u64,
+}
+
+impl<C, E> DirectCache<C, E> {
+    fn new(limit: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            chunks: HashMap::new(),
+            bytes: 0,
+            limit,
+            next: 0,
+        }
+    }
+
+    fn hit(&mut self, key: &DirectKey, tick: u64) -> Option<&E> {
+        let (chunk, entry) = self.entries.get(key)?;
+        if let Some(chunk) = self.chunks.get_mut(chunk) {
+            chunk.used = tick;
+        }
+        Some(entry)
+    }
+
+    /// Charges a new chunk of `bytes`, first dropping the least recently
+    /// used chunks (with their glyphs) it would not fit beside.
+    fn admit(&mut self, payload: C, bytes: u64, tick: u64) -> u64 {
+        while self.bytes + bytes > self.limit {
+            let Some((&oldest, _)) = self.chunks.iter().min_by_key(|(_, c)| c.used) else {
+                break;
+            };
+            self.evict(oldest);
+        }
+        let id = self.next;
+        self.next += 1;
+        self.bytes += bytes;
+        self.chunks.insert(
+            id,
+            DirectChunk {
+                _payload: payload,
+                bytes,
+                keys: Vec::new(),
+                used: tick,
+            },
+        );
+        id
+    }
+
+    fn insert(&mut self, chunk: u64, key: DirectKey, entry: E) {
+        if let Some(c) = self.chunks.get_mut(&chunk) {
+            c.keys.push(key);
+            self.entries.insert(key, (chunk, entry));
+        }
+    }
+
+    fn evict(&mut self, id: u64) {
+        let Some(chunk) = self.chunks.remove(&id) else {
+            return;
+        };
+        self.bytes -= chunk.bytes;
+        for key in chunk.keys {
+            // A later chunk may hold the same glyph again.
+            if self.entries.get(&key).is_some_and(|(c, _)| *c == id) {
+                self.entries.remove(&key);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.chunks.clear();
+        self.bytes = 0;
+    }
 }
 
 struct DirectSource {
@@ -155,9 +252,8 @@ pub struct TextGpu {
     blur: [crate::pipelines::LazyRenderPipeline; 2],
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
     image_bytes: u64,
-    direct: HashMap<usize, DirectCacheEntry>,
-    direct_bytes: u64,
-    direct_upload: Vec<[f32; 2]>,
+    direct: DirectCache<wgpu::Texture, DirectCacheEntry>,
+    direct_scratch: Vec<[f32; 2]>,
     raster_pool: TargetPool,
     cache: HashMap<([u64; 2], Precision, WorkingEncoding), Cached>,
     cache_bytes: u64,
@@ -221,18 +317,97 @@ fn to_working(mut rgba: [f32; 4], working: WorkingEncoding) -> [f32; 4] {
     rgba
 }
 
-/// Pack a resolved, line-only glyph into one RG32Float texture: contiguous
-/// contour points, a conservative Y-row table, then pairs of edge-start
-/// point indices. Only listed consecutive point pairs are edges, so MoveTo
-/// jumps never contribute area. A pixel querying row r has local Y in
-/// [r, r + 1), so its unit-height interval is contained in [r, r + 2).
-/// An edge can contribute only for r in [floor(min_y) - 1, floor(max_y)].
-fn direct_texels_into(
-    path: &BezPath,
-    max_dimension: u32,
-    texels: &mut Vec<[f32; 2]>,
-) -> Option<DirectMeta> {
-    let bounds = path.bounding_box();
+/// A glyph's packing, measured before its texels are written (so a frame's
+/// texels can be reserved at once).
+struct DirectPlan {
+    origin: [f64; 2],
+    row_start: i32,
+    row_end: i32,
+    cursors: Vec<usize>,
+    length: usize,
+    table: u32,
+    list: u32,
+    needed: usize,
+}
+
+// Visit points in exactly the packed order. The optional predecessor
+// identifies an edge; a MoveTo emits a point without an edge.
+fn walk_points(
+    elements: impl Iterator<Item = PathEl>,
+    origin: [f64; 2],
+    mut emit: impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+) -> Option<usize> {
+    fn append(
+        p: [f32; 2],
+        count: &mut usize,
+        last: &mut Option<[f32; 2]>,
+        emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+    ) {
+        if let Some(prev) = *last
+            && prev != p
+        {
+            emit(*count, p, Some(prev));
+            *count += 1;
+        }
+        *last = Some(p);
+    }
+    fn close(
+        count: &mut usize,
+        first: &mut Option<[f32; 2]>,
+        last: &mut Option<[f32; 2]>,
+        emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+    ) {
+        if let Some(p) = *first {
+            append(p, count, last, emit);
+        }
+        *first = None;
+        *last = None;
+    }
+
+    let (mut first, mut last) = (None, None);
+    let mut count = 0;
+    for element in elements {
+        match element {
+            PathEl::MoveTo(p) => {
+                close(&mut count, &mut first, &mut last, &mut emit);
+                let q = [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32];
+                emit(count, q, None);
+                count += 1;
+                first = Some(q);
+                last = Some(q);
+            }
+            PathEl::LineTo(p) => {
+                last?;
+                append(
+                    [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32],
+                    &mut count,
+                    &mut last,
+                    &mut emit,
+                );
+            }
+            PathEl::ClosePath => close(&mut count, &mut first, &mut last, &mut emit),
+            PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
+        }
+    }
+    close(&mut count, &mut first, &mut last, &mut emit);
+    Some(count)
+}
+
+fn direct_range(row_start: i32, row_end: i32, a: f32, b: f32) -> std::ops::RangeInclusive<i32> {
+    let low = (a.min(b).floor() as i32 - 1).max(row_start);
+    let high = (a.max(b).floor() as i32).min(row_end);
+    low..=high
+}
+
+/// Measures a resolved, line-only glyph's packing: contiguous contour
+/// points, a conservative Y-row table, then pairs of edge-start point
+/// indices, all relative to where it starts. Only listed consecutive point
+/// pairs are edges, so MoveTo jumps never contribute area. A pixel querying
+/// row r has local Y in [r, r + 1), so its unit-height interval is contained
+/// in [r, r + 2). An edge can contribute only for r in
+/// [floor(min_y) - 1, floor(max_y)].
+fn direct_plan<I: Iterator<Item = PathEl>>(elements: impl Fn() -> I) -> Option<DirectPlan> {
+    let bounds = line_bounds(elements())?;
     if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
         .into_iter()
         .all(f64::is_finite)
@@ -242,84 +417,16 @@ fn direct_texels_into(
         return None;
     }
     let origin = [bounds.x0.floor(), bounds.y0.floor()];
-    // Visit points in exactly the packed order. The optional predecessor
-    // identifies an edge; a MoveTo emits a point without an edge.
-    fn walk_points(
-        path: &BezPath,
-        origin: [f64; 2],
-        mut emit: impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
-    ) -> Option<usize> {
-        fn append(
-            p: [f32; 2],
-            count: &mut usize,
-            last: &mut Option<[f32; 2]>,
-            emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
-        ) {
-            if let Some(prev) = *last
-                && prev != p
-            {
-                emit(*count, p, Some(prev));
-                *count += 1;
-            }
-            *last = Some(p);
-        }
-        fn close(
-            count: &mut usize,
-            first: &mut Option<[f32; 2]>,
-            last: &mut Option<[f32; 2]>,
-            emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
-        ) {
-            if let Some(p) = *first {
-                append(p, count, last, emit);
-            }
-            *first = None;
-            *last = None;
-        }
-
-        let (mut first, mut last) = (None, None);
-        let mut count = 0;
-        for element in path.elements() {
-            match *element {
-                PathEl::MoveTo(p) => {
-                    close(&mut count, &mut first, &mut last, &mut emit);
-                    let q = [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32];
-                    emit(count, q, None);
-                    count += 1;
-                    first = Some(q);
-                    last = Some(q);
-                }
-                PathEl::LineTo(p) => {
-                    last?;
-                    append(
-                        [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32],
-                        &mut count,
-                        &mut last,
-                        &mut emit,
-                    );
-                }
-                PathEl::ClosePath => close(&mut count, &mut first, &mut last, &mut emit),
-                PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
-            }
-        }
-        close(&mut count, &mut first, &mut last, &mut emit);
-        Some(count)
-    }
-
     let row_start = -2i32;
     let row_end = bounds.height().ceil() as i32 + 3;
     let rows = (row_end - row_start + 1) as usize;
     let mut cursors = vec![0usize; rows];
-    let range = |a: f32, b: f32| {
-        let low = (a.min(b).floor() as i32 - 1).max(row_start);
-        let high = (a.max(b).floor() as i32).min(row_end);
-        low..=high
-    };
     let mut edges = 0usize;
-    let point_count = walk_points(path, origin, |_, point, prev| {
+    let point_count = walk_points(elements(), origin, |_, point, prev| {
         if let Some(prev) = prev {
             edges += 1;
             if prev[1] != point[1] {
-                for row in range(prev[1], point[1]) {
+                for row in direct_range(row_start, row_end, prev[1], point[1]) {
                     cursors[(row - row_start) as usize] += 1;
                 }
             }
@@ -330,7 +437,7 @@ fn direct_texels_into(
     }
     let mut length = 0usize;
     // Prefix counts in place; each entry becomes the insertion cursor for
-    // the second walk after its starting offset has been written below.
+    // the fill after its starting offset has been written.
     for count in &mut cursors {
         let row_count = *count;
         *count = length;
@@ -342,49 +449,125 @@ fn direct_texels_into(
     let table = point_count as u32;
     let list = table + rows as u32;
     let needed = list as usize + length.div_ceil(2);
-    let width = (needed as u32).min(1024).min(max_dimension).max(1);
-    let height = (needed as u32).div_ceil(width);
-    if height > max_dimension || u64::from(width) * u64::from(height) * 8 > DIRECT_CACHE_BYTES / 2 {
+    if needed as u64 * 8 > DIRECT_CACHE_BYTES / 2 || needed >= DIRECT_ARENA_TEXELS {
         return None;
     }
-    let total = width as usize * height as usize;
-    texels.clear();
-    texels.resize(total, [0.0, 0.0]);
+    Some(DirectPlan {
+        origin,
+        row_start,
+        row_end,
+        cursors,
+        length,
+        table,
+        list,
+        needed,
+    })
+}
+
+/// Writes `plan`'s glyph into `texels` (exactly `plan.needed` long).
+fn direct_fill<I: Iterator<Item = PathEl>>(
+    mut plan: DirectPlan,
+    elements: impl Fn() -> I,
+    texels: &mut [[f32; 2]],
+) -> Option<DirectMeta> {
+    let DirectPlan {
+        origin,
+        row_start,
+        row_end,
+        table,
+        list,
+        length,
+        ..
+    } = plan;
+    let rows = plan.cursors.len();
     for row in 0..rows {
         let end = if row + 1 < rows {
-            cursors[row + 1]
+            plan.cursors[row + 1]
         } else {
             length
         };
-        texels[table as usize + row] = [cursors[row] as f32, (end - cursors[row]) as f32];
+        texels[table as usize + row] = [plan.cursors[row] as f32, (end - plan.cursors[row]) as f32];
     }
-    let written = walk_points(path, origin, |index, point, prev| {
+    let cursors = &mut plan.cursors;
+    walk_points(elements(), origin, |index, point, prev| {
         texels[index] = point;
         if let Some(prev) = prev
             && prev[1] != point[1]
         {
-            for row in range(prev[1], point[1]) {
+            for row in direct_range(row_start, row_end, prev[1], point[1]) {
                 let position = &mut cursors[(row - row_start) as usize];
                 texels[list as usize + *position / 2][*position & 1] = (index - 1) as f32;
                 *position += 1;
             }
         }
     })?;
-    debug_assert_eq!(written, point_count);
     Some(DirectMeta {
         origin,
+        base: 0,
         table,
         list,
         row_start,
         rows: rows as u32,
-        width,
+        width: 0,
     })
 }
 
+/// [`direct_plan`] and [`direct_fill`] appended to `texels`.
 #[cfg(test)]
-fn direct_texels(path: &BezPath, max_dimension: u32) -> Option<(Vec<[f32; 2]>, DirectMeta)> {
+fn direct_texels_into<I: Iterator<Item = PathEl>>(
+    elements: impl Fn() -> I,
+    texels: &mut Vec<[f32; 2]>,
+) -> Option<DirectMeta> {
+    let plan = direct_plan(&elements)?;
+    let base = texels.len();
+    texels.resize(base + plan.needed, [0.0, 0.0]);
+    let mut meta = direct_fill(plan, elements, &mut texels[base..])?;
+    meta.base = base as u32;
+    Some(meta)
+}
+
+/// A shared direct-source texture's (width, height) for `texels`: the
+/// fewest rows that fit, each as short as they allow, so it pads less than
+/// one texel per row.
+fn arena_shape(texels: usize, max_side: usize) -> (usize, usize) {
+    let rows = texels.div_ceil(max_side.max(1)).max(1);
+    (texels.div_ceil(rows).max(1), rows)
+}
+
+/// The bounds of a line-only path's segments (a lone MoveTo adds none),
+/// or `None` for a curve.
+fn line_bounds(elements: impl Iterator<Item = PathEl>) -> Option<Rect> {
+    let (mut start, mut last) = (None::<kurbo::Point>, None::<kurbo::Point>);
+    let mut bounds: Option<Rect> = None;
+    let mut add = |a: kurbo::Point, b: kurbo::Point| {
+        let r = Rect::from_points(a, b);
+        bounds = Some(bounds.map_or(r, |old| old.union(r)));
+    };
+    for element in elements {
+        match element {
+            PathEl::MoveTo(p) => (start, last) = (Some(p), Some(p)),
+            PathEl::LineTo(p) => {
+                add(last?, p);
+                last = Some(p);
+            }
+            PathEl::ClosePath => {
+                if let (Some(a), Some(b)) = (last, start)
+                    && a != b
+                {
+                    add(a, b);
+                }
+                last = start;
+            }
+            PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
+        }
+    }
+    Some(bounds.unwrap_or(Rect::ZERO))
+}
+
+#[cfg(test)]
+fn direct_texels(path: &BezPath) -> Option<(Vec<[f32; 2]>, DirectMeta)> {
     let mut texels = Vec::new();
-    let meta = direct_texels_into(path, max_dimension, &mut texels)?;
+    let meta = direct_texels_into(|| path.elements().iter().copied(), &mut texels)?;
     Some((texels, meta))
 }
 
@@ -618,9 +801,8 @@ impl TextGpu {
             blur,
             images: HashMap::new(),
             image_bytes: 0,
-            direct: HashMap::new(),
-            direct_bytes: 0,
-            direct_upload: Vec::new(),
+            direct: DirectCache::new(DIRECT_CACHE_BYTES),
+            direct_scratch: Vec::new(),
             raster_pool: TargetPool::new(),
             cache: HashMap::new(),
             cache_bytes: 0,
@@ -643,6 +825,15 @@ impl TextGpu {
                 .iter()
                 .filter(|pipeline| pipeline.is_built())
                 .count()
+    }
+
+    /// Compiles the text pipelines frames at `precision` draw with (outline
+    /// and image paint, blur), ahead of the first text that needs them.
+    pub(crate) fn prewarm(&self, precision: Precision) {
+        let i = format_index(precision);
+        for pipeline in [&self.paint[i], &self.image_paint[i], &self.blur[i]] {
+            pipeline.get();
+        }
     }
 
     #[cfg(test)]
@@ -702,8 +893,6 @@ impl TextGpu {
         self.images.clear();
         self.image_bytes = 0;
         self.direct.clear();
-        self.direct_bytes = 0;
-        self.direct_upload = Vec::new();
     }
 
     pub fn cached_bytes(&self) -> u64 {
@@ -796,103 +985,122 @@ impl TextGpu {
         view
     }
 
-    fn direct_source(
+    /// The cached direct source of `lines`, or `None` to stage it.
+    fn direct_hit(
+        &mut self,
+        lines: &pm_text::render::scene::CoverageLines,
+        translation: [f64; 2],
+    ) -> Option<DirectSource> {
+        let entry = self.direct.hit(&lines.key(), self.tick)?;
+        Some(DirectSource {
+            view: entry.view.clone(),
+            meta: entry.meta,
+            translation,
+        })
+    }
+
+    /// Uploads the planned glyphs a chunk at a time through the reused
+    /// scratch: one texture and one copy per chunk of at most
+    /// [`DIRECT_CHUNK_TEXELS`] (a larger glyph takes a chunk alone), and
+    /// caches each glyph in its chunk's texture. Returns the sources in
+    /// planning order; `None` if a glyph cannot be written.
+    fn direct_upload(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        path: Arc<BezPath>,
-        translation: [f64; 2],
-    ) -> Option<DirectSource> {
-        let key = Arc::as_ptr(&path) as usize;
-        if let Some(entry) = self.direct.get_mut(&key)
-            && Arc::ptr_eq(&entry.path, &path)
-        {
-            entry.used = self.tick;
-            return Some(DirectSource {
-                view: entry.view.clone(),
-                meta: entry.meta,
-                translation,
+        planned: Vec<(pm_text::render::scene::CoverageLines, DirectPlan)>,
+    ) -> Option<Vec<(wgpu::TextureView, DirectMeta)>> {
+        let max_side = device.limits().max_texture_dimension_2d.max(1) as usize;
+        let mut out = Vec::with_capacity(planned.len());
+        let mut chunk: Vec<(pm_text::render::scene::CoverageLines, DirectMeta, usize)> = Vec::new();
+        let mut scratch = std::mem::take(&mut self.direct_scratch);
+        let sizes: Vec<usize> = planned.iter().map(|(_, p)| p.needed).collect();
+        let mut planned = planned.into_iter();
+        let mut at = 0;
+        while at < sizes.len() {
+            // This chunk's glyphs, and its texture's texels reserved at once.
+            let mut end = at + 1;
+            let mut total = sizes[at];
+            while end < sizes.len() && total + sizes[end] <= DIRECT_CHUNK_TEXELS {
+                total += sizes[end];
+                end += 1;
+            }
+            let (w, h) = arena_shape(total, max_side);
+            scratch.clear();
+            scratch.reserve(w * h);
+            chunk.clear();
+            for _ in at..end {
+                let (lines, plan) = planned.next().expect("sized");
+                let base = scratch.len();
+                let needed = plan.needed;
+                scratch.resize(base + needed, [0.0, 0.0]);
+                let mut meta = direct_fill(plan, || lines.device_elements(), &mut scratch[base..])?;
+                meta.base = base as u32;
+                chunk.push((lines, meta, needed));
+            }
+            at = end;
+            let (width, height) = (w, h);
+            scratch.resize(width * height, [0.0, 0.0]);
+            let size = wgpu::Extent3d {
+                width: width as u32,
+                height: height as u32,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pm text direct resolved edges"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
             });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                // [f32; 2] has no padding; write_texture copies the bytes
+                // before returning.
+                unsafe {
+                    std::slice::from_raw_parts(scratch.as_ptr().cast::<u8>(), scratch.len() * 8)
+                },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width as u32 * 8),
+                    rows_per_image: None,
+                },
+                size,
+            );
+            let view = texture.create_view(&Default::default());
+            // The whole texture is retained while any of its glyphs is.
+            let id = self
+                .direct
+                .admit(texture, (width * height) as u64 * 8, self.tick);
+            for (lines, mut meta, _) in chunk.drain(..) {
+                meta.width = width as u32;
+                let key = lines.key();
+                self.direct.insert(
+                    id,
+                    key,
+                    DirectCacheEntry {
+                        _lines: lines.lines,
+                        view: view.clone(),
+                        meta,
+                    },
+                );
+                out.push((view.clone(), meta));
+            }
         }
-        let meta = direct_texels_into(
-            &path,
-            device.limits().max_texture_dimension_2d,
-            &mut self.direct_upload,
-        )?;
-        let height = (self.direct_upload.len() as u32).div_ceil(meta.width);
-        let bytes = u64::from(meta.width) * u64::from(height) * 8;
-        if bytes > DIRECT_CACHE_BYTES / 2 {
-            return None;
+        // Keep the common chunk's scratch; not an unusually large glyph's.
+        if scratch.capacity() <= 2 * DIRECT_CHUNK_TEXELS {
+            scratch.clear();
+            self.direct_scratch = scratch;
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pm text direct resolved edges"),
-            size: wgpu::Extent3d {
-                width: meta.width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        // [f32; 2] has no padding; the immutable slice remains alive for
-        // queue.write_texture, which copies its bytes before returning.
-        let data = unsafe {
-            std::slice::from_raw_parts(
-                self.direct_upload.as_ptr().cast::<u8>(),
-                self.direct_upload.len() * 8,
-            )
-        };
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(meta.width * 8),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width: meta.width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        // The queue copied the upload. Keep the common glyph buffer for the
-        // next glyph, but do not retain unusually large staging capacity.
-        if self.direct_upload.capacity() * 8 > DIRECT_UPLOAD_SCRATCH_BYTES {
-            self.direct_upload = Vec::new();
-        }
-        let view = texture.create_view(&Default::default());
-        while self.direct_bytes + bytes > DIRECT_CACHE_BYTES {
-            let (&oldest, _) = self.direct.iter().min_by_key(|(_, entry)| entry.used)?;
-            let removed = self.direct.remove(&oldest)?;
-            self.direct_bytes -= removed.bytes;
-        }
-        self.direct_bytes += bytes;
-        self.direct.insert(
-            key,
-            DirectCacheEntry {
-                path,
-                _texture: texture,
-                view: view.clone(),
-                meta,
-                bytes,
-                used: self.tick,
-            },
-        );
-        Some(DirectSource {
-            view,
-            meta,
-            translation,
-        })
+        Some(out)
     }
 
     /// Renders the coverage pages of `atlas` into pool targets, which the
@@ -941,7 +1149,7 @@ impl TextGpu {
                     .iter()
                     .map(|entry| coverage::TransformedItem {
                         path: &entry.path,
-                        transform: Affine::translate((entry.translation[0], entry.translation[1])),
+                        transform: entry.transform,
                         bounds: entry.bounds,
                         at: entry.at,
                     })
@@ -1041,6 +1249,12 @@ impl TextGpu {
         let mut direct = matches!(self.coverage, Coverage::Auto | Coverage::Direct);
         let mut direct_sources: HashMap<usize, DirectSource> = HashMap::new();
         if direct {
+            // Glyphs the direct cache misses are uploaded together: one
+            // texture and one copy per frame, not one per glyph, reserved
+            // once from every glyph's plan.
+            let mut planned = Vec::new();
+            let mut planned_at: HashMap<(usize, [u64; 4]), usize> = HashMap::new();
+            let mut staged_items = Vec::new();
             for (i, item) in scene.items.iter().enumerate() {
                 let ItemContent::Coverage { paths } = &item.content else {
                     continue;
@@ -1051,11 +1265,36 @@ impl TextGpu {
                 };
                 let lines = self.cpu.coverage_cache().get(placed);
                 let [_, _, _, _, x, y] = placed.transform.as_coeffs();
-                let Some(source) = self.direct_source(device, queue, lines, [x, y]) else {
+                if let Some(source) = self.direct_hit(&lines, [x, y]) {
+                    direct_sources.insert(i, source);
+                } else if let Some(&at) = planned_at.get(&lines.key()) {
+                    staged_items.push((i, at, [x, y]));
+                } else if let Some(plan) = direct_plan(|| lines.device_elements()) {
+                    planned_at.insert(lines.key(), planned.len());
+                    staged_items.push((i, planned.len(), [x, y]));
+                    planned.push((lines, plan));
+                } else {
                     direct = false;
                     break;
-                };
-                direct_sources.insert(i, source);
+                }
+            }
+            if direct && !planned.is_empty() {
+                match self.direct_upload(device, queue, planned) {
+                    Some(flushed) => {
+                        for (i, at, translation) in staged_items {
+                            let (view, meta) = &flushed[at];
+                            direct_sources.insert(
+                                i,
+                                DirectSource {
+                                    view: view.clone(),
+                                    meta: *meta,
+                                    translation,
+                                },
+                            );
+                        }
+                    }
+                    None => direct = false,
+                }
             }
         }
         if !direct {
@@ -1279,12 +1518,12 @@ impl TextGpu {
                                 ],
                                 [3.0, 0.0, tw, th],
                                 [
-                                    source.meta.table as f32,
-                                    source.meta.list as f32,
+                                    (source.meta.base + source.meta.table) as f32,
+                                    (source.meta.base + source.meta.list) as f32,
                                     source.meta.row_start as f32,
                                     source.meta.width as f32,
                                 ],
-                                [source.meta.rows as f32, 0.0, 0.0, 0.0],
+                                [source.meta.rows as f32, source.meta.base as f32, 0.0, 0.0],
                             )
                         } else {
                             (
@@ -1673,14 +1912,15 @@ struct Draw {
 
 struct AreaItem {
     path: Arc<BezPath>,
+    /// Maps `path` to device space (cached local lines, then translation).
+    transform: Affine,
     bounds: PixelRect,
     at: [u32; 2],
-    translation: [f64; 2],
 }
 
-/// Device-space outlines and the atlas cell each outline covers. The cache
-/// holds the f64 outline after its linear transform; glyph placement stays
-/// f64 until area rasterization.
+/// Outlines and the atlas cell each outline covers. The cache holds the f64
+/// resolved outline in its own space; the linear transform and glyph
+/// placement stay f64 until area rasterization.
 fn area_items(
     scene: &TextScene,
     atlas: &Atlas,
@@ -1692,28 +1932,28 @@ fn area_items(
         let ItemContent::Coverage { paths, .. } = &scene.items[cell.item].content else {
             continue;
         };
-        let (path, translation) = if let [one] = paths.as_slice() {
+        let (path, transform) = if let [one] = paths.as_slice() {
             let [_, _, _, _, x, y] = one.transform.as_coeffs();
-            (cache.get(one), [x, y])
+            let lines = cache.get(one);
+            (lines.lines, Affine::translate((x, y)) * lines.linear)
         } else {
             let mut combined = BezPath::new();
             for p in paths {
-                let mut part = cache.get(p).as_ref().clone();
                 let [_, _, _, _, x, y] = p.transform.as_coeffs();
-                part.apply_affine(Affine::translate((x, y)));
-                for el in part.iter() {
-                    combined.push(el);
+                let to_device = Affine::translate((x, y));
+                for el in cache.get(p).device_elements() {
+                    combined.push(to_device * el);
                 }
             }
-            (Arc::new(combined), [0.0, 0.0])
+            (Arc::new(combined), Affine::IDENTITY)
         };
         let x = i32::try_from(cell.device_x).map_err(|_| "text cell x outside i32".to_owned())?;
         let y = i32::try_from(cell.device_y).map_err(|_| "text cell y outside i32".to_owned())?;
         out.push(AreaItem {
             path,
+            transform,
             bounds: PixelRect::new(x, y, cell.width, cell.height),
             at: [cell.x, cell.y],
-            translation,
         });
     }
     Ok(out)
@@ -1736,6 +1976,43 @@ pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
 #[cfg(test)]
 mod direct_tests {
     use super::*;
+
+    #[test]
+    fn shared_chunk_textures_are_charged_once_and_stay_within_the_bound() {
+        // Four glyphs share each 4 KB chunk: the chunk, not each glyph, is
+        // what the cache retains and charges.
+        let mut cache: DirectCache<(), u32> = DirectCache::new(10 * 1024);
+        let key = |n: usize| (n, [0u64; 4]);
+        let mut tick = 0;
+        for chunk in 0..2 {
+            tick += 1;
+            let id = cache.admit((), 4096, tick);
+            for glyph in 0..4 {
+                cache.insert(id, key(chunk * 4 + glyph), glyph as u32);
+            }
+        }
+        assert_eq!(cache.bytes, 8192);
+        assert_eq!(cache.entries.len(), 8);
+        // The first chunk is used again; the third evicts the second, whole.
+        tick += 1;
+        assert!(cache.hit(&key(0), tick).is_some());
+        tick += 1;
+        let id = cache.admit((), 4096, tick);
+        cache.insert(id, key(8), 0);
+        assert_eq!(cache.bytes, 8192, "two chunks retained");
+        assert!(cache.bytes <= cache.limit);
+        assert!((4..8).all(|n| cache.hit(&key(n), tick).is_none()));
+        assert!((0..4).all(|n| cache.hit(&key(n), tick).is_some()));
+        // A glyph uploaded again into a newer chunk stays when the older
+        // chunk leaves.
+        let older = cache.admit((), 4096, tick);
+        cache.insert(older, key(9), 1);
+        let newer = cache.admit((), 4096, tick);
+        cache.insert(newer, key(9), 7);
+        assert!(cache.bytes <= cache.limit);
+        cache.evict(older);
+        assert_eq!(cache.hit(&key(9), tick), Some(&7));
+    }
 
     #[test]
     fn closed_form_clamped_integral_matches_piecewise_reference() {
@@ -1835,7 +2112,7 @@ mod direct_tests {
             path.line_to((x, y + h));
             path.close_path();
         }
-        let (data, meta) = direct_texels(&path, 1024).expect("small contours fit");
+        let (data, meta) = direct_texels(&path).expect("small contours fit");
         // Each closed contour has four edges and a duplicated first point.
         for phase in (0..64)
             .map(|step| step as f32 / 64.0)

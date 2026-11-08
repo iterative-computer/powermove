@@ -686,6 +686,8 @@ pub enum ProxyFormat {
     ProResLt,
     /// "HEVC (smaller files)", 10-bit.
     Hevc10,
+    /// Optimized media: ProRes 422 HQ (4444 for alpha or deeper sources).
+    ProResHq,
 }
 
 /// Proxy sizes (appendix D). Automatic never goes below 540p.
@@ -694,6 +696,8 @@ pub enum ProxyFormat {
 #[serde(rename_all = "camelCase")]
 pub enum ProxySize {
     Automatic,
+    /// The source's own size (optimized media; a full-size proxy).
+    Full,
     Half,
     Quarter,
     P1080,

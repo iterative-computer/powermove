@@ -5,6 +5,7 @@ export const sections = [
   "project",
   "memory",
   "general",
+  "media",
   "accounts",
   "transcription",
   "extensions",
@@ -25,6 +26,12 @@ export const sectionCopy: Record<
     title: "General",
     description: "How Powermove looks and works on this Mac.",
     symbol: "gearshape",
+  },
+  media: {
+    title: "Media",
+    description:
+      "Proxies, optimized media, and where Powermove keeps them on this Mac.",
+    symbol: "film.stack",
   },
   accounts: {
     title: "Accounts",

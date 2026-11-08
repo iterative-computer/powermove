@@ -363,6 +363,7 @@ pub fn run_child() -> Result<()> {
         let catalog = crate::MediaCatalog {
             originals: request.originals,
             proxies: request.proxies,
+            ..Default::default()
         };
         let media = catalog.export_paths(settings.draft_from_proxies);
         let mut doc = pm_model::Document::new(

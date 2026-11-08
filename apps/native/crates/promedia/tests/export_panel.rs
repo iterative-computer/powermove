@@ -441,3 +441,41 @@ fn hdr_base() -> pm_protocol::priority::ExportSettings {
         delivery: Default::default(),
     }
 }
+
+/// Use Proxies (Draft) applies only where the sheet shows it: a still
+/// export that inherited it from a video setting reads originals.
+#[test]
+fn a_hidden_draft_choice_never_reaches_the_engine() {
+    for (format, draft) in [
+        (Format::Prores, true),
+        (Format::Mp4, true),
+        (Format::Webm, true),
+        (Format::Png, true),
+        (Format::Still, false),
+    ] {
+        let mut o = options();
+        o.format = format;
+        o.use_proxies = true;
+        let mut base = planned();
+        base.draft_from_proxies = false;
+        if matches!(format, Format::Png | Format::Still) {
+            base.color = pm_protocol::color::OutputColor::SrgbImage;
+        }
+        let mapped = o
+            .intent(true, 0)
+            .unwrap()
+            .engine_settings(base)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mapped.draft_from_proxies, draft, "{format:?}");
+    }
+    let mut o = options();
+    o.use_proxies = false;
+    let mapped = o
+        .intent(true, 0)
+        .unwrap()
+        .engine_settings(planned())
+        .unwrap()
+        .unwrap();
+    assert!(!mapped.draft_from_proxies, "originals unless chosen");
+}

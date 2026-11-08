@@ -85,6 +85,9 @@ pub(crate) struct ChannelMemo {
     /// `PM.localMatrix(L, T)` by layer address when every channel it reads
     /// is time-independent (`None`: some channel is not; it is computed).
     locals: HashMap<usize, Option<crate::transform::Mat2d>, crate::scope::BuildAddressHasher>,
+    /// `pathGeometry(L, T)` by layer address when every path channel it
+    /// reads is time-independent: the same at every time then.
+    paths: HashMap<usize, Arc<crate::bounds::PathGeometry>, crate::scope::BuildAddressHasher>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
 }
@@ -108,6 +111,7 @@ impl ChannelMemo {
             self.keys.clear();
             self.ancestors.clear();
             self.locals.clear();
+            self.paths.clear();
             self.edition = Some(edition);
             // The first plan at an edition only notes it (see above).
             self.open = None;
@@ -130,6 +134,7 @@ impl ChannelMemo {
         self.keys.clear();
         self.ancestors.clear();
         self.locals.clear();
+        self.paths.clear();
         self.edition = None;
     }
 
@@ -180,6 +185,33 @@ impl ChannelMemo {
 }
 
 impl ChannelMemo {
+    /// The time-independent path geometry kept for `layer`.
+    pub(crate) fn path_geometry(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+    ) -> Option<Arc<crate::bounds::PathGeometry>> {
+        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+            return None;
+        }
+        let found = self.paths.get(&address(layer))?.clone();
+        self.hits += 1;
+        Some(found)
+    }
+
+    /// Keeps `layer`'s time-independent path geometry.
+    pub(crate) fn keep_path_geometry(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+        geometry: Arc<crate::bounds::PathGeometry>,
+    ) {
+        if self.answers(cx) && is_element(cx.layers(), layer) {
+            self.misses += 1;
+            self.paths.insert(address(layer), geometry);
+        }
+    }
+
     /// Whether the memo answers for compositions of `cx`'s document.
     fn answers(&self, cx: &crate::Comp<'_>) -> bool {
         self.open == Some((address(cx.root()), cx.revision()))

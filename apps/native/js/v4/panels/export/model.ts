@@ -35,6 +35,8 @@ export interface Options {
   depth: 8 | 16;
   /** Absent from options saved before HDR delivery: read as SDR. */
   dynamicRange: "sdr" | "pq" | "hlg";
+  /** Use Proxies (Draft); absent means originals. */
+  useProxies?: boolean;
 }
 /** Presets saved before profile, codec and depth existed keep today's output. */
 const withDefaults = (o: Options): Options => ({ ...fieldDefaults, ...o });
@@ -99,6 +101,7 @@ function validOptions(x: unknown): x is Options {
     [x.mblur, x.audio, x.alpha, x.captionsBurn].every(
       (v) => typeof v === "boolean",
     ) &&
+    (x.useProxies === undefined || typeof x.useProxies === "boolean") &&
     (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
     (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
     (x.depth === undefined || x.depth === 8 || x.depth === 16)

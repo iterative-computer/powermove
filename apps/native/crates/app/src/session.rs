@@ -39,6 +39,12 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
+    /// What the media resolver found; `media` adds the renditions.
+    pub(crate) media_base: MediaCatalog,
+    /// Proxies, optimized media and their Background Tasks.
+    pub pro_media: Arc<crate::pro_media::ProMedia>,
+    /// Window ▸ Background Tasks, while open.
+    pub tasks_window: Option<Entity<crate::tasks_window::TasksWindow>>,
     pub opening: bool,
     /// The project an open is reading, shown until it lands or fails, and
     /// then until the panels have drawn it (`settling`).
@@ -219,6 +225,28 @@ impl Controller {
         host: Rc<RefCell<Host>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let pro_media = Arc::new(crate::pro_media::ProMedia::new(
+            profile.clone(),
+            crate::media::objects_dir(&profile),
+            engine.export_activity(),
+        ));
+        pro_media.refresh_usage();
+        let pro_events = pro_media.event_receiver.clone();
+        cx.spawn(async move |this, cx| {
+            while let Ok(first) = pro_events.recv().await {
+                let mut renditions = matches!(first, crate::pro_media::Event::Renditions);
+                while let Ok(e) = pro_events.try_recv() {
+                    renditions |= matches!(e, crate::pro_media::Event::Renditions);
+                }
+                if this
+                    .update(cx, |v, cx| v.pro_media_changed(renditions, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let events = kernel.subscribe();
         let (tx, rx) = async_channel::unbounded();
         std::thread::spawn(move || {
@@ -301,6 +329,9 @@ impl Controller {
             viewer: None,
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
+            media_base: MediaCatalog::default(),
+            pro_media,
+            tasks_window: None,
             opening: false,
             opening_name: None,
             settling: None,
@@ -1112,6 +1143,7 @@ impl Controller {
         self.session = Some(session);
         self.media_refresh.reset();
         self.media = MediaCatalog::default();
+        self.media_base = MediaCatalog::default();
         self.mirror = None;
         self.selected = None;
         self.refresh(cx);

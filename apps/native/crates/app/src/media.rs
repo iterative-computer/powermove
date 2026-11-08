@@ -31,6 +31,11 @@ pub fn cache_root(profile: &Path) -> PathBuf {
     profile.join("media-cache")
 }
 
+/// The media cache's content-addressed objects (each named by its bytes).
+pub fn objects_dir(profile: &Path) -> PathBuf {
+    cache_root(profile).join(OBJECTS)
+}
+
 pub fn failure_note(count: usize) -> String {
     match count {
         1 => "1 media item is offline".into(),

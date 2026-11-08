@@ -56,6 +56,32 @@ export function status(
   }
   return null;
 }
+/** A rendition's state in the row's quiet meta text. */
+function rendition(state: unknown, label: string): string | null {
+  if (state === "Queued") return `${label} Waiting`;
+  if (typeof state !== "object" || state === null) return null;
+  if ("Generating" in state) {
+    const { percent } = (state as { Generating: { percent: number } }).Generating;
+    return `Creating ${label} ${percent}%`;
+  }
+  if ("Ready" in state) return label;
+  if ("Failed" in state) return `${label} Failed`;
+  return null;
+}
+/** Proxy, optimized media and Always Play Original, as meta text. */
+export function renditions(runtime: {
+  proxy: unknown;
+  optimized?: unknown;
+  play_original?: boolean;
+}): string {
+  return [
+    rendition(runtime.proxy, "Proxy"),
+    rendition(runtime.optimized, "Optimized"),
+    runtime.play_original ? "Plays Original" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
 export function meta(row: Row): string {
   if ("Folder" in row.data) {
     const n = row.data.Folder.items;
@@ -72,8 +98,9 @@ export function meta(row: Row): string {
       .join(" · ");
   }
   const [a, runtime] = row.data.Asset;
+  const extra = renditions(runtime);
   const detail = status(runtime.availability, a)?.detail;
-  if (detail) return detail;
+  if (detail) return [detail, extra].filter(Boolean).join(" · ");
   return (
     [
       a.format?.toLowerCase() === "svg" || /\.svg$/i.test(a.name)
@@ -85,6 +112,7 @@ export function meta(row: Row): string {
       a.duration === null ? null : clock(a.duration),
       a.kind === "model" && a.triangles !== null ? `${a.triangles} tris` : null,
       a.bytes === null ? null : mediaSize(a.bytes),
+      extra,
     ]
       .filter(Boolean)
       .join(" · ") || (runtime.availability === "Ready" ? "Ready to use" : "")
@@ -125,6 +153,8 @@ export function accessibleName(row: Row): string {
       parts.push("changed");
     if (typeof availability === "object" && "Cloud" in availability)
       parts.push("in cloud");
+    const extra = renditions(row.data.Asset[1]);
+    if (extra) parts.push(extra.toLowerCase().replaceAll(" · ", ", "));
   }
   return [...parts, ...selected].join(", ");
 }
@@ -159,6 +189,18 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
   if ("OpenComposition" in command) return "Open in Timeline";
   if ("CompositionSettings" in command) return "Composition Settings…";
   if ("DuplicateComposition" in command) return "Duplicate";
+  if ("Rendition" in command) {
+    const r = command.Rendition;
+    if (typeof r === "object") return "Always Play Original";
+    return {
+      CreateProxy: "Create Proxy Media",
+      RebuildProxy: "Rebuild Proxy Media",
+      DeleteProxy: "Delete Proxy Media",
+      AttachProxy: "Attach Proxy Media…",
+      CreateOptimized: "Create Optimized Media",
+      DeleteOptimized: "Delete Optimized Media",
+    }[r];
+  }
   return "Delete Composition…";
 }
 export interface CardAction {
@@ -253,7 +295,10 @@ export function menuEntries(
       c === "ImportFiles" ||
       c === "DeleteAssets" ||
       (typeof c === "object" &&
-        ("Replace" in c ||
+        (("Rendition" in c &&
+          (c.Rendition === "CreateProxy" ||
+            c.Rendition === "CreateOptimized")) ||
+          "Replace" in c ||
           "DeleteFolder" in c ||
           "CompositionSettings" in c ||
           "DeleteComposition" in c));

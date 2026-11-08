@@ -32,6 +32,7 @@ mod panels;
 mod perf_gate;
 mod platform;
 mod playback;
+mod pro_media;
 mod project_library;
 mod rows;
 mod session;
@@ -40,6 +41,7 @@ mod sheets;
 mod smoke;
 mod surface_routes;
 mod surfaces;
+mod tasks_window;
 mod text_host;
 mod timeline_surface;
 #[cfg(test)]

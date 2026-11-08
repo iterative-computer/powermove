@@ -151,7 +151,7 @@ impl<'a> CanvasMeasurer<'a> {
     }
 
     /// The full measurement (shaped runs and their faces), unmemoized.
-    pub fn shape(&mut self, text: &[u16]) -> Measured {
+    pub fn shape(&mut self, text: &[u16]) -> std::sync::Arc<Measured> {
         measure::measure(self.resolver, self.cache, &self.setup, text)
     }
 }

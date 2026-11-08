@@ -3,4 +3,4 @@
 /**
  * Proxy formats (appendix D, Settings › Project › Media).
  */
-export type ProxyFormat = "proResProxy" | "proResLt" | "hevc10";
+export type ProxyFormat = "proResProxy" | "proResLt" | "hevc10" | "proResHq";

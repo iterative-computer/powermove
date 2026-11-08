@@ -845,6 +845,15 @@ impl MediaPanel {
                 }
             }
             DeleteAssets => self.request_delete(c, None, out)?,
+            Rendition(action) => {
+                let assets = self.rendition_targets(c, r);
+                if assets.is_empty()
+                    || (action == crate::RenditionAction::AttachProxy && assets.len() != 1)
+                {
+                    return Err(Error::InvalidTarget);
+                }
+                out.effects.push(Effect::Renditions { action, assets });
+            }
             NewComposition => out.effects.push(Effect::NewComposition),
             ImportFiles => out.effects.push(Effect::PickFiles { replace: None }),
             ImportFolder(folder) => {

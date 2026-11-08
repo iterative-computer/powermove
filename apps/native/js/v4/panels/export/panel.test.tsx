@@ -229,6 +229,7 @@ test("hover/focus use system controls; op tree stays stable, with one selected k
     "export.quality",
     "export.mblur",
     "export.audio",
+    "export.useProxies",
     "export.captionsBurn",
     "export.captionsSidecar",
     "export.preset",

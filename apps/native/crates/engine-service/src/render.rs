@@ -334,21 +334,25 @@ impl Engine {
     }
     /// Opens and warms the videos of a coming frame on background workers, so
     /// a clip entering the playhead does not stall the frame that meets it.
-    pub fn prepare(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) {
+    /// The video draws planned at `time`: (layer, instance).
+    pub fn prepare(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<(String, u64)> {
         if self.sync_studio(scene).is_err() {
-            return;
+            return Vec::new();
         }
         let Ok(request) = spec.request(scene) else {
-            return;
+            return Vec::new();
         };
         // A plan that cannot be built reports through the frame itself.
-        let _ = self.renderer.prepare_media(
-            &scene.doc,
-            &scene.comp,
-            time,
-            &request,
-            scene.media.as_ref(),
-        );
+        self.renderer
+            .prepare_media(
+                &scene.doc,
+                &scene.comp,
+                time,
+                &request,
+                scene.media.as_ref(),
+            )
+            .map(|prepared| prepared.videos)
+            .unwrap_or_default()
     }
     /// The extension definitions the next frames render with (the viewer's
     /// pinned resource snapshot). A new snapshot installs them again.
@@ -381,6 +385,10 @@ impl Engine {
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
+            // A document's first frame compiles the frame and text pipelines
+            // it draws with, so no frame met while playing does (built ones
+            // are kept: later documents pay nothing).
+            self.renderer.prewarm(&scene.doc);
             self.studio_content = Some(key);
         }
         Ok(())

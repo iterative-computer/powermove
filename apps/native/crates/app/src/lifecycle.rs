@@ -387,6 +387,7 @@ impl Controller {
                     v.published = None;
                     v.media_refresh.reset();
                     v.media = Default::default();
+                    v.media_base = Default::default();
                     v.mirror = None;
                     v.rows.clear();
                     v.saving_note = false;

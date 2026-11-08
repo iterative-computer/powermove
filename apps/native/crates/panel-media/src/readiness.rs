@@ -20,6 +20,14 @@ impl ObservedRuntime {
         self.stamp = Some(stamp);
         self
     }
+    /// These observations with `f` applied to each asset's state (what the
+    /// host tracks itself, such as renditions).
+    pub fn with_states(mut self, f: impl Fn(&str, &mut RuntimeState)) -> Self {
+        for (id, state) in &mut self.states {
+            f(id, state);
+        }
+        self
+    }
 }
 impl MediaRuntime for ObservedRuntime {
     fn state(&self, stamp: &Stamp, asset: &str) -> RuntimeState {

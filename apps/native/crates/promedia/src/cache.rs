@@ -158,6 +158,20 @@ impl RenderCache {
             BarState::Missing
         })
     }
+    /// Removes every frame not marked Keep Rendered; returns the bytes freed.
+    pub fn clear_unkept(&self) -> io::Result<u64> {
+        no_links(&self.root)?;
+        let mut kept = 0u64;
+        for entry in fs::read_dir(&self.root)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|s| s == "frame")
+                && path.with_extension("keep").exists()
+            {
+                kept = kept.saturating_add(fs::metadata(&path)?.len());
+            }
+        }
+        self.trim_to(kept)
+    }
     /// Deterministic oldest-modified eviction. Kept entries may make quota
     /// impossible; refusal leaves them intact. Check the whole plan before IO.
     pub fn trim_to(&self, bytes: u64) -> io::Result<u64> {

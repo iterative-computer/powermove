@@ -86,10 +86,20 @@ use the nonzero union resolver.
 Large or compound draws use the shared R32Float area renderer. Its cells
 align with device pixels, retain 1/16384 pixel coordinate precision and tile
 large items. Both paths use the same resolved f64 line geometry and ordered
-paint. A bounded 8 MiB path cache is independent of glyph translation, and
-an 8 MiB GPU geometry cache retains compact row-indexed contours. The explicit
-CPU comparison mode uses `vello_cpu`; its 8-bit coverage is not production
-precision. Coverage has no luminance preblend or stem dilation.
+paint. The explicit CPU comparison mode uses `vello_cpu`; its 8-bit coverage
+is not production precision. Coverage has no luminance preblend or stem
+dilation.
+
+**Geometry reuse.** Nonzero resolution commutes with an invertible linear
+map, so the 32 MiB path cache keeps each outline's lines resolved in its own
+space, flattened at the device tolerance divided by the top of its
+quarter-octave scale bucket (2^(k/4)); every transform in the bucket stays
+within the device tolerance, with at most 2^(1/8) more lines. The rasterizers
+apply the linear map, then the translation, in f64. Animated rotation never
+rebuilds geometry; animated scale rebuilds four times per doubling instead of
+every frame. A singular transform is resolved after it, as before. Glyphs the
+8 MiB GPU edge cache misses upload together, in 32 KB chunks through a reused
+scratch, one texture per chunk.
 
 **TEXT-RASTER-1:** exact outline coverage replaces the previous CoreText
 smoothing fit, CoreGraphics masks, Skia preblend tables and distance-field

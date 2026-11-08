@@ -135,14 +135,16 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       />
     </FormRow>
   );
-  const toggle = (key: "mblur" | "audio" | "alpha" | "captionsBurn") => (
+  const toggle = (
+    key: "mblur" | "audio" | "alpha" | "captionsBurn" | "useProxies",
+  ) => (
     <FormRow name={key} help={help(key)}>
       <UI.Checkbox
         id={`export.${key}`}
         label={rows[key][0]}
         title={help(key)}
         binding={s.bindings[key]}
-        value={o[key]}
+        value={o[key] ?? false}
         disabled={busy || (key === "audio" && !p.hasAudio)}
         onChange={(e) => edit(key, e.value as boolean)}
       />
@@ -412,6 +414,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 {shows(o, "mblur") ? toggle("mblur") : null}
                 {shows(o, "audio") ? toggle("audio") : null}
                 {shows(o, "alpha") ? toggle("alpha") : null}
+                {shows(o, "useProxies") ? toggle("useProxies") : null}
               </Group>
               {p.captionLayers ? (
                 <Group label="Captions">

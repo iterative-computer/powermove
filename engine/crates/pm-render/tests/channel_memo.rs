@@ -126,6 +126,53 @@ fn layer(rng: &mut Rng, id: &str, extra: &str) -> String {
     )
 }
 
+/// A shape layer with an editable path: every channel static, or (`moving`)
+/// the first vertex keyframed.
+fn path_layer(rng: &mut Rng, id: &str, moving: bool) -> String {
+    let ch = |v: f64| format!("{{\"v\":{v}}}");
+    let x0 = if moving {
+        format!(
+            "{{\"v\":0,\"kf\":[{{\"t\":0,\"v\":0}},{{\"t\":6,\"v\":{}}}]}}",
+            20 + rng.below(80)
+        )
+    } else {
+        ch(0.0)
+    };
+    let vertices: Vec<String> = [(x0, ch(0.0)), (ch(90.0), ch(10.0)), (ch(30.0), ch(70.0))]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (x, y))| {
+            format!(
+                "{{\"id\":\"v{i}\",\"p\":{{\"x\":{x},\"y\":{y},\"inX\":{z},\"inY\":{z},\"outX\":{c},\"outY\":{z}}}}}",
+                z = ch(0.0),
+                c = ch(12.0),
+            )
+        })
+        .collect();
+    format!(
+        "{{\"id\":\"{id}\",\"type\":\"shape\",\"name\":\"{id}\",\"from\":0,\"dur\":12,\"on\":true,\"d\":{{\"paths\":[{{\"id\":\"p\",\"parent\":null,\"p\":{{\"x\":{},\"y\":{},\"rotation\":{},\"scaleX\":{},\"scaleY\":{},\"closed\":{{\"v\":true}},\"fill\":{{\"v\":\"#{:06x}\"}},\"fillEnabled\":{{\"v\":true}},\"fillOpacity\":{},\"stroke\":{{\"v\":\"#FFFFFF\"}},\"strokeWidth\":{},\"strokeOpacity\":{},\"trimStart\":{},\"trimEnd\":{},\"trimOffset\":{},\"copies\":{},\"repeatX\":{},\"repeatY\":{},\"repeatRotation\":{}}},\"vertices\":[{}]}}]}},\"p\":{{\"position.x\":{{\"v\":{}}},\"position.y\":{{\"v\":{}}}}}}}",
+        ch(0.0),
+        ch(0.0),
+        ch(0.0),
+        ch(100.0),
+        ch(100.0),
+        rng.next() & 0xff_ffff,
+        ch(100.0),
+        ch(2.0),
+        ch(100.0),
+        ch(0.0),
+        ch(100.0),
+        ch(0.0),
+        ch(1.0),
+        ch(0.0),
+        ch(0.0),
+        ch(0.0),
+        vertices.join(","),
+        100 + rng.below(900),
+        100 + rng.below(500),
+    )
+}
+
 fn document(rng: &mut Rng) -> Value {
     let mut layers = vec![
         "{\"id\":\"n1\",\"type\":\"null\",\"name\":\"n1\",\"from\":0,\"dur\":12,\"on\":true,\"d\":{},\"p\":{\"position.x\":{\"v\":300,\"kf\":[{\"t\":0,\"v\":300},{\"t\":4,\"v\":700}]},\"position.y\":{\"v\":200}}}".to_owned(),
@@ -140,6 +187,9 @@ fn document(rng: &mut Rng) -> Value {
             _ => "",
         };
         layers.push(layer(rng, &format!("s{i}"), extra));
+    }
+    for i in 0..4 {
+        layers.push(path_layer(rng, &format!("sp{i}"), i % 2 == 1));
     }
     let nested: Vec<String> = (0..4).map(|i| layer(rng, &format!("ns{i}"), "")).collect();
     layers.push("{\"id\":\"pc\",\"type\":\"precomp\",\"name\":\"pc\",\"from\":0,\"dur\":12,\"on\":true,\"d\":{\"comp\":\"N\",\"w\":480,\"h\":270},\"p\":{\"position.x\":{\"v\":900},\"position.y\":{\"v\":500,\"kf\":[{\"t\":0,\"v\":500},{\"t\":3,\"v\":300}]}}}".to_owned());
@@ -240,6 +290,17 @@ fn edit(doc: &mut Document, rng: &mut Rng) -> String {
             );
             set(doc, layers_path(comp), Value::Array(layers));
             format!("move, delete, insert in {comp}")
+        }
+        8 if layers[i].get("type") == Some(&Value::String("shape".into())) => {
+            // An editable path's vertex: static, keyframed, or an expression.
+            let mut p = at(&["d", "paths", "0", "vertices", "1", "p", "y"]);
+            let v = match rng.below(3) {
+                0 => parse(&channel(rng, 10.0, 60.0)).unwrap(),
+                1 => parse("{\"v\":10,\"expr\":\"value + 5\"}").unwrap(),
+                _ => parse("{\"v\":25}").unwrap(),
+            };
+            set(doc, std::mem::take(&mut p), v);
+            format!("path vertex {comp}[{i}]")
         }
         9 => {
             // Group membership: what the layer's ancestry reads.

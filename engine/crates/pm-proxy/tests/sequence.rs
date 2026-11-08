@@ -180,6 +180,7 @@ mod real {
                 cancel: &cancel,
                 pause: &never_pause,
                 on_pause: &on_pause,
+                on_progress: &|_| {},
             },
         };
         // A deterministic quota keeps this codec test independent of the
@@ -353,6 +354,7 @@ mod real {
                         cancel: &cancel,
                         pause: &|| false,
                         on_pause: &|_| {},
+                        on_progress: &|_| {},
                     },
                 },
                 &quota,

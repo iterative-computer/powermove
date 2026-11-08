@@ -656,6 +656,25 @@ encoder); the file comparison with today's exporter was not measured. A
 straight-alpha path for ProRes 4444 (color under α = 0 kept from straight
 sources) would go beyond today and stays the open decision in `phase2-gate.md`.
 
+### Real-project playback (wave 16)
+
+What each frame no longer repeats, by where the time went on real projects
+(`pm-engine-service --bench --project`, sampled):
+
+- **Text geometry**: resolved once per outline and scale bucket
+  ([text-render.md](text-render.md), "Geometry reuse"), not per transform.
+- **Text shaping**: level 1 measurements are remembered per font setup and
+  text for the session (Blink's per-font shape cache does the same), so text
+  drawn every frame is shaped once.
+- **Shape paths**: static channels answer without building a key; a layer
+  whose path channels are all static keeps its path geometry in the channel
+  memo for the document's edition; drawing leaves a shape's `paths` out of
+  the resolved content (it was a deep copy of every vertex per frame).
+- **Media look-ahead**: stills decode on a worker ahead of the playhead; a
+  layer the renderer cannot draw no longer stops the look-ahead for every
+  other layer; the frames where a video enters between two look-aheads are
+  warmed; frame and text pipelines compile with a document's first frame.
+
 ## Gaps
 
 - **Layer drag (D6) p50 idle, amendment 22** (2026-10-18): p95 and p99 are

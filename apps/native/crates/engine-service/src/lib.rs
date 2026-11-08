@@ -115,6 +115,13 @@ pub type LockedOverlayProvider =
 pub struct MediaCatalog {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     pub proxies: BTreeMap<String, std::path::PathBuf>,
+    /// Optimized media: full-size high-quality transcodes the viewer plays
+    /// in Automatic in place of their originals (Final Cut's optimized
+    /// media). Exports never read them.
+    pub optimized: BTreeMap<String, std::path::PathBuf>,
+    /// Always Play Original: these assets never play a proxy or optimized
+    /// media, in any mode.
+    pub play_original: std::collections::BTreeSet<String>,
 }
 /// What the viewer plays for each clip (View › Media). Exports read
 /// originals whatever this says; only an explicit draft export uses proxies.
@@ -141,14 +148,23 @@ impl MediaCatalog {
     }
     /// The file the viewer reads for each asset in `mode`.
     pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
-        let (first, second) = match mode {
-            MediaMode::Automatic => (&self.originals, Some(&self.proxies)),
-            MediaMode::Originals => (&self.originals, None),
-            MediaMode::ProxyPreferred => (&self.proxies, Some(&self.originals)),
-            MediaMode::ProxyOnly => (&self.proxies, None),
+        // Most preferred last: each later map overrides the earlier ones.
+        let order: &[&BTreeMap<String, std::path::PathBuf>] = match mode {
+            MediaMode::Automatic => &[&self.proxies, &self.originals, &self.optimized],
+            MediaMode::Originals => &[&self.originals],
+            MediaMode::ProxyPreferred => &[&self.originals, &self.optimized, &self.proxies],
+            MediaMode::ProxyOnly => &[&self.proxies],
         };
-        let mut paths = second.cloned().unwrap_or_default();
-        paths.extend(first.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut paths = BTreeMap::new();
+        for map in order {
+            paths.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        for id in &self.play_original {
+            match self.originals.get(id) {
+                Some(original) => paths.insert(id.clone(), original.clone()),
+                None => paths.remove(id),
+            };
+        }
         paths
     }
     /// Assets the viewer draws from a proxy in `mode`.
@@ -871,6 +887,81 @@ struct Runtime {
     /// When the frames started being refused as transient, while they are.
     waiting_since: Option<f64>,
     prepared: f64,
+    lookahead: Lookahead,
+}
+/// Where media was last prepared ahead of the playhead, and the frames a
+/// video entering since then still needs prepared.
+#[derive(Default)]
+struct Lookahead {
+    /// The last look-ahead time and the video draws planned there.
+    last: Option<(Ticks, std::collections::HashSet<(String, u64)>)>,
+    /// Frames between two look-aheads where a video entered: its first
+    /// frame is among them, and the shared cache should hold it before the
+    /// playhead meets it. One is prepared per frame drawn.
+    refine: VecDeque<Ticks>,
+}
+impl Lookahead {
+    /// Notes what the look-ahead at `at` planned. A video new since the last
+    /// one entered between the two: queue every frame between them.
+    fn planned(&mut self, at: Ticks, videos: Vec<(String, u64)>, frame: i64) {
+        let videos: std::collections::HashSet<_> = videos.into_iter().collect();
+        if let Some((last, before)) = &self.last {
+            let (lo, hi) = (last.get().min(at.get()), last.get().max(at.get()));
+            let near = hi - lo
+                <= (2. * PREPARE_EVERY_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
+                    as i64;
+            if near && frame > 0 && !videos.is_subset(before) {
+                let mut t = lo - lo.rem_euclid(frame) + frame;
+                while t < hi && self.refine.len() < MAX_REFINE {
+                    self.refine.extend(Ticks::new(t).ok());
+                    t += frame;
+                }
+            }
+        }
+        self.last = Some((at, videos));
+    }
+}
+/// Entry frames queued at most (a quarter second at 120 fps).
+const MAX_REFINE: usize = 30;
+#[cfg(test)]
+mod lookahead_tests {
+    use super::*;
+    use pm_protocol::common::TICKS_PER_SECOND;
+
+    fn at(seconds: f64) -> Ticks {
+        Ticks::new((seconds * TICKS_PER_SECOND as f64) as i64).unwrap()
+    }
+
+    /// A video first planned at one look-ahead entered since the last: each
+    /// frame between them is queued, so its first frame is warmed. Known
+    /// videos, a jump, or the first look-ahead queue nothing.
+    #[test]
+    fn a_video_entering_between_look_aheads_queues_the_frames_between() {
+        let frame = TICKS_PER_SECOND / 24;
+        let clip = ("clip".to_owned(), 1);
+        let mut l = Lookahead::default();
+        l.planned(at(1.0), vec![], frame);
+        assert!(l.refine.is_empty());
+        l.planned(at(1.25), vec![clip.clone()], frame);
+        let queued: Vec<i64> = l.refine.drain(..).map(|t| t.get()).collect();
+        assert_eq!(
+            queued.len(),
+            5,
+            "the frames strictly between 1.0 s and 1.25 s"
+        );
+        assert!(
+            queued
+                .iter()
+                .all(|t| t % frame == 0 && *t > at(1.0).get() && *t < at(1.25).get())
+        );
+        l.planned(at(1.5), vec![clip.clone()], frame);
+        assert!(l.refine.is_empty(), "already planned");
+        l.planned(at(9.0), vec![clip, ("other".to_owned(), 1)], frame);
+        assert!(
+            l.refine.is_empty(),
+            "a jump says nothing about where it entered"
+        );
+    }
 }
 struct Flight {
     id: u64,
@@ -900,6 +991,8 @@ struct Work {
     pipeline: trace::Pipeline,
     audio_host: Option<f64>,
     plan: Option<present::Plan>,
+    /// The composition's frame duration (0: not a whole number of ticks).
+    frame_ticks: i64,
 }
 /// How much of a frame's budget a video may wait for its exact frame.
 const DECODE_SHARE: f64 = 0.35;
@@ -1225,6 +1318,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     refusals: 0,
                     waiting_since: None,
                     prepared: 0.,
+                    lookahead: Lookahead::default(),
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
@@ -1406,6 +1500,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
                 plan,
+                frame_ticks: v.config.rate.exact_frame_ticks().unwrap_or(0),
             });
             break;
         }
@@ -1441,6 +1536,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             pipeline,
             audio_host,
             plan,
+            frame_ticks,
         }) = work
         {
             drop(state);
@@ -1473,15 +1569,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
             let mut prepare_at = None;
+            let mut refine_at = None;
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
-                && now - r.prepared >= PREPARE_EVERY_SECONDS
             {
-                r.prepared = now;
-                let ahead = (PREPARE_AHEAD_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
-                    * f64::from(r.transport.rate().num.signum());
-                let at = (spec.time.get() + ahead as i64).max(0);
-                prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
+                if now - r.prepared >= PREPARE_EVERY_SECONDS {
+                    r.prepared = now;
+                    let ahead = (PREPARE_AHEAD_SECONDS
+                        * pm_protocol::common::TICKS_PER_SECOND as f64)
+                        * f64::from(r.transport.rate().num.signum());
+                    let at = (spec.time.get() + ahead as i64).max(0);
+                    prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
+                } else {
+                    refine_at = r.lookahead.refine.pop_front();
+                }
+            } else if let Some(r) = runtime.get_mut(&id) {
+                r.lookahead = Lookahead::default();
             }
             #[cfg(test)]
             if let Some(hook) = shared.before_submit.lock().unwrap().take() {
@@ -1582,6 +1685,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             state.notify();
             drop(state);
             if let Some(at) = prepare_at {
+                let videos = engine.prepare(&scene, at, spec);
+                if let Some(r) = runtime.get_mut(&id) {
+                    r.lookahead.planned(at, videos, frame_ticks);
+                }
+            } else if let Some(at) = refine_at {
                 engine.prepare(&scene, at, spec);
             }
         } else {

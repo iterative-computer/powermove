@@ -129,6 +129,17 @@ pub fn import_paths(
     multiple: bool,
     extensions: &[&str],
 ) -> async_channel::Receiver<Vec<PathBuf>> {
+    choose_paths(window, folders, multiple, extensions, "Import")
+}
+
+/// An open panel sheet whose default button reads `prompt`.
+pub fn choose_paths(
+    window: &NSWindow,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+    prompt: &str,
+) -> async_channel::Receiver<Vec<PathBuf>> {
     use objc2::{msg_send, runtime::AnyObject};
     use objc2_foundation::NSArray;
     let (tx, rx) = async_channel::bounded(1);
@@ -137,7 +148,8 @@ pub fn import_paths(
     panel.setCanChooseFiles(!folders);
     panel.setCanChooseDirectories(folders);
     panel.setAllowsMultipleSelection(multiple);
-    panel.setPrompt(Some(&NSString::from_str("Import")));
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
+    panel.setCanCreateDirectories(folders);
     let types: Vec<Retained<AnyObject>> = extensions
         .iter()
         .filter_map(|extension| unsafe {

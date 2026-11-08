@@ -39,6 +39,7 @@ use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
 
 #[path = "media/prewarm.rs"]
 mod prewarm;
+mod stills;
 pub(crate) use prewarm::PlannedVideoDraw;
 
 /// Why a media file cannot be drawn.
@@ -1068,6 +1069,8 @@ pub struct MediaCache {
     free_frames: Vec<Target>,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
+    /// Stills decoded ahead of the playhead ([`Self::prepare_image`]).
+    stills: stills::StillPrefetch,
     /// Open video sources with the file's size and modification time when
     /// opened: a file replaced at the same path is reopened.
     sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
@@ -1117,6 +1120,7 @@ impl MediaCache {
             free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
+            stills: Default::default(),
             sources: BTreeMap::new(),
             frames: BTreeMap::new(),
             next_texture_revision: 0,
@@ -1177,7 +1181,10 @@ impl MediaCache {
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
         probe_interpreted_image(path, interp).map_err(issue)?;
-        let mut still = pm_media::image::read(path, &self.pool).map_err(failed)?;
+        let mut still = match self.stills.take(path, (len, modified)) {
+            Some(still) => still,
+            None => pm_media::image::read(path, &self.pool).map_err(failed)?,
+        };
         let mut read = interpreted_image_color(&still, interp).map_err(issue)?;
         if self.hdr_light {
             read.color.tone_map = None;
@@ -1264,6 +1271,23 @@ impl MediaCache {
         self.images.insert(key, target.clone());
         self.recount();
         Ok(target)
+    }
+
+    /// Decodes the still at `path` on a worker when no converted texture of
+    /// it is cached, so the frame that first draws it does not (see
+    /// `media/stills.rs`).
+    pub(crate) fn prepare_image(&mut self, path: &Path) {
+        let Some((len, modified)) = stamp(path) else {
+            return;
+        };
+        if self
+            .images
+            .keys()
+            .any(|k| k.path == path && k.len == len && k.modified == modified)
+        {
+            return;
+        }
+        self.stills.request(path, (len, modified), &self.pool);
     }
 
     /// Drops the converted texture of `path` at `precision` and `working`

@@ -522,6 +522,61 @@ The review's compiler-busy export case does not occur in the app: every export
 (app and MCP) runs in its own `--engine-job` process with its own compiler
 pool, and one renderer compiles at a time there.
 
+### Wave 16 perf lane, 2026-11-08
+
+M4 Max shared with five other lanes (load 25 to 118 throughout); private
+copies of the three real projects; `pm-engine-service --bench --project`
+(release, 1080p output, 60 Hz synthetic ticks, Auto), 30 s from the start.
+CPU = render thread from frame start to submit; GPU waits include other
+lanes' GPU work.
+
+| Project | Before (head) | After | Notes |
+|---|---|---|---|
+| 30 fps, 867 layers | p50 12.3, p95 44.1 ms; 695/720 frames | p50 9.9, p95 31.2 ms; 720/720; CPU p95 34 → 18 ms; worst in-play frame 190 → 50 ms | heaviest window (9–11 s, keyframed shape paths) CPU 50 → 17–25 ms |
+| 24 fps, 4K video | p95 14.0 ms, max 182 ms | p50 1.2, p95 13.2 ms, max 31 ms in play | the 182 ms was a text pipeline compiled mid-play |
+| WithMedia | p50 1.6, p95 2.4 ms | unchanged | |
+
+Removed per frame (sampled): text glyph geometry flattening and nonzero
+resolution under animated transforms (22% of the frame), per-glyph GPU
+uploads, text reshaping, shape path evaluation and a deep copy of every
+vertex, still decodes and still probes on the frame, a first-play pipeline
+compile, and the 190 ms stall of a video's first frame: `prepare_media`
+refused the whole look-ahead when any layer was unsupported (a missing
+extension effect). Section 5's headroom (p95 ≤ 50% of the 16.7 ms display
+interval) is **not met** on the 867-layer project under this load; the
+remaining cost there is keyframed shape paths (per-vertex channel
+evaluation and outline transforms) and GPU queueing.
+
+**Scrub** (bench sweep at 9 s): repeats of recently drawn frames (the
+service's frame cache) 0.31 ms p95, within the 9.333 ms endpoint;
+uncached frame-by-frame drags 25–37 ms on the 867-layer project's heaviest
+window (animated paths), 2–3 ms p50 and 17 ms p95 on the 4K video project.
+Random seeks to a completed frame: p50 0.8–1.9 ms, p95 31–35 ms.
+
+**Ratchet.** `text_cold` passes again after this lane's changes (heap
+2,332,538 of 2,339,455; 6 textures and 7 uploads instead of 9 and 10).
+`drag_500` (94.6 MB heap, +0.8%) and `blend_stack_cold` (1.62 MB, +4.1%)
+fail as they did on the merged head before the lane (94,565,111 and
+1,609,021 there); not attributed, baselines unchanged.
+
+**`corpus_render_parity`, `render/fx-blur` (effects capture).** Classified
+real, not harness: every failing pixel is *unreferenced* resampled image
+content. Interior pixels match the f64 reference (excess ≤ 0.07 CV). The
+excess over today's capture sits on a rotated, minified high-frequency
+test chart and on the edges of a rotated square (8-bit frame: max 34,
+p99.9 14 CV over 366 pixels; transparent float frames: max 2.49 over a
+bound of 1). Frames are visually identical. Between the passing
+`40f9ee7c9` and failing `80bc541dd` the still minification path changed
+(`3351e2185` per-still mip chains, `625c444f9` one-to-one texel copies,
+`13e77ff11` pyramid tails in one pass), which is where to look. Owner: L4
+sampling, to model the declared minification kernel for rotated stills so
+these pixels get a reference. No bound changed; the pending rows stay
+failing for owner review.
+
+**Not run here:** `text_corpus`, the scene3d and glTF float references
+(they need the Chromium reference generator) and AUDIO-2 (a timing bound
+that needs a quiet Mac). Their state is as in the entry above.
+
 ### WIP owner handoff
 
 Validation was stopped at the orchestrator's request before the full engine

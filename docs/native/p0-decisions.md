@@ -156,3 +156,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - MCP render_frames draws proxy-only media from its proxy, as the viewer does; export_video still refuses it (plan §6).
 - A journal whose document and layout equal the saved file and whose undo steps are the saved steps merged into consecutive runs (an agent's finish_session squash after save_project, compared operation by operation), with nothing to redo on either side, also retires silently. The file's finer steps stay; nothing from the journal is adopted.
 - While an open waits on a person's recovery choice, MCP tools that need the project say which project and that nothing changed; list_projects and the Store tools still run. The choice stays the person's.
+
+## Playback and pro media (perf lane, 2026-11-08)
+
+- Text coverage geometry is resolved in the outline's own space per quarter-octave scale bucket (flattened at the device tolerance over the bucket top, at most 2^(1/8) more lines); the path cache is 32 MiB, since a text-heavy 1080p frame needs about 10 MB at the coverage tolerance (wave 16 perf).
+- Level 1 text measurements are memoized per font setup and text for a session (cleared with it), as Blink's per-font shape cache; `CanvasMeasurer::shape` returns `Arc<Measured>`.
+- Pro media settings (Create Proxies, size, format, storage location) live in `<profile>/Pro Media/settings.json`, not the v1.2.0 profile keys; Always Play Original is per project and asset in the pro media index (machine-local intent).
+- Background Tasks exposes priority through a right-click NSMenu (High/Normal/Low), as plan section 1 asks; rows keep queue order (the design review's "don't reorder" stands).
+- Automatic plays optimized media in place of originals (Final Cut's optimized media); Originals and exports never read it; Export › Use Proxies (Draft) is the only way an export reads proxies.
+- `pm_protocol::priority` gains `ProxySize::Full` and `ProxyFormat::ProResHq` (additive; bindings regenerated).
+- Pro media renditions are keyed by the original's content (media-cache object name or a once-per-stamp BLAKE3), not its path and mtime; Clear… keeps anything another original, attached record, task or the open project references (wave 16 review).
+- The direct glyph cache charges and evicts whole chunk textures, and still prefetch counts decoded bytes from the worker's decode and drops stills no frame asked for within 4 s (wave 16 review).
