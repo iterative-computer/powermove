@@ -1626,8 +1626,14 @@ impl Host {
             if let Some(g) = geometry {
                 self.viewer.setHidden(false);
                 self.viewer.setFrame(g.frame);
-                unsafe {
-                    let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
+                // Without a transform the Metal layer is the view's own backing
+                // layer and AppKit sizes it; framing it here would move it to
+                // the content view's origin (the stray lower-left rectangle).
+                if self.viewer_transform.is_some() {
+                    unsafe {
+                        let _: () =
+                            msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
+                    }
                 }
                 self.layer.set_contents_scale(g.scale);
                 self.viewer_crop.set(g.crop);
@@ -2486,7 +2492,11 @@ impl Popup {
                 ),
                 NSSize::new(size.width - m.menu_inset as f64 * 2., m.menu_row as f64),
             );
-            b.setFrame(r);
+            // The glider spans the row; the title sits `gap` inside it.
+            b.setFrame(NSRect::new(
+                NSPoint::new(r.origin.x + m.gap as f64, r.origin.y),
+                NSSize::new(r.size.width - m.gap as f64 * 2., r.size.height),
+            ));
             if i == self.model.selected {
                 self.glider.setFrame(r);
             }
