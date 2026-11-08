@@ -855,6 +855,10 @@ impl Editor {
             .context_menu(&items, f32::from(position.x), f32::from(position.y));
     }
 }
+/// A token colour at an alpha (`translucency.*`, `Tokens::edge`, `Tokens::line`).
+pub fn tint(rgb: u32, alpha: f32) -> gpui::Rgba {
+    gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
+}
 fn positioned(r: Rect) -> Div {
     div()
         .absolute()
@@ -999,6 +1003,9 @@ impl Render for Editor {
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
+        let ground = t.translucency.window;
+        let (edge, edge_alpha) = t.edge();
+        let (line, line_alpha) = t.line();
         let dragging = matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved);
         let mut root = div()
             .id("editor")
@@ -1063,7 +1070,7 @@ impl Render for Editor {
                                     point(px(r.x), px(r.y)),
                                     gpui::size(px(r.w), px(r.h)),
                                 ))
-                                .background(rgb(c.window)),
+                                .background(tint(c.window, ground)),
                             );
                         }
                     },
@@ -1198,8 +1205,11 @@ impl Render for Editor {
                 .is_some_and(|i| i.native_panel(&id, cx));
             let tabs = group.tabs.clone();
             let active = group.active;
-            let tab_track = group.tab_track(p.rect.w - 2. * m.inset - m.hit, &t);
-            let header_bg = if is_viewer { c.viewer } else { c.panel };
+            // The tab strip's own padding (2 pt each side) and 2 pt gaps come
+            // out of the width before it is shared between the tabs.
+            let strip_chrome = 4. + 2. * tabs.len().saturating_sub(1) as f32;
+            let tab_track =
+                group.tab_track(p.rect.w - m.inset - m.gap * 2. - m.hit - strip_chrome, &t);
             let mut panel = positioned(p.rect)
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
@@ -1211,7 +1221,7 @@ impl Render for Editor {
                 .aria_label(layout::panel_title(&id).to_string())
                 .rounded(px(m.panel_radius))
                 .border(px(m.border))
-                .border_color(rgb(c.separator))
+                .border_color(tint(edge, edge_alpha))
                 .overflow_hidden();
             if body_native {
                 native_bodies.push((
@@ -1224,7 +1234,11 @@ impl Render for Editor {
                     },
                 ));
             } else if !is_viewer || !native {
-                panel = panel.bg(rgb(if is_viewer { c.viewer } else { c.panel }));
+                panel = panel.bg(if is_viewer {
+                    rgb(c.viewer)
+                } else {
+                    tint(c.panel, t.translucency.panel)
+                });
             }
             // A panel may supply its own header content (viewer: pop-ups, no
             // title; timeline: transport). The shell keeps the tab strip only
@@ -1245,8 +1259,17 @@ impl Render for Editor {
                 .items_center()
                 .gap(px(m.gap))
                 .h(px(m.header))
-                .px(px(m.inset))
-                .bg(rgb(header_bg))
+                .flex_none()
+                .pl(px(m.inset))
+                .pr(px(m.gap))
+                // The native viewer body has no panel fill; its bar carries the material.
+                .when(is_viewer && native, |h| {
+                    h.bg(tint(c.panel, t.translucency.panel))
+                })
+                .when(!is_viewer, |h| {
+                    h.border_b(px(m.border))
+                        .border_color(tint(line, line_alpha))
+                })
                 // The header's empty area moves the whole stack; a tab moves one panel.
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1269,8 +1292,11 @@ impl Render for Editor {
             if multi || custom.is_none() {
                 // Approved mockup: a sunken segmented strip for tab groups, a
                 // semibold title for single panels. The whole tab is the drag handle.
+                // Tabs share what the panel's own header controls leave.
                 let mut strip = div().flex().items_center().gap(px(2.)).when(multi, |s| {
-                    s.bg(rgb(c.window))
+                    s.flex_1()
+                        .min_w(px(0.))
+                        .bg(tint(line, line_alpha))
                         .rounded(px(m.control_radius + 2.))
                         .p(px(2.))
                 });
@@ -1303,19 +1329,16 @@ impl Render for Editor {
                         .relative()
                         .flex()
                         .items_center()
-                        .px(px(if multi { m.inset + m.border * 2. } else { 0. }))
+                        .justify_center()
+                        .px(px(if multi { m.gap } else { 0. }))
                         .py(px(3.))
                         .rounded(px(m.control_radius))
                         .when(multi && selected, |s| s.bg(rgb(c.floating)))
                         .when(ghost, |s| s.opacity(0.4))
                         .text_color(rgb(if selected { c.text } else { c.secondary }))
                         .text_size(px(t.typography.title))
-                        .when(!multi, |s| s.font_weight(FontWeight::SEMIBOLD))
-                        .when(multi, |s| s.font_weight(FontWeight::MEDIUM))
-                        .cursor_pointer()
-                        .when(multi, |s| {
-                            s.w(px(tab_track.width)).min_w(px(0.)).overflow_hidden()
-                        })
+                        .font_weight(FontWeight::MEDIUM)
+                        .when(multi, |s| s.flex_auto().min_w(px(0.)).overflow_hidden())
                         .child(div().min_w(px(0.)).truncate().child(title.clone()));
                     if closable {
                         // Mac tabs: the close button sits at the leading edge, on hover.
@@ -1396,7 +1419,6 @@ impl Render for Editor {
                             .aria_label("More Panels")
                             .tab_index(0)
                             .w(px(m.hit))
-                            .cursor_pointer()
                             .child(crate::symbol::symbol(
                                 "chevron.down",
                                 m.symbol_inline,
@@ -1423,7 +1445,6 @@ impl Render for Editor {
                         .role(Role::Button)
                         .tab_index(0)
                         .aria_label("Restore Panel")
-                        .cursor_pointer()
                         .child(crate::symbol::symbol(
                             "arrow.down.right.and.arrow.up.left",
                             m.symbol_inline,
@@ -1439,7 +1460,13 @@ impl Render for Editor {
                 );
             }
             if let Some(custom) = custom {
-                header = header.child(div().flex_1().min_w(px(0.)).h_full().child(custom));
+                header = header.child(
+                    div()
+                        .when(multi, |d| d.flex_none())
+                        .when(!multi, |d| d.flex_1().min_w(px(0.)))
+                        .h_full()
+                        .child(custom),
+                );
             } else if !is_viewer {
                 let (dock, gi) = (p.dock, p.group);
                 let add_group: SharedString = format!("add-{}-{}", p.dock, p.group).into();
@@ -1463,7 +1490,6 @@ impl Render for Editor {
                         .justify_center()
                         .rounded(px(m.control_radius))
                         .hover_style(|s| s.bg(rgb(c.hover)))
-                        .cursor_pointer()
                         .child(crate::symbol::symbol(
                             "plus",
                             m.symbol_panel,
@@ -1521,7 +1547,6 @@ impl Render for Editor {
                             .hover_style(|s| s.bg(rgb(c.hover)))
                             .text_size(px(t.typography.reading))
                             .text_color(rgb(c.text))
-                            .cursor_pointer()
                             .child(label)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let cmd = Command {
@@ -1679,7 +1704,6 @@ impl Render for Editor {
                     .h(px(m.hit))
                     .rounded(px(m.control_radius))
                     .hover_style(|s| s.bg(rgb(c.hover)).text_color(rgb(c.text)))
-                    .cursor_pointer()
                     .child(workspace.to_string())
                     .child(crate::symbol::symbol(
                         "chevron.up.chevron.down",

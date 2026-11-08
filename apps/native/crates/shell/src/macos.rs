@@ -173,6 +173,13 @@ fn open_editor_window(
             .show(visible)
             .focus(visible)
             .macos_window_background(MacosWindowBackground::Transparent)
+            // Content runs under the glass toolbar (full-size content view), so
+            // the window tint and blur continue behind it.
+            .titlebar(Some(TitlebarOptions {
+                title: Some("Untitled".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }))
             .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                 point(px(m.toolbar), px(m.toolbar)),
                 size(px(m.window_width), px(m.window_height)),

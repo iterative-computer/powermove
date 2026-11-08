@@ -172,6 +172,32 @@ pub fn app_appearance(t: &Tokens) {
     NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
         .setAppearance(NSAppearance::appearanceNamed(name).as_deref());
 }
+/// The window ground: clear over a behind-window blur while translucent,
+/// the solid `window` colour under Reduce Transparency.
+fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
+    let translucent = t.translucent();
+    backdrop.setHidden(!translucent);
+    window.setOpaque(!translucent);
+    let colour = if translucent {
+        NSColor::clearColor()
+    } else {
+        native_color(t.colors.window)
+    };
+    window.setBackgroundColor(Some(&colour));
+}
+/// Behind-window blur under everything in the content view; GPUI tints it
+/// with `colors.window` at `translucency.window`.
+fn backdrop(mtm: MainThreadMarker, content: &NSView) -> Retained<NSVisualEffectView> {
+    let v = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content.bounds());
+    v.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
+    v.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    v.setState(NSVisualEffectState::Active);
+    v.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    content.addSubview_positioned_relativeTo(&v, NSWindowOrderingMode::Below, None);
+    v
+}
 pub fn rect(r: crate::layout::Rect, h: f64) -> NSRect {
     NSRect::new(
         NSPoint::new(r.x as f64, h - r.y as f64 - r.h as f64),
@@ -879,6 +905,7 @@ pub struct Host {
     pub window: Retained<NSWindow>,
     pub gpui: Retained<NSView>,
     content: Retained<NSView>,
+    backdrop: Retained<NSVisualEffectView>,
     viewer: Retained<NSView>,
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
     pub splitter_focus: bool,
@@ -996,7 +1023,6 @@ impl Host {
             t.metrics.min_height as f64,
         ));
         window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
-        window.setBackgroundColor(Some(&native_color(t.colors.window)));
         let (tx, rx) = async_channel::unbounded();
         ROUTES.with(|r| {
             r.borrow_mut().insert(window.windowNumber(), tx.clone());
@@ -1039,6 +1065,8 @@ impl Host {
             l.setBackgroundColor(Some(&native_color(t.colors.viewer).CGColor()));
         }
         content.addSubview_positioned_relativeTo(&viewer, NSWindowOrderingMode::Below, Some(&gpui));
+        let backdrop = backdrop(mtm, &content);
+        ground(&window, &backdrop, &t);
         let choices = base_choices();
         let palette = Popup::new(&window, &t, Surface::Palette, choices.clone(), tx.clone());
         palette.borrow_mut().shortcuts = shortcut_glyphs();
@@ -1063,6 +1091,7 @@ impl Host {
             window,
             gpui: gpui.clone(),
             content,
+            backdrop,
             viewer,
             viewer_rect: Rc::new(Cell::new(None)),
             splitter_focus: false,
@@ -1495,8 +1524,7 @@ impl Host {
     }
     pub fn update_tokens(&mut self, t: Tokens) {
         appearance(&self.window, &t);
-        self.window
-            .setBackgroundColor(Some(&native_color(t.colors.window)));
+        ground(&self.window, &self.backdrop, &t);
         if let Some(layer) = self.viewer.layer() {
             layer.setBackgroundColor(Some(&native_color(t.colors.viewer).CGColor()));
         }

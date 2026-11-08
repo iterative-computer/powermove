@@ -219,6 +219,16 @@ pub struct Metrics {
     /// Viewer width below which the 3D toolbar becomes one pull-down.
     pub viewer_3d_collapse: f32,
 }
+/// The translucent shell: a heavy tint over a behind-window blur, one shared
+/// panel material and hairline edges in `text` ink (alphas, 0–1). Reduce
+/// Transparency makes the window and panels solid.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Translucency {
+    pub window: f32,
+    pub panel: f32,
+    pub edge: f32,
+    pub line: f32,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
     pub enter: f64,
@@ -289,6 +299,7 @@ pub struct Tokens {
     pub metrics: Metrics,
     pub typography: TypeScale,
     pub motion: Motion,
+    pub translucency: Translucency,
 }
 pub const TEXT_FONT: &str = ".SystemUIFont";
 pub const DISPLAY_FONT: &str = "SF Pro Display";
@@ -418,12 +429,12 @@ impl Tokens {
             metrics: Metrics {
                 gap: 6.,
                 inset: 12.,
-                panel_radius: 12.,
+                panel_radius: 8.,
                 control_radius: 6.,
                 capsule_radius: 17.,
-                header: 32.,
+                header: 38.,
                 row: 28.,
-                status: 30.,
+                status: 24.,
                 toolbar: 52.,
                 toolbar_title_width: 160.,
                 toolbar_title_line: 14.,
@@ -526,6 +537,32 @@ impl Tokens {
                 tooltip_delay: 0.38,
                 tooltip_warm: 0.6,
             },
+            translucency: match (scheme, accessibility.reduce_transparency) {
+                (Scheme::Dark, true) => Translucency {
+                    window: 1.,
+                    panel: 1.,
+                    edge: 0.06,
+                    line: 0.07,
+                },
+                (Scheme::Light, true) => Translucency {
+                    window: 1.,
+                    panel: 1.,
+                    edge: 0.08,
+                    line: 0.09,
+                },
+                (Scheme::Dark, false) => Translucency {
+                    window: 0.82,
+                    panel: 0.7,
+                    edge: 0.06,
+                    line: 0.07,
+                },
+                (Scheme::Light, false) => Translucency {
+                    window: 0.8,
+                    panel: 0.72,
+                    edge: 0.08,
+                    line: 0.09,
+                },
+            },
         };
         tokens.enforce_accessibility();
         tokens
@@ -589,6 +626,27 @@ impl Tokens {
         next.enforce_accessibility();
         *self = next;
         Ok(())
+    }
+    /// Panel edge as (colour, alpha): a `text` hairline, or the solid
+    /// `separator` at `metrics.border` under Increase Contrast.
+    pub fn edge(&self) -> (u32, f32) {
+        if self.accessibility.increase_contrast {
+            (self.colors.separator, 1.)
+        } else {
+            (self.colors.text, self.translucency.edge)
+        }
+    }
+    /// Divider under a panel header, between list columns and above the status line.
+    pub fn line(&self) -> (u32, f32) {
+        if self.accessibility.increase_contrast {
+            (self.colors.separator, 1.)
+        } else {
+            (self.colors.text, self.translucency.line)
+        }
+    }
+    /// The window ground needs a behind-window blur under it.
+    pub fn translucent(&self) -> bool {
+        self.translucency.window < 1.
     }
     pub fn material(&self, surface: Surface, glass_available: bool) -> Material {
         if !surface.permits_glass() || self.accessibility.reduce_transparency {

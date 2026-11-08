@@ -321,6 +321,19 @@ const ROLES: &[(&str, &str)] = &[
         "motion.tooltip_warm",
         "Time window for an immediate tooltip swap to a neighbouring control (s)",
     ),
+    (
+        "translucency.window",
+        "Window tint over the behind-window blur (1 = solid, Reduce Transparency)",
+    ),
+    (
+        "translucency.panel",
+        "Shared panel material over the window tint (1 = solid)",
+    ),
+    ("translucency.edge", "Panel hairline edge in `text` ink"),
+    (
+        "translucency.line",
+        "Header, column and status dividers in `text` ink",
+    ),
 ];
 
 fn root() -> PathBuf {
@@ -350,7 +363,7 @@ fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, Value)>) {
 fn leaves(t: &Tokens) -> Vec<(String, Value)> {
     let v = serde_json::to_value(t).unwrap();
     let mut out = Vec::new();
-    for group in ["colors", "metrics", "typography", "motion"] {
+    for group in ["colors", "metrics", "typography", "motion", "translucency"] {
         flatten(group, &v[group], &mut out);
     }
     out
@@ -533,11 +546,11 @@ fn dark_is_neutral_grey() {
 fn concentric_radii_and_grid() {
     for t in variants() {
         let m = t.metrics;
-        assert_eq!(
-            m.control_radius,
-            m.panel_radius - m.gap,
-            "control nests in panel"
-        );
+        // Concentric radii apply only inside an outer corner's curve. Panel
+        // content sits `inset` in, clear of the panel corner, so controls keep
+        // their own radius and are never rounder than the panel.
+        assert!(m.inset >= m.panel_radius, "controls clear the panel corner");
+        assert!(m.control_radius <= m.panel_radius, "control nests in panel");
         assert!(m.inner_radius <= m.control_radius - 2.);
         assert_eq!(
             m.capsule_radius * 2.,
