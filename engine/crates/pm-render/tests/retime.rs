@@ -97,9 +97,10 @@ fn keep_frame_rate_holds_each_child_frame() {
 
 /// The frame-counter video of the newest motion capture, if any.
 fn frame_video() -> Option<std::path::PathBuf> {
-    let capture = support::newest_capture("motion-")?;
+    let capture = support::required_capture("motion-")?;
     let path = capture.join("generated/media/corpus-frames-30.mp4");
-    path.is_file().then_some(path)
+    assert!(path.is_file(), "{} is missing", path.display());
+    Some(path)
 }
 
 fn video_doc(rate: Option<serde_json::Value>) -> pm_model::Document {
@@ -122,7 +123,7 @@ fn video_doc(rate: Option<serde_json::Value>) -> pm_model::Document {
 #[test]
 fn a_frame_rate_override_shows_frame_n_at_n_over_the_rate() {
     let Some(video) = frame_video() else {
-        eprintln!("no motion capture with corpus-frames-30.mp4; skipping");
+        eprintln!("NOT RUN: no private corpus motion capture");
         return;
     };
     let mut renderer = Renderer::headless().unwrap();

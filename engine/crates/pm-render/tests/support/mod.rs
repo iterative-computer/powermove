@@ -54,6 +54,17 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
         .max_by_key(|p| (created(p), p.clone()))
 }
 
+/// The newest `prefix*` capture, required on a machine with the private
+/// corpus: a missing witness fails the gate there. Elsewhere `None`, and the
+/// caller prints `NOT RUN`.
+pub fn required_capture(prefix: &str) -> Option<PathBuf> {
+    let found = newest_capture(prefix);
+    if found.is_none() && corpus_root().is_some() {
+        panic!("the private corpus has no `{prefix}*` capture; this gate cannot run");
+    }
+    found
+}
+
 /// The captures to compare against: `PM_ENGINE_CORPUS` (comma-separated),
 /// or the newest `v1-*` corpus capture, the newest `render-*` capture (the
 /// render parity cases, `engine/corpus/src/projects/render.ts`), the

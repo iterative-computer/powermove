@@ -52,7 +52,7 @@ fn fixture() -> Vec<Value> {
 fn capture() -> Option<PathBuf> {
     std::env::var_os("PM_SCENE3D_REF")
         .map(PathBuf::from)
-        .or_else(|| support::newest_capture("scene3d-"))
+        .or_else(|| support::required_capture("scene3d-"))
 }
 
 fn obj(v: &Value) -> &Map {
@@ -277,7 +277,7 @@ fn selected() -> Option<(PathBuf, Vec<Case>)> {
 #[test]
 fn sweep_resolves_finite_linear_color() {
     let Some((dir, cases)) = selected() else {
-        eprintln!("no scene3d scene assets; run tools/three-ref/run-scenes.ts");
+        eprintln!("NOT RUN: no private corpus scene3d capture");
         return;
     };
     let gpu = pm_gpu::Gpu::new("pm-render 3d linear sweep").expect("a Metal device");
@@ -334,7 +334,7 @@ fn sweep_resolves_finite_linear_color() {
 #[test]
 fn displayed_pixels_prefer_supersampled_float_reference() {
     let Some((capture, cases)) = selected() else {
-        eprintln!("no scene3d scene assets; run tools/three-ref/run-scenes.ts");
+        eprintln!("NOT RUN: no private corpus scene3d capture");
         return;
     };
     let path = std::env::var_os("PM_SCENE3D_FLOAT_REF")
@@ -592,7 +592,7 @@ fn f32s(v: &serde_json::Value) -> Vec<f32> {
 #[test]
 fn programs_and_uniforms_equal_three_js() {
     let Some((dir, cases)) = selected() else {
-        eprintln!("no scene3d reference capture; run tools/three-ref/run-scenes.ts");
+        eprintln!("NOT RUN: no private corpus scene3d capture");
         return;
     };
     let mut problems = Vec::new();

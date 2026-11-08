@@ -54,7 +54,7 @@ fn fixture() -> Vec<Value> {
 fn capture() -> Option<PathBuf> {
     std::env::var_os("PM_GLTF_REF")
         .map(PathBuf::from)
-        .or_else(|| support::newest_capture("gltf-scene3d-"))
+        .or_else(|| support::required_capture("gltf-scene3d-"))
 }
 
 fn obj(v: &Value) -> &Map {
@@ -282,7 +282,7 @@ fn selected() -> Option<(PathBuf, Vec<Case>)> {
 #[test]
 fn gltf_sweep_resolves_finite_linear_color() {
     let Some((_, cases)) = selected() else {
-        eprintln!("no glTF scene assets; run tools/three-ref/run-gltf.ts");
+        eprintln!("NOT RUN: no private corpus glTF capture");
         return;
     };
     let gpu = pm_gpu::Gpu::new("pm-render glTF linear sweep").expect("a Metal device");
@@ -334,7 +334,7 @@ fn gltf_sweep_resolves_finite_linear_color() {
 #[test]
 fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
     let Some((capture, cases)) = selected() else {
-        eprintln!("no glTF scene assets; run tools/three-ref/run-gltf.ts");
+        eprintln!("NOT RUN: no private corpus glTF capture");
         return;
     };
     let path = std::env::var_os("PM_GLTF_FLOAT_REF")
@@ -471,7 +471,7 @@ fn close(a: f64, b: f64, rel: f64) -> bool {
 #[test]
 fn gltf_poses_equal_three_js() {
     let Some((dir, cases)) = selected() else {
-        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+        eprintln!("NOT RUN: no private corpus glTF capture");
         return;
     };
     let mut problems = Vec::new();
@@ -782,7 +782,7 @@ fn f32s(v: &serde_json::Value) -> Vec<f32> {
 #[test]
 fn gltf_programs_and_uniforms_equal_three_js() {
     let Some((dir, cases)) = selected() else {
-        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+        eprintln!("NOT RUN: no private corpus glTF capture");
         return;
     };
     let mut problems = Vec::new();
@@ -1061,7 +1061,7 @@ fn gltf_programs_and_uniforms_equal_three_js() {
 fn gltf_picks_equal_three_js() {
     use pm_geom3d::gltf::pick::{Picker, Ray, Side as PickSide};
     let Some((dir, cases)) = selected() else {
-        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+        eprintln!("NOT RUN: no private corpus glTF capture");
         return;
     };
     let (mut rays, mut hits, mut agree) = (0usize, 0usize, 0usize);
@@ -1192,7 +1192,7 @@ fn gltf_picks_equal_three_js() {
 #[test]
 fn content_keys_follow_the_pose() {
     let Some((_, cases)) = selected() else {
-        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+        eprintln!("NOT RUN: no private corpus glTF capture");
         return;
     };
     let plan = |id: &str| {
@@ -1230,7 +1230,7 @@ fn content_keys_follow_the_pose() {
 #[ignore]
 fn frame_time_gltf_at_1080p() {
     let Some((dir, _)) = selected() else {
-        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+        eprintln!("NOT RUN: no private corpus glTF capture");
         return;
     };
     let gpu = pm_gpu::Gpu::new("pm-render glTF frame time").expect("a Metal device");
