@@ -276,7 +276,7 @@ impl Backend {
                         .map_err(|e| format!("{e:?}"))?;
                     let value = wire(&state.value);
                     values.push(match value.as_f64() {
-                        Some(n) => format!("{n:.2}"),
+                        Some(n) => readout(n),
                         None => value.to_string(),
                     });
                     animated |= state.animated;
@@ -1288,10 +1288,29 @@ fn profile_key(key: &str) -> bool {
     )
 }
 
+/// A property's timeline readout, the same reading as its Properties field
+/// (two places, trailing zeros trimmed): 960 and 1372.84, never 960.00.
+fn readout(value: f64) -> String {
+    let text = format!("{value:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.into()
+    }
+}
+
 #[cfg(test)]
 mod store_tests {
     use super::*;
     use pm_agents::persistence::Store;
+    #[test]
+    fn readouts_read_like_the_properties_field() {
+        assert_eq!(readout(960.), "960");
+        assert_eq!(readout(1372.8427), "1372.84");
+        assert_eq!(readout(0.5), "0.5");
+        assert_eq!(readout(-0.001), "0");
+    }
     #[test]
     fn application_agent_archive_is_disjoint_and_preserves_unknown_fields() {
         let actor = KernelActor::spawn(KernelConfig::default());
