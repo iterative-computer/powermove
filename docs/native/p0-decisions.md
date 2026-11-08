@@ -81,3 +81,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **First-run animation** plays inside the Welcome window.
 - **Going back:** there is no reverse migration. The old app must refuse a native file it can't read, safely and clearly, instead of opening it wrongly.
 
+
+## Compat lane decisions (2026-11-08)
+
+- Extensions load from the migrated `extensions-shared` checkpoint plus the native `extensions` folder; the shipped app's live folder is never read.
+- The trusted realm's first document is staged as JSON text outside JavaScript time; synchronous engine replies get their own size cap (`Limits::max_engine_response_bytes`, additive in runtime-v8).
+- `PM.proj` is a write-tracking view; whole-tree diffs remain only for unflushed writes during native publications and for a replaced project root.
+- Contributed panels build into a body inside a host-owned root, hidden until placed; a panel the shell restored opens when its definition registers.
+- The page gets the compat theme edition matching the window's tokens (scheme, Increase Contrast, Reduce Transparency).

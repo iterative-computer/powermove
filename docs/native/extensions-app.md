@@ -9,8 +9,10 @@ Status of the running app's extension support. Measured results live in
 `pm_compat_runner::host::ExtensionHost` is created per project window by
 `Controller::start_extensions`. One owner thread does everything that can wait:
 
-1. **Discover**: immediate children of the shipped app's extensions folder, then
-   the native profile's. Later roots win. A manifest error stays a visible record.
+1. **Discover**: immediate children of `extensions-shared` (the shipped app's
+   folder as first launch migrated it, kept current by each launch's delta pass),
+   then the native profile's `extensions`. Later roots win. The shipped app's live
+   folder is never read. A manifest error stays a visible record.
 2. **Compile**: `compile.rs` applies the frozen compiler's source boundary, strips
    TypeScript with oxc, compiles Svelte in a compiler realm and caches graphs by
    source digest. There is no bundler: V8 links the graph as real ES modules.
@@ -30,16 +32,26 @@ The main thread only enqueues and reads published copies (N8).
 
 `adapter.rs` serves the realm from `KernelHandle`. Reads carry facts only. A write
 publishes the stored change's operations mapped onto the realized open composition;
-only a composition switch or a whole-root write sends a document. `transport.rs`
+only a composition switch or a whole-root write sends a document. The first
+document is serialized before the realm starts and parsed with `JSON.parse`
+(a pro project can be hundreds of megabytes).
+
+`PM.proj` is a view over the realm's mirror that records which records were
+written; a boundary diffs and settles only those subtrees. Records an extension
+builds and inserts are compared slot by slot, since it may keep writing through
+its own reference. Replacing the whole project falls back to whole-tree diffs. `transport.rs`
 keeps `PM.time` a lock and a copy; the app's clock owner pushes time and receives
 seek, play and pause.
 
 ## DOM panels
 
 The realm has one document, so the window has one WebKit page below GPUI. A
-contributed panel's body is transparent in GPUI (`Integration::native_panel`), the
-page shows through and takes pointer events there, and the realm positions the
-panel's root at the shell's rectangle. Recorder canvases reach the page as immutable
+contributed panel's body is transparent in GPUI (`Integration::native_panel`, and
+the shell's window fill leaves it out), the page shows through and takes pointer
+events there, and the realm positions the panel's root at the shell's rectangle.
+The root stays hidden until placed; the extension builds into a body inside it,
+which it may style. The page carries the compat theme edition for the window's
+appearance, so `--tx`, `--bg-field` and the rest resolve as in the shipped app. Recorder canvases reach the page as immutable
 PNG resources. Inspector sections share a contributed `extension-properties` panel,
 because the v4 Inspector has no DOM slot.
 
@@ -80,6 +92,13 @@ once a Store key is pinned; until the Store signs releases there is none (see
 [store-host.md](store-host.md)).
 
 ## Known limits
+
+- On screen (2026-11-08, debug build): panel roots are placed in the realm, but the
+  WebKit page lags behind it after a realm rebuild; contributed panel bodies show the
+  themed page background without their content. Under load the 8 s watchdog rebuilds
+  the realm during activation of 38 extensions and disables the one activating.
+- With the 39-extension setup the app grew to 12–16 GB (301 MB without it; the realm
+  alone peaks at 211 MB). About 32 V8 isolates were created; not yet attributed.
 
 - `render.raster`, `renderFrameTo` and `snapshot` have no engine backend, and raster
   overrides do not reach the viewer.
