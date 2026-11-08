@@ -301,7 +301,13 @@ impl SurfaceView {
         let id = view.id;
         let value = node.props.get("value").cloned().unwrap_or(Value::Null);
         if let Some(control) = self.controls.get(&id) {
-            control.update(cx, |v, cx| v.update(&value, view.disabled, cx));
+            let options = node
+                .props
+                .get("options")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            control.update(cx, |v, cx| v.update(&value, options, view.disabled, cx));
             return;
         }
         let label = node
