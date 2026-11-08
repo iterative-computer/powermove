@@ -877,6 +877,7 @@ impl Backend {
                 "codec",
                 "depth",
                 "dynamicRange",
+                "useProxies",
                 "preset",
                 "presetName"
             ]))?;

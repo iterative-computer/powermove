@@ -55,12 +55,13 @@ export type Field =
   | "quality"
   | "mblur"
   | "audio"
-  | "alpha";
+  | "alpha"
+  | "useProxies";
 export const fields: Record<Format, readonly Field[]> = {
-  prores: ["profile", "scale", "fps", "range", "mblur", "audio", "alpha"],
-  mp4: ["codec", "scale", "fps", "range", "quality", "mblur", "audio"],
-  webm: ["scale", "fps", "range", "quality", "mblur", "audio"],
-  png: ["depth", "scale", "fps", "range", "mblur", "alpha"],
+  prores: ["profile", "scale", "fps", "range", "mblur", "audio", "alpha", "useProxies"],
+  mp4: ["codec", "scale", "fps", "range", "quality", "mblur", "audio", "useProxies"],
+  webm: ["scale", "fps", "range", "quality", "mblur", "audio", "useProxies"],
+  png: ["depth", "scale", "fps", "range", "mblur", "alpha", "useProxies"],
   still: ["depth", "scale", "mblur", "alpha"],
   json: [],
 };
@@ -133,6 +134,10 @@ export const rows = {
   range: ["Range", "Export the work area or the whole composition."],
   quality: ["Quality", "Video bitrate used for video exports."],
   mblur: ["Motion Blur", "Render motion blur for moving layers."],
+  useProxies: [
+    "Use Proxies (Draft)",
+    "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
+  ],
   audio: ["Include Audio", "Mix composition audio into the video."],
   alpha: [
     "Transparent Background",

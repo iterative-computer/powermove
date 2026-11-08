@@ -112,6 +112,10 @@ pub struct Options {
     pub depth: u8,
     #[serde(default, skip_serializing_if = "DynamicRange::is_sdr")]
     pub dynamic_range: DynamicRange,
+    /// Use Proxies (Draft): read proxy media where it exists. Otherwise an
+    /// export always reads originals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_proxies: bool,
     /// Migration/extension fields survive every remember/preset round trip.
     #[serde(flatten)]
     pub opaque: BTreeMap<String, Value>,
@@ -235,7 +239,7 @@ impl Intent {
         };
         planned.audio = self.audio;
         planned.motion_blur = self.motion_blur;
-        planned.draft_from_proxies = false;
+        planned.draft_from_proxies = self.options.use_proxies;
         planned.delivery.hide_captions = !self.burn_captions;
         planned.delivery.preview = true;
         // Still-frame timing is entirely the planner's (current playhead).
