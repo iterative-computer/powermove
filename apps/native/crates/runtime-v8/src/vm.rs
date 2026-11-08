@@ -190,7 +190,7 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
             if op == "engine" {
                 engine_op(&state, v)
             } else {
-                host_op(&mut state.lock().unwrap(), &op, v)
+                host_op(&mut state.lock().unwrap(), &op, v).map(|v| v.to_string())
             }
         });
     if state.lock().unwrap().cancellation.is_cancelled() {
@@ -198,14 +198,15 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
         return;
     }
     match result {
-        Ok(value) => {
-            let result = v8::String::new(s, &value.to_string()).unwrap();
-            rv.set(result.into());
-        }
+        Ok(text) => match v8::String::new(s, &text) {
+            Some(result) => rv.set(result.into()),
+            None => throw(s, "Engine response quota"),
+        },
         Err(error) => throw(s, &error),
     }
 }
-fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<Value, String> {
+/// The reply as JSON text, serialized once.
+fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<String, String> {
     let (engine, generation, budget, _reservation) = {
         let mut n = state.lock().unwrap();
         if n.sync_calls >= n.limits.max_host_ops {
@@ -213,7 +214,10 @@ fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Resu
         }
         n.sync_calls += 1;
         let engine = n.engine.clone().ok_or("Engine service is not attached")?;
-        let reserve = n.limits.max_response_bytes.min(n.limits.external_bytes);
+        let reserve = n
+            .limits
+            .max_engine_response_bytes
+            .min(n.limits.external_bytes);
         if !n.admits_response(reserve) {
             return Err("External memory reservation quota".into());
         }
@@ -233,8 +237,8 @@ fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Resu
         )
     };
     budget.check().map_err(|e| e.to_string())?;
-    let value = engine
-        .call(
+    let text = engine
+        .call_text(
             &generation,
             input["operation"]
                 .as_str()
@@ -244,10 +248,10 @@ fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Resu
         )
         .map_err(|e| e.to_string())?;
     budget.check().map_err(|e| e.to_string())?;
-    if value.to_string().len() > budget.max_response_bytes {
+    if text.len() > budget.max_response_bytes {
         return Err("Engine response quota".into());
     }
-    Ok(value)
+    Ok(text)
 }
 fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value, String> {
     match op {

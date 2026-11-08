@@ -107,6 +107,10 @@ pub struct Limits {
     pub max_op_bytes: usize,
     pub max_ops: usize,
     pub max_response_bytes: usize,
+    /// One synchronous engine reply, such as a whole project the trusted realm
+    /// mirrors. Kept apart from fetch, which reserves `max_response_bytes` per
+    /// request in flight.
+    pub max_engine_response_bytes: usize,
     pub host_timeout: Duration,
     pub queue_capacity: usize,
 }
@@ -120,6 +124,7 @@ impl Default for Limits {
             max_op_bytes: 1024 * 1024,
             max_ops: 4096,
             max_response_bytes: 8 * 1024 * 1024,
+            max_engine_response_bytes: 8 * 1024 * 1024,
             host_timeout: Duration::from_secs(30),
             queue_capacity: 64,
         }
@@ -185,6 +190,18 @@ pub trait EngineProxy: Send + Sync + 'static {
         input: &Value,
         budget: HostBudget,
     ) -> Result<Value>;
+    /// The reply as JSON text. A host that already holds the text (a large
+    /// document it serialized ahead of time) returns it without a second pass.
+    fn call_text(
+        &self,
+        generation: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<String> {
+        self.call(generation, operation, input, budget)
+            .map(|value| value.to_string())
+    }
 }
 
 /// V8's statistics, not RSS or an admission reservation.

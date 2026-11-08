@@ -1007,7 +1007,7 @@ fn engine_hook_obeys_cancellation_timeout_and_byte_limits() {
     let f = fixture_with(|c| {
         c.engine = Some(engine.clone());
         c.limits.host_timeout = Duration::from_millis(15);
-        c.limits.max_response_bytes = 100;
+        c.limits.max_engine_response_bytes = 100;
     });
     let r = f.pool.realm(RealmKind::Compat).unwrap();
     assert_eq!(
