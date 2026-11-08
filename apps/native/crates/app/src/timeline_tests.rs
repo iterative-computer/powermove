@@ -922,3 +922,23 @@ fn hovering_a_layer_row_shows_its_switches(cx: &mut TestAppContext) {
     s.idle(cx);
     assert!(!painted(&mut s), "leaving hides it");
 }
+/// A click right after the pointer enters a row selects it, although the
+/// hover restyles the row before the click lands.
+#[gpui::test]
+fn clicking_a_layer_row_selects_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let row = bounds(&mut s.vcx, r#"timeline:row:["layer","l1"]"#);
+    s.vcx
+        .simulate_mouse_move(row.center(), None, Modifiers::none());
+    s.vcx.simulate_click(row.center(), Modifiers::none());
+    s.idle(cx);
+    let selected = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .layers()
+        .to_vec();
+    assert_eq!(selected, ["l1".to_string()]);
+}

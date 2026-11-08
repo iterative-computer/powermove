@@ -308,11 +308,15 @@ export class SurfaceRoot {
     // Commits may land between planning and dispatch. Keys follow focus and
     // reach their element as it is now; anything else lands only on a target
     // whose subtree they left alone, never on changed or new content.
+    const same =
+      plan.semantic !== undefined &&
+      this.host.nodes.get(plan.target)?.props.id === plan.semantic;
     if (
       plan.revision > this.revision ||
       !this.host.nodes.has(plan.target) ||
       (plan.revision !== this.revision &&
         !keyboard.has(type.toLowerCase()) &&
+        !same &&
         !this.unchangedSince(plan.target, plan.revision))
     )
       throw new Error("Stale surface event");

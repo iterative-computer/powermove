@@ -55,6 +55,9 @@ export interface EventPlan {
   target: number;
   preventDefault: boolean;
   deliveries: { id: number; capture: boolean }[];
+  /** The target's `id` prop when the host planned it; a render that lands
+      first does not stale an activation of the same identified element. */
+  semantic?: string;
 }
 /** UTF-16 code-unit offsets (Cocoa/JS), end exclusive. */
 export type TextRange = [number, number];
