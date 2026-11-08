@@ -166,6 +166,8 @@ pub struct Extensions {
     pub host: Option<ExtensionHost>,
     /// This window's raster overrides; dropped with its host.
     overrides: Option<crate::raster_overrides::Overrides>,
+    /// The document whose captures carry this window's definitions.
+    doc_id: Option<u64>,
     /// One WebKit document per trust domain: the trusted realm's under the empty
     /// key, then each Store extension's own. Never shared.
     pages: BTreeMap<String, Page>,
@@ -210,6 +212,7 @@ impl Default for Extensions {
             window: NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             host: None,
             overrides: None,
+            doc_id: None,
             pages: BTreeMap::new(),
             views: Rc::default(),
             data_stores: StoreDataStores::default(),
@@ -240,6 +243,9 @@ impl Default for Extensions {
 impl Drop for Extensions {
     fn drop(&mut self) {
         layout::set_contributed_panels(self.window, []);
+        if let Some(doc_id) = self.doc_id {
+            crate::mcp_services::set_resources(doc_id, None);
+        }
     }
 }
 impl Extensions {
@@ -278,6 +284,7 @@ impl Controller {
         let project = session.project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
+        let doc_id = self.kernel.published(&project).map(|p| p.snapshot.doc_id);
         let rasters = crate::raster_overrides::Overrides::new(
             &self.engine,
             self.kernel.clone(),
@@ -308,6 +315,7 @@ impl Controller {
             }),
         });
         rasters.connect(host.raster_inbox());
+        self.extensions.doc_id = doc_id;
         self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
         cx.spawn(async move |this, cx| {
@@ -465,7 +473,27 @@ impl Controller {
                         && n.len() > 4
                         && n.chars().all(|c| c.is_ascii_alphabetic())
                 }) {
-                    self.host.borrow().send_command(name, vec![]);
+                    // A shape tool's shape rides along; today's native Shape
+                    // tool draws rectangles.
+                    let args = request["shape"]
+                        .as_str()
+                        .map(|shape| vec![serde_json::json!(shape)])
+                        .unwrap_or_default();
+                    self.host.borrow().send_command(name, args);
+                }
+            }
+            // The `viewer` service's setZoom: the viewer leaves fit at that zoom
+            // (as far as the display can show it) and reports where it landed.
+            Some("viewerZoom") => {
+                use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
+                if let Some(zoom) = request["zoom"].as_f64().filter(|z| z.is_finite()) {
+                    let pan = match request["pan"].as_array().map(Vec::as_slice) {
+                        Some([x, y]) => [x.as_f64().unwrap_or(0.), y.as_f64().unwrap_or(0.)],
+                        _ => self.view.pan,
+                    };
+                    let top = ZOOM_MAX.min(self.zoom_limit()).max(ZOOM_MIN);
+                    self.view.place(Some(zoom.clamp(ZOOM_MIN, top)), pan);
+                    self.write_view(None, cx);
                 }
             }
             Some("download") => {
@@ -923,7 +951,9 @@ impl Controller {
                 definitions,
                 ..Default::default()
             });
-            crate::mcp_services::set_resources(self.extensions.resources.clone());
+            if let Some(doc_id) = self.extensions.doc_id {
+                crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+            }
             self.apply_extension_resources();
         }
         self.update_builtins(cx);

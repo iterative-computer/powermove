@@ -33,11 +33,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The window's extension definitions, for captures and exports agents start.
-static RESOURCES: Mutex<Option<Arc<pm_engine_service::resources::ResourceSnapshot>>> =
-    Mutex::new(None);
-pub(crate) fn set_resources(resources: Arc<pm_engine_service::resources::ResourceSnapshot>) {
-    *RESOURCES.lock().unwrap() = Some(resources);
+type Resources = Arc<pm_engine_service::resources::ResourceSnapshot>;
+/// Each open document's extension definitions (its window's), for the
+/// captures and exports agents start; a request copies them when it starts.
+static RESOURCES: Mutex<Option<HashMap<u64, Resources>>> = Mutex::new(None);
+/// Document `doc_id`'s definitions now (none: its window has no extensions).
+pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
+    let mut all = RESOURCES.lock().unwrap();
+    let all = all.get_or_insert_with(HashMap::new);
+    match resources {
+        Some(resources) => all.insert(doc_id, resources),
+        None => all.remove(&doc_id),
+    };
+}
+fn resources_of(doc_id: u64) -> Option<Resources> {
+    RESOURCES.lock().unwrap().as_ref()?.get(&doc_id).cloned()
 }
 /// Install the production engine hosts. Call on a worker before serving.
 pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()> {
@@ -149,8 +159,8 @@ impl EngineJobs {
             media,
             destination,
         )?;
-        // An agent's capture draws the effects the window's extensions define.
-        if let Some(resources) = RESOURCES.lock().unwrap().clone() {
+        // An agent's capture draws the effects its project's window defines.
+        if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
         }
         ExportHandle::start_scheduled(&self.executable, request, self.activity.clone())
@@ -276,10 +286,12 @@ pub(crate) fn frame_renderer(
     let cache: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>> = Mutex::default();
     Ok(Arc::new(move |request: &pm_compat_runner::FrameRequest| {
         let published = kernel.published(&project).ok_or("No open project")?;
+        // The same frame drawn by other override wrappers is another frame.
         let key = format!(
-            "{}:{}:{}:{}x{}:{}",
+            "{}:{}:{:?}:{}:{}x{}:{}",
             published.snapshot.doc_id,
             published.revision(),
+            pm_engine_service::jobs::compat_epoch(published.snapshot.doc_id),
             request.time.to_bits(),
             request.width,
             request.height,
