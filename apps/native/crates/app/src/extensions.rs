@@ -185,16 +185,15 @@ impl Extensions {
     pub fn owns_panel(&self, id: &str) -> bool {
         self.known_panels.contains(id)
     }
-    /// Extensions from this profile, then the shipped app's, so nothing is left
-    /// behind on update. The native folder wins when both have an id.
+    /// The shipped app's extensions as first launch migrated them (its sealed
+    /// checkpoint, kept current by each launch's delta pass), then this profile's
+    /// own. The native folder wins when both have an id. The shipped app's live
+    /// folder is never read: an isolated profile stays isolated.
     fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
-        let mut roots = vec![];
-        if let Some(home) = std::env::var_os("HOME") {
-            roots
-                .push(PathBuf::from(home).join("Library/Application Support/Powermove/extensions"));
-        }
-        roots.push(profile.join("extensions"));
-        roots
+        vec![
+            profile.join("extensions-shared"),
+            profile.join("extensions"),
+        ]
     }
 }
 impl Controller {
