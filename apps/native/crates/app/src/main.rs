@@ -28,6 +28,8 @@ mod media;
 mod media_import;
 mod media_refresh;
 mod migration_report;
+#[cfg(all(test, target_os = "macos"))]
+mod panel_capture_tests;
 mod panels;
 mod perf_gate;
 mod platform;

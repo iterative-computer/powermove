@@ -82,3 +82,6 @@ path = "../../../../engine/crates/pm-audio"
 path = "../../../../engine/crates/pm-media"
 [dev-dependencies.pm-render]
 path = "../../../../engine/crates/pm-render"
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
+gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/gpui_ce_parley" }
