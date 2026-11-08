@@ -39,6 +39,9 @@ pub struct Editor {
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
     maximized_panel: Option<String>,
+    /// Tabs of panels whose owner went away for a moment (an extension
+    /// reloading), and where they were: the panel returns there.
+    parked: HashMap<String, DropTarget>,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -104,6 +107,7 @@ impl Editor {
             host,
             geometry: Geometry::default(),
             maximized_panel: None,
+            parked: HashMap::new(),
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
@@ -331,8 +335,36 @@ impl Editor {
                 cx.notify();
                 return true;
             }
-            ("panel", "show") => self.layout.show_panel(rest),
-            ("panel", "close") => self.layout.close_panel(rest),
+            ("panel", "show") => match self.parked.remove(rest) {
+                Some(place) if self.layout.find(rest).is_none() => {
+                    let mut next = self.layout.clone();
+                    next.show_panel(rest)
+                        .and_then(|_| next.move_panel_to(rest, place))
+                        .map(|_| self.layout = next)
+                        .or_else(|_| self.layout.show_panel(rest))
+                }
+                _ => self.layout.show_panel(rest),
+            },
+            ("panel", "close") => {
+                self.parked.remove(rest);
+                self.layout.close_panel(rest)
+            }
+            // panel:park:<id> — closed, but a later show puts it back in place.
+            ("panel", "park") => match self.layout.find(rest) {
+                Some((dock, group, index)) => {
+                    // A tab alone in its stack takes the stack with it; it
+                    // comes back as a stack in the same position.
+                    let alone = self.layout.docks[dock].groups[group].tabs.len() == 1;
+                    let place = if alone {
+                        DropTarget::Split { dock, group }
+                    } else {
+                        DropTarget::Tab { dock, group, index }
+                    };
+                    self.parked.insert(rest.to_owned(), place);
+                    self.layout.close_panel(rest)
+                }
+                None => Ok(()),
+            },
             ("panel", "dock") => {
                 let (id, edge) = rest.rsplit_once(':').unwrap_or((rest, ""));
                 let edge = match edge {
@@ -1010,6 +1042,9 @@ impl Render for Editor {
         let (ground, ground_alpha) = t.ground();
         let (edge, edge_alpha) = t.edge();
         let (line, line_alpha) = t.line();
+        // Extension pages sit below GPUI too; their bodies are read at paint
+        // time, after this frame's layout has recorded them.
+        let native_bodies = self.host.as_ref().map(|h| h.borrow().native_panels.clone());
         let dragging = matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved);
         let mut root = div()
             .id("editor")
@@ -1032,42 +1067,20 @@ impl Render for Editor {
                     move |_, _, _| (),
                     move |b, _, window, _| {
                         let (width, height) = (f32::from(b.size.width), f32::from(b.size.height));
-                        let mut rects = vec![];
-                        if let Some(v) = canvas_viewer.filter(|_| native) {
-                            rects.extend([
-                                Rect {
-                                    x: 0.,
-                                    y: 0.,
-                                    w: width,
-                                    h: v.y,
-                                },
-                                Rect {
-                                    x: 0.,
-                                    y: v.y,
-                                    w: v.x,
-                                    h: v.h,
-                                },
-                                Rect {
-                                    x: v.x + v.w,
-                                    y: v.y,
-                                    w: width - v.x - v.w,
-                                    h: v.h,
-                                },
-                                Rect {
-                                    x: 0.,
-                                    y: v.y + v.h,
-                                    w: width,
-                                    h: height - v.y - v.h,
-                                },
-                            ]);
-                        } else {
-                            rects.push(Rect {
+                        let mut holes: Vec<Rect> =
+                            canvas_viewer.filter(|_| native).into_iter().collect();
+                        if let Some(bodies) = &native_bodies {
+                            holes.extend(bodies.borrow().iter().map(|(_, r)| *r));
+                        }
+                        let rects = layout::outside(
+                            Rect {
                                 x: 0.,
                                 y: 0.,
                                 w: width,
                                 h: height,
-                            });
-                        }
+                            },
+                            &holes,
+                        );
                         for r in rects {
                             window.paint_quad(
                                 PaintQuad::new(Bounds::new(

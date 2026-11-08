@@ -606,6 +606,7 @@ impl Live {
         self.requests.clear();
         let mut n = self.vm.native.lock().unwrap();
         n.queued.clear();
+        n.deferred.clear();
         n.aborted.clear();
         n.in_flight = 0;
         n.reserved = 0;
@@ -618,6 +619,11 @@ impl Live {
             let aborted = std::mem::take(&mut n.aborted);
             let before = n.queued.len();
             n.queued.retain(|(id, _)| !aborted.contains(id));
+            // A waiting fetch held no reservation: it leaves the count only.
+            let waiting = n.deferred.len();
+            n.deferred.retain(|(id, _)| !aborted.contains(id));
+            let waited = waiting - n.deferred.len();
+            n.in_flight -= waited;
             (aborted, before - n.queued.len())
         };
         self.requests.retain_mut(|request| {
@@ -637,6 +643,13 @@ impl Live {
     fn pump(&mut self, config: &Config) -> Result<()> {
         let (queued, aborted, logs) = {
             let mut n = self.vm.native.lock().unwrap();
+            // A waiting fetch that was aborted never held a reservation.
+            let before = n.deferred.len();
+            let aborted = n.aborted.clone();
+            n.deferred.retain(|(id, _)| !aborted.contains(id));
+            let dropped = before - n.deferred.len();
+            n.in_flight = n.in_flight.saturating_sub(dropped);
+            n.admit_deferred();
             (
                 std::mem::take(&mut n.queued),
                 std::mem::take(&mut n.aborted),
@@ -688,6 +701,8 @@ impl Live {
             n.reserved = n
                 .reserved
                 .saturating_sub(retired * config.limits.max_response_bytes);
+            // Room that just came free goes to waiting fetches; the next pump starts them.
+            n.admit_deferred();
         }
         self.vm.pump(json!(completed))
     }
@@ -768,7 +783,7 @@ impl Live {
         let native = self.vm.native.lock().unwrap();
         let io_delay = if !native.queued.is_empty() || !native.logs.is_empty() {
             Some(Duration::ZERO)
-        } else if !self.requests.is_empty() {
+        } else if !self.requests.is_empty() || !native.deferred.is_empty() {
             Some(Duration::from_millis(5))
         } else {
             None

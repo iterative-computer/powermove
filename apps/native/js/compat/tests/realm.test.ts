@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { CompatRealm, EditGesture } from "../src";
-import { DocumentMirror, copy } from "../src/mirror";
+import {
+  DocumentMirror,
+  cloneAcceptingViews,
+  copy,
+  unwrapViews,
+} from "../src/mirror";
 import type { Data } from "../src/types";
 import { FakeHost } from "./fake-host";
 const setup = () => {
@@ -682,4 +687,120 @@ test("owned onDispose handlers run once without reporting retired-owner health f
   extension.dispose();
   expect(called).toBe(1);
   expect(host.errors).toEqual([]);
+});
+describe("writes cost what they touch", () => {
+  const big = (layers: number, keys: number) => ({
+    name: "big",
+    layers: Array.from({ length: layers }, (_, l) => ({
+      id: `l${l}`,
+      p: {
+        x: {
+          v: 0,
+          kf: Array.from({ length: keys }, (_, k) => ({
+            i: `k${k}`,
+            t: k,
+            v: k,
+          })),
+        },
+      },
+    })),
+  });
+  test("a deep write sends only its path and settles only there", () => {
+    const mirror = new DocumentMirror(big(3, 4));
+    const key = mirror.document.layers[2].p.x.kf[1];
+    key.v = 99;
+    expect(mirror.take()).toEqual([
+      { path: ["layers", 2, "p", "x", "kf", 1, "v"], exists: true, value: 99 },
+    ]);
+    expect(mirror.pending()).toEqual([]);
+    expect(mirror.document.layers[2].p.x.kf[1]).toBe(key);
+  });
+  test("a record an extension built keeps taking its later raw writes", () => {
+    const mirror = new DocumentMirror(big(1, 1));
+    const raw: Data = { i: "new", t: 5, v: 1, ease: { speed: 0 } };
+    mirror.document.layers[0].p.x.kf.push(raw);
+    expect(mirror.take()).toEqual([
+      {
+        path: ["layers", 0, "p", "x", "kf"],
+        exists: true,
+        value: [
+          { i: "k0", t: 0, v: 0 },
+          { i: "new", t: 5, v: 1, ease: { speed: 0 } },
+        ],
+      },
+    ]);
+    mirror.acknowledged.layers[0].p.x.kf.push(copy(raw));
+    raw.ease.speed = 3;
+    expect(mirror.take()).toEqual([
+      {
+        path: ["layers", 0, "p", "x", "kf", 1, "ease", "speed"],
+        exists: true,
+        value: 3,
+      },
+    ]);
+  });
+  test("a record an extension inserts is found again by identity", () => {
+    const mirror = new DocumentMirror(big(1, 1));
+    const doc = mirror.document;
+    const mine: Data = { id: "mine", p: { x: { v: 1 } } };
+    doc.layers.push(mine);
+    expect(doc.layers.indexOf(mine)).toBe(1);
+    expect(doc.layers.includes(mine)).toBe(true);
+    expect(doc.layers.find((l: Data) => l === mine)).toBe(mine);
+    expect(doc.layers[1].p).toBe(mine.p);
+    // A record that came from the project keeps one identity too.
+    const theirs = doc.layers[0];
+    expect(doc.layers.indexOf(theirs)).toBe(0);
+    expect(mirror.take()).toHaveLength(1);
+  });
+  test("project records structured-clone as plain data", () => {
+    const mirror = new DocumentMirror(big(2, 2));
+    const clone = cloneAcceptingViews(structuredClone);
+    const layer = mirror.document.layers[0];
+    expect(() => structuredClone(layer)).toThrow();
+    const copied = clone(layer);
+    expect(copied).toEqual({
+      id: "l0",
+      p: {
+        x: {
+          v: 0,
+          kf: [
+            { i: "k0", t: 0, v: 0 },
+            { i: "k1", t: 1, v: 1 },
+          ],
+        },
+      },
+    });
+    copied.id = "copy";
+    expect(mirror.document.layers[0].id).toBe("l0");
+    // Views nested in the extension's own containers, and cycles.
+    const bag: Data = { layers: [layer], keyed: new Map([["a", layer.p]]) };
+    bag.self = bag;
+    const out = clone(bag);
+    expect(out.layers[0].id).toBe("l0");
+    expect(out.keyed.get("a").x.v).toBe(0);
+    expect(out.self).toBe(out);
+    expect(unwrapViews(mirror.document.layers)).toBe(
+      unwrapViews(mirror.document.layers),
+    );
+    expect(mirror.take()).toEqual([]);
+  });
+  test("a thousand one-key boundaries on 200k keyframes stay cheap", () => {
+    const mirror = new DocumentMirror(big(400, 500));
+    const started = performance.now();
+    for (let i = 0; i < 1000; i++) {
+      mirror.document.layers[i % 400].p.x.kf[i % 500].v = -(i + 1);
+      const ops = mirror.take();
+      expect(ops).toHaveLength(1);
+      // The native adapter answers with the stored change's operations.
+      mirror.applyOps(ops);
+      mirror.settle(ops);
+    }
+    // One whole-tree walk per boundary takes tens of milliseconds here.
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(mirror.acknowledged.layers[999 % 400].p.x.kf[999 % 500].v).toBe(
+      -1000,
+    );
+    expect(mirror.pending()).toEqual([]);
+  });
 });

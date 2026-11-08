@@ -423,11 +423,14 @@ impl Inspector {
             .filter(|n| *n > 0.0)
             .unwrap_or(30.0)
     }
-    pub(crate) fn composition(&self) -> Value {
+    /// One field of the open composition. Only that field is converted: a pro
+    /// composition holds millions of keyframes, and fields are read per binding.
+    pub(crate) fn composition_field(&self, key: &str) -> Value {
         self.published
             .snapshot
             .root()
             .and_then(|root| model::comp_node(root, model::open_comp_id(root).as_deref()))
+            .and_then(|comp| comp.get(key))
             .map(Node::to_value)
             .unwrap_or(Value::Null)
     }

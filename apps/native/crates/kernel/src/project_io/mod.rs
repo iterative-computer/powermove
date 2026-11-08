@@ -112,8 +112,9 @@ impl MediaEntry {
     /// Stream this read capability to a new private cache file. Never writes a
     /// source project or creates a source-side lock. Checks version and digest.
     /// The version check is the save path's: stat identity, rehashing the
-    /// container only when the stat changed. The item's own digest proves its
-    /// bytes, so a project with many items is never hashed once per item.
+    /// container only when the stat changed. An item with its own digest is
+    /// proven by it, so a project with many items is never hashed once per
+    /// item; a PMV3 item without one still verifies the whole file.
     pub fn copy_to(&self, destination: &Path) -> Result<(), ProjectIoError> {
         use std::io::{Read, Seek, SeekFrom, Write};
         let mut input: Box<dyn Read> = match &self.source {
@@ -129,9 +130,12 @@ impl MediaEntry {
                 file,
                 offset,
                 length,
-                ..
+                sha256,
             } => {
-                file.check(false)?;
+                // An entry with its own checksum is verified below; re-hashing
+                // the whole container per entry made a 51-item PMV4 file take
+                // minutes to open. PMV3 entries have only the file's content.
+                file.check(sha256.is_none())?;
                 let mut input = File::open(&file.path).map_err(|e| io_err(&file.path, e))?;
                 input
                     .seek(SeekFrom::Start(*offset))
@@ -179,8 +183,8 @@ impl MediaEntry {
                     "Media source length or checksum changed".into(),
                 ));
             }
-            if let MediaSource::Embedded { file, .. } = &self.source {
-                file.check(false)?;
+            if let MediaSource::Embedded { file, sha256, .. } = &self.source {
+                file.check(sha256.is_none())?;
             }
             output.sync_all().map_err(|e| io_err(destination, e))
         })();

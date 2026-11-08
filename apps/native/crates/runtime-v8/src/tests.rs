@@ -865,6 +865,7 @@ fn engine_reservation_counts_v8_and_pending_fetch_memory_before_calling_host() {
         c.engine = Some(engine.clone());
         c.limits.external_bytes = 2 * 1024 * 1024;
         c.limits.max_response_bytes = 1024 * 1024;
+        c.limits.max_engine_response_bytes = 1024 * 1024;
     });
     f.host.mode.store(1, Ordering::Relaxed);
     let r = f.pool.realm(RealmKind::Compat).unwrap();
@@ -889,6 +890,44 @@ fn engine_reservation_counts_v8_and_pending_fetch_memory_before_calling_host() {
             .engine_reserved_bytes,
         0
     );
+    close(&r);
+}
+#[test]
+fn queued_fetches_wait_for_room_and_never_refuse_the_engine() {
+    let engine = Arc::new(Engine::default());
+    let f = fixture_with(|c| {
+        c.engine = Some(engine.clone());
+        c.limits.external_bytes = 4 * 1024 * 1024;
+        c.limits.max_response_bytes = 1024 * 1024;
+        c.limits.max_engine_response_bytes = 2 * 1024 * 1024;
+        c.limits.queue_fetches = true;
+    });
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    // Room for two fetches beside the engine's reply; twelve are asked for.
+    eval(
+        &r,
+        "globalThis.all=Promise.all(Array.from({length:12},()=>fetch('https://example.test/').then(r=>r.json()).then(j=>j.ok)));'started'",
+    );
+    let measured = wait(r.measure().unwrap()).unwrap();
+    assert!(measured[0].memory.fetch_reserved_bytes <= 2 * 1024 * 1024);
+    // The synchronous engine channel is admitted while fetches wait.
+    assert_eq!(eval(&r, "runtime.engine('read').operation"), "read");
+    assert_eq!(eval(&r, "all.then(v=>v.every(Boolean)&&v.length)"), "12");
+    assert_eq!(f.host.starts.load(Ordering::Relaxed), 12);
+    assert_eq!(
+        wait(r.measure().unwrap()).unwrap()[0]
+            .memory
+            .fetch_reserved_bytes,
+        0
+    );
+    // An aborted waiting fetch leaves without ever starting.
+    eval(
+        &r,
+        "globalThis.held=Array.from({length:2},()=>fetch('https://example.test/'));globalThis.c=new AbortController();globalThis.late=fetch('https://example.test/',{signal:c.signal}).catch(e=>e.name);c.abort();'ok'",
+    );
+    assert_eq!(eval(&r, "late"), "AbortError");
+    eval(&r, "Promise.all(held).then(()=>'done')");
+    assert_eq!(f.host.starts.load(Ordering::Relaxed), 14);
     close(&r);
 }
 #[test]
@@ -1011,7 +1050,7 @@ fn engine_hook_obeys_cancellation_timeout_and_byte_limits() {
     let f = fixture_with(|c| {
         c.engine = Some(engine.clone());
         c.limits.host_timeout = Duration::from_millis(15);
-        c.limits.max_response_bytes = 100;
+        c.limits.max_engine_response_bytes = 100;
     });
     let r = f.pool.realm(RealmKind::Compat).unwrap();
     assert_eq!(

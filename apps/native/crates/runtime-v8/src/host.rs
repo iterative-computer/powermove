@@ -107,8 +107,17 @@ pub struct Limits {
     pub max_op_bytes: usize,
     pub max_ops: usize,
     pub max_response_bytes: usize,
+    /// One synchronous engine reply, such as a whole project the trusted realm
+    /// mirrors. Kept apart from fetch, which reserves `max_response_bytes` per
+    /// request in flight.
+    pub max_engine_response_bytes: usize,
     pub host_timeout: Duration,
     pub queue_capacity: usize,
+    /// Fetches that do not fit the reservation budget wait for room instead of
+    /// failing, as a browser queues connections, and always leave room for one
+    /// synchronous engine reply. For a realm whose engine channel must never be
+    /// refused by its own pending fetches.
+    pub queue_fetches: bool,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -120,8 +129,10 @@ impl Default for Limits {
             max_op_bytes: 1024 * 1024,
             max_ops: 4096,
             max_response_bytes: 8 * 1024 * 1024,
+            max_engine_response_bytes: 8 * 1024 * 1024,
             host_timeout: Duration::from_secs(30),
             queue_capacity: 64,
+            queue_fetches: false,
         }
     }
 }
@@ -190,6 +201,18 @@ pub trait EngineProxy: Send + Sync + 'static {
     /// itself for realms it trusts (its own built-ins), never for extensions.
     fn metered(&self, _generation: &Generation, _operation: &str) -> bool {
         true
+    }
+    /// The reply as JSON text. A host that already holds the text (a large
+    /// document it serialized ahead of time) returns it without a second pass.
+    fn call_text(
+        &self,
+        generation: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<String> {
+        self.call(generation, operation, input, budget)
+            .map(|value| value.to_string())
     }
 }
 

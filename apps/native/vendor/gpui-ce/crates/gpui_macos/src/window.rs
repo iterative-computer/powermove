@@ -1047,6 +1047,7 @@ impl MacWindowState {
                             msg_send![class!(CAMetalDisplayLink), alloc];
                         let raw: *mut Objc2Object = msg_send![allocated, initWithMetalLayer: self.renderer.layer_ptr() as ObjcId];
                         link = Retained::from_raw(raw).expect("CAMetalDisplayLink initialization");
+                        self.renderer.set_display_link_bound(true);
                         let _: () = msg_send![&*link, setDelegate: view];
                         let _: () = msg_send![&*link, setPreferredFrameLatency: 2.0_f32];
                     } else {
@@ -1088,6 +1089,8 @@ impl MacWindowState {
                 let _: () = msg_send![&*link, invalidate];
             }
         }
+        #[cfg(not(feature = "wgpu"))]
+        self.renderer.set_display_link_bound(false);
         if let Some(frame_source) = self.frame_source.as_mut() {
             frame_source.stop();
         }
@@ -2270,9 +2273,14 @@ impl PlatformWindow for MacWindow {
             this.force_render_pending = true;
         }
         #[cfg(not(feature = "wgpu"))]
-        this.renderer.draw(scene);
-        // Committing the transaction runs AppKit's display cycle, which resets
-        // cursor rects and takes this lock again: release it first.
+        if !this.renderer.draw(scene) {
+            // No link-supplied drawable while a CAMetalDisplayLink owns the
+            // layer: the link's next update paints this scene.
+            this.force_render_pending = true;
+        }
+        // Committing the slot transaction runs AppKit's display cycle, which
+        // calls back into this window (cursor rects take this lock): release
+        // the lock first, or the main thread deadlocks on itself.
         drop(this);
         drop(transaction);
     }

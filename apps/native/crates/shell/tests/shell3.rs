@@ -284,3 +284,46 @@ fn panel_headers_share_the_38_pt_header_metric() {
         38.
     );
 }
+
+#[test]
+fn a_parked_panel_comes_back_where_it_was() {
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )),
+        Arc::new(()),
+        || None,
+    );
+    let t = tokens();
+    let window = cx
+        .open_window(size(px(1440.), px(900.)), |_, cx| {
+            cx.new(|cx| {
+                let mut v = pm_shell::view::Editor::new(t, None, cx);
+                v.layout = Layout::preset("design");
+                v
+            })
+        })
+        .unwrap();
+    window
+        .update(&mut cx, |v, _, cx| {
+            // An extension reloading takes its panel away for a moment.
+            assert!(v.run_shell_command("panel:dock:inspector:left", cx));
+            let place = v.layout.find("inspector").unwrap();
+            assert!(v.run_shell_command("panel:park:inspector", cx));
+            assert!(v.layout.find("inspector").is_none());
+            assert!(v.run_shell_command("panel:show:inspector", cx));
+            assert_eq!(v.layout.find("inspector"), Some(place));
+            // A tab among others returns to its index in that stack.
+            let shared = v.layout.find("layer-effects").unwrap();
+            assert!(v.layout.docks[shared.0].groups[shared.1].tabs.len() > 1);
+            assert!(v.run_shell_command("panel:park:layer-effects", cx));
+            assert!(v.run_shell_command("panel:show:layer-effects", cx));
+            assert_eq!(v.layout.find("layer-effects"), Some(shared));
+            // A plain close forgets the place: show uses the panel's home.
+            assert!(v.run_shell_command("panel:park:inspector", cx));
+            assert!(v.run_shell_command("panel:close:inspector", cx));
+            assert!(v.run_shell_command("panel:show:inspector", cx));
+            assert_ne!(v.layout.find("inspector").map(|p| p.0), Some(place.0));
+        })
+        .unwrap();
+}

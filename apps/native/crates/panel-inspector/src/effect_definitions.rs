@@ -102,7 +102,6 @@ impl Inspector {
             return Ok(definition);
         }
         let value = self.layer(layer)?;
-        let composition = self.composition();
         let location = self
             .published
             .snapshot
@@ -128,16 +127,11 @@ impl Inspector {
         let positive = |a: Option<f64>, field: &str| {
             let data = value.get("d").and_then(|d| d.get(field));
             let data = data.and_then(|v| v.get("v").unwrap_or(v).as_f64());
-            [
-                a,
-                data,
-                composition.get(field).and_then(Value::as_f64),
-                Some(1.),
-            ]
-            .into_iter()
-            .flatten()
-            .find(|v| v.is_finite() && *v > 0.)
-            .expect("positive fallback")
+            [a, data, self.composition_field(field).as_f64(), Some(1.)]
+                .into_iter()
+                .flatten()
+                .find(|v| v.is_finite() && *v > 0.)
+                .expect("positive fallback")
         };
         let width = positive(bounds.map(|b| b.w), "w");
         let height = positive(bounds.map(|b| b.h), "h");

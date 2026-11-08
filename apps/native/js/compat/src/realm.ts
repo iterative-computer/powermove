@@ -27,6 +27,7 @@ import type {
   EditResult,
   HistoryAPI,
   KernelHost,
+  Patch,
   Publication,
   PublicationDelta,
   Reply,
@@ -73,7 +74,8 @@ export class CompatRealm {
   private disposed = false;
   private abandonedMutationStart = false;
   private deferredPublications: PublicationDelta[] = [];
-  private unacknowledgedDocument?: Data;
+  /** Writes sent and not yet answered; the answer settles where they went. */
+  private inFlight?: Patch[];
   private unacknowledgedSelection?: Data;
   private unacknowledgedWorkspace?: Data;
   private domConnection?: { globals: Data; dispose(): void };
@@ -85,10 +87,13 @@ export class CompatRealm {
       (error) => options.host.reportError(error),
       this.kernel,
     );
-    this.publication = { ...copy(options.initial), document: undefined };
-    this.mirror = new DocumentMirror(options.initial.document);
-    this.workspaceValue = copy(options.initial.workspace);
-    this.selection = copy(options.initial.selection);
+    // The first document becomes the live tree; the kept options drop it.
+    const { document, ...initial } = options.initial;
+    this.options = { ...options, initial: initial as Publication };
+    this.publication = { ...copy(initial), document: undefined };
+    this.mirror = new DocumentMirror(document, { owned: true });
+    this.workspaceValue = copy(initial.workspace);
+    this.selection = copy(initial.selection);
     this.channel = new HostChannel(
       options.host,
       options.id,
@@ -190,8 +195,8 @@ export class CompatRealm {
         let result: unknown;
         try {
           result = (action as () => unknown)();
-          const ops = this.mirror.pending();
-          this.unacknowledgedDocument = this.mirror.snapshot();
+          const ops = this.mirror.take();
+          this.inFlight = ops;
           const reply: EditResult = this.channel.call("edit.mutateFinish", {
             lease: lease.data!.lease,
             label,
@@ -206,7 +211,8 @@ export class CompatRealm {
         } catch (error) {
           // Discard only unacknowledged JS writes; the kernel selectively aborts acknowledged owner writes.
           if (!this.channel.pending) {
-            this.mirror.accept(this.mirror.acknowledged);
+            this.mirror.discard(this.inFlight);
+            this.inFlight = undefined;
             try {
               this.channel.call("edit.mutateAbort", {
                 lease: lease.data!.lease,
@@ -367,17 +373,22 @@ export class CompatRealm {
         "Host publication moved backwards",
       );
     // Reads carry facts only; nothing here may walk the document for them.
+    const sent = this.inFlight;
     const moved =
       !!publication.document ||
       !!publication.ops?.length ||
       !!reply.error ||
-      !!this.unacknowledgedDocument;
-    const documentBase =
-      this.unacknowledgedDocument ?? this.mirror.acknowledged;
+      !!sent;
+    // Writes made after the flush that sent `sent`. The channel is synchronous,
+    // so this is the rare path, and the only one that walks the whole tree.
+    const slow = moved && this.mirror.writing;
+    const documentBase = slow
+      ? sent
+        ? patch(this.mirror.acknowledged, sent)
+        : copy(this.mirror.acknowledged)
+      : undefined;
     const later =
-      moved && (this.unacknowledgedDocument || !reply.error)
-        ? diff(documentBase, this.mirror.document)
-        : [];
+      slow && (sent || !reply.error) ? diff(documentBase, this.mirror.raw) : [];
     const selectionBase =
       this.unacknowledgedSelection ?? this.publication.selection;
     const selected =
@@ -390,18 +401,23 @@ export class CompatRealm {
       this.unacknowledgedWorkspace || !reply.error
         ? diff(workspaceBase, copy(this.workspaceValue, true))
         : [];
-    this.unacknowledgedDocument = undefined;
+    this.inFlight = undefined;
     this.unacknowledgedSelection = undefined;
     this.unacknowledgedWorkspace = undefined;
     this.adopt(publication);
-    if (moved) {
+    if (slow) {
       const document = this.mirror.acknowledged;
-      reconcile(this.mirror.document, document);
+      this.mirror.accept(document);
       if (later.length)
         this.mirror.restore(
           patch(document, rebase(later, documentBase, document)),
         );
-    }
+    } else if (moved)
+      this.mirror.settle(
+        publication.document
+          ? [{ path: [] }]
+          : [...((publication.ops ?? []) as Patch[]), ...(sent ?? [])],
+      );
     reconcile(
       this.selection,
       selected.length
@@ -460,15 +476,21 @@ export class CompatRealm {
     let failed = false,
       failure: unknown;
     const moved = !!publication.document || !!publication.ops?.length;
-    const previous = moved ? copy(this.mirror.acknowledged) : undefined;
+    // Unflushed local writes rebase onto the native change: the rare path.
+    const previous =
+      moved && this.mirror.writing ? copy(this.mirror.acknowledged) : undefined;
     this.adopt(publication);
-    if (moved)
+    if (previous)
       try {
-        this.mirror.receive(this.mirror.acknowledged, previous!);
+        this.mirror.receive(this.mirror.acknowledged, previous);
       } catch (error) {
         failed = true;
         failure = error;
       }
+    else if (moved)
+      this.mirror.settle(
+        publication.document ? [{ path: [] }] : (publication.ops as Patch[]),
+      );
     reconcile(
       this.selection,
       selected.length
@@ -509,13 +531,13 @@ export class CompatRealm {
       this.receive(this.deferredPublications.shift()!);
     let ops;
     try {
-      ops = this.mirror.pending();
+      ops = this.mirror.take();
     } catch (error) {
-      this.mirror.accept(this.mirror.acknowledged);
+      this.mirror.discard();
       throw error;
     }
     if (ops.length) {
-      this.unacknowledgedDocument = this.mirror.snapshot();
+      this.inFlight = ops;
       this.channel.call("document.directWrite", { ops });
     }
     if (diff(this.publication.selection, this.selection).length) {

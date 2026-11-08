@@ -115,6 +115,58 @@ fn definitions(
         json!({"ready":true,"generation":1,"definitions":definitions,"missing":[],"records":records}),
     )
 }
+/// A whole profile through the production host, as a project window starts it:
+/// every root, one shared realm, against a real project. Reports each record and
+/// what reached the kernel.
+fn profile(input: &Value) -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let roots: Vec<std::path::PathBuf> = input["roots"]
+        .as_array()
+        .ok_or("roots required")?
+        .iter()
+        .filter_map(|r| r.as_str().map(Into::into))
+        .collect();
+    let root = Path::new(input["work"].as_str().ok_or("work directory required")?);
+    let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+    let kernel = actor.handle();
+    let source = match input["project"].as_str() {
+        Some(path) => pm_kernel::OpenSource::File(pm_kernel::open_project(
+            Path::new(path),
+            Default::default(),
+        )?),
+        None => pm_kernel::OpenSource::Untitled(pm_model::json::parse(
+            &initial()["document"].to_string(),
+        )?),
+    };
+    kernel
+        .open("window", source)
+        .wait()
+        .ok_or("kernel stopped")??;
+    let host = pm_compat_runner::host::ExtensionHost::start(pm_compat_runner::host::HostConfig {
+        kernel,
+        project: "window".into(),
+        roots,
+        cache: root.join("cache"),
+        owner: None,
+        text: None,
+        wake: std::sync::Arc::new(|| ()),
+    });
+    let wait = input["seconds"].as_u64().unwrap_or(120);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    while !host.is_ready() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Late registrations (timers, promises) settle shortly after activation.
+    thread::sleep(std::time::Duration::from_millis(500));
+    let records = host.records();
+    let contributions = host.contributions().map(|c| (*c).clone());
+    let ready = host.is_ready();
+    let toasts = host.take_toasts();
+    drop(host);
+    actor.shutdown();
+    Ok(
+        json!({"version":1,"ready":ready,"records":records,"contributions":contributions,"toasts":toasts}),
+    )
+}
 fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut input = String::new();
     io::stdin()
@@ -129,6 +181,9 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>>
     }
     if input["definitions"] == true {
         return definitions(&input);
+    }
+    if input.get("roots").is_some() {
+        return profile(&input);
     }
     let initial = input.get("initial").cloned().unwrap_or_else(initial);
     let prelude = input

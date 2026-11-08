@@ -107,4 +107,19 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **v4 additive:** `metadata.placeholder` on `TextField` shows a muted hint in the empty field (no new prop).
 - **The ground tint is darker than `colors.window` in dark (`#080808`, the demo's `#0C0A09` relationship)** because the blur lightens it; panels then composite a step above the ground, as tonal elevation requires.
 - **The shell tab strip is the only Project / Effect Controls switch.** Both panels' own `SegmentedControl` (kept for the web host) is hidden in the native header.
-- **Synchronous presents (live resize, key-window change) release the `CAMetalDisplayLink` first;** Core Animation forbids `nextDrawable` while a link owns the layer.
+- **Synchronous presents (live resize, key-window change) release the `CAMetalDisplayLink` first;** Core Animation forbids `nextDrawable` while a link owns the layer. While a link does own it, a draw with no link-supplied drawable waits for the link's next update and never falls back to `nextDrawable` (integration, wave 15).
+
+## Compat lane decisions (2026-11-08)
+
+- Extensions load from the migrated `extensions-shared` checkpoint plus the native `extensions` folder; the shipped app's live folder is never read.
+- The trusted realm's first document is staged as JSON text outside JavaScript time; synchronous engine replies get their own size cap (`Limits::max_engine_response_bytes`, additive in runtime-v8).
+- `PM.proj` is a write-tracking view; whole-tree diffs remain only for unflushed writes during native publications and for a replaced project root.
+- Contributed panels build into a body inside a host-owned root, hidden until placed; a panel the shell restored opens when its definition registers.
+- The page gets the compat theme edition matching the window's tokens (scheme, Increase Contrast, Reduce Transparency).
+- Trusted-realm watchdog follows D11: Wait / Stop sheet, never an automatic stop; Stop disables only an extension caught activating.
+- Each extension activates in its own realm task, so the watchdog times one extension.
+- Additive runtime-v8 API: `Limits::queue_fetches` (fetches wait for room and leave room for one engine reply; Store helpers keep failing).
+- Records an extension inserts read back as themselves; the realm's `structuredClone` unwraps project views.
+- The realm's first document becomes its live tree (no second copy); the first publication is staged model-to-text.
+- Shell `panel:park:<id>`: closes a tab but a later `panel:show` puts it back in place (used when an extension reloads).
+- ae-workspace-theme turning itself off on a fresh profile is its own one-time recovery (storage key `restore-request-1.0.4`), as in Electron; a migrated profile that carries the key keeps it on.

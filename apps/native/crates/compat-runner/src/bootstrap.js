@@ -2,6 +2,7 @@
 globalThis.__compat = {
   create(initial) {
     const call = (operation, input = {}) => runtime.engine(operation, input);
+    initial ??= call("kernel.publication");
     const unavailable = (operation, input) => call(operation, input);
     this.errors = [];
     const host = {

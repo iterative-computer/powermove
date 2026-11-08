@@ -7,6 +7,7 @@
     after = 0,
     applied = 0,
     stopped = false;
+  const waiting = [];
   const call = (value) => {
     const request = new XMLHttpRequest();
     request.open(
@@ -20,6 +21,32 @@
     const reply = JSON.parse(request.responseText);
     if (!reply.ok) throw Error(reply.error);
     return reply.value;
+  };
+  /** Frames whose DOM has applied. A canvas the document no longer has
+   * releases its resource quietly; a frame that cannot draw is reported. Neither
+   * stops the page. */
+  const drawWaiting = async () => {
+    while (waiting.length && waiting[0].dom_sequence <= applied) {
+      const event = waiting.shift();
+      const node = applier?.node(event.node);
+      let failed = !!node && node.localName !== "canvas";
+      if (node?.localName === "canvas") {
+        node.width = event.width;
+        node.height = event.height;
+        if (event.width && event.height) {
+          try {
+            const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
+            if (!response.ok) throw Error(String(response.status));
+            const bitmap = await createImageBitmap(await response.blob());
+            try { node.getContext("2d").drawImage(bitmap, 0, 0); }
+            finally { bitmap.close(); }
+          } catch (_) {
+            failed = true;
+          }
+        }
+      }
+      call({ kind: "canvas_applied", panel, payload: {resource:event.resource, failed} });
+    }
   };
   const apply = async (event) => {
     if (event.kind === "create") {
@@ -55,21 +82,13 @@
           });
         if (!applier.apply(batch)) throw Error("Remote DOM page fault");
         applied = batch.seq;
+        await drawWaiting();
       } else if (event.kind === "canvas") {
-        if (event.dom_sequence > applied) throw Error("Native canvas precedes DOM admission");
-        const canvas = applier?.node(event.node);
-        if (!canvas || canvas.localName !== "canvas") throw Error("Unknown native canvas");
-        canvas.width = event.width;
-        canvas.height = event.height;
-        if (event.width && event.height) {
-          const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
-          if (!response.ok) throw Error("Native canvas resource unavailable");
-          const bitmap = await createImageBitmap(await response.blob());
-          try { canvas.getContext("2d").drawImage(bitmap, 0, 0); }
-          finally { bitmap.close(); }
-        }
-        call({ kind: "canvas_applied", panel, payload: {resource:event.resource} });
+        // A frame can overtake the DOM batch that creates its canvas; it waits.
+        waiting.push(event);
+        await drawWaiting();
       } else if (event.kind === "destroy") {
+        waiting.length = 0;
         applier?.dispose();
         applier = null;
         panel = null;

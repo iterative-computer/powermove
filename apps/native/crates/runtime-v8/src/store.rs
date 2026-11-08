@@ -613,9 +613,15 @@ fn dispatch(
     }
 }
 fn limits_wire(l: &Limits) -> Value {
-    json!({"heap":l.heap_bytes,"external":l.external_bytes,"source":l.max_source_bytes,"host_ops":l.max_host_ops,"op_bytes":l.max_op_bytes,"ops":l.max_ops,"response":l.max_response_bytes,"timeout_ms":l.host_timeout.as_millis() as u64,"queue":l.queue_capacity})
+    json!({"heap":l.heap_bytes,"external":l.external_bytes,"source":l.max_source_bytes,"host_ops":l.max_host_ops,"op_bytes":l.max_op_bytes,"ops":l.max_ops,"response":l.max_response_bytes,"engine_response":l.max_engine_response_bytes,"timeout_ms":l.host_timeout.as_millis() as u64,"queue":l.queue_capacity})
 }
 fn limits_read(v: &Value) -> Result<Limits> {
+    let response = number(v, "response")? as usize;
+    // Absent from a peer that predates it: engine replies keep the response cap.
+    let engine_response = match v.get("engine_response") {
+        Some(_) => number(v, "engine_response")? as usize,
+        None => response,
+    };
     Ok(Limits {
         heap_bytes: number(v, "heap")? as usize,
         external_bytes: number(v, "external")? as usize,
@@ -623,9 +629,12 @@ fn limits_read(v: &Value) -> Result<Limits> {
         max_host_ops: number(v, "host_ops")? as usize,
         max_op_bytes: number(v, "op_bytes")? as usize,
         max_ops: number(v, "ops")? as usize,
-        max_response_bytes: number(v, "response")? as usize,
+        max_response_bytes: response,
+        max_engine_response_bytes: engine_response,
         host_timeout: Duration::from_millis(number(v, "timeout_ms")?),
         queue_capacity: number(v, "queue")? as usize,
+        // Store helpers stay contained: a fetch past their budget fails.
+        queue_fetches: false,
     })
 }
 

@@ -9,7 +9,6 @@ use pm_compat_host::{
     RequestContext, Result as PageResult, StoreDataStores, SyncHandler, Trust,
 };
 use pm_compat_runner::{
-    PAGE_BUNDLE,
     host::{ExtensionHost, HostConfig},
     transport::{TransportOwner, TransportRequest},
 };
@@ -185,16 +184,15 @@ impl Extensions {
     pub fn owns_panel(&self, id: &str) -> bool {
         self.known_panels.contains(id)
     }
-    /// Extensions from this profile, then the shipped app's, so nothing is left
-    /// behind on update. The native folder wins when both have an id.
+    /// The shipped app's extensions as first launch migrated them (its sealed
+    /// checkpoint, kept current by each launch's delta pass), then this profile's
+    /// own. The native folder wins when both have an id. The shipped app's live
+    /// folder is never read: an isolated profile stays isolated.
     fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
-        let mut roots = vec![];
-        if let Some(home) = std::env::var_os("HOME") {
-            roots
-                .push(PathBuf::from(home).join("Library/Application Support/Powermove/extensions"));
-        }
-        roots.push(profile.join("extensions"));
-        roots
+        vec![
+            profile.join("extensions-shared"),
+            profile.join("extensions"),
+        ]
     }
 }
 impl Controller {
@@ -267,6 +265,16 @@ impl Controller {
             return;
         };
         let revision = host.revision();
+        // A rebuilt realm is a new document: render again so open panels
+        // replace the page the old one drew into.
+        if self
+            .extensions
+            .pages
+            .get("")
+            .is_some_and(|page| host.view() != 0 && page.view != host.view())
+        {
+            cx.notify();
+        }
         for toast in host.take_toasts() {
             self.message = toast;
             cx.notify();
@@ -314,6 +322,38 @@ impl Controller {
                     let _ = this.update(cx, |v, _| {
                         if let Some(host) = &v.extensions.host {
                             host.answer(token, confirmed.into());
+                        }
+                    });
+                })
+                .detach();
+            }
+            Some("unresponsive") => {
+                let Some(execution) = request["execution"].as_u64() else {
+                    return;
+                };
+                let restart = "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.";
+                let (title, body) = match request["name"].as_str() {
+                    Some(name) if request["disables"] == true => (
+                        format!("“{name}” isn’t responding"),
+                        format!(
+                            "You can wait for it to finish, or stop it. A stopped extension stays off until you turn {name} back on in Extensions."
+                        ),
+                    ),
+                    Some(name) => (format!("“{name}” isn’t responding"), restart.to_owned()),
+                    None => (
+                        "An extension isn’t responding".to_owned(),
+                        restart.to_owned(),
+                    ),
+                };
+                let shell = self.host.borrow();
+                let answer =
+                    crate::platform::choice(&shell.window, &title, &body, &["Wait", "Stop"]);
+                drop(shell);
+                cx.spawn(async move |this, cx| {
+                    let stop = answer.recv().await == Ok(1);
+                    let _ = this.update(cx, |v, _| {
+                        if let Some(host) = &v.extensions.host {
+                            host.answer_unresponsive(execution, stop);
                         }
                     });
                 })
@@ -497,7 +537,7 @@ impl Controller {
         for id in self.extensions.known_panels.difference(&known) {
             if self.extensions.open_panels.contains(id) || self.extensions.panels.contains_key(id) {
                 self.extensions.suspended.insert(id.clone());
-                shell.send_command(&format!("panel:close:{id}"), vec![]);
+                shell.send_command(&format!("panel:park:{id}"), vec![]);
             }
         }
         for id in known.intersection(&self.extensions.suspended.clone()) {
@@ -692,20 +732,26 @@ impl Controller {
             .host
             .as_ref()
             .and_then(|h| h.store_session(&key));
+        let tokens = self.host.borrow().tokens.clone();
+        let bundle = pm_compat_runner::page_bundle(
+            tokens.scheme == pm_design::Scheme::Dark,
+            tokens.accessibility.increase_contrast,
+            tokens.accessibility.reduce_transparency,
+        );
         let created = match &session {
             Some(session) => MacDomHost::new_store_remote_dom(
                 mtm,
                 session,
                 events.clone(),
                 &mut self.extensions.data_stores,
-                PAGE_BUNDLE,
+                &bundle,
             ),
             None if key.is_empty() => MacDomHost::new_remote_dom(
                 mtm,
                 Trust::Trusted,
                 events.clone(),
                 &mut self.extensions.data_stores,
-                PAGE_BUNDLE,
+                &bundle,
             ),
             None => return,
         };
@@ -871,6 +917,7 @@ impl Controller {
                     HostEvent::CompositionChanged => cx.notify(),
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::Recovered { .. } => page.ready = true,
+                    HostEvent::Failure(code) => eprintln!("extension page: {code}"),
                     _ => (),
                 }
             }

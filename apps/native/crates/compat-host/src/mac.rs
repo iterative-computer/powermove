@@ -136,6 +136,10 @@ impl Shared {
             "canvas_applied" => {
                 let resource = payload["resource"].as_u64().ok_or(Error::InvalidRequest)?;
                 self.canvases.borrow_mut().remove(resource)?;
+                if payload["failed"] == true {
+                    self.handler
+                        .event(HostEvent::Failure("compat_canvas_frame_unavailable"));
+                }
                 Ok(Value::Null)
             }
             "remote_dom" => {
@@ -406,6 +410,8 @@ impl SlotView {
         *self.ivars().borrow_mut() = rects;
         self.setWantsLayer(true);
         let mask = objc2_quartz_core::CAShapeLayer::new();
+        // A mask is drawn within its own bounds; without a frame it hides everything.
+        mask.setFrame(self.bounds());
         mask.setPath(Some(&path));
         if let Some(layer) = self.layer() {
             unsafe { layer.setMask(Some(&mask)) }

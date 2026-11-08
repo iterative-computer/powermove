@@ -140,12 +140,16 @@ const realm = `import * as compat from ${JSON.stringify(join(root, "src/index.ts
 import {RemoteDOM} from ${JSON.stringify(join(root, "../remote-dom/src/shim.ts"))};
 import {installLegacyRuntime} from ${JSON.stringify(join(root, "src/legacy/runtime.ts"))};
 import {createLoader} from ${JSON.stringify(join(root, "src/loader.ts"))};
+import {cloneAcceptingViews} from ${JSON.stringify(join(root, "src/mirror.ts"))};
 ${controlNames.map((name) => `import ${name} from ${JSON.stringify(join(reference, `controls/${name}.svelte`))};`).join("\n")}
 import {doc} from ${JSON.stringify(join(reference, "state/document.svelte.ts"))};
 import {setSelection} from ${JSON.stringify(join(reference, "state/selection.svelte.ts"))};
 import {transport,updateControlTime} from ${JSON.stringify(join(reference, "state/transport.svelte.ts"))};
 import {styles} from '${styles}';
 ${moduleImports}
+// Extensions clone project records (structuredClone(PM.L(id))); PM.proj hands
+// them views of those records, which a plain structured clone refuses.
+if(globalThis.structuredClone)globalThis.structuredClone=cloneAcceptingViews(globalThis.structuredClone);
 globalThis.PowermoveCompat={...compat,RemoteDOM,installLegacyRuntime,createLoader,controls:{${controlNames.join(",")}},controlStores:{doc,setSelection,transport,updateControlTime},controlStyles:styles,runtimeModules:{${moduleTable}}};`;
 await write(
   "compat.js",

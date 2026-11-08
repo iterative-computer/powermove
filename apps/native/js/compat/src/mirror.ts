@@ -207,29 +207,330 @@ export function rebase(ops: Patch[], before: Data, after: Data): Patch[] {
     return { ...op, path };
   });
 }
+/** A raw record or array of the live tree, and where it was last seen. */
+type Link = { parent: Data; key: string | number };
+const raws = new WeakMap<object, object>();
+/**
+ * `value` with project views replaced by the records they show, for natives
+ * that refuse proxies (structured clone). Containers are copied only on the
+ * way to a view; a view's own subtree holds no views.
+ */
+export function unwrapViews(value: unknown): unknown {
+  const seen = new Map<object, unknown>();
+  const visit = (v: any): any => {
+    if (v === null || typeof v !== "object") return v;
+    const raw = raws.get(v);
+    if (raw) return raw;
+    if (seen.has(v)) return seen.get(v);
+    const proto = Object.getPrototypeOf(v);
+    if (Array.isArray(v)) {
+      const out: any[] = [];
+      seen.set(v, out);
+      let changed = false;
+      for (let i = 0; i < v.length; i++) {
+        out[i] = visit(v[i]);
+        changed ||= out[i] !== v[i];
+      }
+      if (!changed) seen.set(v, v);
+      return changed ? out : v;
+    }
+    if (v instanceof Map) {
+      const out = new Map();
+      seen.set(v, out);
+      let changed = false;
+      for (const [k, item] of v) {
+        const key = visit(k),
+          next = visit(item);
+        changed ||= key !== k || next !== item;
+        out.set(key, next);
+      }
+      if (!changed) seen.set(v, v);
+      return changed ? out : v;
+    }
+    if (v instanceof Set) {
+      const out = new Set();
+      seen.set(v, out);
+      let changed = false;
+      for (const item of v) {
+        const next = visit(item);
+        changed ||= next !== item;
+        out.add(next);
+      }
+      if (!changed) seen.set(v, v);
+      return changed ? out : v;
+    }
+    if (proto !== Object.prototype && proto !== null) return v;
+    const out: Data = Object.create(proto);
+    seen.set(v, out);
+    let changed = false;
+    for (const key of Object.keys(v)) {
+      out[key] = visit(v[key]);
+      changed ||= out[key] !== v[key];
+    }
+    if (!changed) seen.set(v, v);
+    return changed ? out : v;
+  };
+  return visit(value);
+}
+/** Lets the realm's `structuredClone` take project records as Electron did. */
+export function cloneAcceptingViews(
+  clone: (value: any, options?: any) => any,
+): (value: any, options?: any) => any {
+  return (value, options) => clone(unwrapViews(value), options);
+}
+const slots = (value: Data): unknown[] => {
+  const out: unknown[] = [];
+  for (const key of Object.keys(value)) out.push(key, value[key]);
+  return out;
+};
+/**
+ * The live project and its last acknowledged copy. Extensions see `document`,
+ * a view that records which records they write, so a boundary costs what was
+ * written rather than the size of the project: Electron let them mutate the
+ * project in place, and a pro project holds millions of keyframes.
+ */
 export class DocumentMirror {
-  document: Data;
+  private root: Data;
   private base: Data;
-  constructor(document: Data) {
+  private dirty = new Set<object>();
+  private links = new WeakMap<object, Link>();
+  private views = new WeakMap<object, any>();
+  /** Records an extension built and put in the tree. It keeps the raw
+   * reference and may write through it later, as in Electron, so each is
+   * compared slot by slot with how it was last sent. */
+  private adopted = new Map<object, unknown[]>();
+  /** An extension replaced the whole project and holds it: every boundary
+   * compares the whole tree, as before views. */
+  private rawRoot = false;
+  /** `owned`: the caller hands `document` over (a parsed publication), so it
+   * becomes the live tree rather than being copied a second time. */
+  constructor(document: Data, { owned = false } = {}) {
     this.base = copy(document);
-    this.document = copy(document);
+    this.root = owned ? document : copy(document);
+  }
+  get document(): Data {
+    return this.rawRoot ? this.root : this.view(this.root);
+  }
+  private link(raw: object, parent: Data, key: string | number): void {
+    const link = this.links.get(raw);
+    if (!link || link.parent !== parent || link.key !== key)
+      this.links.set(raw, { parent, key });
+  }
+  /** A value entering the tree: views become the records they show, and the
+   * extension's own records are adopted, keeping their identity. */
+  private adopt(value: any, parent: Data, key: string | number): any {
+    if (value === null || typeof value !== "object") return value;
+    const raw = raws.get(value);
+    if (raw) {
+      this.link(raw, parent, key);
+      return raw;
+    }
+    if (this.links.has(value) && !this.adopted.has(value)) {
+      this.link(value, parent, key);
+      return value;
+    }
+    this.link(value, parent, key);
+    if (this.adopted.has(value)) return value;
+    this.adopted.set(value, []);
+    this.rescan(value);
+    return value;
+  }
+  private rescan(value: Data): void {
+    const array = Array.isArray(value);
+    for (const key of Object.keys(value)) {
+      const d = Object.getOwnPropertyDescriptor(value, key);
+      if (!d || !("value" in d) || !d.value || typeof d.value !== "object")
+        continue;
+      const next = this.adopt(d.value, value, array ? Number(key) : key);
+      if (next !== d.value && d.writable) value[key] = next;
+    }
+    this.adopted.set(value, slots(value));
+  }
+  private view(raw: any): any {
+    let view = this.views.get(raw);
+    if (view) return view;
+    const mirror = this;
+    view = new Proxy(raw, {
+      get(target, key) {
+        const value = target[key];
+        if (value === null || typeof value !== "object") return value;
+        const link = mirror.links.get(value);
+        if (!link || link.parent !== target)
+          mirror.links.set(value, {
+            parent: target,
+            key: Array.isArray(target) ? Number(key) : (key as string),
+          });
+        // The extension's own records read back as themselves, as in
+        // Electron: they are tracked slot by slot, not through a view.
+        return mirror.adopted.has(value) ? value : mirror.view(value);
+      },
+      set(target, key, value) {
+        const slot = Array.isArray(target) ? Number(key) : (key as string);
+        target[key] = mirror.adopt(value, target, slot);
+        mirror.dirty.add(target);
+        return true;
+      },
+      defineProperty(target, key, descriptor) {
+        const slot = Array.isArray(target) ? Number(key) : (key as string);
+        if ("value" in descriptor)
+          descriptor = {
+            ...descriptor,
+            value: mirror.adopt(descriptor.value, target, slot),
+          };
+        mirror.dirty.add(target);
+        return Reflect.defineProperty(target, key, descriptor);
+      },
+      deleteProperty(target, key) {
+        mirror.dirty.add(target);
+        return Reflect.deleteProperty(target, key);
+      },
+    });
+    this.views.set(raw, view);
+    raws.set(view, raw);
+    return view;
+  }
+  /** Where a written record sits now; undefined once it left the tree. */
+  private pathOf(raw: object): Path | undefined {
+    const path: Path = [];
+    for (let at: any = raw; at !== this.root; ) {
+      const link = this.links.get(at);
+      if (!link) return undefined;
+      const parent = link.parent;
+      if (parent[link.key] !== at) {
+        const key = Array.isArray(parent)
+          ? parent.indexOf(at)
+          : Object.keys(parent).find((k) => parent[k] === at);
+        if (key === undefined || key === -1) return undefined;
+        link.key = key;
+      }
+      path.push(link.key);
+      at = parent;
+    }
+    return path.reverse();
+  }
+  /** Written subtrees, none inside another. */
+  private written(): Path[] {
+    if (this.rawRoot) return [[]];
+    const paths: Path[] = [];
+    for (const raw of this.dirty) {
+      const path = this.pathOf(raw);
+      if (path) paths.push(path);
+    }
+    for (const [raw, last] of this.adopted) {
+      const path = this.pathOf(raw);
+      if (!path) {
+        this.adopted.delete(raw);
+        continue;
+      }
+      const now = slots(raw);
+      if (now.length !== last.length || now.some((v, i) => v !== last[i])) {
+        this.rescan(raw);
+        this.adopted.set(raw, last);
+        paths.push(path);
+      }
+    }
+    return outermost(paths);
+  }
+  /** The adopted records as they are now are what was last sent. */
+  private sent(): void {
+    for (const raw of this.adopted.keys()) this.adopted.set(raw, slots(raw));
   }
   /** Every changed value is validated by `copy`; unchanged values equal `base`. */
   pending(): Patch[] {
-    return diff(this.base, this.document);
+    const changes: Patch[] = [];
+    for (const path of this.written()) {
+      const before = at(this.base, path),
+        after = at(this.root, path);
+      if (before.found && after.found)
+        changes.push(...diff(before.value, after.value, [...path]));
+      else if (after.found)
+        changes.push({ path, exists: true, value: copy(after.value) });
+      else if (before.found) changes.push({ path, exists: false });
+    }
+    return changes;
   }
-  snapshot(): Data {
-    return copy(this.document);
+  /** The pending writes, now in flight: later writes start a new set. */
+  take(): Patch[] {
+    const changes = this.pending();
+    this.dirty.clear();
+    this.sent();
+    return changes;
+  }
+  /** Local writes not yet sent, including any through adopted records. */
+  get writing(): boolean {
+    return this.dirty.size > 0 || this.written().length > 0;
   }
   restore(snapshot: Data): void {
-    reconcile(this.document, snapshot);
+    reconcile(this.root, snapshot);
+    this.dirty.add(this.root);
   }
   replace(document: Data): void {
-    this.document = document;
+    const raw = raws.get(document);
+    this.root = raw ?? document;
+    this.rawRoot ||= !raw;
+    this.dirty.add(this.root);
   }
   accept(document: Data): void {
     this.base = copy(document);
-    reconcile(this.document, document);
+    reconcile(this.root, document);
+    this.dirty.clear();
+    this.sent();
+  }
+  /** Drops local writes, and those of `sent`, where they were made. */
+  discard(sent: Patch[] = []): void {
+    this.settle(
+      [...this.written(), ...sent.map((op) => op.path)].map((path) => ({
+        path,
+      })),
+    );
+    this.dirty.clear();
+    this.sent();
+  }
+  /** Brings the live tree back to `base` wherever `ops` reached it, keeping
+   * retained references. Whole-document publications reconcile everything. */
+  settle(ops: { path: Path }[]): void {
+    this.reconcileAt(outermost(ops.map((op) => op.path)));
+    this.sent();
+  }
+  private reconcileAt(paths: Path[]): void {
+    for (const path of paths) {
+      if (!path.length) {
+        reconcile(this.root, this.base);
+        return;
+      }
+      const parentPath = path.slice(0, -1),
+        key = path.at(-1)!;
+      const parent = at(this.root, parentPath),
+        source = at(this.base, parentPath);
+      if (
+        !parent.found ||
+        !source.found ||
+        !parent.value ||
+        typeof parent.value !== "object" ||
+        !source.value ||
+        typeof source.value !== "object" ||
+        Array.isArray(parent.value) !== Array.isArray(source.value)
+      ) {
+        reconcile(this.root, this.base);
+        return;
+      }
+      if (Array.isArray(source.value)) {
+        // One record replaced in place; anything structural walks the array.
+        const same =
+          typeof key === "number" &&
+          parent.value.length === source.value.length &&
+          identity(parent.value[key]) === identity(source.value[key]);
+        if (!same) {
+          reconcile(parent.value, source.value);
+          continue;
+        }
+      }
+      if (Object.hasOwn(source.value, key)) {
+        const current = parent.value[key];
+        const next = reconcile(current, source.value[key]);
+        if (next !== current) parent.value[key] = next;
+      } else delete parent.value[key];
+    }
   }
   /** The last authoritative tree. Callers treat it as read-only. */
   get acknowledged(): Data {
@@ -269,17 +570,51 @@ export class DocumentMirror {
   /** Native writes received before our flush win only where we did not write. */
   receive(document: Data, previous: Data = this.base): void {
     try {
-      const local = diff(previous, this.document);
+      const local = diff(previous, this.root);
       const authoritative = copy(document);
       reconcile(
-        this.document,
+        this.root,
         patch(authoritative, rebase(local, previous, authoritative)),
       );
       this.base = authoritative;
     } catch (error) {
       this.base = copy(document);
-      reconcile(this.document, document);
+      reconcile(this.root, document);
+      this.dirty.clear();
       throw error;
     }
   }
+  /** The live tree itself, for the realm's own whole-tree fallbacks. */
+  get raw(): Data {
+    return this.root;
+  }
+}
+/** Paths with none of their ancestors in the list, shortest first. */
+function outermost(paths: Path[]): Path[] {
+  const seen = new Set<string>(),
+    kept: Path[] = [];
+  for (const path of [...paths].sort((a, b) => a.length - b.length)) {
+    let key = "",
+      inside = false;
+    for (const part of path) {
+      if (seen.has(key)) {
+        inside = true;
+        break;
+      }
+      key += "\u0000" + typeof part + ":" + part;
+    }
+    if (inside || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(path);
+  }
+  return kept;
+}
+function at(root: any, path: Path): { found: boolean; value?: any } {
+  let value = root;
+  for (const part of path) {
+    if (!value || typeof value !== "object" || !Object.hasOwn(value, part))
+      return { found: false };
+    value = value[part];
+  }
+  return { found: true, value };
 }
