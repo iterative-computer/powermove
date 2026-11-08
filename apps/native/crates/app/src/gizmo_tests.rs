@@ -1144,3 +1144,62 @@ fn moves_snap_to_the_composition_centre_unless_command_is_held(cx: &mut TestAppC
     s.drag(cx, at, point(px(66.), px(0.)), Modifiers::command());
     assert_eq!(s.pose().position, [266., 150.]);
 }
+/// Two selected layers share one box: dragging its corner scales both about
+/// the opposite corner, and one Undo restores them.
+#[gpui::test]
+fn the_common_box_scales_a_multiple_selection(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let both = SelectionCall::Layers {
+        ids: vec!["l0".into(), "l1".into()],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), both))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.refresh(cx);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.poses().len() == 2)
+    });
+    let poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+    let corner = [
+        poses
+            .iter()
+            .flat_map(|p| p.corners)
+            .map(|c| c[0])
+            .fold(f64::MIN, f64::max),
+        poses
+            .iter()
+            .flat_map(|p| p.corners)
+            .map(|c| c[1])
+            .fold(f64::MIN, f64::max),
+    ];
+    let left = poses
+        .iter()
+        .flat_map(|p| p.corners)
+        .map(|c| c[0])
+        .fold(f64::MAX, f64::min);
+    let top = poses
+        .iter()
+        .flat_map(|p| p.corners)
+        .map(|c| c[1])
+        .fold(f64::MAX, f64::min);
+    let at = s.point_of(corner);
+    let by = point(px((corner[0] - left) as f32), px((corner[1] - top) as f32));
+    s.drag(cx, at, by, Modifiers::none());
+    let poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+    let l0 = poses.iter().find(|p| p.id == "l0").unwrap();
+    assert_eq!(l0.scale, [200., 200.]);
+    assert_eq!(
+        l0.position,
+        [left + (200. - left) * 2., top + (150. - top) * 2.]
+    );
+    let l1 = poses.iter().find(|p| p.id == "l1").unwrap();
+    assert_eq!(l1.scale, [200., 200.]);
+    s.undo(cx);
+    let poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+    assert!(poses.iter().all(|p| p.scale == [100., 100.]));
+}

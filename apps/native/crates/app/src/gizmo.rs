@@ -590,7 +590,9 @@ impl GizmoSurface {
             Tool::Text => CursorStyle::IBeam,
             Tool::Anchor | Tool::Zoom | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
             _ => match self.handle_at(at, frame.scale) {
-                Some(Hit::Handle(index)) => self.poses[0].cursor(index),
+                Some(Hit::Handle(index)) => self
+                    .handle_pose()
+                    .map_or(CursorStyle::Arrow, |p| p.cursor(index)),
                 _ => CursorStyle::Arrow,
             },
         };
@@ -603,10 +605,16 @@ impl GizmoSurface {
     fn transformable(&self) -> bool {
         !self.poses.is_empty() && self.poses.iter().all(|p| !p.locked)
     }
+    /// The box whose handles a press can take: the one layer's, or the
+    /// common box of an unlocked multiple selection.
+    fn handle_pose(&self) -> Option<Pose> {
+        match self.poses.as_slice() {
+            [pose] => Some(pose.clone()),
+            poses => group_pose(poses),
+        }
+    }
     fn handle_at(&self, at: [f64; 2], scale: f64) -> Option<Hit> {
-        let [pose] = self.poses.as_slice() else {
-            return None;
-        };
+        let pose = self.handle_pose()?;
         if pose.locked || !self.controls {
             return None;
         }
@@ -1228,6 +1236,141 @@ impl GizmoSurface {
         ))
     }
 }
+/// The common box of an unlocked multiple selection, as a pose whose
+/// handles the shared scale and rotate drags use.
+fn group_pose(poses: &[Pose]) -> Option<Pose> {
+    if poses.len() < 2 || poses.iter().any(|p| p.locked) {
+        return None;
+    }
+    let points = poses.iter().flat_map(|p| p.corners);
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for [x, y] in points {
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+    }
+    let centre = [(x0 + x1) / 2., (y0 + y1) / 2.];
+    Some(Pose {
+        id: String::new(),
+        locked: false,
+        root: false,
+        keeps_aspect: false,
+        world: [1., 0., 0., 1., 0., 0.],
+        linear: [1., 0., 0., 1.],
+        to_parent: [1., 0., 0., 1.],
+        bounds: [x0, y0, x1, y1],
+        shape: None,
+        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        anchor: centre,
+        local_anchor: centre,
+        position: centre,
+        scale: [100., 100.],
+        rotation: 0.,
+    })
+}
+/// Scale or rotate every selected root layer about the common box: Scale
+/// multiplies each layer's scale and carries its anchor about the pivot
+/// (the opposite handle, the centre with Option); Rotate turns each layer
+/// and carries its anchor about the box centre (Shift: 15° steps).
+fn group_commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Vec<Command> {
+    let Some(group) = group_pose(&drag.poses) else {
+        return vec![];
+    };
+    let t = drag.time;
+    let centre = group.anchor;
+    let mut out = vec![];
+    let mut carry = |pose: &Pose, moved: [f64; 2], out: &mut Vec<Command>| {
+        let d = apply(
+            pose.to_parent,
+            [moved[0] - pose.anchor[0], moved[1] - pose.anchor[1]],
+        );
+        out.push(set(
+            &pose.id,
+            "position.x",
+            round(pose.position[0] + d[0], 3),
+            t,
+        ));
+        out.push(set(
+            &pose.id,
+            "position.y",
+            round(pose.position[1] + d[1], 3),
+            t,
+        ));
+    };
+    let roots = drag.poses.iter().filter(|p| p.root && !p.locked);
+    match drag.hit {
+        Hit::Handle(index) => {
+            let (u, v) = HANDLES[index];
+            let (active_x, active_y) = (u != 0.5, v != 0.5);
+            let handle = group.handle(index);
+            let pivot = if mods.alt {
+                centre
+            } else {
+                group.local(
+                    if active_x { 1. - u } else { 0.5 },
+                    if active_y { 1. - v } else { 0.5 },
+                )
+            };
+            let grabbed = [
+                at[0] - (origin[0] - handle[0]),
+                at[1] - (origin[1] - handle[1]),
+            ];
+            let factor = |active: bool, span: f64, grabbed: f64, pivot: f64| {
+                if active && span.abs() > 1e-9 {
+                    (grabbed - pivot) / span
+                } else {
+                    1.
+                }
+            };
+            let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
+            let mut f = [
+                factor(active_x, dx, grabbed[0], pivot[0]),
+                factor(active_y, dy, grabbed[1], pivot[1]),
+            ];
+            if mods.shift {
+                let uniform = if active_x && active_y {
+                    ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                        / (dx * dx + dy * dy).max(1e-9)
+                } else if active_x {
+                    f[0]
+                } else {
+                    f[1]
+                };
+                f = [uniform, uniform];
+            }
+            for pose in roots {
+                let sx = (pose.scale[0] * f[0]).max(MIN_SCALE);
+                let sy = (pose.scale[1] * f[1]).max(MIN_SCALE);
+                out.push(set(&pose.id, "scale.x", round(sx, 3), t));
+                out.push(set(&pose.id, "scale.y", round(sy, 3), t));
+                let kept = [sx / pose.scale[0], sy / pose.scale[1]];
+                let moved = [
+                    pivot[0] + (pose.anchor[0] - pivot[0]) * kept[0],
+                    pivot[1] + (pose.anchor[1] - pivot[1]) * kept[1],
+                ];
+                carry(pose, moved, &mut out);
+            }
+        }
+        Hit::Rotate => {
+            let angle = |p: [f64; 2]| (p[1] - centre[1]).atan2(p[0] - centre[0]);
+            let mut turn =
+                ((angle(at) - angle(origin)).to_degrees() + 180.).rem_euclid(360.) - 180.;
+            if mods.shift {
+                turn = (turn / 15.).round() * 15.;
+            }
+            let (s, c) = turn.to_radians().sin_cos();
+            for pose in roots {
+                out.push(set(&pose.id, "rotation", round(pose.rotation + turn, 2), t));
+                let r = [pose.anchor[0] - centre[0], pose.anchor[1] - centre[1]];
+                let moved = [
+                    centre[0] + c * r[0] - s * r[1],
+                    centre[1] + s * r[0] + c * r[1],
+                ];
+                carry(pose, moved, &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
+}
 fn inside(corners: &[[f64; 2]; 4], p: [f64; 2]) -> bool {
     let mut sign = 0.;
     for i in 0..4 {
@@ -1279,6 +1422,9 @@ fn commands(
     } else {
         [at[0] - origin[0], at[1] - origin[1]]
     };
+    if drag.poses.len() > 1 && matches!(drag.hit, Hit::Handle(_) | Hit::Rotate) {
+        return group_commands(drag, origin, at, mods);
+    }
     let t = drag.time;
     let mut out = vec![];
     let moves_roots = matches!(drag.hit, Hit::Body);
@@ -1562,6 +1708,17 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
         for i in 0..4 {
             line(pose.corners[i], pose.corners[(i + 1) % 4]);
         }
+    }
+    let common = (poses.len() > 1).then(|| group_pose(poses)).flatten();
+    if let Some(group) = &common {
+        for i in 0..4 {
+            line(group.corners[i], group.corners[(i + 1) % 4]);
+        }
+        for i in 0..8 {
+            square(group.handle(i), &mut line);
+        }
+        line(group.handle(1), group.rotate_handle(stem));
+        square(group.rotate_handle(stem), &mut line);
     }
     if let [pose] = poses
         && !pose.locked
