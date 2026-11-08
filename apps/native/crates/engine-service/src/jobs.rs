@@ -35,6 +35,11 @@ pub struct ExportRequest {
     /// destination volume has less free space than this.
     #[serde(default = "disk_reserve")]
     pub disk_reserve: u64,
+    /// A look at the project (an agent's still), not a delivery: an effect
+    /// whose provider isn't installed is bypassed, as the viewer does,
+    /// instead of refusing the job.
+    #[serde(default)]
+    pub bypass_missing_effects: bool,
 }
 /// An export frame's raster override answer from the window that has the
 /// document open.
@@ -226,6 +231,7 @@ impl ExportRequest {
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
             disk_reserve: DISK_RESERVE,
+            bypass_missing_effects: false,
         })
     }
 }
@@ -582,6 +588,22 @@ pub fn run_child() -> Result<()> {
         let failures = renderer
             .set_document_effects(&doc, &request.resources.definitions)
             .map_err(anyhow::Error::msg)?;
+        if request.bypass_missing_effects {
+            renderer.set_bypass_missing_effects(true);
+        } else if let Some(missing) = renderer.missing_effects().first() {
+            let uses = match missing.layers {
+                1 => "1 layer uses it".to_owned(),
+                n => format!("{n} layers use it"),
+            };
+            let others = match renderer.missing_effects().len() - 1 {
+                0 => String::new(),
+                n => format!("; {n} more effects are missing too"),
+            };
+            anyhow::bail!(
+                "{} isn't installed ({uses}{others}). Install the extension that provides it, or turn the effect off, then export again.",
+                missing.effect
+            );
+        }
         if let Some(failure) = failures.iter().find(|failure| {
             matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }
                 if request.document.contains(&format!("\"{}\"", definition.as_str())))

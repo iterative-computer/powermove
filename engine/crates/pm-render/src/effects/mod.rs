@@ -74,6 +74,9 @@ struct Entry {
 pub struct Effects {
     pub(crate) file_app_version: Option<String>,
     pub(crate) versioned_builtins: bool,
+    /// Viewer frames: an effect whose provider isn't installed is bypassed
+    /// (its layer draws without it) instead of refusing the layer.
+    pub(crate) bypass_missing: bool,
     /// Neutral of a layer map: byte projects have a representable 128 of 255.
     pub(crate) map_midpoint: f64,
     set: DefinitionSet,
@@ -249,6 +252,7 @@ impl Effects {
             mips: None,
             file_app_version: None,
             versioned_builtins: false,
+            bypass_missing: false,
             map_midpoint: 0.5,
             set: DefinitionSet::default(),
             configured: false,

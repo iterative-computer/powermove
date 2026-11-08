@@ -476,6 +476,8 @@ pub struct Renderer {
     reuse_enabled: bool,
     /// See [`Renderer::set_isolate_layers`].
     isolate_layers: bool,
+    /// [`Renderer::missing_effects`].
+    missing_effects: Vec<crate::effects::versions::MissingEffect>,
     /// [`Renderer::set_channel_memo`].
     channel_memo: bool,
     /// The bottom of the last reusing frame kept on the GPU
@@ -538,6 +540,7 @@ impl Renderer {
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
             isolate_layers: false,
+            missing_effects: Vec::new(),
             svg_warned: Default::default(),
             channel_memo: true,
             prefix: Default::default(),
@@ -666,12 +669,14 @@ impl Renderer {
             set.missing.retain(|m| *m != definition.id);
             set.definitions.push(definition.clone());
         }
-        let failures = self.set_definitions(&set).map_err(|e| format!("{e:?}"))?;
+        self.missing_effects = crate::effects::versions::missing_effects(document, &set);
+        let failures = self.set_definitions(&set).map_err(|e| e.to_string())?;
         let (own, pinned): (Vec<_>, Vec<_>) = failures.into_iter().partition(|failure| {
             matches!(&failure.scope, ErrorScope::Definition { definition } if accepted.contains(definition))
         });
         if !pinned.is_empty() {
-            return Err(format!("effect definition failures: {pinned:?}"));
+            let messages: Vec<_> = pinned.iter().map(|f| f.message.as_str()).collect();
+            return Err(messages.join("; "));
         }
         self.effects.versioned_builtins = true;
         self.effects.file_app_version = document.saving_app_version().map(str::to_owned);
@@ -1364,8 +1369,23 @@ impl Renderer {
     /// Viewer frames: a layer this renderer cannot draw becomes a
     /// [`LayerFailure`] and the rest of the frame is drawn. Exports never set
     /// this: a delivered file refuses to omit a layer.
+    /// An effect whose provider isn't installed is bypassed on its layer
+    /// too ([`Renderer::missing_effects`] names them).
     pub fn set_isolate_layers(&mut self, on: bool) {
         self.isolate_layers = on;
+        self.effects.bypass_missing = on;
+    }
+
+    /// Draws a layer without an effect whose provider isn't installed
+    /// instead of refusing it (a look at the project, not a delivery).
+    pub fn set_bypass_missing_effects(&mut self, on: bool) {
+        self.effects.bypass_missing = on;
+    }
+
+    /// Effects the document set by [`Renderer::set_document_effects`] uses
+    /// that no installed provider defines, with how many layers use each.
+    pub fn missing_effects(&self) -> &[crate::effects::versions::MissingEffect] {
+        &self.missing_effects
     }
 
     /// Changes whenever a frame a scrub render asked for has decoded: a

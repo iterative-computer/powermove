@@ -322,6 +322,14 @@ pub(crate) fn effect_steps_raster<'d>(
             continue;
         }
         let ty = node::to_js_string(node::member(Some(fx), "type")).to_string_lossy();
+        // No provider is installed: the effect is skipped with its data kept,
+        // when the kernel marked it missing or for viewer frames (After
+        // Effects' missing-effect bypass). Exports refuse instead.
+        if effects.get(DefinitionKind::Effect, &ty).is_none()
+            && (effects.bypass_missing || effects.is_missing(DefinitionKind::Effect, &ty))
+        {
+            continue;
+        }
         let ty = match effects.saved_key(&ty, node::member(Some(fx), "version")) {
             Ok(key) => key,
             Err(message) => {

@@ -226,3 +226,43 @@ fn a_winning_fork_draws_saved_version_one_and_refuses_later_revisions() {
         "a saved revision the fork never had must not draw"
     );
 }
+
+#[test]
+fn an_effect_with_no_installed_provider_is_bypassed_in_the_viewer_and_refused_in_exports() {
+    let mut renderer = Renderer::headless().unwrap();
+    let plain = {
+        let mut d = doc("invert", None);
+        d.set_saving_app_version(Some("1.3.0".into()));
+        d
+    };
+    let mut missing = doc("acme.glow", None);
+    missing.set_saving_app_version(Some("1.3.0".into()));
+    renderer.set_main_effects_for_document(&missing).unwrap();
+    assert_eq!(
+        renderer.missing_effects(),
+        [pm_render::effects::versions::MissingEffect {
+            effect: "acme.glow".into(),
+            layers: 1
+        }]
+    );
+    let request = RenderRequest::sized(Size::new(16, 16), Precision::Float16);
+    let export = renderer.render(
+        &missing,
+        "Ptest-root",
+        ticks(0.),
+        &request,
+        &MapResolver::default(),
+    );
+    assert!(export.is_err(), "an export never omits an effect silently");
+    renderer.set_isolate_layers(true);
+    let bypassed = draw(&mut renderer, &missing);
+    renderer.set_isolate_layers(false);
+    // The layer draws without the effect: the chip's own colour.
+    let center = &bypassed[(8 * 16 + 8) * 4..][..4];
+    let chip = [64. / 255., 128. / 255., 192. / 255., 1.];
+    for (got, want) in center.iter().zip(chip) {
+        assert!((got - want).abs() < 2e-3, "{center:?}");
+    }
+    renderer.set_main_effects_for_document(&plain).unwrap();
+    assert!(renderer.missing_effects().is_empty());
+}

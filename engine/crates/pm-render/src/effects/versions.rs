@@ -218,6 +218,72 @@ pub fn for_document(document: &pm_model::Document) -> DefinitionSetSnapshot {
     set
 }
 
+/// An effect type the document uses that no definition in its set provides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingEffect {
+    pub effect: String,
+    /// Layers that use it.
+    pub layers: usize,
+}
+
+/// The effect types `document`'s layers use that `set` has no definition
+/// for, commonest first.
+pub fn missing_effects(
+    document: &pm_model::Document,
+    set: &DefinitionSetSnapshot,
+) -> Vec<MissingEffect> {
+    fn walk(
+        node: &pm_model::Node,
+        known: &dyn Fn(&str) -> bool,
+        out: &mut std::collections::BTreeMap<String, usize>,
+    ) {
+        match node.kind() {
+            pm_model::NodeKind::Object(map) => {
+                if let Some(fx) = map.get(b"fx" as &[u8]) {
+                    let mut types = std::collections::BTreeSet::new();
+                    for effect in pm_eval::node::array(Some(fx)).unwrap_or(&[]) {
+                        if let Some(ty) =
+                            pm_eval::node::string(pm_eval::node::member(Some(effect), "type"))
+                        {
+                            let ty = ty.to_string_lossy();
+                            if !known(&ty) {
+                                types.insert(ty);
+                            }
+                        }
+                    }
+                    for ty in types {
+                        *out.entry(ty).or_default() += 1;
+                    }
+                }
+                for child in map.values() {
+                    walk(child, known, out);
+                }
+            }
+            pm_model::NodeKind::Array(array) => {
+                for child in array.iter() {
+                    walk(child, known, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let known = |ty: &str| {
+        set.definitions
+            .iter()
+            .any(|d| d.kind == DefinitionKind::Effect && d.id.as_str() == ty)
+    };
+    let mut counts = std::collections::BTreeMap::new();
+    if let Some(root) = document.root() {
+        walk(root, &known, &mut counts);
+    }
+    let mut out: Vec<_> = counts
+        .into_iter()
+        .map(|(effect, layers)| MissingEffect { effect, layers })
+        .collect();
+    out.sort_by_key(|m| std::cmp::Reverse(m.layers));
+    out
+}
+
 pub(crate) fn main_definition(key: &str) -> Option<&'static Definition> {
     let key = key.strip_prefix("pm.history.main.")?;
     let (id, version) = key.rsplit_once('.')?;
