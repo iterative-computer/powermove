@@ -39,6 +39,12 @@ const OWNER: &str = "extension:";
 /// Commands v4 extensions register at run time: `extension.v4:<panel>:<id>`.
 const V4_COMMAND: &str = "extension.v4:";
 const V4_OWNER: &str = "v4-extension:";
+/// `extension.v4theme:<panel>:<id>`, or `…:default` for the built-in look.
+const V4_THEME: &str = "extension.v4theme:";
+thread_local! {
+    /// The v4 theme the person chose (`panel:id`), for every window.
+    static ACTIVE_THEME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
 /// Keys this window's list of contributed panels in the shell.
 static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -156,6 +162,9 @@ pub struct Extensions {
     compat_choices: Vec<Choice>,
     v4_choices: Vec<Choice>,
     v4_seen: u64,
+    v4_theme_choices: Vec<Choice>,
+    v4_themes: Vec<Value>,
+    v4_themes_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
     surfaces: BTreeMap<String, (String, String)>,
     /// Forks drawing a built-in panel in its place: id to (panel, source).
@@ -190,6 +199,9 @@ impl Default for Extensions {
             compat_choices: vec![],
             v4_choices: vec![],
             v4_seen: 0,
+            v4_theme_choices: vec![],
+            v4_themes: vec![],
+            v4_themes_seen: 0,
             surfaces: BTreeMap::new(),
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
@@ -208,6 +220,7 @@ impl Extensions {
         self.compat_choices
             .iter()
             .chain(&self.v4_choices)
+            .chain(&self.v4_theme_choices)
             .cloned()
             .collect()
     }
@@ -787,6 +800,25 @@ impl Controller {
             }
             return true;
         }
+        if let Some(target) = cmd.name.strip_prefix(V4_THEME) {
+            let chosen = (target != "default").then(|| target.to_owned());
+            let tokens = chosen.as_deref().and_then(|key| self.v4_theme(key));
+            match (chosen, tokens) {
+                (None, _) => {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(Vec::new(), cx);
+                }
+                (Some(key), Some(tokens)) => match theme_patch(&tokens) {
+                    Ok(patch) => {
+                        ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(key));
+                        apply_theme(patch, cx);
+                    }
+                    Err(message) => self.errors.borrow_mut().tell("Theme", &message),
+                },
+                (Some(_), None) => {}
+            }
+            return true;
+        }
         if let Some(target) = cmd.name.strip_prefix(V4_COMMAND) {
             if let (Some(runtime), Some((panel, id))) =
                 (self.builtins.runtime.clone(), target.split_once(':'))
@@ -819,6 +851,59 @@ impl Controller {
             host.run_command(id, Value::Array(cmd.args.clone()));
         }
         true
+    }
+    fn v4_theme(&self, key: &str) -> Option<Value> {
+        self.extensions
+            .v4_themes
+            .iter()
+            .find(|t| {
+                format!(
+                    "{}:{}",
+                    t["panel"].as_str().unwrap_or_default(),
+                    t["id"].as_str().unwrap_or_default()
+                ) == key
+            })
+            .map(|t| t["tokens"].clone())
+    }
+    /// Themes v4 extensions offer go into the palette ("Theme: <title>"). The
+    /// chosen one follows its extension: a reload restyles, a removal resets.
+    pub fn sync_v4_themes(&mut self, runtime: &pm_builtins::Builtins, cx: &mut Context<Self>) {
+        let Some((revision, list)) = runtime.themes_since(self.extensions.v4_themes_seen) else {
+            return;
+        };
+        self.extensions.v4_themes_seen = revision;
+        self.extensions.v4_themes = list;
+        let mut choices: Vec<Choice> = self
+            .extensions
+            .v4_themes
+            .iter()
+            .map(|t| Choice {
+                label: format!("Theme: {}", t["title"].as_str().unwrap_or_default()),
+                command: format!(
+                    "{V4_THEME}{}:{}",
+                    t["panel"].as_str().unwrap_or_default(),
+                    t["id"].as_str().unwrap_or_default()
+                ),
+            })
+            .collect();
+        if !choices.is_empty() {
+            choices.push(Choice {
+                label: "Theme: Default".into(),
+                command: format!("{V4_THEME}default"),
+            });
+        }
+        self.extensions.v4_theme_choices = choices;
+        self.host.borrow_mut().contributed_choices = self.extensions.palette_choices();
+        if let Some(active) = ACTIVE_THEME.with(|a| a.borrow().clone()) {
+            match self.v4_theme(&active).map(|tokens| theme_patch(&tokens)) {
+                Some(Ok(patch)) => apply_theme(patch, cx),
+                Some(Err(message)) => self.errors.borrow_mut().tell("Theme", &message),
+                None => {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(Vec::new(), cx);
+                }
+            }
+        }
     }
     /// Commands v4 extensions registered since the last look go into the
     /// palette and, with a `key`, the keymap.
@@ -1223,5 +1308,61 @@ mod tests {
         assert!(!external_link("file:///etc/passwd") && !external_link("powermove://x"));
         let store = store_entries(&[json!({"label":"First","release":"one","repo":"r"})]);
         assert_eq!(store[0].command, "extension.install:one:r");
+    }
+}
+
+/// A v4 theme's tokens as the shell's patch: colours `"#rrggbb"`, the rest
+/// numbers. Unknown tokens are refused by the shell when it applies the patch.
+fn theme_patch(tokens: &Value) -> Result<pm_shell::theme::Patch, String> {
+    let fields = tokens.as_object().ok_or("A theme needs a tokens object.")?;
+    fields
+        .iter()
+        .map(|(name, value)| {
+            let number = match value {
+                Value::Number(n) => n.as_f64(),
+                Value::String(hex) => hex
+                    .strip_prefix('#')
+                    .filter(|h| h.len() == 6)
+                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .map(f64::from),
+                _ => None,
+            };
+            number
+                .map(|n| (name.clone(), n))
+                .ok_or_else(|| format!("Theme token {name} needs a number or a #rrggbb colour."))
+        })
+        .collect()
+}
+/// Restyles every window with `patch` (empty: the built-in look), after the
+/// current update so each window's editor can be updated in turn.
+fn apply_theme(patch: pm_shell::theme::Patch, cx: &mut App) {
+    cx.defer(move |cx| {
+        for window in cx.windows() {
+            let Some(editor) = window.downcast::<pm_shell::view::Editor>() else {
+                continue;
+            };
+            let patch = patch.clone();
+            let _ = editor.update(cx, |e, _, cx| e.apply_theme(patch, cx));
+        }
+    });
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::theme_patch;
+    use serde_json::json;
+    #[::core::prelude::v1::test]
+    fn a_v4_theme_becomes_the_shell_patch() {
+        let patch = theme_patch(&json!({"colors.accent":"#ff8800","metrics.gap":8})).unwrap();
+        assert!(patch.contains(&("colors.accent".into(), f64::from(0xff8800u32))));
+        assert!(patch.contains(&("metrics.gap".into(), 8.)));
+        pm_shell::theme::set(patch).unwrap();
+        pm_shell::theme::clear();
+        assert!(theme_patch(&json!({"colors.accent":"orange"})).is_err());
+        let unknown = theme_patch(&json!({"colors.nonsense":"#000000"})).unwrap();
+        assert!(
+            pm_shell::theme::set(unknown).is_err(),
+            "unknown tokens are refused"
+        );
     }
 }

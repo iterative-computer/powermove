@@ -1941,3 +1941,40 @@ fn an_extension_registers_a_command_the_window_can_run() {
     panels.close();
     actor.shutdown();
 }
+#[test]
+fn an_extension_offers_a_theme_the_window_can_apply() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                export function activate({ themes }) {
+                    themes.register({ id: 'warm', title: 'Warm', tokens: { 'colors.accent': '#ff8800', 'metrics.gap': 8 } });
+                }
+                export function view() { return jsx('text', { children: 'Themed' }); }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(
+        panels
+            .mount_extension("synthetic-theme", &graph, None)
+            .unwrap(),
+    );
+    let (revision, list) = panels.themes_since(0).expect("registered");
+    assert_eq!(
+        list,
+        vec![json!({"panel":"synthetic-theme","id":"warm","title":"Warm",
+            "tokens":{"colors.accent":"#ff8800","metrics.gap":8}})]
+    );
+    assert!(panels.themes_since(revision).is_none());
+    // Its themes leave with it.
+    panels.unmount_extension("synthetic-theme");
+    let (_, list) = panels.themes_since(revision).expect("removed");
+    assert!(list.is_empty());
+    panels.close();
+    actor.shutdown();
+}

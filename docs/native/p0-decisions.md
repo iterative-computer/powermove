@@ -100,6 +100,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 
 - **`metadata.submitOnReturn` on `textarea` (2026-11-08, additive):** the host draws a native composer (`TextKind::Composer`, an NSTextView: IME, spelling, dictation, emoji and shifted punctuation are AppKit's). Return sends `input` with the text, then `keydown` Enter; Shift- or Option-Return inserts a line. The field clears after a send once the model empties it, unless the person typed on. The Agent panel's composer uses it.
 
+- **`activate({ themes })` / `env.themes` (2026-11-08, additive):** `themes.register({ id, title, tokens })` offers a whole-window theme as palette "Theme: <title>"; the app applies its token patch through the shell's theme pipeline (`pm_shell::theme`), restyling chrome and every panel in every window; it follows reloads and leaves with its extension. Tokens only (no surface rules yet); the choice lasts until quit.
+
 ## Look lane decisions (2026-11-08)
 
 - **The owner's GPUI demo is the visual reference.** Translucent window (`translucency.ground` at `translucency.window` over a behind-window blur), one shared panel material (`colors.panel` at `translucency.panel`) with a `text` hairline edge, 8 pt panel radius, 38 pt headers with a divider, 24 pt status line. Reduce Transparency makes both solid; Increase Contrast makes edges solid `separator`.

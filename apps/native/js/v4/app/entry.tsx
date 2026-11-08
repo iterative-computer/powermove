@@ -23,6 +23,7 @@ import type {
   Hot,
   Mount,
   Mounted,
+  Themes,
 } from "../src/builtin";
 import { mount as layerEffects } from "../panels/effect-controls/mount";
 import { mount as fxbrowser } from "../panels/effects/mount";
@@ -136,7 +137,11 @@ const commands = new Map<
 const publishCommands = () =>
   native(
     "commands.set",
-    [...commands].map(([id, c]) => ({ id, title: c.title, key: c.key ?? null })),
+    [...commands].map(([id, c]) => ({
+      id,
+      title: c.title,
+      key: c.key ?? null,
+    })),
   );
 const commandApi: Commands = {
   register({ id, title, key }, run) {
@@ -148,6 +153,34 @@ const commandApi: Commands = {
       if (commands.get(id)?.run === run) {
         commands.delete(id);
         publishCommands();
+      }
+    };
+  },
+};
+/** Themes this realm offers; the window lists them in its palette. */
+const themes = new Map<
+  string,
+  { title: string; tokens: Record<string, string | number> }
+>();
+const publishThemes = () =>
+  native(
+    "themes.set",
+    [...themes].map(([id, t]) => ({ id, title: t.title, tokens: t.tokens })),
+  );
+const themeApi: Themes = {
+  register(theme) {
+    const { id, title, tokens } = theme ?? ({} as never);
+    if (typeof id !== "string" || !id || typeof title !== "string" || !title)
+      throw new Error("A theme needs an id and a title");
+    if (!tokens || typeof tokens !== "object" || Array.isArray(tokens))
+      throw new Error("A theme needs a tokens object");
+    const entry = { title, tokens: { ...tokens } };
+    themes.set(id, entry);
+    publishThemes();
+    return () => {
+      if (themes.get(id) === entry) {
+        themes.delete(id);
+        publishThemes();
       }
     };
   },
@@ -166,7 +199,12 @@ async function mountExtension(
       hot.disposers.push(callback);
     },
   };
-  const env = { ...environment(replaces ?? id), hot: api, commands: commandApi };
+  const env = {
+    ...environment(replaces ?? id),
+    hot: api,
+    commands: commandApi,
+    themes: themeApi,
+  };
   (globalThis as any).__powermove_runtime = RUNTIME;
   const graph = JSON.parse(text);
   const url = (name: string) =>
@@ -208,7 +246,13 @@ async function mountExtension(
   if (typeof namespace.view !== "function")
     throw new Error("A v4 extension exports view() or mount(env)");
   const root = env.root();
-  await namespace.activate?.({ host, id, hot: api, commands: commandApi });
+  await namespace.activate?.({
+    host,
+    id,
+    hot: api,
+    commands: commandApi,
+    themes: themeApi,
+  });
   // A component, so the view's hooks have one to belong to.
   const View = namespace.view;
   await root.render(<View />);

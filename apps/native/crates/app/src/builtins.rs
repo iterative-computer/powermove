@@ -404,6 +404,7 @@ impl Controller {
             eprintln!("v4: {error}");
         }
         self.sync_v4_commands(&runtime);
+        self.sync_v4_themes(&runtime, cx);
         self.builtins
             .requests
             .extend(runtime.take_platform_requests());

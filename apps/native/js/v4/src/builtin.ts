@@ -29,6 +29,23 @@ export interface BuiltinEnv {
   hot?: Hot;
   /** Extensions only: commands in the palette and keymap (see `Commands`). */
   commands?: Commands;
+  /** Extensions only: themes for the whole window (see `Themes`). */
+  themes?: Themes;
+}
+
+/**
+ * Themes an extension offers. Each is listed in the command palette as
+ * "Theme: <title>"; choosing it restyles the window's chrome and every panel.
+ * `tokens` names design tokens (`"colors.accent"`, `"metrics.gap"`,
+ * `"translucency.panel"`, …): colours as `"#rrggbb"`, the rest as numbers.
+ * Unknown tokens are refused. `register` returns a function that removes it.
+ */
+export interface Themes {
+  register(theme: {
+    id: string;
+    title: string;
+    tokens: Record<string, string | number>;
+  }): () => void;
 }
 
 /**

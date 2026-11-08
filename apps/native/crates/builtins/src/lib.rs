@@ -146,6 +146,8 @@ struct Broker {
     /// Commands each extension realm registered (`commands.register`), by panel,
     /// with a revision that moves on every change.
     commands: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// Themes each extension realm offers (`themes.register`), by panel.
+    themes: Mutex<(u64, BTreeMap<String, Value>)>,
 }
 impl Builtins {
     pub fn new(
@@ -618,6 +620,7 @@ impl Builtins {
             agent_released: Default::default(),
             thread_requests: Default::default(),
             commands: Default::default(),
+            themes: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -684,6 +687,7 @@ impl Builtins {
         self.broker.entries.lock().unwrap().remove(panel);
         self.broker.publications.lock().unwrap().remove(panel);
         self.broker.forget_commands(panel);
+        self.broker.forget_themes(panel);
     }
     /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
     /// it: same realm identity, routes and host operations, the fork's code.
@@ -756,9 +760,29 @@ impl Builtins {
         // Its surface and router go too; a late call from it is a stale generation.
         self.broker.entries.lock().unwrap().remove(id);
         self.broker.forget_commands(id);
+        self.broker.forget_themes(id);
     }
     /// Every extension command in this window when they changed since `seen`:
     /// `(revision, [{panel, id, title, key}])`.
+    /// Themes v4 extensions offer, when they changed since `seen`: each
+    /// `{panel, id, title, tokens}`.
+    pub fn themes_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
+        let themes = self.broker.themes.lock().unwrap();
+        (themes.0 != seen).then(|| {
+            let list = themes
+                .1
+                .iter()
+                .flat_map(|(panel, list)| {
+                    list.as_array().into_iter().flatten().map(move |t| {
+                        let mut t = t.clone();
+                        t["panel"] = json!(panel);
+                        t
+                    })
+                })
+                .collect();
+            (themes.0, list)
+        })
+    }
     pub fn commands_since(&self, seen: u64) -> Option<(u64, Vec<Value>)> {
         let commands = self.broker.commands.lock().unwrap();
         (commands.0 != seen).then(|| {
@@ -1348,6 +1372,29 @@ impl EngineProxy for Broker {
                 entry.router.retire().map_err(Error::Host)?;
                 Ok(Value::Null)
             }
+            "themes.set" => {
+                let valid = input.as_array().is_some_and(|list| {
+                    list.len() <= 32
+                        && list.iter().all(|t| {
+                            t["id"]
+                                .as_str()
+                                .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && t["title"]
+                                    .as_str()
+                                    .is_some_and(|s| (1..=128).contains(&s.len()))
+                                && t["tokens"].as_object().is_some_and(|m| m.len() <= 256)
+                        })
+                });
+                if !valid {
+                    return Err(Error::Invalid("themes need an id, a title and tokens"));
+                }
+                let mut themes = self.themes.lock().unwrap();
+                themes.0 += 1;
+                themes.1.insert(panel.into(), input.clone());
+                drop(themes);
+                (self.wake)();
+                Ok(Value::Null)
+            }
             "commands.set" => {
                 let valid = input.as_array().is_some_and(|list| {
                     list.len() <= 64
@@ -1560,6 +1607,12 @@ impl KernelHooks for Broker {
     fn seal_open_gestures(&self, _: &Generation) {}
 }
 impl Broker {
+    fn forget_themes(&self, panel: &str) {
+        let mut themes = self.themes.lock().unwrap();
+        if themes.1.remove(panel).is_some() {
+            themes.0 += 1;
+        }
+    }
     fn forget_commands(&self, panel: &str) {
         let mut commands = self.commands.lock().unwrap();
         if commands.1.remove(panel).is_some() {
