@@ -291,7 +291,7 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
   const show = row.hovered || row.focused || row.selected;
   return (
     <>
-      <div style={{ ...line, gap: t("metrics.gap") }}>
+      <div style={{ ...line, gap: t("metrics.gap"), overflow: "hidden" }}>
         {row.index !== null && (
           <text
             style={{
@@ -303,7 +303,7 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             {String(row.index).padStart(2, "0")}
           </text>
         )}
-        {row.canOpen && (
+        {row.canOpen ? (
           <Icon
             id={`timeline:disclosure:${row.id}`}
             label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
@@ -312,6 +312,9 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             send={send}
             intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
           />
+        ) : (
+          // The disclosure column stays reserved so badges and names align.
+          <div role="presentation" style={{ width: t("metrics.hit"), height: t("metrics.hit") }} />
         )}
         <div
           role="presentation"
@@ -345,7 +348,7 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
         ) : (
           <text
             title={row.label}
-            style={text}
+            style={{ ...text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
             onDoubleClick={action(send, { type: "rename", id: row.id })}
           >
             {row.label}

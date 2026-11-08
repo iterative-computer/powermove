@@ -1611,6 +1611,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -1625,6 +1628,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -2458,6 +2462,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -2472,6 +2479,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -3423,6 +3431,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -3437,6 +3448,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -4388,6 +4400,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -4402,6 +4417,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -5350,6 +5366,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -5364,6 +5383,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -6453,6 +6473,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -6467,6 +6490,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -7319,6 +7343,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -7333,6 +7360,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -8290,6 +8318,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -8304,6 +8335,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -8588,6 +8620,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -8602,6 +8637,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -9567,6 +9603,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -9581,6 +9620,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -10414,6 +10454,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -10428,6 +10471,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -10594,6 +10638,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -10608,6 +10655,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -10774,6 +10822,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -10788,6 +10839,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -10954,6 +11006,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -10968,6 +11023,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -11134,6 +11190,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -11148,6 +11207,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -11314,6 +11374,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -11328,6 +11391,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -11494,6 +11558,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -11508,6 +11575,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -11674,6 +11742,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -11688,6 +11759,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -11854,6 +11926,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -11868,6 +11943,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -12034,6 +12110,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -12048,6 +12127,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -12214,6 +12294,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -12228,6 +12311,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -12394,6 +12478,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -12408,6 +12495,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -12574,6 +12662,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -12588,6 +12679,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -12754,6 +12846,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -12768,6 +12863,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -12934,6 +13030,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -12948,6 +13047,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -13114,6 +13214,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -13128,6 +13231,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -13294,6 +13398,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -13308,6 +13415,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -13474,6 +13582,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -13488,6 +13599,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -13654,6 +13766,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -13668,6 +13783,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -13834,6 +13950,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -13848,6 +13967,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -14014,6 +14134,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -14028,6 +14151,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -14194,6 +14318,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -14208,6 +14335,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -14374,6 +14502,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -14388,6 +14519,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -14554,6 +14686,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -14568,6 +14703,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -14734,6 +14870,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -14748,6 +14887,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -14914,6 +15054,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -14928,6 +15071,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -15094,6 +15238,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -15108,6 +15255,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -15274,6 +15422,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -15288,6 +15439,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -15454,6 +15606,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -15468,6 +15623,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -15634,6 +15790,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -15648,6 +15807,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -16508,6 +16668,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -16522,6 +16685,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -17410,6 +17574,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -17424,6 +17591,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -19073,6 +19241,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "fontSize": {
                                         "token": "typography.body",
                                       },
+                                      "overflow": "hidden",
+                                      "textOverflow": "ellipsis",
+                                      "whiteSpace": "nowrap",
                                     },
                                     "title": "Headline",
                                   },
@@ -19087,6 +19258,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
@@ -20026,6 +20198,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "gap": {
                                     "token": "metrics.gap",
                                   },
+                                  "overflow": "hidden",
                                 },
                               },
                               "type": "div",
