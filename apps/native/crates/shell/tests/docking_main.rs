@@ -225,10 +225,22 @@ fn overflow_keeps_active_and_never_loses_a_tab() {
         all.extend(&track.overflow);
         all.sort_unstable();
         assert_eq!(all, (0..12).collect::<Vec<_>>());
-        // Shown titles keep their full width: they fit, or only the active tab is left.
+        // Shown tabs plus the reserved More Panels square fit the header; only
+        // an active tab wider than that room truncates, to exactly that room.
+        let room = (width - t.metrics.hit).max(0.);
         let shown: f32 = track.visible.iter().map(|&i| widths[i]).sum();
-        assert!(shown <= width || track.visible == [10]);
+        match track.active_limit {
+            None => assert!(shown <= room),
+            Some(limit) => {
+                assert_eq!(track.visible, [10]);
+                assert!(widths[10] > room);
+                assert_eq!(limit, room);
+            }
+        }
     }
+    // Everything fits: no limit and nothing folded.
+    let wide = group.tab_track(10_000., &widths, &t);
+    assert!(wide.overflow.is_empty() && wide.active_limit.is_none());
 }
 #[test]
 fn main_menu_has_system_show_all_delete_and_one_new_window() {

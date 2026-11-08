@@ -163,6 +163,9 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
+    fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
+        id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
+    }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
     }

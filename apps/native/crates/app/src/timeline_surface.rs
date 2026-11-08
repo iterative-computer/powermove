@@ -1640,13 +1640,7 @@ impl Render for TimelineSurface {
                         if let Some(frame) = frame {
                             // The outline row owns the keyframe toggle; the scene's
                             // copy would sit stale beneath it.
-                            // The shell already paints the panel material; an opaque
-                            // `ground` would turn the translucent timeline solid.
-                            for op in frame
-                                .ops
-                                .iter()
-                                .filter(|op| op.id != "ground" && !op.id.starts_with("toggle:"))
-                            {
+                            for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
                                 paint(op, bounds.origin, &tokens, window, cx);
                             }
                             for op in

@@ -132,7 +132,12 @@ pub fn settings() -> Accessibility {
     let w = NSWorkspace::sharedWorkspace();
     // Review captures may force settings for this process (comma-separated
     // `increase-contrast`, `reduce-transparency`, `reduce-motion`).
-    let forced = std::env::var("PM_NATIVE_ACCESSIBILITY").unwrap_or_default();
+    // Development builds only; release builds follow the system alone.
+    let forced = if cfg!(debug_assertions) {
+        std::env::var("PM_NATIVE_ACCESSIBILITY").unwrap_or_default()
+    } else {
+        String::new()
+    };
     let on = |name: &str| forced.split(',').any(|f| f.trim() == name);
     Accessibility {
         reduce_transparency: on("reduce-transparency")

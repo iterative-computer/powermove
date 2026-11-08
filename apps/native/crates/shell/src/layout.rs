@@ -62,13 +62,17 @@ impl Group {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
 }
-/// Content-width tab titles. Titles never truncate: tabs that do not fit fold
-/// into the trailing More Panels menu, and the active tab always stays shown.
+/// Content-width tab titles. Tabs that do not fit fold into the trailing More
+/// Panels menu, whose hit square is always reserved; the active tab always
+/// stays shown. A title truncates only when the active tab alone is wider than
+/// the room left beside More Panels (`active_limit`).
 /// The caller reserves space for header tools before asking for this track.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabTrack {
     pub visible: Vec<usize>,
     pub overflow: Vec<usize>,
+    /// Width the active tab must fit in, when it cannot take its full title.
+    pub active_limit: Option<f32>,
 }
 impl Group {
     /// `widths[i]` is the room tab `i` takes, padding and spacing included.
@@ -81,6 +85,7 @@ impl Group {
             return TabTrack {
                 visible: all,
                 overflow: vec![],
+                active_limit: None,
             };
         }
         // The More Panels chevron takes one hit square.
@@ -96,7 +101,11 @@ impl Group {
         }
         visible.sort_unstable();
         let overflow = (0..n).filter(|i| !visible.contains(i)).collect();
-        TabTrack { visible, overflow }
+        TabTrack {
+            visible,
+            overflow,
+            active_limit: (width(active) > room).then_some(room),
+        }
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

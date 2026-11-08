@@ -1364,7 +1364,6 @@ impl Render for Editor {
                         + TAB_SPACING
                 })
                 .collect();
-            let tab_track = group.tab_track(p.rect.w - m.gap * 2. - m.hit, &widths, &t);
             let mut panel = positioned(p.rect)
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
@@ -1391,6 +1390,12 @@ impl Render for Editor {
                         h: (p.rect.h - m.header - m.border).max(0.),
                     },
                 ));
+            } else if self
+                .integration
+                .as_ref()
+                .is_some_and(|i| i.paints_own_ground(&id, cx))
+            {
+                // Header only: the body paints its own ground (see below).
             } else if !is_viewer || !native {
                 panel = panel.bg(if is_viewer {
                     rgb(c.viewer)
@@ -1401,10 +1406,23 @@ impl Render for Editor {
             // A panel may supply its own header content (viewer: pop-ups, no
             // title; timeline: transport). The shell keeps the tab strip only
             // when the group has more than one tab.
+            let own_ground = self
+                .integration
+                .as_ref()
+                .is_some_and(|i| i.paints_own_ground(&id, cx));
             let custom = self
                 .integration
                 .as_ref()
                 .and_then(|i| i.header(&id, p.rect, w, cx));
+            // The header's own tools (Add Panel, or the panel's actions such as
+            // Project's search and +) keep their room beside the tabs.
+            let tools = if custom.is_some() {
+                2. * m.hit + m.gap
+            } else {
+                m.hit
+            };
+            // Gaps: trailing padding, strip|chevron and chevron|tools, plus one spare.
+            let tab_track = group.tab_track(p.rect.w - m.gap * 4. - tools, &widths, &t);
             let group_name: SharedString = format!("tabs-{}-{}", p.dock, p.group).into();
             let header_id = id.clone();
             let menu_header = id.clone();
@@ -1420,8 +1438,9 @@ impl Render for Editor {
                 .flex_none()
                 .pl(px(m.inset))
                 .pr(px(m.gap))
-                // The native viewer body has no panel fill; its bar carries the material.
-                .when(is_viewer && native, |h| {
+                // The native viewer body has no panel fill, and the timeline paints
+                // its own ground: their headers carry the material.
+                .when((is_viewer && native) || own_ground, |h| {
                     h.bg(tint(c.panel, t.translucency.panel))
                 })
                 .when(!is_viewer, |h| {
@@ -1458,7 +1477,7 @@ impl Render for Editor {
                     .flex()
                     .items_center()
                     .gap(px(TAB_SPACING))
-                    .when(multi, |s| s.flex_1().min_w(px(0.)));
+                    .when(multi, |s| s.flex_1().min_w(px(0.)).overflow_hidden());
                 for (ti, tab) in tabs.iter().enumerate() {
                     if !tab_track.visible.contains(&ti) {
                         continue;
@@ -1505,8 +1524,16 @@ impl Render for Editor {
                         })
                         .text_size(px(t.typography.title))
                         .font_weight(FontWeight(t.typography.medium_weight))
-                        .whitespace_nowrap()
-                        .child(title.clone());
+                        .whitespace_nowrap();
+                    // Only an active tab wider than the room beside More Panels truncates.
+                    cell = match tab_track.active_limit.filter(|_| selected) {
+                        Some(limit) => cell
+                            .max_w(px(limit))
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .child(div().min_w(px(0.)).truncate().child(title.clone())),
+                        None => cell.flex_none().child(title.clone()),
+                    };
                     if closable {
                         // Mac tabs: the close button sits at the leading edge, on hover.
                         cell = cell.child(
@@ -1560,6 +1587,7 @@ impl Render for Editor {
                         ),
                     );
                 }
+                header = header.child(strip);
                 if !tab_track.overflow.is_empty() {
                     let entries: Vec<_> = tab_track
                         .overflow
@@ -1572,9 +1600,10 @@ impl Render for Editor {
                             .checked(i == active)
                         })
                         .collect();
-                    strip = strip.child(
+                    header = header.child(
                         div()
                             .id(format!("more-panels-{}-{}", p.dock, p.group))
+                            .flex_none()
                             .role(Role::Button)
                             .aria_label("More Panels")
                             .tab_index(0)
@@ -1596,7 +1625,6 @@ impl Render for Editor {
                             })),
                     );
                 }
-                header = header.child(strip);
             }
             if self.maximized_panel.is_some() {
                 header = header.child(
