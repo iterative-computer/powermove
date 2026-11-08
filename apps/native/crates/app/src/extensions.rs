@@ -535,7 +535,7 @@ impl Controller {
         for id in self.extensions.known_panels.difference(&known) {
             if self.extensions.open_panels.contains(id) || self.extensions.panels.contains_key(id) {
                 self.extensions.suspended.insert(id.clone());
-                shell.send_command(&format!("panel:close:{id}"), vec![]);
+                shell.send_command(&format!("panel:park:{id}"), vec![]);
             }
         }
         for id in known.intersection(&self.extensions.suspended.clone()) {

@@ -836,7 +836,7 @@ impl Layout {
             .flat_map(|g| g.tabs.iter().map(String::as_str))
             .collect()
     }
-    fn find(&self, id: &str) -> Option<(usize, usize, usize)> {
+    pub fn find(&self, id: &str) -> Option<(usize, usize, usize)> {
         self.docks.iter().enumerate().find_map(|(di, d)| {
             d.groups
                 .iter()
