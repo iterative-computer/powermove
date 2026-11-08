@@ -190,9 +190,10 @@ window is open is shown in it.
   own. Its body is a fixed 280 pt tall and scrolls. `PM.Fonts`
   throws `Unavailable`.
 - `titlebar:right` has no host. `layer:context`, `timeline:context` and `viewer:context`
-  rows follow the native rows in the timeline's and viewer's right-click NSMenus
-  (`Controller::surface_menu`, the same 150 ms deadline as tab menus), with v1's contexts:
-  a layer gathers both `layer:context` and its surface's location.
+  rows follow the native rows in the timeline's and viewer's right-click NSMenus through
+  the same gathering path as tab menus (`Controller::extension_menu`: v4 items off the
+  main thread, then v1–3's within the 150 ms deadline), with v1's contexts: a layer
+  gathers both `layer:context` and its surface's location (`kind: "layer"`).
 - Contributed layer types render and label their timeline row, but their parameters
   have no Properties rows until per-kind controls are designed.
 - Layout reads in the realm are cached from the last page report (`remote-dom.md`).

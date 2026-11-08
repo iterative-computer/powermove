@@ -72,8 +72,9 @@ latest activation from any extension wins, and activating again shows it again.
 
 Menus: `menus.contribute(location, (ctx) => items)` adds items to a context
 menu each time it opens: `"panel:context"` (`ctx.panelId`), `"layer:context"`
-(`ctx.layerId`, `ctx.layerIds`), `"timeline:context"` (`ctx.time`, `ctx.kind`)
-and `"viewer:context"` (empty canvas: `ctx.time`), as v1–3's
+(`ctx.layerId`, `ctx.layerIds`), `"timeline:context"` (`ctx.time`, `ctx.kind`,
+`ctx.layerId`) and `"viewer:context"` (`ctx.time`; `ctx.layerId` is null on empty
+canvas, and over a layer `ctx.kind` is `"layer"`), as v1–3's
 `menus.contribute`: `"-"`, `{ header }` or `{ label, kb?, on?, disabled?,
 run?, submenu? }`; a Promise is waited for at most 100 ms.
 
