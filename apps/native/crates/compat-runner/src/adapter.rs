@@ -201,8 +201,30 @@ impl KernelAdapter {
         (revision == p.revision()).then_some(out)
     }
     /// Builds the first publication now; the realm's first `publication` takes it.
+    /// The document goes straight from the model to text: a pro project is
+    /// hundreds of megabytes of JSON, and a parsed copy of it on the way
+    /// costs gigabytes the allocator keeps.
     pub fn stage(&mut self) -> Result<()> {
-        self.staged = Some(self.snapshot()?.to_string());
+        let p = self.published()?;
+        let document = pm_model::json::to_canonical_string(&realized(&p));
+        let selection = selection_wire(&p.selection);
+        let rest = json!({"revision":p.revision(),"selection":selection,
+            "workspace":wire(&p.workspace),"facts":Self::facts(&p)})
+        .to_string();
+        let mut text = String::with_capacity(document.len() + rest.len() + 16);
+        text.push_str("{\"document\":");
+        text.push_str(&document);
+        text.push(',');
+        text.push_str(&rest[1..]);
+        drop(document);
+        self.sent = Some(Sent {
+            document_id: p.snapshot.doc_id,
+            revision: p.revision(),
+            open: p.snapshot.open_comp(),
+            selection,
+            workspace: p.workspace.clone(),
+        });
+        self.staged = Some(text);
         Ok(())
     }
     pub fn take_staged(&mut self) -> Option<String> {
@@ -674,6 +696,17 @@ mod tests {
         );
         adapter.snapshot().unwrap();
         (actor, adapter)
+    }
+    #[test]
+    fn the_staged_first_publication_is_the_snapshot_as_text() {
+        let (actor, mut adapter) = adapter();
+        let snapshot = adapter.snapshot().unwrap();
+        adapter.sent = None;
+        adapter.stage().unwrap();
+        let staged: Value = serde_json::from_str(&adapter.take_staged().unwrap()).unwrap();
+        assert_eq!(staged, snapshot);
+        assert!(adapter.sent.is_some(), "later publications are deltas");
+        drop(actor);
     }
     #[test]
     fn reads_send_no_document_and_writes_send_only_their_operations() {
