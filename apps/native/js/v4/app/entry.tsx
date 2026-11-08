@@ -163,10 +163,17 @@ const themes = new Map<
   string,
   { title: string; tokens: Record<string, string | number> }
 >();
+/** The theme this realm asked the window to show (`themes.activate`). */
+let activeTheme: string | null = null;
 const publishThemes = () =>
   native(
     "themes.set",
-    [...themes].map(([id, t]) => ({ id, title: t.title, tokens: t.tokens })),
+    [...themes].map(([id, t]) => ({
+      id,
+      title: t.title,
+      tokens: t.tokens,
+      active: id === activeTheme,
+    })),
   );
 const themeApi: Themes = {
   register(theme) {
@@ -181,9 +188,16 @@ const themeApi: Themes = {
     return () => {
       if (themes.get(id) === entry) {
         themes.delete(id);
+        if (activeTheme === id) activeTheme = null;
         publishThemes();
       }
     };
+  },
+  activate(id) {
+    if (id !== null && !themes.has(id))
+      throw new Error(`No theme ${String(id)} is registered`);
+    activeTheme = id;
+    publishThemes();
   },
 };
 /** Context-menu items this realm adds (main's `MenusAPI.contribute`). */

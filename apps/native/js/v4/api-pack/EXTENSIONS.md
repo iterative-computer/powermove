@@ -66,6 +66,8 @@ command palette; choosing it restyles the window chrome and every panel.
 (`"colors.accent"`, `"colors.panel"`, …), lengths and alphas as numbers
 (`"metrics.gap"`, `"translucency.panel"`, …). Unknown tokens are refused. It
 returns a function that removes the theme; a chosen theme follows reloads.
+`themes.activate(id)` shows it right away (as v1–3's `theme.activate`);
+`themes.activate(null)` puts the built-in look back.
 
 Menus: `menus.contribute(location, (ctx) => items)` adds items to a context
 menu each time it opens: `"panel:context"` (`ctx.panelId`), `"layer:context"`

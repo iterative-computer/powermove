@@ -170,6 +170,8 @@ pub struct Extensions {
     v4_choices: Vec<Choice>,
     v4_seen: u64,
     v4_theme_choices: Vec<Choice>,
+    /// The v4 theme an extension last asked to show (`themes.activate`).
+    v4_theme_requested: Option<String>,
     /// The v1–3 theme last applied (id and patch), so republishing is free.
     v1_theme: Option<String>,
     v4_themes: Vec<Value>,
@@ -211,6 +213,7 @@ impl Default for Extensions {
             v4_seen: 0,
             v4_theme_choices: vec![],
             v1_theme: None,
+            v4_theme_requested: None,
             v4_themes: vec![],
             v4_themes_seen: 0,
             surfaces: BTreeMap::new(),
@@ -1067,6 +1070,34 @@ impl Controller {
         }
         self.extensions.v4_theme_choices = choices;
         self.host.borrow_mut().contributed_choices = self.extensions.palette_choices();
+        // An extension activating its theme (`themes.activate`) shows it, as
+        // v1–3's `theme.activate`; a later palette choice still wins.
+        let requested = self
+            .extensions
+            .v4_themes
+            .iter()
+            .find(|t| t["active"] == true)
+            .map(|t| {
+                format!(
+                    "{}:{}",
+                    t["panel"].as_str().unwrap_or_default(),
+                    t["id"].as_str().unwrap_or_default()
+                )
+            });
+        if requested != self.extensions.v4_theme_requested {
+            match &requested {
+                Some(key) => ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(key.clone())),
+                // `activate(null)` puts back the built-in look it replaced.
+                None if ACTIVE_THEME
+                    .with(|a| *a.borrow() == self.extensions.v4_theme_requested) =>
+                {
+                    ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
+                    apply_theme(Vec::new(), cx);
+                }
+                None => {}
+            }
+            self.extensions.v4_theme_requested = requested;
+        }
         if let Some(active) = ACTIVE_THEME.with(|a| a.borrow().clone()) {
             match self.v4_theme(&active).map(|tokens| theme_patch(&tokens)) {
                 Some(Ok(patch)) => apply_theme(patch, cx),

@@ -79,6 +79,9 @@ export interface Themes {
     title: string;
     tokens: Record<string, string | number>;
   }): () => void;
+  /** Shows a registered theme in every window now, as v1–3's
+   *  `theme.activate`; `null` puts the built-in look back. */
+  activate(id: string | null): void;
 }
 
 /**
