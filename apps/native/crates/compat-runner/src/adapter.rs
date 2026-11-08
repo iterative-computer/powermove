@@ -40,6 +40,15 @@ fn realized(published: &Published) -> pm_model::Value {
             .unwrap_or(pm_model::Value::Null),
     )
 }
+/// A frozen document's text (an export's snapshot) as the realm's mirror
+/// shows a project.
+pub(crate) fn realized_wire(document: &str) -> std::result::Result<String, String> {
+    let value =
+        pm_model::json::parse(document).map_err(|_| "The export's project is unreadable")?;
+    Ok(pm_model::json::to_canonical_string(
+        &canonical::realize_project(value),
+    ))
+}
 fn selection_wire(selection: &pm_kernel::Selection) -> Value {
     json!({"layers":selection.layers(),"keys":selection.keys(),"chan":selection.channel()})
 }

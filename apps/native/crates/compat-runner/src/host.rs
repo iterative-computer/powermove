@@ -91,8 +91,11 @@ enum Input {
     Place(String, Option<[f32; 4]>),
     Page(u64, Value),
     Answer(u64, Value),
-    /// A batch of layers the viewer needs override answers for.
+    /// A batch of layers the viewer or an export needs override answers for:
+    /// `{needs, ask}`.
     Rasters(u64, Value),
+    /// An export's frozen project (realized wire JSON), for its overrides.
+    Pin(String, String),
     /// The shell's tool and the viewer's navigation, for built-in services.
     Shell(Value),
     Menu(String, Value, u64),
@@ -313,6 +316,41 @@ impl TrySink<AdmittedDomBatch> for PageQueue<'_> {
     }
 }
 
+/// Override asks for one realm. While the realm waits for a capture of its own
+/// project, they go to that wait (it answers inline); otherwise to its inbox.
+#[derive(Clone)]
+pub struct RasterInbox {
+    inbox: Arc<Mutex<Sender<Input>>>,
+    native: Arc<Mutex<Option<Arc<NativeHost>>>>,
+}
+impl RasterInbox {
+    /// `needs`: `[{composition, layer, seconds, scale, crop?}]`; `ask`:
+    /// `{revision}` (viewer) or `{job, epoch}` (export). Answered through
+    /// `RasterHooks::answers` with `batch`.
+    pub fn ask(&self, batch: u64, needs: Value, ask: Value) {
+        let wire = json!({"needs": needs, "ask": ask});
+        let native = self.native.lock().unwrap().clone();
+        let wire = match native {
+            Some(native) => match native.nested_ask(batch, wire) {
+                Ok(()) => return,
+                Err(wire) => wire,
+            },
+            None => wire,
+        };
+        let _ = self.inbox.lock().unwrap().send(Input::Rasters(batch, wire));
+    }
+    /// An export's frozen project, from its canonical document text, as the
+    /// realm's mirror shows a project. Call off the main thread.
+    pub fn pin(&self, job: &str, document: &str) -> std::result::Result<(), String> {
+        let project = crate::adapter::realized_wire(document)?;
+        self.inbox
+            .lock()
+            .unwrap()
+            .send(Input::Pin(job.to_owned(), project))
+            .map_err(|_| "The project's extensions stopped".to_owned())
+    }
+}
+
 pub struct ExtensionHost {
     inbox: Sender<Input>,
     shared: Arc<Shared>,
@@ -477,24 +515,17 @@ impl ExtensionHost {
             }
         });
     }
-    /// Contributions for one open menu. A `key` keeps the reply tied to it.
-    /// Layers whose override answers a viewer needs, as
-    /// `[{composition, layer, seconds, scale, crop?}]`; answered through
-    /// `RasterHooks::answers` with `batch`.
-    pub fn rasters(&self, batch: u64, needs: Value) {
-        let _ = self.inbox.send(Input::Rasters(batch, needs));
-    }
     /// The shell's current tool (`{tool}`) or viewer navigation
     /// (`{zoom, pan, fit}`), which the `tool` and `viewer` services report.
     pub fn shell_state(&self, state: Value) {
         let _ = self.inbox.send(Input::Shell(state));
     }
-    /// `rasters` for another thread (the engine's).
-    pub fn raster_inbox(&self) -> Arc<dyn Fn(u64, Value) + Send + Sync> {
-        let inbox = std::sync::Mutex::new(self.inbox.clone());
-        Arc::new(move |batch, needs| {
-            let _ = inbox.lock().unwrap().send(Input::Rasters(batch, needs));
-        })
+    /// Where override asks for this realm go, from any thread.
+    pub fn raster_inbox(&self) -> RasterInbox {
+        RasterInbox {
+            inbox: Arc::new(Mutex::new(self.inbox.clone())),
+            native: self.transport.clone(),
+        }
     }
     /// One menu from several locations: `[[location, context], ...]`, gathered
     /// in order and answered once with every contribution.
@@ -503,6 +534,7 @@ impl ExtensionHost {
             .inbox
             .send(Input::Menu(String::new(), Value::Array(pairs), key));
     }
+    /// Contributions for one open menu. A `key` keeps the reply tied to it.
     pub fn gather_menu(&self, location: &str, context: Value, key: u64) {
         let _ = self
             .inbox
@@ -785,8 +817,22 @@ impl Owner {
             Input::Shell(state) => {
                 self.eval(&format!("__compat.shellState({state})"));
             }
-            Input::Rasters(batch, needs) => {
-                self.eval(&format!("__compat.answerRasters({batch},{needs})"));
+            Input::Rasters(batch, wire) => {
+                let ask = match &wire["ask"] {
+                    Value::Object(_) => wire["ask"].clone(),
+                    _ => json!({}),
+                };
+                self.eval(&format!(
+                    "__compat.answerRasters({batch},{},{ask})",
+                    wire["needs"]
+                ));
+            }
+            Input::Pin(job, project) => {
+                self.eval(&format!(
+                    "__compat.pinProject({},JSON.parse({}))",
+                    json!(job),
+                    json!(project)
+                ));
             }
             Input::Menu(location, context, key) => {
                 self.eval(&format!(

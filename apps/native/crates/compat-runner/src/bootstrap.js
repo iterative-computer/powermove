@@ -162,55 +162,74 @@ globalThis.__compat = {
     };
     const reveal = (id, open) =>
       call("ui.request", { kind: "panel", id, open });
-    // Raster overrides: the viewer asks for layers it needs, a batch at a
-    // time; an override's canvas goes back as pixels, a pass-through as native.
-    const layerIn = (composition, id) => {
-      const proj = this.realm.PM.proj;
-      const comps = proj?.comps;
+    // Raster overrides: the viewer and exports ask for layers they need, a
+    // batch at a time. An override's canvas goes back as pixels, a pass-through
+    // as native, a null result (main draws nothing) as hidden, and a failure
+    // as an error: the frame fails rather than draw the layer without it.
+    const layerIn = (project, composition, id) => {
+      const comps = project?.comps;
       const nested = Array.isArray(comps)
         ? comps.find((c) => c?.id === composition)
         : comps?.[composition];
-      for (const list of [nested?.layers, proj?.layers])
+      for (const list of [nested?.layers, project?.layers])
         for (const layer of list ?? []) if (layer?.id === id) return layer;
       return null;
     };
-    this.answerRasters = (batch, needs) => {
+    const failure = (error) => String(error?.message ?? error ?? "The override failed");
+    /** `ask`: `{revision}` for the viewer; `{job, epoch}` for an export, which
+     * reads its frozen project and the wrappers it started with. */
+    this.answerRasters = (batch, needs, ask = {}) => {
+      const realm = this.realm;
+      const project = ask.job ? realm.pinnedProject(ask.job) : realm.PM.proj;
       const answers = needs.map((need) => {
+        // This realm has not seen the viewer's revision yet: ask again.
+        if (ask.revision !== undefined && ask.revision > realm.revision) return { retry: true };
+        if (ask.job && !project) return { error: "The export's project is not available to its extensions" };
+        if (ask.epoch !== undefined && ask.epoch !== realm.rasterGeneration)
+          return { error: "The extension that draws this layer changed during the export" };
         try {
-          const layer = layerIn(need.composition, need.layer);
+          const layer = layerIn(project, need.composition, need.layer);
           if (!layer) return { native: true };
-          const result = this.realm.PM.raster(
+          realm.rasterContext = { composition: need.composition, job: ask.job, layer };
+          const result = realm.PM.raster(
             layer,
             need.scale,
             need.seconds,
             undefined,
             need.crop ?? undefined,
           );
-          if (!result || this.realm.isBaseRaster(result)) return { native: true };
+          if (!result) return { hidden: true };
+          if (realm.isBaseRaster(result, need)) return { native: true };
           const surface = this.nativeSurfaceOf?.(result.cv);
-          if (!surface) return { native: true };
+          if (!surface) return { error: "The override returned a canvas the engine cannot read" };
           return {
             surface,
             w: result.w,
             h: result.h,
             anchorX: result.anchorX,
             anchorY: result.anchorY,
+            uv: Array.isArray(result.uv) ? result.uv : undefined,
           };
         } catch (error) {
           this.reportFailure(error);
-          return { native: true };
+          return { error: failure(error) };
+        } finally {
+          realm.rasterContext = null;
         }
       });
       try {
         call("compat.answers", { batch, answers });
       } catch (error) {
-        // The engine waits for this batch; say why it never came.
+        // The asker waits for this batch; say why it never came.
         this.reportFailure(error);
-        call("compat.answers", { batch, answers: answers.map(() => ({ native: true })) });
+        call("compat.answers", { batch, answers: answers.map(() => ({ error: failure(error) })) });
       }
     };
+    this.pinProject = (job, project) => this.realm.pinProject(job, project);
     const capabilities = {
-      rasterProducing: (on) => call("compat.producing", { on: !!on }),
+      rasterProducing: (on, epoch) => call("compat.producing", { on: !!on, epoch }),
+      // A capture this realm waits for asks it for overrides: answered inline.
+      answerRasters: (batch, needs, ask) => this.answerRasters(batch, needs, ask),
       ui: { controls: PowermoveCompat.controls },
       extensions: {
         list: () => this.loader.records(),
@@ -267,10 +286,17 @@ globalThis.__compat = {
           const handle = {
             el,
             body,
+            // As main: closing (an action, a dismissal or close()) removes the
+            // sheet, then calls onClose once.
             close: () => {
               if (!open) return;
               open = false;
               el.remove();
+              try {
+                options.onClose?.();
+              } catch (error) {
+                this.reportFailure(error);
+              }
             },
           };
           actions.forEach((action, index) => {
@@ -471,20 +497,32 @@ globalThis.__compat = {
       Object.assign(shell, state);
       if (tool) this.realm.PM.bus.emit("tool", shell.tool);
     };
+    // As main's toolbar service: the change is immediate here, and the shell
+    // follows (its command carries a shape tool's shape).
     this.realm.services.register("tool", {
       get tool() {
         return shell.tool;
       },
+      set tool(value) {
+        shell.tool = String(value);
+      },
       get toolShape() {
         return shell.toolShape;
       },
+      set toolShape(value) {
+        shell.toolShape = String(value);
+      },
       setTool: (tool, detail) => {
         const name = String(tool ?? "");
+        const changed = name !== shell.tool;
+        shell.tool = name;
+        if (name === "shape" && detail) shell.toolShape = String(detail);
+        if (changed) this.realm.PM.bus.emit("tool", name);
         if (!/^[a-z]+$/.test(name)) return;
-        if (detail !== undefined) shell.toolShape = String(detail);
         call("ui.request", {
           kind: "command",
           name: "tool" + name[0].toUpperCase() + name.slice(1),
+          shape: name === "shape" ? shell.toolShape : undefined,
         });
       },
     });
@@ -508,7 +546,17 @@ globalThis.__compat = {
       snapshotSnapCandidates: () => ({ x: [], y: [] }),
       isNavigating: () => false,
       deferNavigationRender: () => false,
-      setZoom: () => false,
+      // As main: a finite zoom leaves fit (centred when it was fitting),
+      // clamped to 5%–800%; the viewer takes it and reports where it landed.
+      setZoom: (zoom) => {
+        const value = Number(zoom);
+        if (!Number.isFinite(value)) return false;
+        if (shell.fit) shell.pan = [0, 0];
+        shell.fit = false;
+        shell.zoom = Math.min(8, Math.max(0.05, value));
+        call("ui.request", { kind: "viewerZoom", zoom: shell.zoom, pan: [...shell.pan] });
+        return shell.zoom;
+      },
     });
     this.realm.installGlobals(globalThis);
     __installNativeCanvas(this);

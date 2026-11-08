@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use pm_model::{Document, Node};
 use pm_protocol::common::PixelRect;
@@ -44,6 +45,9 @@ pub struct BaseRaster {
     pub anchor: (f64, f64),
     pub selection: Option<[f64; 4]>,
     pub font_offset: Option<(f64, f64)>,
+    /// The part of the canvas the layer's quad samples (`[ox, oy, sx, sy]`):
+    /// a crop window's canvas sits inside the whole raster.
+    pub uv: [f64; 4],
 }
 
 type Job = (BaseRequest, Sender<Result<Option<BaseRaster>, String>>);
@@ -110,7 +114,7 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
     let Some(raster) = painted else {
         return Ok(None);
     };
-    let geometry = |width, height, straight_rgba| BaseRaster {
+    let geometry = |width, height, straight_rgba, uv| BaseRaster {
         width,
         height,
         straight_rgba,
@@ -118,11 +122,17 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
         anchor: raster.anchor,
         selection: raster.selection,
         font_offset: raster.font_offset,
+        uv,
     };
     // Text with no ink is a transparent canvas of its geometry.
     if raster.pixels.pixels.is_empty() {
         let (w, h) = raster.canvas;
-        return Ok(Some(geometry(w, h, vec![0; w as usize * h as usize * 4])));
+        return Ok(Some(geometry(
+            w,
+            h,
+            vec![0; w as usize * h as usize * 4],
+            [0., 0., 1., 1.],
+        )));
     }
     let painted = pm_node::present::snapshot::encode_rgba8_f32(
         &raster.pixels.pixels,
@@ -135,7 +145,22 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
         raster.canvas,
         window,
     )
-    .map(|(pixels, w, h)| geometry(w, h, pixels)))
+    .map(|(pixels, w, h)| {
+        // A crop window's canvas: the quad still spans the whole raster.
+        let uv = match window {
+            Some(c) if w > 0 && h > 0 => {
+                let (cw, ch) = (f64::from(w), f64::from(h));
+                [
+                    -f64::from(c.x) / cw,
+                    -f64::from(c.y) / ch,
+                    f64::from(raster.canvas.0) / cw,
+                    f64::from(raster.canvas.1) / ch,
+                ]
+            }
+            _ => [0., 0., 1., 1.],
+        };
+        geometry(w, h, pixels, uv)
+    }))
 }
 
 /// What one need is: the layer at one frame, scale and crop.
@@ -163,22 +188,41 @@ fn need_key(need: &CompatNeed) -> NeedKey {
 const AHEAD: i64 = 12;
 /// The rasters one revision's frames draw from, newest last.
 const MAX_BYTES: u64 = 256 << 20;
+/// Answers kept at most (a pass-through costs no pixels but still a key).
+const MAX_ENTRIES: usize = 16_384;
+/// A need asked this long ago and never answered is asked again.
+const ASK_AGAIN: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct Answers {
     revision: u64,
+    /// The realm's generation of `raster` wrappers the answers are from.
+    epoch: u64,
     producing: bool,
     /// One frame of the open composition in ticks, for asking ahead.
     frame: i64,
     map: HashMap<NeedKey, CompatAnswer>,
     order: VecDeque<(NeedKey, u64)>,
     bytes: u64,
-    /// Asked of the realm and not answered yet.
-    asked: HashSet<NeedKey>,
+    /// Asked of the realm and not answered yet, and when.
+    asked: HashMap<NeedKey, Instant>,
+    /// Needs whose override failed: their frames fail (as main's compositor
+    /// throws) and are not asked again until the revision or wrappers change.
+    failed: HashSet<NeedKey>,
 }
 
-/// Where needs go: the extension realm of the window showing the document.
-pub type CompatSink = Arc<dyn Fn(u64, Vec<CompatNeed>) + Send + Sync>;
+/// Where needs go: the extension realm of the window showing the document,
+/// with the revision and wrapper generation they are asked at.
+pub type CompatSink = Arc<dyn Fn(u64, u64, Vec<CompatNeed>) + Send + Sync>;
+
+/// What the realm answered for one need.
+pub enum Reply {
+    Draw(CompatAnswer),
+    /// The override threw or returned what cannot be drawn.
+    Failed,
+    /// The realm had not seen the revision yet.
+    Retry,
+}
 
 /// The viewer's raster override answers for the open document.
 #[derive(Default)]
@@ -190,14 +234,16 @@ pub struct CompatStore {
 }
 
 impl CompatStore {
-    /// Whether an override is registered, and the document revision frames
-    /// are drawn at. A new revision forgets every answer.
-    pub fn set_state(&self, producing: bool, revision: u64) {
+    /// Whether an override is registered, the generation of wrappers
+    /// answering, and the document revision frames are drawn at. A new
+    /// revision or generation forgets every answer.
+    pub fn set_state(&self, producing: bool, revision: u64, epoch: u64) {
         let mut answers = self.answers.lock().unwrap();
-        if answers.revision != revision {
+        if answers.revision != revision || answers.epoch != epoch {
             let frame = answers.frame;
             *answers = Answers {
                 revision,
+                epoch,
                 frame,
                 ..Answers::default()
             };
@@ -211,6 +257,10 @@ impl CompatStore {
     }
     pub fn producing_now(&self) -> bool {
         self.answers.lock().unwrap().producing
+    }
+    /// The generation of wrappers answering now.
+    pub fn epoch(&self) -> u64 {
+        self.answers.lock().unwrap().epoch
     }
     pub fn set_sink(&self, sink: Option<CompatSink>) {
         *self.sink.lock().unwrap() = sink;
@@ -226,7 +276,7 @@ impl CompatStore {
     /// playing with the same layers' next frames, so playback finds them answered.
     pub(crate) fn request(&self, needs: Vec<CompatNeed>, playing: bool) {
         let mut answers = self.answers.lock().unwrap();
-        let revision = answers.revision;
+        let (revision, epoch) = (answers.revision, answers.epoch);
         // Ahead only while playing: a still frame needs itself alone.
         let frame = if playing { answers.frame } else { 0 };
         let ahead = needs.iter().flat_map(|need| {
@@ -240,30 +290,63 @@ impl CompatStore {
             })
         });
         let all: Vec<CompatNeed> = needs.iter().cloned().chain(ahead).collect();
+        // Asks the realm never answered (it stopped, or dropped them) retire.
+        if answers.asked.len() > MAX_ENTRIES {
+            answers.asked.retain(|_, at| at.elapsed() < ASK_AGAIN);
+        }
+        let now = Instant::now();
+        let answers = &mut *answers;
         let fresh: Vec<CompatNeed> = all
             .into_iter()
             .filter(|need| {
                 let key = need_key(need);
-                !answers.map.contains_key(&key) && answers.asked.insert(key)
+                if answers.map.contains_key(&key) || answers.failed.contains(&key) {
+                    return false;
+                }
+                match answers.asked.get(&key) {
+                    Some(at) if at.elapsed() < ASK_AGAIN => false,
+                    _ => {
+                        answers.asked.insert(key, now);
+                        true
+                    }
+                }
             })
             .collect();
-        drop(answers);
         if fresh.is_empty() {
             return;
         }
         if let Some(sink) = self.sink.lock().unwrap().clone() {
-            sink(revision, fresh);
+            sink(revision, epoch, fresh);
         }
     }
-    /// The realm's answers for `revision`; stale ones are dropped.
-    pub fn answer_all(&self, revision: u64, answered: Vec<(CompatNeed, CompatAnswer)>) {
+    /// The realm's answers for `revision` and `epoch`; stale ones are dropped.
+    pub fn answer_all(&self, revision: u64, epoch: u64, answered: Vec<(CompatNeed, Reply)>) {
         let mut answers = self.answers.lock().unwrap();
-        if answers.revision != revision {
+        if answers.revision != revision || answers.epoch != epoch {
             return;
         }
-        for (need, answer) in answered {
+        let mut drew = false;
+        for (need, reply) in answered {
             let key = need_key(&need);
             answers.asked.remove(&key);
+            let answer = match reply {
+                Reply::Draw(answer) => answer,
+                Reply::Failed => {
+                    if answers.failed.len() >= MAX_ENTRIES {
+                        answers.failed.clear();
+                    }
+                    answers.failed.insert(key);
+                    continue;
+                }
+                // Asked again by the next frame that needs it.
+                Reply::Retry => {
+                    drew = true;
+                    continue;
+                }
+            };
+            if answers.map.contains_key(&key) {
+                continue;
+            }
             let bytes = match &answer {
                 CompatAnswer::Raster(r) => r.data.len() as u64,
                 _ => 0,
@@ -271,8 +354,9 @@ impl CompatStore {
             answers.bytes += bytes;
             answers.order.push_back((key.clone(), bytes));
             answers.map.insert(key, answer);
+            drew = true;
         }
-        while answers.bytes > MAX_BYTES {
+        while answers.bytes > MAX_BYTES || answers.map.len() > MAX_ENTRIES {
             let Some((old, bytes)) = answers.order.pop_front() else {
                 break;
             };
@@ -280,9 +364,14 @@ impl CompatStore {
             answers.bytes -= bytes;
         }
         drop(answers);
-        if let Some(redraw) = self.redraw.lock().unwrap().clone() {
+        if drew && let Some(redraw) = self.redraw.lock().unwrap().clone() {
             redraw();
         }
+    }
+    #[cfg(test)]
+    fn sizes(&self) -> (usize, usize, usize) {
+        let answers = self.answers.lock().unwrap();
+        (answers.map.len(), answers.order.len(), answers.asked.len())
     }
 }
 
@@ -345,13 +434,15 @@ impl CompatRasters for CompatStore {
 }
 
 /// A realm canvas as an override's raster: premultiplied RGBA8 rows (the
-/// engine's fast upload path), the quad's size and anchor in layer pixels.
+/// engine's fast upload path), the quad's size and anchor in layer pixels,
+/// and the part of the canvas it samples.
 pub fn override_raster(
     width: u32,
     height: u32,
     premultiplied_rgba: Vec<u8>,
     size: [f64; 2],
     anchor: [f64; 2],
+    uv: [f64; 4],
 ) -> CompatAnswer {
     CompatAnswer::Raster(Arc::new(CompatRaster {
         width,
@@ -359,9 +450,13 @@ pub fn override_raster(
         format: pm_protocol::snapshot::CompatFormat::Rgba8Premultiplied,
         anchor,
         size,
-        uv: [0.0, 0.0, 1.0, 1.0],
+        uv,
         data: Arc::new(premultiplied_rgba),
     }))
+}
+/// An override that returned nothing: the layer draws nothing (main skips it).
+pub fn hidden_raster() -> CompatAnswer {
+    override_raster(1, 1, vec![0; 4], [1., 1.], [0., 0.], [0., 0., 1., 1.])
 }
 
 #[cfg(test)]
@@ -378,34 +473,93 @@ mod tests {
             crop: None,
         }
     }
+    fn draw(byte: u8) -> Reply {
+        Reply::Draw(override_raster(
+            1,
+            1,
+            vec![byte; 4],
+            [1., 1.],
+            [0., 0.],
+            [0., 0., 1., 1.],
+        ))
+    }
+    fn answer(store: &CompatStore, layer: &str) -> CompatAnswer {
+        store.answer("c", layer, 1., 1., CompatSource::RasterOverride, None)
+    }
+    fn asking(store: &CompatStore) -> Arc<Mutex<Vec<(u64, usize)>>> {
+        let asked = Arc::new(Mutex::new(vec![]));
+        let log = asked.clone();
+        store.set_sink(Some(Arc::new(move |_, epoch, needs: Vec<CompatNeed>| {
+            log.lock().unwrap().push((epoch, needs.len()));
+        })));
+        asked
+    }
     #[test]
     fn each_document_answers_from_its_own_window() {
         let stores = CompatStores::default();
         let (a, b) = (stores.document(1), stores.document(2));
-        let asked = Arc::new(Mutex::new(vec![]));
-        for (doc, store) in [(1u64, &a), (2u64, &b)] {
-            let asked = asked.clone();
-            store.set_sink(Some(Arc::new(move |_, needs: Vec<CompatNeed>| {
-                asked.lock().unwrap().push((doc, needs.len()));
-            })));
-            store.set_state(true, 7);
-        }
+        let (asked_a, asked_b) = (asking(&a), asking(&b));
+        a.set_state(true, 7, 1);
+        b.set_state(true, 7, 1);
         a.request(vec![need("x")], false);
-        assert_eq!(*asked.lock().unwrap(), vec![(1, 1)]);
-        a.answer_all(
-            7,
-            vec![(
-                need("x"),
-                override_raster(1, 1, vec![9; 4], [1., 1.], [0., 0.]),
-            )],
-        );
-        let answer = |store: &CompatStore| {
-            store.answer("c", "x", 1., 1., CompatSource::RasterOverride, None)
-        };
-        assert!(matches!(answer(&a), CompatAnswer::Raster(_)));
-        assert!(matches!(answer(&b), CompatAnswer::Missing));
+        assert_eq!(*asked_a.lock().unwrap(), vec![(1, 1)]);
+        assert!(asked_b.lock().unwrap().is_empty());
+        a.answer_all(7, 1, vec![(need("x"), draw(9))]);
+        assert!(matches!(answer(&a, "x"), CompatAnswer::Raster(_)));
+        assert!(matches!(answer(&b, "x"), CompatAnswer::Missing));
         assert!(Arc::ptr_eq(&stores.document(1), &a));
         stores.forget(1);
         assert!(!Arc::ptr_eq(&stores.document(1), &a));
+    }
+    #[test]
+    fn new_wrappers_at_the_same_revision_forget_earlier_answers() {
+        let store = CompatStore::default();
+        let asked = asking(&store);
+        store.set_state(true, 7, 1);
+        store.answer_all(7, 1, vec![(need("x"), draw(255))]);
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Raster(_)));
+        // Another provider registered: same revision, new generation.
+        store.set_state(true, 7, 2);
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
+        // An answer computed by the earlier wrappers is dropped.
+        store.answer_all(7, 1, vec![(need("x"), draw(255))]);
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
+        store.request(vec![need("x")], false);
+        assert_eq!(*asked.lock().unwrap(), vec![(2, 1)]);
+    }
+    #[test]
+    fn a_failed_override_fails_its_frames_without_asking_again() {
+        let store = CompatStore::default();
+        let asked = asking(&store);
+        store.set_state(true, 7, 1);
+        store.request(vec![need("x")], false);
+        store.answer_all(7, 1, vec![(need("x"), Reply::Failed)]);
+        assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
+        store.request(vec![need("x")], false);
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        // A realm that had not caught up is asked again.
+        store.request(vec![need("y")], false);
+        store.answer_all(7, 1, vec![(need("y"), Reply::Retry)]);
+        store.request(vec![need("y")], false);
+        assert_eq!(asked.lock().unwrap().len(), 3);
+        // An edit retries the failed one.
+        store.set_state(true, 8, 1);
+        store.request(vec![need("x")], false);
+        assert_eq!(asked.lock().unwrap().len(), 4);
+    }
+    #[test]
+    fn pass_through_answers_are_bounded_too() {
+        let store = CompatStore::default();
+        store.set_state(true, 7, 1);
+        let needs: Vec<_> = (0..MAX_ENTRIES + 500)
+            .map(|i| {
+                let mut n = need("x");
+                n.time = pm_protocol::common::Ticks::new(i as i64).unwrap();
+                (n, Reply::Draw(CompatAnswer::Native))
+            })
+            .collect();
+        store.answer_all(7, 1, needs);
+        let (map, order, _) = store.sizes();
+        assert_eq!((map, order), (MAX_ENTRIES, MAX_ENTRIES));
     }
 }

@@ -70,6 +70,20 @@ pub struct NativeHost {
     text: Mutex<Option<CanvasText>>,
     frames: Mutex<Option<crate::FrameRenderer>>,
     rasters: Mutex<Option<crate::RasterHooks>>,
+    /// The capture (`renderFrameTo`, `PM.Export.snapshot`) the realm waits for.
+    capture: Mutex<Option<Capture>>,
+    /// While a capture runs, override asks for this realm come here: the
+    /// waiting realm answers them inline (the capture draws its own project).
+    nested: Mutex<Option<std::sync::mpsc::Sender<CaptureEvent>>>,
+}
+pub(crate) enum CaptureEvent {
+    Frame(std::result::Result<Vec<u8>, String>),
+    Asks(u64, Value),
+}
+struct Capture {
+    method: String,
+    events: std::sync::mpsc::Receiver<CaptureEvent>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 /// Straight RGBA8 to premultiplied, as a canvas's backing store holds it.
 fn premultiply(straight: &[u8]) -> Vec<u8> {
@@ -158,6 +172,29 @@ impl NativeHost {
             text: Mutex::new(None),
             frames: Mutex::new(None),
             rasters: Mutex::new(None),
+            capture: Mutex::new(None),
+            nested: Mutex::new(None),
+        }
+    }
+    /// An override ask while this realm waits for a capture: handed to the
+    /// wait (true), or not (false: the realm is free; use its inbox).
+    pub(crate) fn nested_ask(&self, batch: u64, ask: Value) -> std::result::Result<(), Value> {
+        match self.nested.lock().unwrap().as_ref() {
+            Some(tx) => tx
+                .send(CaptureEvent::Asks(batch, ask))
+                .map_err(|e| match e.0 {
+                    CaptureEvent::Asks(_, ask) => ask,
+                    CaptureEvent::Frame(_) => Value::Null,
+                }),
+            None => Err(ask),
+        }
+    }
+    fn end_capture(&self) {
+        *self.nested.lock().unwrap() = None;
+        if let Some(capture) = self.capture.lock().unwrap().take() {
+            capture
+                .stop
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
     pub fn set_rasters(&self, hooks: Option<crate::RasterHooks>) {
@@ -211,6 +248,7 @@ impl NativeHost {
             seconds: number(2, self.transport.time()),
             scale: number(1, 1.).max(1e-6),
             crop,
+            job: spec["job"].as_str().map(str::to_owned),
         })
         .map_err(Error::Host)?;
         let Some(reply) = reply else {
@@ -220,13 +258,14 @@ impl NativeHost {
         Ok(
             json!({"kind":"recorder-surface","surface":surface,"width":reply.width,
             "height":reply.height,"w":reply.size.0,"h":reply.size.1,
-            "anchorX":reply.anchor.0,"anchorY":reply.anchor.1,
+            "anchorX":reply.anchor.0,"anchorY":reply.anchor.1,"uv":reply.uv,
             "selection":reply.selection.map(|[x0,y0,x1,y1]| json!({"x0":x0,"y0":y0,"x1":x1,"y1":y1})),
             "fontOffset":reply.font_offset.map(|(x,y)| json!({"x":x,"y":y}))}),
         )
     }
-    /// One batch of override answers: `{batch, answers: [{native} | {surface,
-    /// w, h, anchorX, anchorY}]}`, the canvases read here, on the realm worker.
+    /// One batch of override answers: `{batch, answers: [{native} | {hidden} |
+    /// {retry} | {error} | {surface, w, h, anchorX, anchorY, uv?}]}`, the
+    /// canvases read here, on the realm worker.
     fn raster_answers(&self, input: &Value) -> Result<Value> {
         let Some(hooks) = self.rasters.lock().unwrap().clone() else {
             return Ok(Value::Null);
@@ -243,30 +282,46 @@ impl NativeHost {
             let surface = item["surface"]
                 .as_str()
                 .and_then(|id| state.surfaces.get_mut(id));
+            let number = |k: &str, default: f64| {
+                item[k]
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(default)
+            };
             let answer = match surface {
-                Some(canvas) if !(canvas.size().0 == 0 || canvas.size().1 == 0) => {
+                _ if item["native"] == true => crate::RasterAnswer::Native,
+                _ if item["hidden"] == true => crate::RasterAnswer::Hidden,
+                _ if item["retry"] == true => crate::RasterAnswer::Retry,
+                _ if item["error"].is_string() => {
+                    crate::RasterAnswer::Failed(item["error"].as_str().unwrap_or_default().into())
+                }
+                // An empty canvas draws nothing, as on main.
+                Some(canvas) if canvas.size().0 == 0 || canvas.size().1 == 0 => {
+                    crate::RasterAnswer::Hidden
+                }
+                Some(canvas) => {
                     let (width, height) = canvas.size();
-                    let pixels = canvas
-                        .get_image_data(0, 0, width as i32, height as i32)
-                        .map_err(host_error)?;
-                    let number = |k: &str, default: f64| {
-                        item[k]
-                            .as_f64()
-                            .filter(|v| v.is_finite())
-                            .unwrap_or(default)
-                    };
-                    crate::RasterAnswer::Raster {
-                        width,
-                        height,
-                        premultiplied_rgba: premultiply(pixels.bytes()),
-                        size: [
-                            number("w", f64::from(width)),
-                            number("h", f64::from(height)),
-                        ],
-                        anchor: [number("anchorX", 0.), number("anchorY", 0.)],
+                    match canvas.get_image_data(0, 0, width as i32, height as i32) {
+                        Ok(pixels) => crate::RasterAnswer::Raster {
+                            width,
+                            height,
+                            premultiplied_rgba: premultiply(pixels.bytes()),
+                            size: [
+                                number("w", f64::from(width)),
+                                number("h", f64::from(height)),
+                            ],
+                            anchor: [number("anchorX", 0.), number("anchorY", 0.)],
+                            uv: match item["uv"].as_array().map(Vec::as_slice) {
+                                Some([a, b, c, d]) => {
+                                    [a, b, c, d].map(|v| v.as_f64().unwrap_or(0.))
+                                }
+                                _ => [0., 0., 1., 1.],
+                            },
+                        },
+                        Err(error) => crate::RasterAnswer::Failed(error.to_string()),
                     }
                 }
-                _ => crate::RasterAnswer::Native,
+                None => crate::RasterAnswer::Failed("The override's canvas is gone".into()),
             };
             answers.push(answer);
         }
@@ -317,17 +372,81 @@ impl NativeHost {
             return Err(Error::Invalid("render size"));
         };
         crate::image::rgba_bytes(u64::from(width), u64::from(height))?;
-        let stop = || budget.check().is_err();
-        let png = renderer(&crate::FrameRequest {
-            time,
-            width,
-            height,
-            motion_blur,
-            stop: &stop,
-        })
-        .map_err(Error::Host)?;
-        budget.check()?;
-        let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+        // The capture renders on its own thread; this realm waits for it, and
+        // answers the overrides it asks for meanwhile (`wait_capture`).
+        self.end_capture();
+        let (tx, events) = std::sync::mpsc::channel();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        *self.nested.lock().unwrap() = Some(tx.clone());
+        std::thread::Builder::new()
+            .name("pm-compat-capture".into())
+            .spawn(move || {
+                let stop = || stopped.load(std::sync::atomic::Ordering::Acquire);
+                let png = renderer(&crate::FrameRequest {
+                    time,
+                    width,
+                    height,
+                    motion_blur,
+                    stop: &stop,
+                });
+                let _ = tx.send(CaptureEvent::Frame(png));
+            })
+            .map_err(|e| Error::Host(e.to_string()))?;
+        *self.capture.lock().unwrap() = Some(Capture {
+            method: method.to_owned(),
+            events,
+            stop,
+        });
+        self.wait_capture(budget)
+    }
+    /// The capture's frame, or the next override ask it has for this realm
+    /// (`{kind: "raster-asks", batches}`: the realm answers, then continues).
+    fn wait_capture(&self, budget: &HostBudget) -> Result<Value> {
+        use std::sync::mpsc::RecvTimeoutError;
+        loop {
+            let event = {
+                let capture = self.capture.lock().unwrap();
+                let capture = capture
+                    .as_ref()
+                    .ok_or(Error::Invalid("no capture is running"))?;
+                capture
+                    .events
+                    .recv_timeout(std::time::Duration::from_millis(20))
+            };
+            match event {
+                Ok(CaptureEvent::Asks(batch, ask)) => {
+                    return Ok(json!({"kind":"raster-asks","batches":[{
+                        "batch": batch, "needs": ask["needs"], "ask": ask["ask"]}]}));
+                }
+                Ok(CaptureEvent::Frame(png)) => {
+                    let method = self
+                        .capture
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|c| c.method.clone())
+                        .unwrap_or_default();
+                    self.end_capture();
+                    let png = png.map_err(Error::Host)?;
+                    budget.check()?;
+                    return self.decode_frame(&method, &png);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Err(error) = budget.check() {
+                        self.end_capture();
+                        return Err(error);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.end_capture();
+                    return Err(Error::Host("The capture stopped".into()));
+                }
+            }
+        }
+    }
+    fn decode_frame(&self, method: &str, png: &[u8]) -> Result<Value> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png));
         let mut reader = decoder
             .read_info()
             .map_err(|e| Error::Host(e.to_string()))?;
@@ -1306,13 +1425,16 @@ impl EngineProxy for NativeHost {
                 let method = input["method"].as_str().unwrap_or_default();
                 return self.render_query(method, &input["args"]["args"], &budget);
             }
+            "kernel.query" if input["method"] == "render.continue" => {
+                return self.wait_capture(&budget);
+            }
             "kernel.query" if input["method"] == "render.raster" => {
                 return self.base_raster(&input["args"]["args"]);
             }
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "compat.producing" => {
                 if let Some(hooks) = self.rasters.lock().unwrap().clone() {
-                    (hooks.producing)(input["on"] == true);
+                    (hooks.producing)(input["on"] == true, input["epoch"].as_u64().unwrap_or(0));
                 }
                 return Ok(Value::Null);
             }

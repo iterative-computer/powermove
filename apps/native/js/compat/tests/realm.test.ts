@@ -516,11 +516,14 @@ test("raster override and nested capture callbacks remain inline in the shared r
   let realm: CompatRealm;
   host.query = (method, args) => {
     order.push(method);
-    if (method === "render.raster")
-      return { native: true, layer: args.args[0] };
+    if (method === "render.raster") {
+      order.push(JSON.stringify(args.args[0]));
+      return null;
+    }
     if (method === "render.snapshot") return "data:image/jpeg;base64,synthetic";
+    // The base raster is lazy: reading its geometry paints it, inline.
     if (method === "render.renderFrameTo")
-      return realm.PM.raster("frame-layer");
+      return { w: realm.PM.raster({ id: "frame-layer" }).w ?? "unpainted" };
     throw new Error("Unavailable");
   };
   realm = new CompatRealm({
@@ -534,21 +537,19 @@ test("raster override and nested capture callbacks remain inline in the shared r
   const base = provider.api.services.get("raster");
   const registration = provider.api.services.register(
     "raster",
-    (layer: string) => {
+    (layer: Data) => {
       order.push("override");
       expect(consumer.api.render.snapshot()).toStartWith("data:image/jpeg");
       return base(layer);
     },
   );
-  expect(consumer.api.render.renderFrameTo()).toEqual({
-    native: true,
-    layer: "frame-layer",
-  });
+  expect(consumer.api.render.renderFrameTo()).toEqual({ w: "unpainted" });
   expect(order).toEqual([
     "render.renderFrameTo",
     "override",
     "render.snapshot",
     "render.raster",
+    JSON.stringify({ id: "frame-layer", content: { id: "frame-layer" } }),
   ]);
   registration.dispose();
   expect(provider.api.services.get("raster")).toBe(base);

@@ -56,6 +56,17 @@ export interface RealmOptions {
   /** Shared Svelte/compiler modules are supplied by the embedding runtime. */
   runtimeModules?: Data;
 }
+/** What a base raster was asked for, and whether the override changed it. */
+type BaseState = {
+  id: string;
+  own: boolean;
+  scale: number;
+  time: number;
+  crop: unknown;
+  touched: boolean;
+};
+/** Exports whose frozen projects the realm keeps at once. */
+const PINNED_PROJECTS = 4;
 export class CompatRealm {
   readonly PM: Data;
   readonly keymap: CompatKeymap;
@@ -759,16 +770,32 @@ export class CompatRealm {
       );
     return new NativeImage(this.options.recorder, surface, width, height, vector);
   }
+  /** The kernel revision this realm's project mirrors. */
+  get revision(): number {
+    return this.publication.revision;
+  }
   private renderQuery(method: string, args: any[]): any {
     this.flush();
-    const value = this.options.host.query(method, {
-      args,
-      revision: this.publication.revision,
-      realm: this.options.id,
-      generation: this.options.generation,
-    });
+    const query = (name: string, values: any[]) =>
+      this.options.host.query(name, {
+        args: values,
+        revision: this.publication.revision,
+        realm: this.options.id,
+        generation: this.options.generation,
+      });
+    let value = query(method, args);
+    // The capture draws this project, whose overrides live here: while it
+    // waits, it asks this realm for them, and they are answered inline.
+    while (value?.kind === "raster-asks") {
+      for (const asked of value.batches ?? [])
+        this.options.capabilities?.answerRasters?.(asked.batch, asked.needs, asked.ask ?? {});
+      value = query("render.continue", []);
+    }
     if (value?.kind !== "recorder-surface") return value;
-    const surface = value as NativeSurface;
+    return this.adoptSurface(value as NativeSurface);
+  }
+  /** A recorder surface the host made, as this realm's one canvas for it. */
+  private adoptSurface(surface: NativeSurface): RecorderCanvas {
     let canvas = this.nativeCanvases.get(surface.surface)?.deref();
     if (!canvas) {
       if (!this.options.recorder)
@@ -786,17 +813,76 @@ export class CompatRealm {
     }
     return canvas;
   }
-  /** Base rasters handed out and not yet known to be changed. */
-  private bases = new WeakSet<object>();
-  /** Whether `value` is a base raster an override passed through untouched. */
-  isBaseRaster(value: unknown): boolean {
-    return typeof value === "object" && value !== null && this.bases.has(value);
+  /** Base rasters handed out, with what they were asked for. */
+  private bases = new WeakMap<object, BaseState>();
+  /**
+   * What an override answer is for, while the realm answers it: the need's
+   * composition (a nested layer's base paints in its own composition) and,
+   * for an export, the job whose frozen project it reads.
+   */
+  rasterContext: { composition?: string; job?: string; layer?: object } | null = null;
+  /** Layers of the frozen projects exports read (see `pinProject`). */
+  private pinnedLayers = new WeakSet<object>();
+  private pins = new Map<string, Data>();
+  /**
+   * An export's project as its snapshot froze it: the overrides answering its
+   * frames read these layers, so edits made while it runs never reach it.
+   * The few most recent jobs are kept.
+   */
+  pinProject(job: string, project: Data): void {
+    const walk = (layers: unknown) => {
+      for (const layer of Array.isArray(layers) ? layers : [])
+        if (layer && typeof layer === "object") this.pinnedLayers.add(layer);
+    };
+    walk(project?.layers);
+    const comps = project?.comps;
+    for (const comp of Array.isArray(comps) ? comps : Object.values(comps ?? {}))
+      walk((comp as Data)?.layers);
+    this.pins.delete(job);
+    this.pins.set(job, project);
+    while (this.pins.size > PINNED_PROJECTS) this.pins.delete(this.pins.keys().next().value!);
+  }
+  pinnedProject(job: string): Data | undefined {
+    return this.pins.get(job);
+  }
+  /**
+   * Whether `value` is the base raster of exactly `need`'s layer, frame, scale
+   * and crop, untouched: an override that returns it passes the layer through.
+   * A replacement layer object, another frame, a canvas drawn into or a
+   * geometry field changed all make it the override's own raster.
+   */
+  isBaseRaster(
+    value: unknown,
+    need: { layer: string; seconds: number; scale: number; crop?: Data | null },
+  ): boolean {
+    if (typeof value !== "object" || value === null) return false;
+    const state = this.bases.get(value);
+    return (
+      !!state &&
+      state.own &&
+      !state.touched &&
+      state.id === need.layer &&
+      state.time === need.seconds &&
+      state.scale === need.scale &&
+      JSON.stringify(state.crop ?? null) === JSON.stringify(need.crop ?? null)
+    );
+  }
+  /** The composition holding layer `id` (null: the open one). */
+  private compositionOf(id: string): string | null {
+    const project = this.PM.proj;
+    if ((project?.layers ?? []).some((layer: Data) => layer?.id === id)) return null;
+    const comps = project?.comps;
+    for (const [key, comp] of Object.entries(comps ?? {}) as [string, Data][])
+      if ((comp?.layers ?? []).some((layer: Data) => layer?.id === id))
+        return String(comp.id ?? key);
+    return null;
   }
   /**
    * `render.raster(L, scale, T, uploaded, crop)`'s base: the layer as the
    * engine paints it, with today's geometry (`cv`, `w`, `h`, `anchorX`,
-   * `anchorY`, `selection`, `fontOffset`). Lazy: an override that passes a
-   * layer through never makes the engine paint it here.
+   * `anchorY`, `selection`, `fontOffset`, `uv`), each field writable as on
+   * main. Lazy: an override that passes a layer through never makes the
+   * engine paint it here.
    */
   private baseRaster = (
     layer: any,
@@ -806,10 +892,20 @@ export class CompatRealm {
     crop?: { x: number; y: number; width: number; height: number },
   ): any => {
     if (!layer || typeof layer !== "object") return null;
-    const view = isProjectView(layer);
+    const context = this.rasterContext;
+    // The project's own record: a view of it, the exact layer this answer
+    // is for, or a layer of an export's frozen project.
+    const own =
+      isProjectView(layer) || layer === context?.layer || this.pinnedLayers.has(layer);
+    const id = String(layer.id ?? "");
+    const composition = context?.composition ?? this.compositionOf(id);
     const spec: Data = {
-      id: String(layer.id ?? ""),
-      ...(view ? {} : { content: JSON.parse(JSON.stringify(layer)) }),
+      id,
+      ...(composition ? { composition } : {}),
+      ...(context?.job ? { job: context.job } : {}),
+      // The project's own layer paints from the document; any other object
+      // (`{ ...L, d: { ...L.d, text } }`) paints as given.
+      ...(own ? {} : { content: JSON.parse(JSON.stringify(layer)) }),
     };
     let loaded: Data | null | undefined;
     const load = () => {
@@ -822,14 +918,7 @@ export class CompatRealm {
         generation: this.options.generation,
       });
       if (!value || value.kind !== "recorder-surface") return (loaded = null);
-      const cv = new RecorderCanvas(
-        this.options.recorder!,
-        value.width,
-        value.height,
-        value.surface,
-      );
-      this.track(cv);
-      const fontOffset = value.fontOffset ?? undefined;
+      const cv = this.adoptSurface(value as NativeSurface);
       return (loaded = {
         cv,
         w: value.w,
@@ -837,39 +926,60 @@ export class CompatRealm {
         anchorX: value.anchorX,
         anchorY: value.anchorY,
         selection: value.selection ?? undefined,
-        fontOffset,
-        uv: [0, 0, 1, 1],
+        fontOffset: value.fontOffset ?? undefined,
+        uv: value.uv ?? [0, 0, 1, 1],
       });
     };
+    const state: BaseState = { id, own, scale, time, crop: crop ?? null, touched: false };
+    const written: Data = {};
     // Today's cache key: the same layer, frame, scale and crop paint the same.
     const surface: Data = {
       key: JSON.stringify([
-        spec.id,
+        id,
         this.publication.revision,
         time,
         scale,
         crop ?? null,
-        view ? null : spec.content,
+        spec.content ?? null,
       ]),
     };
     for (const key of ["cv", "w", "h", "anchorX", "anchorY", "selection", "fontOffset", "uv"])
       Object.defineProperty(surface, key, {
         enumerable: true,
-        get: () => load()?.[key],
+        configurable: true,
+        get: () => {
+          // A canvas handed out may be drawn into: no longer the base.
+          if (key === "cv") state.touched = true;
+          return key in written ? written[key] : load()?.[key];
+        },
+        set: (value: unknown) => {
+          state.touched = true;
+          written[key] = value;
+        },
       });
-    this.bases.add(surface);
+    this.bases.set(surface, state);
     return surface;
   };
-  /** Tells the host whether an extension wraps the `raster` service. */
+  /** Changes whenever what draws `raster` changes (a wrapper registered,
+   * removed or reloaded; `PM.raster` replaced): earlier answers are stale. */
+  private rasterEpoch = 0;
+  private rasterTop: unknown[] = [];
+  /** Tells the host whether an extension wraps the `raster` service, and
+   * which generation of wrappers answers. */
   private rasterChanged(): void {
-    const on =
-      this.services.get("raster") !== this.baseRaster ||
-      this.PM.raster !== this.serviceRaster;
-    if (on === this.overriding) return;
+    const top = [this.services.get("raster"), this.PM.raster];
+    const on = top[0] !== this.baseRaster || top[1] !== this.serviceRaster;
+    if (top[0] === this.rasterTop[0] && top[1] === this.rasterTop[1]) return;
+    this.rasterTop = top;
+    this.rasterEpoch += 1;
+    if (!on && !this.overriding) return;
     this.overriding = on;
-    this.options.capabilities?.rasterProducing?.(on);
+    this.options.capabilities?.rasterProducing?.(on, this.rasterEpoch);
   }
   private overriding = false;
+  get rasterGeneration(): number {
+    return this.rasterEpoch;
+  }
   /** `PM.raster` as the realm defines it: the `raster` service's top. */
   private serviceRaster = (...args: any[]): any =>
     (this.services.get<Function>("raster") ?? this.baseRaster)(...args);

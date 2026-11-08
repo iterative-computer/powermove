@@ -37,9 +37,37 @@ pub struct ExportRequest {
     pub disk_reserve: u64,
 }
 /// An export frame's raster override answer from the window that has the
-/// document open: `None` passes the layer through; `Some` is premultiplied RGBA8
-/// with the quad's size and anchor (layer pixels).
-pub type CompatReply = Option<(u32, u32, Vec<u8>, [f64; 2], [f64; 2])>;
+/// document open.
+#[derive(Debug)]
+pub enum CompatReply {
+    /// Passed through: the export draws the layer itself.
+    Native,
+    /// The override returned nothing: the layer draws nothing.
+    Hidden,
+    /// Premultiplied RGBA8 rows with the quad's size and anchor (layer
+    /// pixels) and the part of the canvas it samples.
+    Raster {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        size: [f64; 2],
+        anchor: [f64; 2],
+        uv: [f64; 4],
+    },
+}
+/// What an export's overrides answer for: its frozen project and the
+/// wrappers registered when it started. Edits and reloads made while it runs
+/// never reach it.
+pub struct CompatPin {
+    pub job: String,
+    pub revision: u64,
+    /// The generation of `raster` wrappers the export started with.
+    pub epoch: u64,
+    /// The snapshot's canonical document.
+    pub document: Arc<String>,
+    /// Set when the export is cancelled or its handle dropped.
+    pub cancel: Arc<AtomicBool>,
+}
 /// One layer an export frame needs an override answer for.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompatJobNeed {
@@ -49,44 +77,70 @@ pub struct CompatJobNeed {
     pub scale: f64,
 }
 /// Answers a batch of export needs, in order, on the job's reader thread.
-pub type CompatAnswerer =
-    Arc<dyn Fn(&[CompatJobNeed]) -> std::result::Result<Vec<CompatReply>, String> + Send + Sync>;
+/// An error fails the frame (and the export).
+pub type CompatAnswerer = Arc<
+    dyn Fn(&CompatPin, &[CompatJobNeed]) -> std::result::Result<Vec<CompatReply>, String>
+        + Send
+        + Sync,
+>;
+/// The wrappers' generation while an override is registered (none: no override).
+pub type CompatState = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
 struct CompatProducer {
-    producing: Arc<dyn Fn() -> bool + Send + Sync>,
+    state: CompatState,
     answer: CompatAnswerer,
 }
 /// Each open document's producer, by kernel `doc_id` (the job's session).
 static COMPAT: Mutex<Option<std::collections::HashMap<u64, CompatProducer>>> = Mutex::new(None);
 /// Whose extensions wrap `raster` for document `doc_id` (none: its exports
 /// draw natively).
-pub fn set_compat_answerer(
-    doc_id: u64,
-    producer: Option<(Arc<dyn Fn() -> bool + Send + Sync>, CompatAnswerer)>,
-) {
+pub fn set_compat_answerer(doc_id: u64, producer: Option<(CompatState, CompatAnswerer)>) {
     let mut all = COMPAT.lock().unwrap();
     let all = all.get_or_insert_with(Default::default);
     match producer {
-        Some((producing, answer)) => {
-            all.insert(doc_id, CompatProducer { producing, answer });
+        Some((state, answer)) => {
+            all.insert(doc_id, CompatProducer { state, answer });
         }
         None => {
             all.remove(&doc_id);
         }
     }
 }
+/// The generation of override wrappers drawing document `doc_id` now (none:
+/// no override).
+pub fn compat_epoch(doc_id: u64) -> Option<u64> {
+    let all = COMPAT.lock().unwrap();
+    (all.as_ref()?.get(&doc_id)?.state)()
+}
 /// A compat need's reply on the child's stdin. Pixels go through a private
-/// file the child reads and removes, never through the pipe.
-fn compat_reply(id: u64, answered: std::result::Result<Vec<CompatReply>, String>) -> String {
+/// file the child reads and removes, never through the pipe; its name is the
+/// job's own, so simultaneous exports never share one.
+fn compat_reply(
+    job: &str,
+    id: u64,
+    answered: std::result::Result<Vec<CompatReply>, String>,
+) -> String {
+    let job: String = job
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     let answer = |(i, reply): (usize, CompatReply)| match reply {
-        None => serde_json::json!({"native": true}),
-        Some((width, height, rgba, size, anchor)) => {
+        CompatReply::Native => serde_json::json!({"native": true}),
+        CompatReply::Hidden => serde_json::json!({"hidden": true}),
+        CompatReply::Raster {
+            width,
+            height,
+            rgba,
+            size,
+            anchor,
+            uv,
+        } => {
             let path = std::env::temp_dir().join(format!(
-                "powermove-compat-{}-{id}-{i}.rgba",
+                "powermove-compat-{}-{job}-{id}-{i}.rgba",
                 std::process::id()
             ));
             match std::fs::write(&path, &rgba) {
                 Ok(()) => serde_json::json!({"width": width, "height": height,
-                    "size": size, "anchor": anchor, "file": path}),
+                    "size": size, "anchor": anchor, "uv": uv, "file": path}),
                 Err(e) => serde_json::json!({"error": e.to_string()}),
             }
         }
@@ -223,9 +277,21 @@ impl ExportHandle {
             JobSpec::Export { session, .. } => Some(session.get()),
             _ => None,
         };
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Pinned now: the frozen project and the wrappers registered at start.
         let answerer = COMPAT.lock().unwrap().as_ref().and_then(|all| {
             let c = all.get(&session?)?;
-            (c.producing)().then(|| c.answer.clone())
+            let epoch = (c.state)()?;
+            Some((
+                c.answer.clone(),
+                CompatPin {
+                    job: request.job.as_str().to_owned(),
+                    revision: request.revision,
+                    epoch,
+                    document: Arc::new(request.document.clone()),
+                    cancel: cancel.clone(),
+                },
+            ))
         });
         if answerer.is_some()
             && let JobSpec::Export { settings, .. } = &mut request.spec
@@ -261,7 +327,6 @@ impl ExportHandle {
         input.flush()?;
         let input = Arc::new(Mutex::new(input));
         let gate_input = input.clone();
-        let cancel = Arc::new(AtomicBool::new(false));
         let gate_cancel = cancel.clone();
         let output = child.stdout.take().unwrap();
         let state = Arc::new(Mutex::new(status(
@@ -285,12 +350,13 @@ impl ExportHandle {
                         serde_json::from_value(asked["compat"]["needs"].clone())
                             .unwrap_or_default();
                     let answered = match &answerer {
-                        Some(answer) => answer(&needs),
+                        Some((answer, pin)) => answer(pin, &needs),
                         None => Err("No window has this project's extensions open".into()),
                     };
+                    let job = answerer.as_ref().map_or("", |(_, pin)| pin.job.as_str());
                     let mut input = compat_input.lock().unwrap();
                     if input
-                        .write_all(compat_reply(id, answered).as_bytes())
+                        .write_all(compat_reply(job, id, answered).as_bytes())
                         .and_then(|_| input.flush())
                         .is_err()
                     {
@@ -389,8 +455,12 @@ pub fn run_child() -> Result<()> {
     request.resources.validate()?;
     let (grant, permits) = std::sync::mpsc::channel();
     let stopped = cancel.clone();
-    let rasters = Arc::new(JobRasters::default());
+    let rasters = Arc::new(JobRasters {
+        stop: cancel.clone(),
+        ..JobRasters::default()
+    });
     let replies = rasters.clone();
+    let override_error = rasters.clone();
     std::thread::spawn(move || {
         for line in lines {
             if let Ok(text) = line.as_deref()
@@ -571,13 +641,14 @@ pub fn run_child() -> Result<()> {
         Err(_) if cancel.load(Ordering::Acquire) => {
             emit(status(&job_id, JobState::Cancelled, 0., None, None))?
         }
-        Err(e) => emit(status(
-            &job_id,
-            JobState::Failed,
-            0.,
-            None,
-            Some(e.to_string()),
-        ))?,
+        Err(e) => {
+            // A layer an extension draws failed the frame: say why.
+            let message = match override_error.error.lock().unwrap().take() {
+                Some(error) => format!("An extension could not draw a layer: {error}"),
+                None => e.to_string(),
+            };
+            emit(status(&job_id, JobState::Failed, 0., None, Some(message)))?
+        }
     }
     Ok(())
 }
@@ -589,6 +660,10 @@ pub fn run_child() -> Result<()> {
 /// then runs ahead of, not between, the frame's GPU work.
 #[derive(Default)]
 struct JobRasters {
+    /// Cancellation or the parent's end: a frame waiting on an answer stops.
+    stop: Arc<AtomicBool>,
+    /// Why the last need went unanswered, for the export's failure.
+    error: Mutex<Option<String>>,
     next: std::sync::atomic::AtomicU64,
     waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>,
     answered: Mutex<JobAnswers>,
@@ -609,27 +684,54 @@ impl JobRasters {
             let _ = tx.send(body);
         }
     }
-    fn raster(item: &serde_json::Value) -> pm_render::compat::CompatAnswer {
+    fn raster(
+        item: &serde_json::Value,
+    ) -> std::result::Result<pm_render::compat::CompatAnswer, String> {
         use pm_render::compat::CompatAnswer;
         if item["native"] == true {
-            return CompatAnswer::Native;
+            return Ok(CompatAnswer::Native);
+        }
+        if item["hidden"] == true {
+            return Ok(crate::compat::hidden_raster());
         }
         let Some(file) = item["file"].as_str() else {
-            return CompatAnswer::Missing;
+            return Err(item["error"]
+                .as_str()
+                .unwrap_or("The extension did not draw the layer")
+                .to_owned());
         };
         let data = std::fs::read(file);
         let _ = std::fs::remove_file(file);
         let number = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.);
-        match data {
-            Ok(data) => crate::compat::override_raster(
-                item["width"].as_u64().unwrap_or(0) as u32,
-                item["height"].as_u64().unwrap_or(0) as u32,
-                data,
-                [number(&item["size"], 0), number(&item["size"], 1)],
-                [number(&item["anchor"], 0), number(&item["anchor"], 1)],
-            ),
-            Err(_) => CompatAnswer::Missing,
+        let data = data.map_err(|e| e.to_string())?;
+        Ok(crate::compat::override_raster(
+            item["width"].as_u64().unwrap_or(0) as u32,
+            item["height"].as_u64().unwrap_or(0) as u32,
+            data,
+            [number(&item["size"], 0), number(&item["size"], 1)],
+            [number(&item["anchor"], 0), number(&item["anchor"], 1)],
+            match item["uv"].as_array().map(Vec::as_slice) {
+                Some([a, b, c, d]) => [a, b, c, d].map(|v| v.as_f64().unwrap_or(0.)),
+                _ => [0., 0., 1., 1.],
+            },
+        ))
+    }
+    /// The parent's reply, waited for until it comes, the export is
+    /// cancelled or the parent ends.
+    fn wait(&self, rx: &std::sync::mpsc::Receiver<serde_json::Value>) -> Option<serde_json::Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
+            if self.stop.load(Ordering::Acquire) {
+                return None;
+            }
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(body) => return Some(body),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
         }
+        *self.error.lock().unwrap() = Some("The extension did not draw the layer in time".into());
+        None
     }
 }
 impl pm_render::compat::CompatRasters for JobRasters {
@@ -683,14 +785,26 @@ impl pm_render::compat::CompatRasters for JobRasters {
                 return CompatAnswer::Missing;
             }
         }
-        let Ok(body) = rx.recv_timeout(std::time::Duration::from_secs(120)) else {
+        let body = self.wait(&rx);
+        self.waiting.lock().unwrap().remove(&id);
+        let Some(body) = body else {
             return CompatAnswer::Missing;
         };
+        if let Some(error) = body["error"].as_str() {
+            *self.error.lock().unwrap() = Some(error.to_owned());
+            return CompatAnswer::Missing;
+        }
         let items = body["answers"].as_array().cloned().unwrap_or_default();
         let mut answered = self.answered.lock().unwrap();
         let mut mine = CompatAnswer::Missing;
         for (need, item) in needs.iter().zip(&items) {
-            let answer = Self::raster(item);
+            let answer = match Self::raster(item) {
+                Ok(answer) => answer,
+                Err(error) => {
+                    *self.error.lock().unwrap() = Some(error);
+                    continue;
+                }
+            };
             let k = (
                 need.composition.clone(),
                 need.layer.clone(),
@@ -769,5 +883,49 @@ mod tests {
     fn free_space_is_read_for_a_folder_that_does_not_exist_yet() {
         let dir = tempfile::tempdir().unwrap();
         assert!(free_bytes(&dir.path().join("frames/not-yet")).unwrap() > 0);
+    }
+    #[test]
+    fn simultaneous_exports_never_share_a_pixel_file() {
+        let reply = |job: &str| {
+            let line = compat_reply(
+                job,
+                0,
+                Ok(vec![CompatReply::Raster {
+                    width: 1,
+                    height: 1,
+                    rgba: job.as_bytes()[..4].to_vec(),
+                    size: [1., 1.],
+                    anchor: [0., 0.],
+                    uv: [0., 0., 1., 1.],
+                }]),
+            );
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            value["compatAnswer"]["answers"][0].clone()
+        };
+        let (a, b) = (reply("export-aaaa"), reply("export-bbbb"));
+        assert_ne!(a["file"], b["file"]);
+        assert_eq!(a["uv"], serde_json::json!([0., 0., 1., 1.]));
+        for (item, bytes) in [(&a, b"expo"), (&b, b"expo")] {
+            match JobRasters::raster(item).unwrap() {
+                pm_render::compat::CompatAnswer::Raster(r) => assert_eq!(&r.data[..], bytes),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+    #[test]
+    fn a_cancelled_export_stops_waiting_for_an_extension() {
+        let rasters = JobRasters::default();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        rasters.stop.store(true, Ordering::Release);
+        let started = std::time::Instant::now();
+        assert!(rasters.wait(&rx).is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // An extension's failure is the export's message.
+        let item = serde_json::json!({"error": "broken wrapper"});
+        assert_eq!(JobRasters::raster(&item).unwrap_err(), "broken wrapper");
+        assert!(matches!(
+            JobRasters::raster(&serde_json::json!({"hidden": true})),
+            Ok(pm_render::compat::CompatAnswer::Raster(_))
+        ));
     }
 }

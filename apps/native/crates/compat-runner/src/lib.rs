@@ -144,6 +144,9 @@ pub struct BaseRasterRequest {
     pub scale: f64,
     /// Today's preview crop window `[x, y, w, h]` in raster pixels.
     pub crop: Option<[u32; 4]>,
+    /// The export whose frozen project the layer is read from (none: the
+    /// project as it is now).
+    pub job: Option<String>,
 }
 /// A base raster's straight RGBA8 canvas and today's geometry.
 pub struct BaseRasterReply {
@@ -154,19 +157,30 @@ pub struct BaseRasterReply {
     pub anchor: (f64, f64),
     pub selection: Option<[f64; 4]>,
     pub font_offset: Option<(f64, f64)>,
+    /// The part of the canvas the quad samples: a crop window's canvas is
+    /// placed inside the whole raster (today's `uv`).
+    pub uv: [f64; 4],
 }
 /// What an override answered for one layer at one frame.
+#[derive(Debug)]
 pub enum RasterAnswer {
     /// Passed through: the engine draws the layer itself.
     Native,
+    /// The override returned nothing: the layer draws nothing, as on main.
+    Hidden,
+    /// The realm has not seen the revision asked for yet: ask again.
+    Retry,
+    /// The override threw or returned what cannot be drawn: the frame fails.
+    Failed(String),
     /// The override's canvas: premultiplied RGBA8 rows (a canvas's backing
-    /// store), the quad's size and anchor.
+    /// store), the quad's size, anchor and `uv`.
     Raster {
         width: u32,
         height: u32,
         premultiplied_rgba: Vec<u8>,
         size: [f64; 2],
         anchor: [f64; 2],
+        uv: [f64; 4],
     },
 }
 /// The app's side of raster overrides.
@@ -179,8 +193,9 @@ pub struct RasterHooks {
     >,
     /// The answers to one batch of needs, in the batch's order.
     pub answers: Arc<dyn Fn(u64, Vec<RasterAnswer>) + Send + Sync>,
-    /// Whether a `raster` override is registered.
-    pub producing: Arc<dyn Fn(bool) + Send + Sync>,
+    /// Whether a `raster` override is registered, and the generation of
+    /// wrappers answering (it changes whenever they do).
+    pub producing: Arc<dyn Fn(bool, u64) + Send + Sync>,
 }
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
@@ -592,8 +607,12 @@ mod tests {
             json!(300000)
         );
     }
-    #[test]
-    fn raster_overrides_answer_with_pixels_and_pass_layers_through_unpainted() {
+    type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
+    type RasterRunner = (CompatRunner, Log<Value>, Log<Value>, Log<(bool, u64)>);
+    /// A runner whose base rasters are 2×2 red, recording what was asked
+    /// (layer, composition, job, whether a layer object was passed) and
+    /// answered (as JSON), and the producing calls.
+    fn raster_runner() -> RasterRunner {
         let runner = dom_runner();
         let painted = Arc::new(std::sync::Mutex::new(vec![]));
         let answered = Arc::new(std::sync::Mutex::new(vec![]));
@@ -601,7 +620,12 @@ mod tests {
         let (p, a, o) = (painted.clone(), answered.clone(), producing.clone());
         runner.host.set_rasters(Some(crate::RasterHooks {
             base: Arc::new(move |request: crate::BaseRasterRequest| {
-                p.lock().unwrap().push(request.layer.clone());
+                p.lock().unwrap().push(json!([
+                    request.layer,
+                    request.composition,
+                    request.job,
+                    request.content.is_some()
+                ]));
                 Ok(Some(crate::BaseRasterReply {
                     width: 2,
                     height: 2,
@@ -610,32 +634,48 @@ mod tests {
                     anchor: (1., 1.),
                     selection: None,
                     font_offset: Some((0.5, 0.)),
+                    // A crop window's canvas inside the whole raster.
+                    uv: if request.crop.is_some() {
+                        [-0.5, 0., 2., 1.]
+                    } else {
+                        [0., 0., 1., 1.]
+                    },
                 }))
             }),
             answers: Arc::new(move |batch, answers| {
                 for answer in answers {
                     a.lock().unwrap().push(match answer {
                         crate::RasterAnswer::Native => json!([batch, "native"]),
+                        crate::RasterAnswer::Hidden => json!([batch, "hidden"]),
+                        crate::RasterAnswer::Retry => json!([batch, "retry"]),
+                        crate::RasterAnswer::Failed(error) => json!([batch, "failed", error]),
                         crate::RasterAnswer::Raster {
                             width,
                             height,
                             premultiplied_rgba,
                             size,
                             anchor,
+                            uv,
                         } => json!([
                             batch,
                             width,
                             height,
                             &premultiplied_rgba[..4],
-                            &premultiplied_rgba[12..16],
+                            &premultiplied_rgba[premultiplied_rgba.len() - 4..],
                             size,
-                            anchor
+                            anchor,
+                            uv
                         ]),
                     });
                 }
             }),
-            producing: Arc::new(move |on| o.lock().unwrap().push(on)),
+            producing: Arc::new(move |on, epoch| o.lock().unwrap().push((on, epoch))),
         }));
+        (runner, painted, answered, producing)
+    }
+    #[test]
+    fn raster_overrides_answer_with_pixels_and_pass_layers_through_unpainted() {
+        let (runner, painted, answered, producing) = raster_runner();
         let manifest = json!({"id":"widen","name":"Widen","version":"1.0.0","apiVersion":3,"entry":"index.js"});
         runner
             .activate(
@@ -647,7 +687,7 @@ mod tests {
                    return {...base,cv:c,w:base.w+2,fontOffset:base.fontOffset};});globalThis.dropRaster=()=>r.dispose();}",
             )
             .unwrap();
-        assert_eq!(*producing.lock().unwrap(), vec![true]);
+        assert_eq!(*producing.lock().unwrap(), vec![(true, 2)]);
         runner
             .eval("__compat.realm.PM.proj.layers.push({id:'t1',type:'text',name:'T1',d:{text:'a'}},{id:'t2',type:'text',name:'T2',d:{text:'b'}})")
             .unwrap();
@@ -664,23 +704,192 @@ mod tests {
                     [255, 0, 0, 255],
                     [0, 0, 255, 255],
                     [4., 2.],
-                    [1., 1.]
+                    [1., 1.],
+                    [0., 0., 1., 1.]
                 ]),
                 json!([7, "native"])
             ]
         );
-        // The pass-through layer was never painted.
-        assert_eq!(*painted.lock().unwrap(), vec!["t1".to_owned()]);
+        // The pass-through layer was never painted; t1 painted in its composition.
+        assert_eq!(
+            *painted.lock().unwrap(),
+            vec![json!(["t1", "synthetic-comp", null, false])]
+        );
         runner.eval("dropRaster()").unwrap();
-        assert_eq!(*producing.lock().unwrap(), vec![true, false]);
-        // An extension that replaces PM.raster itself (variable-font-anchor) counts too.
+        // An extension that replaces PM.raster itself (variable-font-anchor) counts
+        // too; each change is a new generation of wrappers.
         runner
             .eval(
                 "const PM=__compat.realm.PM;globalThis.kept=PM.raster;PM.raster=(...a)=>kept(...a)",
             )
             .unwrap();
         runner.eval("__compat.realm.PM.raster=kept").unwrap();
-        assert_eq!(*producing.lock().unwrap(), vec![true, false, true, false]);
+        assert_eq!(
+            *producing.lock().unwrap(),
+            vec![(true, 2), (false, 3), (true, 4), (false, 5)]
+        );
+    }
+    #[test]
+    fn a_base_raster_counts_as_the_layer_only_while_untouched() {
+        let (runner, painted, answered, _) = raster_runner();
+        let manifest = json!({"id":"cases","name":"Cases","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        // Each layer id is one way an override can use the base.
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 api.services.register('raster',(L,s,T,up,crop)=>{switch(L.id){
+                   case 'same': return base(L,s,T,up,crop);
+                   case 'replaced': return base({...L,d:{...L.d,text:'replacement'}},s,T,up,crop);
+                   case 'later': return base(L,s,T+1,up,crop);
+                   case 'painted': {const r=base(L,s,T,up,crop);const x=r.cv.getContext('2d');x.fillStyle='#00ff00';x.fillRect(0,0,1,1);return r}
+                   case 'moved': {const r=base(L,s,T,up,crop);r.anchorX+=0.5;return r}
+                   case 'spread': return {...base(L,s,T,up,crop)};
+                   case 'gone': return null;
+                   case 'throws': throw new Error('broken wrapper');
+                   case 'odd': return {cv:{},w:1,h:1,anchorX:0,anchorY:0};
+                   default: return base(L,s,T,up,crop);}});}",
+            )
+            .unwrap();
+        runner
+            .eval("for(const id of ['same','replaced','later','painted','moved','spread','gone','throws','odd'])__compat.realm.PM.proj.layers.push({id,type:'text',name:id,d:{text:id}});
+                   __compat.realm.PM.proj.comps.inner={id:'inner',name:'Inner',w:100,h:100,fps:30,dur:1,layers:[{id:'nested',type:'text',name:'n',d:{text:'n'}}]}")
+            .unwrap();
+        runner
+            .eval("const ask=(layer,crop)=>({composition:'synthetic-comp',layer,seconds:0,scale:1,crop});
+                   __compat.answerRasters(1,['same','replaced','later','painted','moved','gone','throws','odd'].map(id=>ask(id)));
+                   __compat.answerRasters(2,[ask('spread',{x:1,y:0,width:2,height:2})]);
+                   __compat.answerRasters(3,[{composition:'inner',layer:'nested',seconds:0,scale:1}]);")
+            .unwrap();
+        let answered = answered.lock().unwrap().clone();
+        let kinds: Vec<Value> = answered
+            .iter()
+            .map(|a| match a[1].as_str() {
+                Some(kind) => json!(kind),
+                None => json!([a[3], a[6], a[7]]),
+            })
+            .collect();
+        let red = json!([255, 0, 0, 255]);
+        assert_eq!(
+            kinds,
+            vec![
+                json!("native"),
+                json!([red, [1., 1.], [0., 0., 1., 1.]]),
+                json!([red, [1., 1.], [0., 0., 1., 1.]]),
+                json!([[0, 255, 0, 255], [1., 1.], [0., 0., 1., 1.]]),
+                json!([red, [1.5, 1.], [0., 0., 1., 1.]]),
+                json!("hidden"),
+                json!("failed"),
+                json!("failed"),
+                // A cropped base keeps its place inside the whole raster.
+                json!([red, [1., 1.], [-0.5, 0., 2., 1.]]),
+                json!("native"),
+            ]
+        );
+        assert_eq!(answered[6][2], "broken wrapper");
+        // The replacement painted as given; the nested layer in its composition.
+        let painted = painted.lock().unwrap().clone();
+        assert!(painted.contains(&json!(["replaced", "synthetic-comp", null, true])));
+        assert!(!painted.iter().any(|p| p[0] == "same" || p[0] == "nested"));
+    }
+    #[test]
+    fn exports_read_their_frozen_project_and_wrappers() {
+        let (runner, painted, answered, producing) = raster_runner();
+        let manifest =
+            json!({"id":"spy","name":"Spy","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){const base=api.services.get('raster');
+                 globalThis.seen=[];const r=api.services.register('raster',(L,s,T,up,crop)=>{seen.push(L.d.text);return base(L,s,T,up,crop)});
+                 globalThis.reload=()=>{r.dispose();api.services.register('raster',(L,s,T)=>base(L,s,T))};}",
+            )
+            .unwrap();
+        let epoch = producing.lock().unwrap().last().unwrap().1;
+        runner
+            .eval("__compat.realm.PM.proj.layers.push({id:'t1',type:'text',name:'T1',d:{text:'edited'}})")
+            .unwrap();
+        // The export froze the project before the edit.
+        runner
+            .eval(&format!(
+                "__compat.pinProject('job-1',{{layers:[{{id:'t1',type:'text',name:'T1',d:{{text:'frozen'}}}}]}});
+                 __compat.answerRasters(1,[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'job-1',epoch:{epoch}}});
+                 globalThis.out=globalThis.seen.slice()"
+            ))
+            .unwrap();
+        assert_eq!(runner.json("out").unwrap(), json!(["frozen"]));
+        assert_eq!(answered.lock().unwrap()[0], json!([1, "native"]));
+        // A reload mid-export: its frames fail rather than mix wrappers.
+        runner.eval("reload()").unwrap();
+        runner
+            .eval(&format!(
+                "__compat.answerRasters(2,[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'job-1',epoch:{epoch}}})"
+            ))
+            .unwrap();
+        let second = answered.lock().unwrap()[1].clone();
+        assert_eq!(second[1], "failed");
+        assert!(
+            second[2]
+                .as_str()
+                .unwrap()
+                .contains("changed during the export")
+        );
+        assert!(painted.lock().unwrap().is_empty());
+        // The viewer asks at a revision this realm has not seen: ask again.
+        runner
+            .eval("__compat.answerRasters(3,[{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}],{revision:1e9})")
+            .unwrap();
+        assert_eq!(answered.lock().unwrap()[2], json!([3, "retry"]));
+    }
+    #[test]
+    fn a_capture_asks_its_waiting_realm_for_overrides_inline() {
+        let (runner, _, answered, _) = raster_runner();
+        let manifest =
+            json!({"id":"blue","name":"Blue","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){api.services.register('raster',(L)=>{const c=document.createElement('canvas');c.width=1;c.height=1;
+                 const x=c.getContext('2d');x.fillStyle='#0000ff';x.fillRect(0,0,1,1);return {cv:c,w:1,h:1,anchorX:0,anchorY:0}});}",
+            )
+            .unwrap();
+        runner
+            .eval(
+                "__compat.realm.PM.proj.layers.push({id:'t1',type:'text',name:'T1',d:{text:'a'}})",
+            )
+            .unwrap();
+        // The capture's renderer (an export child, in the app) needs t1 drawn
+        // by this realm, which is waiting for the capture.
+        let host = runner.host.clone();
+        let seen = answered.clone();
+        runner.host.set_frames(Some(Arc::new(move |frame: &crate::FrameRequest| {
+            let ask = json!({"needs":[{"composition":"synthetic-comp","layer":"t1","seconds":0,"scale":1}],"ask":{}});
+            host.nested_ask(41, ask).map_err(|_| "the realm is not waiting".to_owned())?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while seen.lock().unwrap().is_empty() {
+                if std::time::Instant::now() > deadline || (frame.stop)() {
+                    return Err("no answer".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0, 0, 255, 255]).unwrap();
+            drop(writer);
+            Ok(png)
+        })));
+        let frame = runner
+            .json("(()=>{const c=PM.renderFrameTo(0,1,1);return [...c.getContext('2d').getImageData(0,0,1,1).data]})()")
+            .unwrap();
+        assert_eq!(frame, json!([0, 0, 255, 255]));
+        let answered = answered.lock().unwrap();
+        assert_eq!(answered[0][0], 41);
+        assert_eq!(answered[0][3], json!([0, 0, 255, 255]));
+        // Done waiting: asks go to the realm's inbox again.
+        assert!(runner.host.nested_ask(42, json!({})).is_err());
     }
     #[test]
     fn tool_and_viewer_services_follow_the_shell() {
@@ -688,7 +897,10 @@ mod tests {
         let value = runner
             .json("(()=>{const s=__compat.realm.services;const t=s.get('tool'),v=s.get('viewer');let heard=null;__compat.realm.PM.bus.on('tool',x=>heard=x);
                 const before=[t.tool,v.zoom,v.fit,v.stage];__compat.shellState({tool:'hand'});__compat.shellState({zoom:2,fit:false,pan:[3,4]});
-                return [before,t.tool,heard,v.zoom,v.fit,v.pan,v.setZoom(1),typeof v.layout]})()")
+                const shell=[t.tool,heard,v.zoom,v.fit,v.pan];
+                // As main: setZoom leaves fit, clamped, at once; setTool reads back at once.
+                const zoomed=[v.setZoom(20),v.zoom,v.fit,v.setZoom(NaN)];t.setTool('shape','ellipse');const shape=[t.tool,t.toolShape,heard];t.toolShape='star';
+                return [before,...shell,zoomed,shape,t.toolShape,typeof v.layout]})()")
             .unwrap();
         assert_eq!(
             value,
@@ -699,7 +911,9 @@ mod tests {
                 2,
                 false,
                 [3, 4],
-                false,
+                [8, 8, false, false],
+                ["shape", "ellipse", "shape"],
+                "star",
                 "function"
             ])
         );
@@ -713,13 +927,13 @@ mod tests {
                 const frame=JSON.parse(m.el.getAttribute('data-pm-modal-frame'));const open=()=>m.el.isConnected;
                 m.el.querySelector('[data-pm-modal-action="0"]').click();const afterStay=open();
                 m.el.querySelector('[data-pm-modal-action="1"]').click();await new Promise(r=>setTimeout(r,0));
-                const n=PM.modal({title:'Fixed',body:'Text',dismissible:false});n.el.querySelector('[data-pm-modal-dismiss]').click();const fixed=n.el.isConnected;n.close();
-                return [frame,m.body.contains(input),afterStay,open(),ran,fixed,n.el.isConnected]})()"#)
+                let closes=0;const n=PM.modal({title:'Fixed',body:'Text',dismissible:false,onClose:()=>closes++});n.el.querySelector('[data-pm-modal-dismiss]').click();const fixed=n.el.isConnected;n.close();n.close();
+                return [frame,m.body.contains(input),afterStay,open(),ran,fixed,n.el.isConnected,closes]})()"#)
             .unwrap();
         assert_eq!(
             value,
             json!([{"title":"Curve","width":360,"actions":[{"label":"Stay","pri":false},{"label":"Done","pri":true}],"dismissible":true},
-                true, true, false, ["stay", "done"], true, false])
+                true, true, false, ["stay", "done"], true, false, 1])
         );
     }
     #[test]
