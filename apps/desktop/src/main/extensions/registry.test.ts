@@ -140,7 +140,7 @@ describe('extension registry', () => {
     expect(setup.events).toEqual([{ ids: ['sample-ext'], reason: 'enable' }]);
   });
 
-  it('uses the recursive mtime signature to avoid unchanged rebuilds', async () => {
+  it('uses the recursive content signature to avoid unchanged rebuilds', async () => {
     const setup = await harness();
     const directory = await writeExtension(setup.userDir, 'cached-ext');
 
@@ -157,6 +157,34 @@ describe('extension registry', () => {
     await setup.registry.refresh(['cached-ext']);
     expect(setup.compile).toHaveBeenCalledTimes(2);
     expect(setup.registry.list()[0]?.bundleUrl).toContain('?v=hash2');
+  });
+
+  it('rebuilds synced source changes even when size and modification time are preserved', async () => {
+    const setup = await harness();
+    const directory = await writeExtension(setup.userDir, 'synced-ext', 'export default () => 1');
+    const file = path.join(directory, 'index.ts');
+    const timestamp = new Date('2026-01-01T00:00:00Z');
+    await fs.utimes(file, timestamp, timestamp);
+    await setup.registry.refresh();
+    await fs.writeFile(file, 'export default () => 2');
+    await fs.utimes(file, timestamp, timestamp);
+    expect(await setup.registry.refreshChanged!(['synced-ext'])).toEqual(['synced-ext']);
+    expect(setup.compile).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the compiled bundle after metadata churn or an identical sync replacement', async () => {
+    const setup = await harness();
+    const directory = await writeExtension(setup.userDir, 'synced-ext', 'export default () => 1');
+    const file = path.join(directory, 'index.ts');
+    await setup.registry.refresh();
+    await fs.utimes(file, new Date('2026-01-01'), new Date('2026-01-01'));
+    await fs.utimes(directory, new Date('2026-01-01'), new Date('2026-01-01'));
+    expect(await setup.registry.refreshChanged!(['synced-ext'])).toEqual([]);
+    expect(setup.compile).toHaveBeenCalledTimes(1);
+    await fs.writeFile(path.join(directory, '.incoming'), 'export default () => 1');
+    await fs.rename(path.join(directory, '.incoming'), file);
+    expect(await setup.registry.refreshChanged!(['synced-ext'])).toEqual([]);
+    expect(setup.compile).toHaveBeenCalledTimes(1);
   });
 
   it('marks a stale user fork and clears the update after its fork base catches up', async () => {

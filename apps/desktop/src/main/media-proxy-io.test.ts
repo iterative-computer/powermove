@@ -12,6 +12,9 @@ vi.mock('node:fs/promises', async importOriginal => {
   io.writeFile.mockImplementation(fs.writeFile);
   io.open.mockImplementation(async (file, flags, mode) => {
     const handle = await fs.open(file, flags, mode);
+    // Source checksum verification has its own descriptor. These tests track
+    // the proxy's playback/upload descriptors and their ownership lifecycle.
+    if (typeof flags === 'number') return handle;
     vi.spyOn(handle, 'close');
     const read = handle.read.bind(handle), write = handle.writeFile.bind(handle);
     vi.spyOn(handle, 'read').mockImplementation(read);

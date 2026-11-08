@@ -8,6 +8,8 @@ import type { AgentToolContent } from '../../shared/ipc';
 import { formatClock, type AgentMediaSource } from '../../shared/media-tools';
 import { TRANSCRIPTION_MODEL_MISSING, type Transcript, type TranscriptSegment } from '../../shared/transcription';
 import { transcriptionService as defaultTranscriptionService, type TranscriptionService } from '../transcription/service';
+import { FileContentCache } from '../file-content-version';
+import { requireLocalMedia } from '../file-cloud-state';
 import {
   FRAME_QUALITY,
   analysisArgs,
@@ -106,6 +108,7 @@ function text(value: unknown): AgentToolContent {
 }
 
 export class AgentMediaTools {
+  private readonly contents = new FileContentCache();
   private readonly probes = new Map<string, Promise<MediaProbe>>();
   private readonly transcripts = new Map<string, Transcript>();
   private readonly jobs = new Map<string, { promise: Promise<Transcript>; progress: number; controller: AbortController }>();
@@ -189,9 +192,10 @@ export class AgentMediaTools {
   }
 
   private async probe(file: string, budget?: Budget): Promise<MediaProbe> {
+    await requireLocalMedia(file);
     const info = await stat(file).catch(() => null);
     if (!info?.isFile()) throw new MediaToolError('The media file is no longer readable.');
-    const key = `${file}|${info.size}|${info.mtimeMs}`;
+    const key = await this.contents.hash(file);
     let pending = this.probes.get(key);
     if (!pending) {
       pending = (async () => {
@@ -536,10 +540,9 @@ export class AgentMediaTools {
     const [from, to] = layer || finite(args.start) || finite(args.end) ? this.sourceWindow(source, duration, args) : [0, duration];
     const whole = from <= 0.001 && to >= duration - 0.001;
     const language = typeof args.language === 'string' && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(args.language) ? args.language : undefined;
-    // By content when the renderer knows it: a re-staged copy (new path, new
-    // mtime) of the same asset reuses its transcript.
-    const identity = source.contentKey ? [`content:${source.asset.id}`, source.contentKey] : await stat(source.path).then((info) => [source.path, info.size, info.mtimeMs]);
-    const key = [...identity, whole ? '' : `${from}-${to}`, language ?? ''].join('|');
+    // The renderer's legacy fingerprint samples only parts of a file. Verify
+    // all bytes before reusing analysis, even if sync preserves its timestamps.
+    const key = [source.contentKey ?? '', await this.contents.hash(source.path), whole ? '' : `${from}-${to}`, language ?? ''].join('|');
 
     let transcript = this.transcripts.get(key);
     if (!transcript) {

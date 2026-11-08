@@ -6,6 +6,20 @@ const deadlock = () => Object.assign(new Error('Unknown system error -11, read')
 });
 
 describe('readWithRetry', () => {
+  it.each(['EAGAIN', 'ETIMEDOUT', 'ENOTCONN'])('retries a transient provider %s failure at the same offset', async code => {
+    const error = Object.assign(new Error('temporarily unavailable'), { code });
+    const read = vi.fn().mockRejectedValueOnce(error).mockResolvedValue({ bytesRead: 2 });
+    await expect(readWithRetry(read)).resolves.toEqual({ bytesRead: 2 });
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['EAGAIN', 'ETIMEDOUT', 'ENOTCONN'])('bounds retries and preserves a persistent %s failure', async code => {
+    const error = Object.assign(new Error('provider offline'), { code });
+    const read = vi.fn().mockRejectedValue(error);
+    await expect(readWithRetry(read)).rejects.toBe(error);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
   it('retries a transient macOS deadlock', async () => {
     const read = vi.fn().mockRejectedValueOnce(deadlock()).mockResolvedValue(new Uint8Array([7]));
     await expect(readWithRetry(read)).resolves.toEqual(new Uint8Array([7]));

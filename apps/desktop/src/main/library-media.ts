@@ -7,6 +7,7 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import { LIBRARY_MEDIA_CHUNK, LIBRARY_MEDIA_IPC, type ImportedArtifact, type LibraryMediaInput, type LibraryMediaLink, type LibraryMediaRecord } from '../shared/library-media';
 import { PROJECT_ID } from '../shared/ipc';
 import { hashHandle, readExactly, sameFile, syncDirectory } from './durable-file';
+import { contentIdentity, fileContentVersion } from './file-content-version';
 async function writeLibraryJSON(file: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -80,23 +81,22 @@ export class LibraryMedia {
   /** Files already proven to hold a record's bytes, keyed by their identity.
    * Playback streams a clip through many small range requests; re-checking a
    * linked original (and hashing it after a touch) on each one starved decoding. */
-  private validated = new WeakMap<Record, string>();
+  private validated = new Map<string, string>();
   private async validateFile(record: Record): Promise<void> {
     // Metadata probes must not silently materialize an offloaded cloud file.
     // The renderer's existing cloud prompt owns that download decision.
     if (record.sourcePath && !await this.sourceAvailable(record.sourcePath)) throw new Error('The source file needs to be downloaded.');
     const file = this.pathFor(record), metadata = await lstat(file);
     if (!metadata.isFile() || metadata.size !== record.size) throw new Error('A media file was changed or removed.');
-    const identity = `${file}\0${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}`;
-    if (this.validated.get(record) === identity) return;
-    if (metadata.mtimeMs !== record.mtime) {
-      const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-      try {
-        if (!sameFile(metadata, await handle.stat()) || (await hashHandle(handle)).digest('hex') !== record.sha256
-          || !sameFile(metadata, await handle.stat())) throw new Error('A media file was changed outside Powermove.');
-      } finally { await handle.close(); }
-    }
-    this.validated.set(record, identity);
+    const key = `${file}\0${record.sha256}`;
+    if (this.validated.get(key) === contentIdentity(metadata)) return;
+    const verified = await fileContentVersion(file);
+    if (verified.info.size !== record.size || verified.sha256 !== record.sha256) throw new Error('A media file was changed outside Powermove.');
+    this.validated.delete(key);
+    this.validated.set(key, contentIdentity(verified.info));
+    // Metadata records are reloaded for IPC requests. Keep verification across
+    // those requests without retaining every clip ever opened in this session.
+    if (this.validated.size > 256) this.validated.delete(this.validated.keys().next().value!);
   }
   private grant(owner: number, record: Record): LibraryMediaRecord {
     for (const [token, grant] of this.grants) {
@@ -137,16 +137,12 @@ export class LibraryMedia {
       if (!await this.sourceAvailable(sourcePath)) throw new Error('Download the source file before linking it.');
       const metadata = await lstat(sourcePath);
       if (!metadata.isFile() || metadata.size !== input.size) throw new Error('The selected source file changed. Import it again.');
-      const handle = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-      let sha256: string;
-      try {
-        if (!sameFile(metadata, await handle.stat())) throw new Error('The selected source file changed.');
-        sha256 = (await hashHandle(handle)).digest('hex');
-        if (!sameFile(metadata, await handle.stat()) || !sameFile(metadata, await lstat(sourcePath))) throw new Error('The selected source file changed.');
-      } finally { await handle.close(); }
+      const verified = await fileContentVersion(sourcePath);
+      if (verified.info.size !== input.size) throw new Error('The selected source file changed.');
+      const { sha256 } = verified;
       if (previous && (previous.sha256 !== sha256 || previous.size !== input.size)) throw new Error('The source does not match the stored media.');
       const record: Record = { key: input.key, sourcePath, size: input.size, type: input.type,
-        revision: input.revision || randomUUID(), sha256, mtime: metadata.mtimeMs };
+        revision: input.revision || randomUUID(), sha256, mtime: verified.info.mtimeMs };
       await writeLibraryJSON(path.join(this.root, 'Index', indexName(record.key)), record);
       for (const grant of this.grants.values()) {
         if (grant.record.key === record.key && grant.record.sha256 === record.sha256) grant.record = record;

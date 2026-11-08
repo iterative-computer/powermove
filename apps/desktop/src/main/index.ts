@@ -71,7 +71,7 @@ import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
 import { registerCloudMediaIpc } from './cloud-media';
 import { MediaPathCache, registerMediaPathIpc } from './media-path-cache';
-import { cloudFileState } from '@powermove/macos-haptics';
+import { inspectFileCloudState } from './file-cloud-state';
 import { registerConfirmIpc } from './native-confirm';
 import { registerClipboardIpc } from './clipboard';
 import { userInput } from './user-input';
@@ -1078,7 +1078,7 @@ if (!hasSingleInstanceLock) {
     configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
     libraryMedia = new LibraryMedia(path.join(app.getPath('userData'), 'Media Store'), reference => validatedArtifactPath(
       path.join(agentWorkspaceRoot(app.getPath('userData'), reference.projectId), 'artifacts'), reference.path),
-      async source => await cloudFileState(source) === 'local');
+      async source => await inspectFileCloudState(source) === 'local');
     await libraryMedia.initialize();
     registerLibraryMedia(ipcMain, libraryMedia, isTrustedSender);
     const store = createStore(path.join(app.getPath('userData'), 'store'));
@@ -1277,7 +1277,7 @@ if (!hasSingleInstanceLock) {
     /* agent media tools: an asset's bytes as a file path (media-tools lane) */
     const mediaPaths = new MediaPathCache(path.join(app.getPath('userData'), 'Media Tool Cache'), {
       libraryFile: key => libraryMedia!.fileFor(key),
-      isLocal: async (file) => { const state = await cloudFileState(file); return state !== 'icloud' && state !== 'cloud'; }
+      isLocal: async (file) => { const state = await inspectFileCloudState(file); return state !== 'icloud' && state !== 'cloud'; }
     });
     registerMediaPathIpc(ipcMain, mediaPaths, ctx);
     app.once('will-quit', () => { void mediaPaths.dispose(); });
