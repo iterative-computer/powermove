@@ -824,28 +824,46 @@ fn prune_before(dir: &Path, segment: u64) {
 struct Loaded {
     revision: u64,
     base: String,
-    document: Value,
-    history: Value,
+    document: Option<pm_model::Node>,
+    history: LoadedHistory,
     workspace: Value,
 }
+enum LoadedHistory {
+    Saved(Value),
+    Ready(History),
+}
 
-fn read_checkpoint(path: &Path) -> Option<Loaded> {
-    let mut text = String::new();
-    File::open(path).ok()?.read_to_string(&mut text).ok()?;
-    let (meta, doc) = text.split_once('\n')?;
-    let meta = parse(meta).ok()?;
+/// A checkpoint whose recorded document hash is `base`'s takes its document
+/// from `base` (a session's first checkpoint is the state it opened), so only
+/// its metadata line is read.
+fn read_checkpoint(path: &Path, base: Option<&Document>) -> Option<Loaded> {
+    use std::io::BufRead;
+    let mut file = io::BufReader::with_capacity(1 << 20, File::open(path).ok()?);
+    let mut meta = String::new();
+    file.read_line(&mut meta).ok()?;
+    let meta = parse(meta.strip_suffix('\n')?).ok()?;
     let m = meta.as_object()?;
     if m.get("format")?.as_str()? != CHECKPOINT_FORMAT {
         return None;
     }
-    if pm_model::hash::sha256_hex(doc.as_bytes()) != m.get("documentHash")?.as_str()? {
-        return None;
-    }
+    let hash = m.get("documentHash")?.as_str()?;
+    let revision = m.get("revision")?.as_f64()? as u64;
+    let document = match base.filter(|b| b.canonical_hash().as_deref() == Some(hash)) {
+        Some(base) => base.root().cloned(),
+        None => {
+            let mut doc = Vec::new();
+            file.read_to_end(&mut doc).ok()?;
+            if pm_model::hash::sha256_hex(&doc) != hash {
+                return None;
+            }
+            Some(pm_model::Node::parse_bytes(&doc, revision).ok()?)
+        }
+    };
     Some(Loaded {
-        revision: m.get("revision")?.as_f64()? as u64,
+        revision,
         base: m.get("base")?.as_str()?.to_owned(),
-        document: parse(doc).ok()?,
-        history: m.get("history")?.clone(),
+        document,
+        history: LoadedHistory::Saved(m.get("history")?.clone()),
         workspace: m.get("workspace").cloned().unwrap_or(Value::Null),
     })
 }
@@ -896,10 +914,11 @@ pub fn recover(
     current_base: Option<&str>,
     base_document: Option<&Value>,
 ) -> Recovery {
+    let document = base_document.map(|v| Document::new(Some(v.clone()), 1));
     recover_from(
         project_dir,
         current_base,
-        base_document.map(|document| Base {
+        document.as_ref().map(|document| Base {
             document,
             history: None,
             workspace: None,
@@ -910,9 +929,9 @@ pub fn recover(
 /// What a session's base holds, for replay when no checkpoint landed.
 pub struct Base<'a> {
     /// The canonical document (its hash is checked against the session's).
-    pub document: &'a Value,
-    /// Its saved undo history and workspace (`None`: none).
-    pub history: Option<&'a Value>,
+    pub document: &'a Document,
+    /// Its undo history and workspace (`None`: none).
+    pub history: Option<&'a History>,
     pub workspace: Option<&'a Value>,
 }
 
@@ -987,7 +1006,10 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
         if n < first {
             continue;
         }
-        if let Some(loaded) = read_checkpoint(&session.join(checkpoint_name(n))) {
+        if let Some(loaded) = read_checkpoint(
+            &session.join(checkpoint_name(n)),
+            base.as_ref().map(|b| b.document),
+        ) {
             start = Some((n, loaded));
             break;
         }
@@ -1000,7 +1022,7 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
                 return Err("no checkpoint covers the oldest journal segment".into());
             }
             let base = base.ok_or("no checkpoint was written and no base was given")?;
-            if pm_model::hash::canonical_hash(base.document) != session_base {
+            if base.document.canonical_hash().as_deref() != Some(session_base.as_str()) {
                 return Err("the given document is not this journal's base".into());
             }
             let revision = head.get("revision").and_then(Value::as_f64).unwrap_or(1.0) as u64;
@@ -1009,8 +1031,8 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
                 Loaded {
                     revision,
                     base: session_base.clone(),
-                    document: base.document.clone(),
-                    history: base.history.cloned().unwrap_or(Value::Null),
+                    document: base.document.root().cloned(),
+                    history: LoadedHistory::Ready(base.history.cloned().unwrap_or_default()),
                     workspace: base.workspace.cloned().unwrap_or(Value::Null),
                 },
             )
@@ -1018,17 +1040,20 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
     };
     let open_comp = loaded
         .document
-        .get("compId")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let history = if loaded.history.is_null() {
-        History::new()
-    } else {
-        History::from_saved(&loaded.history, open_comp.as_deref())
-            .ok_or("the checkpoint's history is invalid")?
+        .as_ref()
+        .and_then(|d| d.get("compId"))
+        .and_then(|id| match id.kind() {
+            pm_model::NodeKind::String(s) => s.as_str().map(str::to_owned),
+            _ => None,
+        });
+    let history = match loaded.history {
+        LoadedHistory::Ready(history) => history,
+        LoadedHistory::Saved(saved) if saved.is_null() => History::new(),
+        LoadedHistory::Saved(saved) => History::from_saved(&saved, open_comp.as_deref())
+            .ok_or("the checkpoint's history is invalid")?,
     };
     let mut r = Replay {
-        document: Document::new(Some(loaded.document), loaded.revision),
+        document: Document::from_root(loaded.document, loaded.revision),
         history,
         revision: loaded.revision,
         workspace: loaded.workspace,

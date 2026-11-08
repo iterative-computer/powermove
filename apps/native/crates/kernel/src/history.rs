@@ -512,6 +512,24 @@ impl History {
     }
 
     /// A copy for a save on another thread (records are shared, not copied).
+    /// Whether both save as the same `to_saved()` form, compared record by
+    /// record without building it. A false answer may still mean equal saves
+    /// (an entry kept as operations on one side), never the reverse.
+    pub fn saves_as(&self, other: &History) -> bool {
+        fn documents(records: &[HistoryRecord]) -> impl Iterator<Item = &HistoryRecord> {
+            records.iter().filter(|r| r.is_document())
+        }
+        documents(&self.entries).count() == documents(&other.entries).count()
+            && documents(&self.entries[..self.cursor]).count()
+                == documents(&other.entries[..other.cursor]).count()
+            && documents(&self.entries)
+                .zip(documents(&other.entries))
+                .all(|(a, b)| {
+                    a.label == b.label
+                        && ((a.forward == b.forward && a.inverse == b.inverse)
+                            || a.saved_form() == b.saved_form())
+                })
+    }
     pub fn snapshot(&self) -> HistorySnapshot {
         HistorySnapshot {
             records: self.entries.clone(),

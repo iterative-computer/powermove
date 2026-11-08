@@ -107,6 +107,65 @@ pub(crate) struct PendingRecovery {
     source: SessionSource,
     electron_profile: Option<PathBuf>,
     stamp: String,
+    /// What the prompt was prepared from, reused by the decision while
+    /// `fresh` still describes the disk (so a large project isn't read twice).
+    prepared: Option<Box<Prepared>>,
+    fresh: Freshness,
+}
+/// An open read up to its recovery decision.
+pub(crate) struct Prepared {
+    id: String,
+    source: OpenSource,
+    destination: Destination,
+    lock: Option<FileLock>,
+    decision: OpenDecision,
+    meta: Value,
+    rejected_history: Option<Value>,
+    base: String,
+    recovered: Recovery,
+    recovery_file: Option<project_io::ProjectFile>,
+}
+/// Sizes and modification times of the files an open read.
+type Freshness = Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)>;
+fn freshness(paths: impl IntoIterator<Item = PathBuf>) -> Freshness {
+    paths
+        .into_iter()
+        .map(|path| {
+            let seen = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| Some((m.len(), m.modified().ok()?)));
+            (path, seen)
+        })
+        .collect()
+}
+impl Prepared {
+    /// The file, slot and journal files this preparation read.
+    fn inputs(&self, journals: Option<PathBuf>, library: Option<&std::path::Path>) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = self
+            .recovery_file
+            .as_ref()
+            .and_then(|f| f.path.clone())
+            .into_iter()
+            .collect();
+        if let (Destination::Library(slot), Some(store)) = (&self.destination, library) {
+            paths.push(store.join(format!("project.{slot}.json")));
+        }
+        for session in journals
+            .map(|d| crate::journal::sessions(&d))
+            .unwrap_or_default()
+        {
+            paths.push(session.clone());
+            paths.extend(
+                std::fs::read_dir(&session)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path()),
+            );
+        }
+        paths.sort();
+        paths
+    }
 }
 enum RecoveryMode {
     Legacy,
@@ -209,14 +268,16 @@ fn with_identity(mut v: Value, id: &str, name: Option<&str>) -> Value {
     }
     v
 }
-/// The opened project as a value (the base recovery replays onto).
-fn source_value(source: &OpenSource) -> Value {
-    match source {
-        OpenSource::File(opened) => opened.document.to_value().unwrap_or(Value::Null),
+/// The opened project's canonical document (the base recovery replays onto).
+/// A file's is shared, not copied.
+fn source_document(source: &OpenSource) -> pm_model::Document {
+    let value = match source {
+        OpenSource::File(opened) => return opened.document.clone(),
         OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => lib.project.clone(),
         OpenSource::Untitled(value) => value.clone(),
         _ => Value::Null,
-    }
+    };
+    pm_model::Document::new(Some(crate::model::to_canonical(value)), 1)
 }
 fn set_workspace(source: &mut OpenSource, workspace: Value) {
     match source {
@@ -229,15 +290,10 @@ fn set_workspace(source: &mut OpenSource, workspace: Value) {
 }
 // A durable rebase checkpoint after a clean close contains no unsaved work.
 // Compare history and workspace too; document equality alone would hide edits.
-fn saved_state(source: &OpenSource) -> Option<(Value, Value)> {
-    let empty = || crate::History::new().snapshot().to_saved_packed();
+fn saved_state(source: &OpenSource) -> Option<(crate::History, Value)> {
     match source {
         OpenSource::File(opened) => Some((
-            opened
-                .history
-                .as_ref()
-                .map(|h| h.snapshot().to_saved_packed())
-                .unwrap_or_else(empty),
+            opened.history.clone().unwrap_or_default(),
             opened
                 .file
                 .envelope
@@ -251,9 +307,7 @@ fn saved_state(source: &OpenSource) -> Option<(Value, Value)> {
                 crate::History::import(h, canonical.get("compId").and_then(Value::as_str)).ok()
             });
             Some((
-                history
-                    .map(|h| h.snapshot().to_saved_packed())
-                    .unwrap_or_else(empty),
+                history.unwrap_or_default(),
                 lib.workspace
                     .clone()
                     .or_else(|| {
@@ -333,10 +387,20 @@ impl Kernel {
                 electron_profile,
             } => self.open_session_mode(id, source, electron_profile, RecoveryMode::Ask),
             ShellCall::DecideRecovery { ticket, decision } => {
-                let pending = self
+                let mut pending = self
                     .pending_recovery
                     .remove(&ticket)
                     .ok_or_else(|| failure("Recovery choice expired; prepare the open again"))?;
+                if let Some(prepared) = pending.prepared.take() {
+                    let journals = self.project_dir(match &prepared.destination {
+                        Destination::Library(slot) => slot,
+                        _ => &prepared.id,
+                    });
+                    let library = self.library.as_ref().map(|w| w.store().dir().to_path_buf());
+                    if freshness(prepared.inputs(journals, library.as_deref())) == pending.fresh {
+                        return self.settle_open(*prepared, Some(decision));
+                    }
+                }
                 self.open_session_mode(
                     pending.id,
                     pending.source,
@@ -911,7 +975,7 @@ impl Kernel {
         let mut lock = None;
         let mut meta = Value::Object(Map::new());
         let mut rejected_history = None;
-        let (mut source, mut destination, base) = match source {
+        let (mut source, destination, base) = match source {
             SessionSource::New(value) => {
                 let w = self
                     .library
@@ -1087,11 +1151,11 @@ impl Kernel {
                 }
                 let opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
-                // The opened tree is canonical already: hash it in place.
+                // The opened tree is canonical already: hash it in place
+                // (memoized on the document, which recovery reuses).
                 let hash = opened
                     .document
-                    .root()
-                    .map(pm_model::hash::canonical_hash)
+                    .canonical_hash()
                     .unwrap_or_else(|| crate::kernel::base_hash_of(&Value::Null));
                 (OpenSource::File(opened), Destination::File(path), hash)
             }
@@ -1111,7 +1175,7 @@ impl Kernel {
             .is_some_and(|dir| !crate::journal::sessions(&dir).is_empty());
         let mut recovered = Recovery::Nothing;
         if journaled {
-            let document = crate::model::to_canonical(source_value(&source));
+            let document = source_document(&source);
             let saved = saved_state(&source);
             recovered = self.recover_from(
                 recovery_id,
@@ -1127,13 +1191,9 @@ impl Kernel {
             if matches!(mode, RecoveryMode::Ask)
                 && let Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } = &recovered
                 && !r.truncated
-                && r.document
-                    .root()
-                    .map(pm_model::hash::canonical_hash)
-                    .as_deref()
-                    == Some(&base)
+                && r.document.canonical_hash().as_deref() == Some(&base)
                 && let Some((history, workspace)) = &saved
-                && r.history.snapshot().to_saved_packed() == *history
+                && r.history.saves_as(history)
             {
                 // The base already holds this document and undo history, so
                 // there is nothing to decide. A panel layout changed since is
@@ -1157,10 +1217,7 @@ impl Kernel {
                     base,
                     r.session.display(),
                     r.revision,
-                    r.document
-                        .root()
-                        .map(pm_model::hash::canonical_hash)
-                        .unwrap_or_default()
+                    r.document.canonical_hash().unwrap_or_default()
                 ),
                 Recovery::Unrecoverable { session, reason } =>
                     format!("{base}:{session:?}:{reason}"),
@@ -1183,6 +1240,21 @@ impl Kernel {
             };
             self.pending_recovery.retain(|_, p| p.id != id);
             let ticket = crate::new_id("recovery-choice");
+            let journals = self.project_dir(recovery_id);
+            let library = self.library.as_ref().map(|w| w.store().dir().to_path_buf());
+            let prepared = Prepared {
+                id: id.clone(),
+                source,
+                destination,
+                lock,
+                decision,
+                meta,
+                rejected_history,
+                base,
+                recovered,
+                recovery_file,
+            };
+            let fresh = freshness(prepared.inputs(journals, library.as_deref()));
             self.pending_recovery.insert(
                 ticket.clone(),
                 PendingRecovery {
@@ -1190,6 +1262,8 @@ impl Kernel {
                     source: original_source,
                     electron_profile,
                     stamp,
+                    prepared: Some(Box::new(prepared)),
+                    fresh,
                 },
             );
             return Ok(ShellReply::RecoveryRequired { ticket, recovery });
@@ -1203,6 +1277,40 @@ impl Kernel {
             }
             _ => None,
         };
+        self.settle_open(
+            Prepared {
+                id,
+                source,
+                destination,
+                lock,
+                decision,
+                meta,
+                rejected_history,
+                base,
+                recovered,
+                recovery_file,
+            },
+            choice,
+        )
+    }
+    /// The rest of an open once any recovery decision is made.
+    fn settle_open(
+        &mut self,
+        prepared: Prepared,
+        choice: Option<RecoveryDecision>,
+    ) -> Result<ShellReply, KernelFailure> {
+        let Prepared {
+            id,
+            mut source,
+            mut destination,
+            mut lock,
+            decision,
+            meta,
+            mut rejected_history,
+            base,
+            recovered,
+            recovery_file,
+        } = prepared;
         let setting_aside = matches!(
             choice,
             Some(RecoveryDecision::Discard | RecoveryDecision::OpenSavedVersion)
