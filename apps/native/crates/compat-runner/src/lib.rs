@@ -672,6 +672,12 @@ mod tests {
         assert_eq!(*painted.lock().unwrap(), vec!["t1".to_owned()]);
         runner.eval("dropRaster()").unwrap();
         assert_eq!(*producing.lock().unwrap(), vec![true, false]);
+        // An extension that replaces PM.raster itself (variable-font-anchor) counts too.
+        runner
+            .eval("const PM=__compat.realm.PM;globalThis.kept=PM.raster;PM.raster=(...a)=>kept(...a)")
+            .unwrap();
+        runner.eval("__compat.realm.PM.raster=kept").unwrap();
+        assert_eq!(*producing.lock().unwrap(), vec![true, false, true, false]);
     }
     #[test]
     fn render_frame_to_and_snapshot_read_the_engine_frame() {

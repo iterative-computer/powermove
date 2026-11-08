@@ -342,8 +342,7 @@ export class CompatRealm {
       byName: (name: string) =>
         this.PM.proj.layers?.find((layer: Data) => layer.name === name) ?? null,
       P: (v: any, extra: Data = {}) => ({ v, kf: [], expr: null, ...extra }),
-      raster: (...args: any[]) =>
-        (this.services.get<Function>("raster") ?? this.baseRaster)(...args),
+
     };
     let uid = 0;
     this.PM.uid = (prefix = "l") =>
@@ -384,6 +383,17 @@ export class CompatRealm {
     Object.assign(this.PM, options.capabilities?.PM ?? {});
     this.bridgeEvents();
     options.installLegacy?.(this.PM);
+    // Extensions also replace `PM.raster` itself (and put it back).
+    let raster: unknown = this.serviceRaster;
+    Object.defineProperty(this.PM, "raster", {
+      configurable: true,
+      enumerable: true,
+      get: () => raster,
+      set: (next: unknown) => {
+        raster = next;
+        this.rasterChanged();
+      },
+    });
     // A `raster` registration changes what the engine asks this realm for.
     const register = this.services.register.bind(this.services);
     this.services.register = ((name: string, implementation: unknown) => {
@@ -842,12 +852,17 @@ export class CompatRealm {
   };
   /** Tells the host whether an extension wraps the `raster` service. */
   private rasterChanged(): void {
-    const on = this.services.get("raster") !== this.baseRaster;
+    const on =
+      this.services.get("raster") !== this.baseRaster ||
+      this.PM.raster !== this.serviceRaster;
     if (on === this.overriding) return;
     this.overriding = on;
     this.options.capabilities?.rasterProducing?.(on);
   }
   private overriding = false;
+  /** `PM.raster` as the realm defines it: the `raster` service's top. */
+  private serviceRaster = (...args: any[]): any =>
+    (this.services.get<Function>("raster") ?? this.baseRaster)(...args);
   /** Metadata only: safe for headless inspection without exposing vars/user data. */
   inspect() {
     return {
