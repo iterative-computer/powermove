@@ -406,6 +406,8 @@ impl SlotView {
         *self.ivars().borrow_mut() = rects;
         self.setWantsLayer(true);
         let mask = objc2_quartz_core::CAShapeLayer::new();
+        // A mask is drawn within its own bounds; without a frame it hides everything.
+        mask.setFrame(self.bounds());
         mask.setPath(Some(&path));
         if let Some(layer) = self.layer() {
             unsafe { layer.setMask(Some(&mask)) }
