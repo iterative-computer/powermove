@@ -1,9 +1,9 @@
 //! Stills decoded ahead of the playhead on a worker, so a still layer
 //! entering playback does not decode on the frame that meets it.
 //!
-//! The worker runs the same [`pm_media::image::read`] the frame would; the
-//! frame takes the result when the file's stamp still matches and decodes
-//! itself otherwise. Only the decode moves: conversion and upload stay on
+//! The worker runs the same [`pm_media::image::read`] the frame would (and
+//! warms the per-stamp facts its probe reads); the frame takes the result
+//! when the file's stamp still matches and decodes itself otherwise. Only the decode moves: conversion and upload stay on
 //! the frame, so the pixels are the ones a cold read gives.
 
 use std::collections::{HashMap, HashSet};
@@ -59,6 +59,9 @@ impl StillPrefetch {
                 .name("pm-still-prefetch".into())
                 .spawn(move || {
                     for key in asks {
+                        // The frame's probe reads the file's facts first,
+                        // once per stamp: warm that cache here too.
+                        let _ = super::still_facts(&key.0);
                         let still = pm_media::image::read(&key.0, &pool).ok();
                         if done.send((key, still)).is_err() {
                             break;
