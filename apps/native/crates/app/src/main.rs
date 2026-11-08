@@ -34,6 +34,7 @@ mod playback;
 mod project_library;
 mod rows;
 mod session;
+mod shape_tool;
 mod sheets;
 mod smoke;
 mod surface_routes;

@@ -690,3 +690,63 @@ fn a_selected_layer_outside_the_playhead_has_no_box(cx: &mut TestAppContext) {
     });
     assert_eq!(ids, ["l0".to_string()]);
 }
+fn layer_value(kernel: &pm_kernel::KernelHandle, id: &str) -> Option<pm_model::Value> {
+    let p = kernel.published(PROJECT).unwrap();
+    let root = p.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, id)?;
+    Some(pm_kernel::model::layer_at(root, &at)?.to_value())
+}
+/// A static channel value: `p` of a layer, or of its first mask.
+fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
+    let owner = if mask {
+        layer.get("masks")?.as_array()?.first()?
+    } else {
+        layer
+    };
+    owner.get("p")?.get(key)?.get("v")?.as_f64()
+}
+/// Shape tool over a selected shape layer: the drag draws a new shape layer
+/// whose Scale is the drawn size, selected, in one undo step.
+#[gpui::test]
+fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("shape"));
+    s.recorder.tool.set(Some(Tool::Shape));
+    let at = s.point_of([300., 200.]);
+    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+    });
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let id = p.selection.layers()[0].clone();
+    let layer = layer_value(&s.rig.kernel, &id).unwrap();
+    assert_eq!(
+        layer.get("type").and_then(pm_model::Value::as_str),
+        Some("shape")
+    );
+    assert_eq!(channel(&layer, false, "position.x"), Some(330.));
+    assert_eq!(channel(&layer, false, "position.y"), Some(220.));
+    assert_eq!(channel(&layer, false, "scale.x"), Some(60.));
+    assert_eq!(channel(&layer, false, "scale.y"), Some(40.));
+    let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
+    s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
+    assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
+}
+/// With a maskable layer selected the drawn box becomes a mask on it.
+#[gpui::test]
+fn the_shape_tool_draws_a_mask_on_a_selected_image(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Shape));
+    let at = s.point_of([300., 200.]);
+    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        layer_value(&kernel, "l0").is_some_and(|l| channel(&l, true, "w").is_some())
+    });
+    let layer = layer_value(&s.rig.kernel, "l0").unwrap();
+    assert_eq!(channel(&layer, true, "feather"), Some(0.));
+    assert_eq!(channel(&layer, true, "w"), Some(60.));
+    assert_eq!(channel(&layer, true, "h"), Some(40.));
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.selection.layers(), ["l0".to_string()]);
+}

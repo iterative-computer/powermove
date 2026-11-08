@@ -990,6 +990,7 @@ impl crate::gizmo::Host for ControllerDelegate {
             "toolZoom" => Tool::Zoom,
             "toolRotate" => Tool::Rotate,
             "toolAnchor" => Tool::Anchor,
+            "toolShape" => Tool::Shape,
             _ => Tool::Other,
         }
     }
