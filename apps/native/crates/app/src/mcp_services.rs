@@ -277,7 +277,9 @@ fn frame(
         color: OutputColor::SrgbImage,
         precision: Precision::Float16,
         dither: false,
-        draft_from_proxies: false,
+        // A look at the project, as the viewer shows it: proxy-only media
+        // draws from its proxy. Exports still refuse it without a choice.
+        draft_from_proxies: true,
         delivery: Default::default(),
     };
     let directory = finish(jobs.start(published, settings, destination)?)?;

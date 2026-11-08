@@ -143,3 +143,4 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Reopening a library project unchanged rewrites only its row and view state, never its slot.
 - A record that a development-server IndexedDB origin also holds migrates from the shipped app's origin (`app_powermove_*`, captured first).
 - The window shows a project as soon as the kernel opens it; its media catalog follows from the background refresh.
+- MCP render_frames draws proxy-only media from its proxy, as the viewer does; export_video still refuses it (plan §6).

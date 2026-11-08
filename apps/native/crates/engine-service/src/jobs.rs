@@ -371,7 +371,14 @@ pub fn run_child() -> Result<()> {
         );
         doc.set_saving_app_version(request.saving_app_version);
         ensure!(
-            pm_export::render::offline_media(&doc, composition.as_str(), &media).is_empty(),
+            // An output without audio doesn't need an offline audio clip.
+            pm_export::render::offline_media_with_audio(
+                &doc,
+                composition.as_str(),
+                &media,
+                settings.audio,
+            )
+            .is_empty(),
             "export originals are offline; relink originals or explicitly choose draft"
         );
         if cancel.load(Ordering::Acquire) {
