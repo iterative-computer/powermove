@@ -69,7 +69,8 @@ export interface ExtensionRegistry {
   readonly buildDir: string;
   readonly userDir: string;
   list(): ExtensionRecord[];
-  refresh(ids?: string[]): Promise<void | string[]>;
+  refresh(ids?: string[]): Promise<void>;
+  refreshChanged?(ids?: string[]): Promise<string[]>;
   setEnabled(request: ExtensionSetEnabledRequest): Promise<ExtensionRecord[]>;
   remove(request: ExtensionIdRequest): Promise<ExtensionRecord[]>;
   reload(request: ExtensionIdRequest): Promise<ExtensionRecord[]>;
@@ -322,6 +323,10 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
     },
 
     refresh(ids) {
+      return registry.refreshChanged!(ids).then(() => undefined);
+    },
+
+    refreshChanged(ids) {
       if (ids !== undefined) ids.forEach(validateId);
       const version = (id: string): string | undefined => {
         const record = records.get(id);

@@ -13,7 +13,11 @@ async function fixture() {
   const media = new AgentMediaTools({ ffmpegPath: '/unused' });
   const run = vi.spyOn(media as any, 'run').mockResolvedValue({ code: 1, stdout: Buffer.alloc(0), stderr:
     "Input #0, mov, from 'synthetic.mov':\n  Duration: 00:00:01.00, start: 0.000000\n  Stream #0:0: Video: h264, yuv420p, 640x360, 30 fps\n" });
-  const context = { resolve: async () => ({ path: file, origin: 'source', asset: { id: 'clip', name: 'clip', kind: 'video', duration: 1, hasAudio: false, proxy: false } }) } as MediaToolContext;
+  const context: MediaToolContext = {
+    resolve: async () => ({ path: file, origin: 'source', asset: { id: 'clip', name: 'clip', kind: 'video', duration: 1, hasAudio: false, proxy: false } }),
+    renderFrames: async () => [],
+    composition: async () => ({ duration: 1, fps: 30, width: 640, height: 360 })
+  };
   const probe = () => media.call('probe_media', { assetId: 'clip' }, context);
   return { file, time, run, probe };
 }

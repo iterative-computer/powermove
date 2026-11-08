@@ -168,7 +168,7 @@ describe('extension registry', () => {
     await setup.registry.refresh();
     await fs.writeFile(file, 'export default () => 2');
     await fs.utimes(file, timestamp, timestamp);
-    expect(await setup.registry.refresh(['synced-ext'])).toEqual(['synced-ext']);
+    expect(await setup.registry.refreshChanged!(['synced-ext'])).toEqual(['synced-ext']);
     expect(setup.compile).toHaveBeenCalledTimes(2);
   });
 
@@ -179,11 +179,11 @@ describe('extension registry', () => {
     await setup.registry.refresh();
     await fs.utimes(file, new Date('2026-01-01'), new Date('2026-01-01'));
     await fs.utimes(directory, new Date('2026-01-01'), new Date('2026-01-01'));
-    expect(await setup.registry.refresh(['synced-ext'])).toEqual([]);
+    expect(await setup.registry.refreshChanged!(['synced-ext'])).toEqual([]);
     expect(setup.compile).toHaveBeenCalledTimes(1);
     await fs.writeFile(path.join(directory, '.incoming'), 'export default () => 1');
     await fs.rename(path.join(directory, '.incoming'), file);
-    expect(await setup.registry.refresh(['synced-ext'])).toEqual([]);
+    expect(await setup.registry.refreshChanged!(['synced-ext'])).toEqual([]);
     expect(setup.compile).toHaveBeenCalledTimes(1);
   });
 

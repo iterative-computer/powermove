@@ -45,17 +45,17 @@ function harness(overrides: Partial<ExtensionWatcherRegistry> = {}): {
 describe('extension watcher', () => {
   it('does not reload extensions after metadata-only file events', async () => {
     vi.useFakeTimers();
-    const setup = harness({ refresh: vi.fn().mockResolvedValue([]) });
+    const setup = harness({ refreshChanged: vi.fn().mockResolvedValue([]) });
     startExtensionWatcher({ userDir: '/tmp/extensions', buildDir: '/tmp/build', registry: setup.registry, watch: setup.watchDirectory });
     setup.listener()('change', 'synced-ext/index.ts');
     await vi.advanceTimersByTimeAsync(300);
-    expect(setup.registry.refresh).toHaveBeenCalledWith(['synced-ext']);
+    expect(setup.registry.refreshChanged).toHaveBeenCalledWith(['synced-ext']);
     expect(setup.registry.emitChanged).not.toHaveBeenCalled();
   });
 
   it('broadcasts only extensions with verified content or state changes', async () => {
     vi.useFakeTimers();
-    const setup = harness({ refresh: vi.fn().mockResolvedValue(['changed-ext']) });
+    const setup = harness({ refreshChanged: vi.fn().mockResolvedValue(['changed-ext']) });
     startExtensionWatcher({ userDir: '/tmp/extensions', buildDir: '/tmp/build', registry: setup.registry, watch: setup.watchDirectory });
     setup.listener()('change', 'changed-ext/index.ts');
     setup.listener()('change', 'touched-ext/index.ts');
