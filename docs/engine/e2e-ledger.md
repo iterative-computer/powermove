@@ -427,6 +427,75 @@ The Mac encoding-core replay with `pm-export --no-default-features` also
 passes **69 tests, 0 failed**. Its QoS callback installer is available to the
 Mac unit tests even when the renderer integration feature is disabled.
 
+### Frozen-corpus run on the owner's Mac, 2026-11-07
+
+Head `d324a46f4` (lane `feat/na-w15-engine`), M4 Max (12P + 4E), macOS 27,
+shared with other lanes (load 15 to 90). Original frozen witnesses under
+`PM_ENGINE_CORPUS_ROOT`; same-checkout `pm-glsl-compiler`. The 17 HANDOFF step 3
+packages (plus `pm-text` and `pm-perfbench` in the second run), every test
+binary run to completion with `RUST_TEST_THREADS=3`, as `--no-fail-fast` does.
+
+| Run | Binaries | Pass | Fail | Ignored | Harness `main` failing |
+|---|---:|---:|---:|---:|---|
+| Head, before this lane | 180 | 2,633 | 68 | 74 | `text_corpus` |
+| After this lane's fixes | 188 | 2,816 | 5 | 74 | `text_corpus`, perf `ratchet` |
+
+**Missing captures no longer pass.** On a machine with the corpus, a missing
+capture family fails the gate; with no corpus it prints `NOT RUN`. The newest
+capture is chosen by manifest `createdAt`: `threed-*` had resolved by name to a
+one-project capture instead of the three-project roles/maps capture. Tests that
+still did not run in the second run, counted as not run: 4 `pm-audio`
+`chromium` tests (no Electron `libffmpeg` in a native checkout) and
+`effects_webgl` perturbation (no perturbed WebGL capture).
+
+**Failures fixed (63, harness or setup):**
+
+- 60 `advanced_effects`, 2 `effect_versions`, 1 `pm-node` `compose`: the
+  two-slot GLSL compiler answered busy to parallel test fixtures. A test-only
+  `pm-glsl` feature makes the default pool wait for a slot within the deadline;
+  shipped admission still never queues.
+- `pm-glsl` `source_shader`: the test left out the camera log module that the
+  source pass includes.
+- `pm-audio` `legacy_parity`: `conformed` and `animated-trim` play the AAC video
+  soundtrack since exports mix with the playback mixer; without today's FFmpeg
+  they take `embedded`'s existing decode ceiling (−110.9 dBFS measured).
+
+**Open:**
+
+| Test | Class | Detail |
+|---|---|---|
+| `corpus_render_parity` | Real, unattributed | 362 frames compared, 488 failing checks. All 221 pending rows changed (180) or resolved (41). Measurements got worse, mostly "resampled image content" on transparent float frames (mean 0.06 → 6.4 CV, p99.9 1 → 107); opaque 8-bit frames of the same projects stay within 2 CV. At `40f9ee7c9` (the commit that recorded the rows) `render/fx-blur` passes; at `80bc541dd` and head it fails. Commits from the cloud etrack integration between them do not build, so bisection stops there. Not re-pinned. |
+| `text_corpus` (harness `main`) | Real plus missing witness | 48 frames: unowned text reference gaps and pending rows changed as above; 5 rows "not measured" because no `text-proj-*` capture exists. |
+| `scene3d`, `scene3d_gltf` G-D1 | Setup | Need `PM_SCENE3D_FLOAT_REF` / `PM_GLTF_FLOAT_REF` from `examples/scene3d_float_reference.ts`, which needs a Chromium bundle. Not generated. |
+| `playback` AUDIO-2 and scheduled-play line | Timing under load | AUDIO-2 passed in run 1 (7.3 to 8.1 ms, load 40) and failed in run 2 (13.7 to 15.7 ms, load 86, exports running). The 10.667 ms bound is unchanged. A shorter fresh-start grid cut the work but worsened fresh-start fidelity (3.58 dB LSD over the 3 dB bound), so it was not kept. |
+| perf `ratchet` | Real, pre-existing | `drag_500` heap bytes +0.8% and `blend_stack_cold` heap bytes +3.7% over their baselines on the merged head before this lane. `text_cold` passes again (see perfbench.md). |
+
+**Real projects (private copies; names stay out of Git).** Three local
+projects, 28.8 s to 87.4 s at 1080p, two of them drawing 39 user extensions'
+effects through `pm-cli render --contributed` (the definitions
+`pm-compat-runner` reads from the installed extensions). Every project
+exported its full duration in ProRes 422 HQ, ProRes 4444 with alpha, H.264,
+HEVC Main 10 and PNG: exact frame counts, profiles and bit depths, every frame
+decodes, 24-bit PCM or AAC audio. Decoded frames against the same render as a
+still: ProRes 4444 within 2 CV on opaque pixels with transparent background
+transparent; 4:2:2 and 4:2:0 deliveries 43 to 77 dB PSNR (their maximum errors
+sit on sharp chroma edges). The one project with an Electron capture (v1
+`real/`, 12 sample times) matches it within 1 CV on 98.5 to 99.6% of pixels;
+the rest are antialiased text and line edges. Open: one project's audio ends
+400 samples (8 ms) before its video when the composition duration is not a
+whole frame; a Store fork of a built-in could not draw saved instances until
+this lane's fork rule (now drawn); one project needs an extension that is not
+on this Mac.
+
+**Playback (`pm-engine-service --bench --project`, 1080p output, 60 Hz
+synthetic ticks, Auto).** 87 s project: 0 skipped targets and 0 stand-ins over
+25 s, Auto dropped to half resolution; frame cost p50 7.7 ms, p95 25 ms (after
+removing a per-frame whole-document walk: p50 was 9 to 11 ms). The section 5
+headroom (p95 ≤ 8.3 ms) is **not met**. Random seeks to a full-quality frame:
+p50 3 to 5 ms, p95 27 to 35 ms, max 49 ms. On screen (release build, window
+behind the owner's windows) 7 to 30% of presented frames reached the glass;
+an occluded window does not present, so on-glass drops are unmeasured.
+
 ### WIP owner handoff
 
 Validation was stopped at the orchestrator's request before the full engine
