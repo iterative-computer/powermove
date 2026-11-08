@@ -687,7 +687,7 @@ fn coverage(
     resolver.trim_after(
         lines.elements().len(),
         resolved.elements().len(),
-        super::scene::COVERAGE_PATH_CACHE_BYTES,
+        super::scene::NONZERO_RESOLVER_RETAIN_BYTES,
     );
     let mut areas = EdgeAreas::new(width, height, left, top);
     let (mut start, mut last, mut open) = (Point::ZERO, Point::ZERO, false);
