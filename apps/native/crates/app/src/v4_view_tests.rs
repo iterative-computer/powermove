@@ -612,3 +612,26 @@ fn playback_never_reaches_a_panel_between_its_start_and_end(cx: &mut TestAppCont
     assert_eq!(deliveries, 3);
     assert!(playing > baseline, "the play button changes once");
 }
+
+#[::core::prelude::v1::test]
+fn status_nodes_announce_when_they_appear_or_change_never_on_open() {
+    use crate::v4_view::status_announcements;
+    let mut seen = None;
+    let status = |id: u64, text: &str| (id, text.to_owned());
+    // Opening state is recorded, not read out.
+    assert!(status_announcements(&mut seen, [status(4, "Layer is locked")]).is_empty());
+    // Unchanged: silent. Changed or new: announced. Empty: silent.
+    assert!(status_announcements(&mut seen, [status(4, "Layer is locked")]).is_empty());
+    assert_eq!(
+        status_announcements(
+            &mut seen,
+            [status(4, "Removed marker"), status(9, "2 layers selected")]
+        ),
+        ["Removed marker", "2 layers selected"]
+    );
+    assert!(status_announcements(&mut seen, [status(4, "")]).is_empty());
+    assert_eq!(
+        status_announcements(&mut seen, [status(4, "3 layers selected")]),
+        ["3 layers selected"]
+    );
+}

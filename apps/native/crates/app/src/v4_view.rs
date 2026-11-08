@@ -132,6 +132,9 @@ pub struct SurfaceView {
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
     move_busy: bool,
+    /// Last label of each `role="status"` node; `None` until the first frame,
+    /// so a panel's opening state is not read out.
+    statuses: Option<HashMap<Id, String>>,
     queued_move: Option<(Id, EventDetail)>,
     latest: u64,
     requested: Option<(usize, usize)>,
@@ -183,6 +186,7 @@ impl SurfaceView {
             scrub_busy: false,
             scrub_shown: None,
             move_busy: false,
+            statuses: None,
             queued_move: None,
             latest: 0,
             requested: None,
@@ -261,6 +265,7 @@ impl SurfaceView {
         self.error = None;
     }
     fn reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.announce_statuses(window);
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
         self.controls.retain(|id, _| live(id));
@@ -315,6 +320,36 @@ impl SurfaceView {
                 continue;
             }
             self.mount_field(view, node, lease, window, cx);
+        }
+    }
+    /// `role="status"` is a live region: a status that appears or changes is
+    /// posted as an NSAccessibility announcement (VoiceOver reads it).
+    fn announce_statuses(&mut self, window: &Window) {
+        let surface = self.publication.surface.clone();
+        let current = self.prepared.nodes.keys().filter_map(|id| {
+            let node = surface.node(*id)?;
+            (node.props.get("role").and_then(Value::as_str) == Some("status")).then(|| {
+                let label = node.props.get("label").and_then(Value::as_str);
+                (*id, label.map_or_else(|| node.text.clone(), str::to_owned))
+            })
+        });
+        let messages = status_announcements(&mut self.statuses, current);
+        if messages.is_empty() || !self.appkit {
+            return;
+        }
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return;
+        };
+        let view: objc2::rc::Retained<objc2_app_kit::NSView> =
+            unsafe { objc2::rc::Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+        if let Some(ns_window) = view.window() {
+            for message in messages {
+                crate::v4_native::announce(&ns_window, &message);
+            }
         }
     }
     fn mount_control(
@@ -1783,6 +1818,27 @@ impl Render for Tooltip {
             .text_color(rgb(t.colors.text))
             .child(self.title.clone())
     }
+}
+/// What to announce: statuses that appeared or changed since the last frame,
+/// with non-empty text. The first frame only records them.
+pub(crate) fn status_announcements(
+    seen: &mut Option<HashMap<Id, String>>,
+    current: impl IntoIterator<Item = (Id, String)>,
+) -> Vec<String> {
+    let current: HashMap<Id, String> = current.into_iter().collect();
+    let messages = match seen {
+        None => vec![],
+        Some(previous) => {
+            let mut changed: Vec<_> = current
+                .iter()
+                .filter(|(id, text)| !text.is_empty() && previous.get(id) != Some(text))
+                .collect();
+            changed.sort_by_key(|(id, _)| **id);
+            changed.into_iter().map(|(_, text)| text.clone()).collect()
+        }
+    };
+    *seen = Some(current);
+    messages
 }
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;

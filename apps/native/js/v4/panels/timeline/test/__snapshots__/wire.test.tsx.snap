@@ -6582,6 +6582,56 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
               },
               "type": "div",
             },
+            {
+              "children": [
+                {
+                  "props": {},
+                  "text": "That time is outside the composition",
+                  "type": "text",
+                },
+              ],
+              "props": {
+                "id": "timeline:announcement",
+                "label": "That time is outside the composition",
+                "metadata": {
+                  "sequence": "2",
+                },
+                "role": "status",
+                "style": {
+                  "alignItems": "center",
+                  "background": {
+                    "token": "colors.floating",
+                  },
+                  "borderRadius": {
+                    "token": "metrics.control_radius",
+                  },
+                  "bottom": {
+                    "token": "metrics.inset",
+                  },
+                  "color": {
+                    "token": "colors.text",
+                  },
+                  "display": "flex",
+                  "fontSize": {
+                    "token": "typography.minimum",
+                  },
+                  "height": {
+                    "token": "metrics.field",
+                  },
+                  "left": {
+                    "token": "metrics.inset",
+                  },
+                  "paddingLeft": {
+                    "token": "metrics.gap",
+                  },
+                  "paddingRight": {
+                    "token": "metrics.gap",
+                  },
+                  "position": "absolute",
+                },
+              },
+              "type": "text",
+            },
           ],
           "props": {
             "id": "timeline:body",
@@ -6597,17 +6647,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
           "props": {
             "id": "timeline:render-bar",
             "label": "Rendered 0:00 to 0:12, rendering 0:12 to 0:14",
-          },
-          "type": "text",
-        },
-        {
-          "props": {
-            "id": "timeline:announcement",
-            "label": "That time is outside the composition",
-            "metadata": {
-              "sequence": "2",
-            },
-            "role": "status",
           },
           "type": "text",
         },

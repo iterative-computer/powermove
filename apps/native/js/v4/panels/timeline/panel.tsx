@@ -11,7 +11,7 @@ import type {
   Row,
   TimelineFrame,
 } from "./model";
-import { announcementText } from "./model";
+import { announcementText, type Announcement } from "./model";
 import { nativeEvent, type TimelineSession } from "./session";
 
 type Send = (intent: Intent) => void;
@@ -72,6 +72,14 @@ function Icon(props: {
     >
       {props.children}
     </UI.ToolbarItem>
+  );
+}
+/** Refused edits need visible feedback; confirmations do not. */
+function refusal(value: Announcement): boolean {
+  return (
+    value.kind === "keyCollision" ||
+    value.kind === "outsideComposition" ||
+    value.kind === "locked"
   );
 }
 function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
@@ -787,6 +795,32 @@ export function TimelinePanel({
                 Select an animated property to see its curve.
               </text>
             )}
+            {f.announcement && refusal(f.announcement.value) && (
+              // A refused edit stays visible: a quiet capsule over the tracks,
+              // also announced (role="status").
+              <text
+                id="timeline:announcement"
+                role="status"
+                label={announcementText(f.announcement.value)}
+                metadata={{ sequence: f.announcement.sequence }}
+                style={{
+                  position: "absolute",
+                  left: t("metrics.inset"),
+                  bottom: t("metrics.inset"),
+                  paddingLeft: t("metrics.gap"),
+                  paddingRight: t("metrics.gap"),
+                  height: t("metrics.field"),
+                  display: "flex",
+                  alignItems: "center",
+                  borderRadius: t("metrics.control_radius"),
+                  background: t("colors.floating"),
+                  color: t("colors.text"),
+                  fontSize: t("typography.minimum"),
+                }}
+              >
+                {announcementText(f.announcement.value)}
+              </text>
+            )}
           </div>
           <text id="timeline:render-bar" label={f.renderSummary} />
           {f.selection && f.selection.count > 1 && (
@@ -798,7 +832,8 @@ export function TimelinePanel({
               label={`${f.selection.count} ${f.selection.kind === "layers" ? "layers" : "keyframes"} selected`}
             />
           )}
-          {f.announcement && (
+          {f.announcement && !refusal(f.announcement.value) && (
+            // Confirmations (marker added/removed) are spoken only.
             <text
               id="timeline:announcement"
               role="status"
