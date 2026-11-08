@@ -150,12 +150,14 @@ export function PopUpButton(
     label?: string;
     options: (string | Option | { separator: true })[];
     widthSample?: string;
+    /** The button's title when it differs from the selected row. */
+    display?: string;
   },
 ) {
   // Inside an InspectorRow a pop-up is a `field`-high value well; standalone
   // it is a `control`-high button (language.md §9).
   const inRow = useContext(Label) !== undefined;
-  const { widthSample, options, ...rest } = props;
+  const { widthSample, display, options, ...rest } = props;
   return field("pop-up-button", "select", "button", {
     ...rest,
     // Keep the frozen primitive option shape. Native NSMenu presentation lives
@@ -176,6 +178,7 @@ export function PopUpButton(
     metadata: kitMetadata(props, {
       menu: json(options),
       ...(widthSample === undefined ? {} : { widthSample }),
+      ...(display === undefined ? {} : { display }),
     }),
     style: {
       height: token(inRow ? "metrics.field" : "metrics.control"),

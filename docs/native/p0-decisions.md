@@ -98,6 +98,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **`onPointerEnter` / `onPointerLeave` (2026-11-07, additive):** typed on every intrinsic element; the host already delivered `pointerenter`/`pointerleave` to listeners. Timeline rows use them to show their switches on hover.
 - **`EventPlan.semantic` (2026-11-08, additive, host↔renderer wire):** optional; the host sets it to the target's `id` when it planned an activation on an identified element, and the renderer then accepts the event even if a render restyled that element first (a hovered row stays clickable).
 
+- **`PopUpButton` `display` (2026-11-08, additive kit prop → `metadata.pmKit.display`):** the button's title when it differs from its selected row; the native `NSPopUpButton` shows it via its cell's own menu item (the viewer's zoom reads `Fit (54 %)` while its row is `Fit`).
+
+## Edit lane decisions (2026-11-08)
+
+- **On-canvas text** is an invisible P-TEXT canvas `NSTextView` (typing, IME, dictation, emoji, spelling) over engine-rendered text; the session is one kernel gesture ("Add Text" / "Edit Text"), the caret is the system `NSTextInsertionIndicator`, and frame, selection, misspellings and the marked-text underline are drawn from the engine's `textLayout`. Labels follow the kernel's title case.
+- **Pen and Text overlays draw in GPUI over the paused viewer** (plan §3.3 static case); transform gizmos stay engine-drawn.
+- **Shape variants** live in the toolbar Shape segment's menu; Q on the Shape tool cycles them (as on `main`); only Rectangle and Ellipse become masks.
+
 ## Look lane decisions (2026-11-08)
 
 - **The owner's GPUI demo is the visual reference.** Translucent window (`translucency.ground` at `translucency.window` over a behind-window blur), one shared panel material (`colors.panel` at `translucency.panel`) with a `text` hairline edge, 8 pt panel radius, 38 pt headers with a divider, 24 pt status line. Reduce Transparency makes both solid; Increase Contrast makes edges solid `separator`.
