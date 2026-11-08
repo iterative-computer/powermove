@@ -1549,9 +1549,16 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = node.id;
+        // A field grows along a row (value wells); in a column it spans the
+        // width at its own height instead of stretching downwards.
+        let in_row = node
+            .parent
+            .and_then(|p| self.prepared.node(p))
+            .is_some_and(|p| p.style.flex_direction == Some(FlexDirection::Row));
         let mut wrapper = div()
             .id(("field", id))
-            .flex_1()
+            .when(in_row, |d| d.flex_1())
+            .when(!in_row, |d| d.flex_none().w_full())
             .min_w(px(0.))
             .child(field.clone());
         if let Some(ax) = &node.ax {

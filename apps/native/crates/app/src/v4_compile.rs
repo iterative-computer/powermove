@@ -321,7 +321,8 @@ fn compile(
                 .items_center()
                 .min_h(px(t.metrics.row))
                 .mx(px(t.metrics.gap))
-                .px(px(t.metrics.gap)),
+                .px(px(t.metrics.gap))
+                .gap(px(t.metrics.gap)),
             // A section heading reads from the leading edge, chevron first.
             Some(Component::DisclosureButton) => sheet
                 .flex_row()
