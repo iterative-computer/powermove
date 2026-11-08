@@ -118,10 +118,10 @@ window is open is shown in it.
 - Contributed layer types render and label their timeline row, but their parameters
   have no Properties rows until per-kind controls are designed.
 - Layout reads in the realm are cached from the last page report (`remote-dom.md`).
-- A v4 extension adds a panel or replaces a whole built-in panel. It cannot yet
-  slot into part of another panel (a viewer overlay or timeline column without a
-  fork), register commands, menus or keybindings, or add toolbar items; v1–3
-  extensions can do the latter through the compat realm.
-- Each window reserves 64 MiB per isolate for up to 64 isolates; idle isolates are
-  not parked yet.
+- A v4 extension adds a panel, replaces a whole built-in panel, and registers
+  palette commands with shortcuts (`commands.register`). It cannot yet slot into
+  part of another panel (a viewer overlay or timeline column without a fork), add
+  menus or toolbar items; v1–3 extensions can add menus through the compat realm.
+- Each window reserves 64 MiB per isolate for up to 64 isolates, so many windows
+  can together reserve past the shared 4 GB cage; idle isolates are not parked.
 - Store panels have no recorder canvases, and `ui.*` from a helper is not attached.
