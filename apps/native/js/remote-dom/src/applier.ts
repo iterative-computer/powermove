@@ -41,6 +41,9 @@ export class PageApplier {
   private reverse = new WeakMap<object, number>();
   private subscriptions = new Map<number, Map<string, Policy>>();
   private handlers = new Map<string, EventListener>();
+  /** The panel's window and any window it presents part of its DOM in (a
+   * ui.modal sheet's document): events are captured in each. */
+  private windows = new Set<Window>();
   private resize: ResizeObserver | null = null;
   private observed = new Set<number>();
   private seq = 0;
@@ -67,6 +70,7 @@ export class PageApplier {
       this.nodes.set(id, { node, parent, kind });
       this.reverse.set(node, id);
     }
+    this.windows.add(this.document.defaultView);
     const RO = this.document.defaultView.ResizeObserver;
     if (RO)
       this.resize = new RO((entries) => {
@@ -83,6 +87,18 @@ export class PageApplier {
   node(id: number) {
     return this.nodes.get(id)?.node;
   }
+  /** A same-origin window showing some of this panel's nodes (adopted into
+   * its document): its events reach the realm as the panel's own. */
+  attachWindow(view: Window) {
+    if (this.retired || this.windows.has(view)) return;
+    this.windows.add(view);
+    for (const [type, handler] of this.handlers)
+      view.addEventListener(type, handler, { capture: true, passive: false });
+  }
+  detachWindow(view: Window) {
+    if (!this.windows.delete(view)) return;
+    for (const [type, handler] of this.handlers) view.removeEventListener(type, handler, true);
+  }
   private get(id: number): Mount {
     const node = this.nodes.get(id);
     if (!node) throw new Error('Unknown node');
@@ -91,7 +107,7 @@ export class PageApplier {
   private snapshot(id: number, styles: string[] = []): LayoutEntry {
     const node = this.get(id).node as Element,
       rect = node.getBoundingClientRect();
-    const computed = this.document.defaultView!.getComputedStyle(node);
+    const computed = (node.ownerDocument.defaultView ?? this.document.defaultView!).getComputedStyle(node);
     const values: Record<string, string> = {};
     // Cache declared style requests plus the complete enumerated declaration.
     for (const name of new Set([...Array.from(computed), ...styles]))
@@ -287,15 +303,18 @@ export class PageApplier {
         const control = node.localName === 'option' ? (node.closest('select') ?? node) : node;
         const newerInput = (this.edited.get(control) ?? 0) > (batch.caused_by ?? 0);
         switch (op.op) {
-          case 'insert':
-            (this.get(op.parent).node as Node).insertBefore(
-              node,
-              op.before === null ? null : (this.get(op.before).node as Node)
-            );
+          case 'insert': {
+            const parent = this.get(op.parent).node as Node;
+            // A sibling shown in another document (a ui.modal sheet) is not
+            // under `parent` here: the node goes last instead.
+            const before = op.before === null ? null : (this.get(op.before).node as Node);
+            parent.insertBefore(node, before?.parentNode === parent ? before : null);
             mount.parent = op.parent;
             break;
+          }
           case 'remove':
-            (this.get(op.parent).node as Node).removeChild(node);
+            // Wherever it is shown: its panel parent, or a sheet's document.
+            node.parentNode?.removeChild(node);
             mount.parent = null;
             break;
           case 'attribute':
@@ -381,12 +400,13 @@ export class PageApplier {
     else map.delete(type);
     if (!this.handlers.has(type) && enabled) {
       const handler = ((event: Event) => this.forward(event)) as EventListener;
-      this.document.defaultView!.addEventListener(type, handler, { capture: true, passive: false });
+      for (const view of this.windows)
+        view.addEventListener(type, handler, { capture: true, passive: false });
       this.handlers.set(type, handler);
     }
     if (!enabled && ![...this.subscriptions.values()].some((map) => map.has(type))) {
       const handler = this.handlers.get(type);
-      if (handler) this.document.defaultView!.removeEventListener(type, handler, true);
+      if (handler) for (const view of this.windows) view.removeEventListener(type, handler, true);
       this.handlers.delete(type);
     }
   }
@@ -467,7 +487,9 @@ export class PageApplier {
       );
     if (event.type === 'selectionchange') {
       this.selected = this.event + 1;
-      const selection = this.document.getSelection();
+      // The document the selection changed in: the panel's or a sheet's.
+      const target = event.target as any;
+      const selection = (target?.getSelection ? target : (target?.ownerDocument ?? this.document)).getSelection();
       data.selection = {
         anchor: selection?.anchorNode ? (this.reverse.get(selection.anchorNode) ?? null) : null,
         anchor_offset: selection?.anchorOffset ?? 0,
@@ -480,8 +502,8 @@ export class PageApplier {
       if ('value' in state) this.edited.set(node, this.event + 1);
     }
     if (event.type === 'focusin' || event.type === 'focusout') this.focused = this.event + 1;
-    if (event instanceof this.document.defaultView!.FocusEvent)
-      data.relatedTarget = this.reverse.get(event.relatedTarget as object) ?? null;
+    if (['focus', 'blur', 'focusin', 'focusout'].includes(event.type))
+      data.relatedTarget = this.reverse.get((event as FocusEvent).relatedTarget as object) ?? null;
     this.options.send({
       kind: 'event',
       session: this.session,
@@ -508,8 +530,9 @@ export class PageApplier {
     this.retired = true;
     this.resize?.disconnect();
     for (const [type, handler] of this.handlers)
-      this.document.defaultView!.removeEventListener(type, handler, true);
+      for (const view of this.windows) view.removeEventListener(type, handler, true);
     this.handlers.clear();
+    this.windows.clear();
     this.subscriptions.clear();
     this.nodes.clear();
     this.observed.clear();

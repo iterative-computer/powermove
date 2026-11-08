@@ -366,7 +366,7 @@ impl Bridge {
         if s.trust.is_store() || s.popouts.borrow().len() >= 8 {
             return None;
         }
-        let parent = web.window()?;
+        let parent = web.window();
         let mtm = self.mtm();
         let frame: Value = NSString::from_str(frame)
             .stringByRemovingPercentEncoding()
@@ -465,7 +465,11 @@ impl Bridge {
             right -= 12.;
         }
         s.popouts.borrow_mut().push((window.clone(), child.clone()));
-        parent.beginSheet_completionHandler(&window, None);
+        // A page with no window (headless tests) keeps the sheet unshown; its
+        // body and actions still work.
+        if let Some(parent) = parent {
+            parent.beginSheet_completionHandler(&window, None);
+        }
         s.handler.event(HostEvent::PopoutOpened);
         Some(child)
     }
@@ -738,6 +742,15 @@ impl MacDomHost {
     }
     pub fn web_view(&self) -> &WKWebView {
         &self.web
+    }
+    /// The page's open child web views (popouts and ui.modal sheet bodies).
+    pub fn child_web_views(&self) -> Vec<Retained<WKWebView>> {
+        self.shared
+            .popouts
+            .borrow()
+            .iter()
+            .map(|(_, web)| web.clone())
+            .collect()
     }
     /// Read exactly one rendered page node; no expression supplied by extension
     /// or caller executes in WebKit. Invoke on AppKit and poll on the worker.
@@ -1100,8 +1113,9 @@ impl MacDomHost {
             }
         }
         // User-closed child windows are removed without retaining hidden pages.
+        // A ui.modal sheet has no close box: it goes when its page closes it.
         self.shared.popouts.borrow_mut().retain(|(w, v)| {
-            if w.isVisible() {
+            if w.isVisible() || !w.styleMask().contains(NSWindowStyleMask::Closable) {
                 true
             } else {
                 unsafe {

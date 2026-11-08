@@ -26,21 +26,23 @@
     for (const style of document.querySelectorAll("style"))
       doc.head.append(doc.importNode(style, true));
     doc.body.append(doc.adoptNode(root));
+    // The sheet's input reaches the realm as the panel's own.
+    applier?.attachWindow(child);
     doc.addEventListener("keydown", (event) => {
       if (event.key === "Escape") root.querySelector("[data-pm-modal-dismiss]")?.click();
     });
     new MutationObserver(() => {
-      if (!root.isConnected || root.ownerDocument !== doc || root.parentNode !== doc.body) {
-        sheets.delete(root);
-        child.close();
-      }
+      if (!root.isConnected || root.ownerDocument !== doc || root.parentNode !== doc.body)
+        dismissSheet(root);
     }).observe(doc.body, { childList: true });
   };
-  new MutationObserver((records) => {
-    for (const record of records)
-      for (const node of record.addedNodes)
-        if (node.nodeType === 1 && node.matches?.("[data-pm-modal]")) present(node);
-  }).observe(document.body, { childList: true });
+  const dismissSheet = (root) => {
+    const child = sheets.get(root);
+    if (!child) return;
+    sheets.delete(root);
+    applier?.detachWindow(child);
+    child.close();
+  };
   const resourceImages = new WeakMap();
   // A removed image gives back its page URL (and the bytes behind it).
   const revoke = (node) => {
@@ -157,6 +159,7 @@
         await drawWaiting();
       } else if (event.kind === "destroy") {
         waiting.length = 0;
+        for (const root of [...sheets.keys()]) dismissSheet(root);
         applier?.dispose();
         applier = null;
         panel = null;
@@ -192,6 +195,13 @@
   document.addEventListener(
     "DOMContentLoaded",
     () => {
+      // ui.modal roots the realm appends to the body (it exists only now:
+      // this script runs in the head).
+      new MutationObserver((records) => {
+        for (const record of records)
+          for (const node of record.addedNodes)
+            if (node.nodeType === 1 && node.matches?.("[data-pm-modal]")) present(node);
+      }).observe(document.body, { childList: true });
       call({ kind: "ready", panel: 0, payload: { origin: location.origin } });
       void poll();
     },
