@@ -1132,7 +1132,7 @@ impl crate::gizmo::Host for ControllerDelegate {
                 .unwrap_or_default();
             let at = window.mouse_position();
             let ctx = serde_json::json!({"layerId": layers.first(), "layerIds": layers});
-            let choose: Box<dyn FnOnce(Option<usize>, &mut App)> = Box::new(move |index, cx| {
+            let choose: crate::timeline_surface::Choose = Box::new(move |index, cx| {
                 let rows = &crate::layer_commands::LAYER_MENU;
                 if let (Some((command, _)), Some(controller)) =
                     (index.and_then(|i| rows.get(i)), host.upgrade())
