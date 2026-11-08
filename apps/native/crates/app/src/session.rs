@@ -40,6 +40,8 @@ pub struct Controller {
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     pub opening: bool,
+    /// The project an open is reading, shown until it lands or fails.
+    pub opening_name: Option<String>,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
@@ -130,7 +132,8 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
-            panels::library(v, id, bounds, cx)
+            panels::opening(v, id, bounds)
+                .or_else(|| panels::library(v, id, bounds, cx))
                 .or_else(|| v.extension_panel(id, bounds, cx))
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
@@ -287,6 +290,7 @@ impl Controller {
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
             opening: false,
+            opening_name: None,
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
@@ -835,7 +839,9 @@ impl Controller {
         let kernel = self.kernel.clone();
         let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
-        self.message = "Opening…".into();
+        self.message = format!("Opening “{name}”…");
+        self.opening_name = Some(name.clone());
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let _operation = operation;
             let mut result = pending.await;
@@ -901,6 +907,7 @@ impl Controller {
             }
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
+                v.opening_name = None;
                 v.recovery_pending = false;
                 match result {
                     Some(Ok(ShellReply::Opened {
