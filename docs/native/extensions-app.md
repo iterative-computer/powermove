@@ -150,10 +150,21 @@ window is open is shown in it.
   asking twelve frames ahead while playing; an export child asks the parent for each
   layer through its pipes, with pixels in a private file. `render.raster`'s base is
   lazy and painted by a second renderer on its own thread (`LayerRasters`), so a
-  pass-through costs one JS call and no paint. Answers are per document (kernel
-  `doc_id`): each window's extensions answer its own project's frames and exports,
-  and a closed window's stop being asked. Override pixels travel premultiplied (the
-  engine's fast upload) and one texture serves every band of a frame. Release, 2 s
+  pass-through costs one JS call and no paint. A result counts as the layer only
+  while it is that layer's untouched base at the asked frame, scale and crop; any
+  write, canvas read, replacement layer or other frame sends its pixels (with `uv`, so
+  a crop window keeps its place). `null` draws nothing, as main; a throwing or
+  unreadable override fails that frame (the viewer holds it and does not ask again
+  until an edit or new wrappers; an export fails with the extension's message).
+  Answers are per document (kernel `doc_id`) and per wrapper generation (any
+  registration, removal or `PM.raster` change forgets them). An export pins its
+  frozen snapshot: the realm answers from that project (base rasters paint from that
+  document) and fails the export if its wrappers change mid-run. A capture
+  (`renderFrameTo`, snapshot) of the realm's own project answers the overrides it
+  needs inline while the realm waits (`render.continue`). Cancelling an export or
+  closing its window ends any wait at once; pixel files carry the job id. Override
+  pixels travel premultiplied (the engine's fast upload) and each renderer keeps one
+  texture per raster for every band. Release, 2 s
   test export with four overrides: 16 s against 4.5 s without extensions (76 s before
   the upload fixes); about 6 s of that is realm answers (480 asks, ~12 ms each).
 - `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine as
@@ -163,17 +174,20 @@ window is open is shown in it.
   the last four are cached by revision, and a stopped task or the 30 s host deadline
   cancels it. `mbSamples` is not honoured: the engine picks its own sample count.
 - Built-in services: `tool` follows the shell's tool (`toolSelect` is `select`; a
-  `tool` bus event on change; `setTool` runs the shell's tool command), and `viewer`
-  reports the viewer's zoom, pan and fit plus `worldBounds`. The native viewer is
-  Metal under no DOM, so `viewer.stage` and `ov` are `null` and `setZoom` returns
-  `false`: an extension drawing a DOM overlay on the viewer (displacement-origin-guide)
-  finds no stage and draws nothing. `timeline`, `inspector` and `shaderHooks` are not
-  registered.
+  `tool` bus event on change); `setTool` and its writable `tool`/`toolShape` change at
+  once, as main, and run the shell's tool command (the native Shape tool draws
+  rectangles whatever the shape). `viewer` reports the viewer's zoom, pan and fit plus
+  `worldBounds`; `setZoom` leaves fit at the clamped zoom as main. The native viewer
+  is Metal under no DOM, so `viewer.stage` and `ov` are `null`: an extension drawing a
+  DOM overlay on the viewer (displacement-origin-guide) finds no stage and draws
+  nothing. `timeline`, `inspector` and `shaderHooks` are not registered.
 - `ui.modal` is a native sheet on the window: AppKit title and buttons (primary last,
   on Return), the extension's body DOM in a child web view the page moves it into; a
   button clicks a hidden twin in the realm, so actions run there with main's rules
   (run then close unless it returns `false`; Escape dismisses unless
-  `dismissible: false`). Its body is a fixed 280 pt tall and scrolls. `PM.Fonts`
+  `dismissible: false`; `onClose` once on any close). The sheet's document is attached
+  to the panel's remote-DOM applier, so its input reaches the realm as the panel's
+  own. Its body is a fixed 280 pt tall and scrolls. `PM.Fonts`
   throws `Unavailable`.
 - `titlebar:right` has no host. `layer:context`, `timeline:context` and `viewer:context`
   rows follow the native rows in the timeline's and viewer's right-click NSMenus
