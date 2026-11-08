@@ -132,3 +132,4 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
 - Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
 - The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.
+- **v4 additive API:** `SegmentOption.symbol` (optional SF Symbol name) draws a glyph segment with the label as its tooltip and accessible name.

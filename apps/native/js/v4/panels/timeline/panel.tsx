@@ -220,18 +220,10 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             id="timeline:view"
             label="Timeline view"
             value={f.view}
-            metadata={{
-              designTodo: "T1",
-              requiredSymbols: [
-                "chart.bar.doc.horizontal",
-                "rectangle.split.1x2",
-                "bezier",
-              ],
-            }}
             options={[
-              { id: "DopeSheet", label: "Dope Sheet" },
-              { id: "Combined", label: "Dope Sheet and Graph" },
-              { id: "Graph", label: "Graph Editor" },
+              { id: "DopeSheet", label: "Dope Sheet", symbol: "chart.bar.doc.horizontal" },
+              { id: "Combined", label: "Dope Sheet and Graph", symbol: "rectangle.split.1x2" },
+              { id: "Graph", label: "Graph Editor", symbol: "point.topleft.down.to.point.bottomright.curvepath" },
             ]}
             onChange={(view) =>
               send({

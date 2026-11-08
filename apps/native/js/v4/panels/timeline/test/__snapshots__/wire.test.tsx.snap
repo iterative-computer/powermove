@@ -522,15 +522,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -566,19 +562,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -611,19 +604,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -656,6 +646,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -664,14 +655,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -1263,15 +1246,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -1307,19 +1286,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -1352,19 +1328,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -1397,6 +1370,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -1405,14 +1379,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -2114,15 +2080,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -2158,19 +2120,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -2203,19 +2162,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -2248,6 +2204,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -2256,14 +2213,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -3083,15 +3032,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -3127,19 +3072,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -3172,19 +3114,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -3217,6 +3156,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -3225,14 +3165,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -4052,15 +3984,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -4096,19 +4024,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -4141,19 +4066,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -4186,6 +4108,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -4194,14 +4117,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -5018,15 +4933,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -5062,19 +4973,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -5107,19 +5015,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -5152,6 +5057,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -5160,14 +5066,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -6125,15 +6023,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -6169,19 +6063,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -6214,19 +6105,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -6259,6 +6147,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -6267,14 +6156,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -6995,15 +6876,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -7039,19 +6916,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -7084,19 +6958,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -7129,6 +7000,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -7137,14 +7009,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -7970,15 +7834,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -8014,19 +7874,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -8059,19 +7916,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -8104,6 +7958,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -8112,14 +7967,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -9255,15 +9102,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -9299,19 +9142,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -9344,19 +9184,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -9389,6 +9226,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -9397,14 +9235,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -10106,15 +9936,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -10150,19 +9976,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -10195,19 +10018,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -10240,6 +10060,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -10248,14 +10069,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -16293,15 +16106,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -16334,19 +16143,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -16382,19 +16188,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -16427,6 +16230,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -16435,14 +16239,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -17199,15 +16995,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -17240,19 +17032,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -17285,19 +17074,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -17333,6 +17119,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -17341,14 +17128,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -18087,15 +17866,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -18131,19 +17906,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -18176,19 +17948,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -18221,6 +17990,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -18229,14 +17999,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -18893,15 +18655,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -18937,19 +18695,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -18982,19 +18737,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -19027,6 +18779,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -19035,14 +18788,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -19820,15 +19565,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -19864,19 +19605,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -19909,19 +19647,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -19954,6 +19689,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -19962,14 +19698,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {
@@ -20684,15 +20412,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 {
                   "children": [
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": true,
+                        "attr": {
+                          "symbol": "chart.bar.doc.horizontal",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:DopeSheet",
                         "label": "Dope Sheet",
@@ -20728,19 +20452,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": 0,
+                        "title": "Dope Sheet",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Dope Sheet and Graph",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "rectangle.split.1x2",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Combined",
                         "label": "Dope Sheet and Graph",
@@ -20773,19 +20494,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Dope Sheet and Graph",
                       },
                       "type": "button",
                     },
                     {
-                      "children": [
-                        {
-                          "props": {},
-                          "text": "Graph Editor",
-                          "type": "text",
-                        },
-                      ],
                       "props": {
                         "aria-checked": false,
+                        "attr": {
+                          "symbol": "point.topleft.down.to.point.bottomright.curvepath",
+                        },
                         "data-pm-component": "segment",
                         "id": "P0-1:Graph",
                         "label": "Graph Editor",
@@ -20818,6 +20536,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                         },
                         "tabIndex": -1,
+                        "title": "Graph Editor",
                       },
                       "type": "button",
                     },
@@ -20826,14 +20545,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "segmented-control",
                     "id": "timeline:view",
                     "label": "Timeline view",
-                    "metadata": {
-                      "designTodo": "T1",
-                      "requiredSymbols": [
-                        "chart.bar.doc.horizontal",
-                        "rectangle.split.1x2",
-                        "bezier",
-                      ],
-                    },
                     "role": "radiogroup",
                     "style": {
                       "background": {

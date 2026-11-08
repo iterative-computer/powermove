@@ -31,3 +31,11 @@ uses. The governing rules stay in [language.md](language.md).
   the row's tooltip.
 - A multi-column layout keeps the card grid (thumbnail, duration badge, name,
   metadata), for when the host supplies posters.
+
+## 2b. Timeline header
+
+- The view switch (Dope Sheet / Dope Sheet and Graph / Graph Editor) is a
+  three-glyph segmented control (`chart.bar.doc.horizontal`,
+  `rectangle.split.1x2`, `point.topleft.down.to.point.bottomright.curvepath`)
+  with the names as tooltips, so the header reads as transport + tabs, not a
+  row of long labels. Layers | Tracks stays text.
