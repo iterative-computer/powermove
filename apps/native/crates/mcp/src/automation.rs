@@ -137,7 +137,8 @@ pub struct Automation {
     pub export_child: Arc<dyn crate::services::ExportChild>,
     pub store_reads: Option<Arc<dyn crate::store::StoreRead>>,
     pub creative: Arc<dyn crate::creative::CreativeInspection>,
-    pub extension_sources: Option<Arc<dyn crate::extensions::ExtensionSources>>,
+    /// Extension authoring: staging, publication, forks and rebases.
+    pub extensions: Option<Arc<dyn crate::extensions::ExtensionHost>>,
 }
 impl Automation {
     /// `profile` must be an explicit, isolated native destination, never the
@@ -194,7 +195,7 @@ impl Automation {
             scene3d_assets: None,
             export_child: Arc::new(crate::services::NativeExportChild),
             store_reads: None,
-            extension_sources: None,
+            extensions: None,
             creative: Arc::new(crate::creative::CreativeReader::default()),
         }
     }
