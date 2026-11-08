@@ -165,7 +165,16 @@ impl Editor {
     /// Applies a theme's `nativePatch` (`Tokens::apply_patch`) to every editor
     /// window; it is re-applied on appearance and accessibility changes.
     pub fn apply_theme(&mut self, patch: crate::theme::Patch, cx: &mut Context<Self>) {
-        match crate::theme::set(patch) {
+        self.apply_themes(patch.clone(), patch, cx);
+    }
+    /// A theme with its own dark and light patches (`theme::set_schemes`).
+    pub fn apply_themes(
+        &mut self,
+        dark: crate::theme::Patch,
+        light: crate::theme::Patch,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::theme::set_schemes(dark, light) {
             Ok(()) => self.rebuild_tokens(),
             Err(e) => self.status = format!("The theme could not be applied: {}", e.0),
         }

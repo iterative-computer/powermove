@@ -49,7 +49,13 @@ const V4_MENU: &str = "extension.v4menu:";
 thread_local! {
     /// The v4 theme the person chose (`panel:id`), for every window.
     static ACTIVE_THEME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// The active v1–3 theme last applied, for every window: its translation
+    /// (as JSON text) and its dark and light patches. A v4 theme going away
+    /// shows this again.
+    static V1_THEME: std::cell::RefCell<Option<(String, Patches)>> = const { std::cell::RefCell::new(None) };
 }
+/// A theme's patches for dark and for light windows.
+type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
 /// Keys this window's list of contributed panels in the shell.
 static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -174,10 +180,8 @@ pub struct Extensions {
     pub v1_timeline: Value,
     /// The viewport last sent to the compat realm.
     viewport: Option<(f32, f32, f32)>,
-    /// The v4 theme an extension last asked to show (`themes.activate`).
-    v4_theme_requested: Option<String>,
-    /// The v1–3 theme last applied (id and patch), so republishing is free.
-    v1_theme: Option<String>,
+    /// The `themes.activate` request this window last acted on (its number).
+    v4_theme_requested: Option<u64>,
     v4_themes: Vec<Value>,
     v4_themes_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
@@ -216,7 +220,6 @@ impl Default for Extensions {
             v4_choices: vec![],
             v4_seen: 0,
             v4_theme_choices: vec![],
-            v1_theme: None,
             v4_theme_requested: None,
             viewport: None,
             v1_timeline: Value::Null,
@@ -880,32 +883,37 @@ impl Controller {
         cx.notify();
     }
     /// The active v1–3 theme, translated in the realm (plan 3.6.5), restyles
-    /// every window's chrome and native panels when it changes. Choosing a v4
-    /// theme from the palette afterwards replaces it until this one changes.
+    /// every window's chrome and native panels when it changes, in both
+    /// appearances. Choosing a v4 theme afterwards replaces it until this one
+    /// changes; another window publishing the same theme changes nothing.
     fn apply_v1_theme(&mut self, theme: &Value, cx: &mut Context<Self>) {
         if theme.is_null() {
             return;
         }
-        let dark = self.host.borrow().tokens.scheme == pm_design::Scheme::Dark;
-        let fields = &theme[if dark { "dark" } else { "light" }];
-        let key = format!("{}:{fields}:{}", theme["id"], theme["error"]);
-        if self.extensions.v1_theme.as_deref() == Some(key.as_str()) {
+        self.extensions.v1_timeline = theme["timeline"].clone();
+        let key = theme.to_string();
+        if V1_THEME.with(|t| t.borrow().as_ref().is_some_and(|(k, _)| *k == key)) {
             return;
         }
-        self.extensions.v1_theme = Some(key);
-        self.extensions.v1_timeline = theme["timeline"].clone();
         if let Some(error) = theme["error"].as_str() {
             let name = theme["id"].as_str().unwrap_or("theme");
             self.errors.borrow_mut().tell(
                 "Theme",
                 &format!("The theme “{name}” couldn’t be applied: {error}"),
             );
+            V1_THEME.with(|t| *t.borrow_mut() = Some((key, Default::default())));
             return;
         }
-        match theme_patch(fields) {
-            Ok(patch) => {
+        let light = if theme["light"].is_object() {
+            &theme["light"]
+        } else {
+            &theme["dark"]
+        };
+        match theme_patch(&theme["dark"]).and_then(|dark| Ok((dark, theme_patch(light)?))) {
+            Ok(patches) => {
+                V1_THEME.with(|t| *t.borrow_mut() = Some((key, patches.clone())));
                 ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
-                apply_theme(patch, cx);
+                apply_theme(patches, cx);
             }
             Err(message) => self.errors.borrow_mut().tell("Theme", &message),
         }
@@ -971,7 +979,11 @@ impl Controller {
                                 .run_menu(&panel, &key)
                                 .map_err(|e| format!("{e:?}"))
                                 .and_then(|ticket| {
-                                    wait_ticket(ticket, std::time::Duration::from_secs(30))
+                                    wait_ticket(
+                                        ticket,
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(30),
+                                    )
                                 })
                         })
                         .await;
@@ -990,12 +1002,12 @@ impl Controller {
             match (chosen, tokens) {
                 (None, _) => {
                     ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
-                    apply_theme(Vec::new(), cx);
+                    apply_theme(base_look(), cx);
                 }
                 (Some(key), Some(tokens)) => match theme_patch(&tokens) {
                     Ok(patch) => {
                         ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(key));
-                        apply_theme(patch, cx);
+                        apply_theme((patch.clone(), patch), cx);
                     }
                     Err(message) => self.errors.borrow_mut().tell("Theme", &message),
                 },
@@ -1078,41 +1090,33 @@ impl Controller {
         }
         self.extensions.v4_theme_choices = choices;
         self.host.borrow_mut().contributed_choices = self.extensions.palette_choices();
-        // An extension activating its theme (`themes.activate`) shows it, as
-        // v1–3's `theme.activate`; a later palette choice still wins.
-        let requested = self
-            .extensions
-            .v4_themes
-            .iter()
-            .find(|t| t["active"] == true)
-            .map(|t| {
-                format!(
-                    "{}:{}",
-                    t["panel"].as_str().unwrap_or_default(),
-                    t["id"].as_str().unwrap_or_default()
-                )
-            });
-        if requested != self.extensions.v4_theme_requested {
-            match &requested {
-                Some(key) => ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(key.clone())),
-                // `activate(null)` puts back the built-in look it replaced.
+        // The latest `themes.activate` in the window shows its theme, as v1–3's
+        // `theme.activate`; a later palette choice still wins. Each request
+        // acts once, so activating the same theme again shows it again.
+        if let Some((number, panel, id)) = runtime.theme_request()
+            && self.extensions.v4_theme_requested != Some(number)
+        {
+            self.extensions.v4_theme_requested = Some(number);
+            let prefix = format!("{panel}:");
+            match id {
+                Some(id) => ACTIVE_THEME.with(|a| *a.borrow_mut() = Some(format!("{prefix}{id}"))),
+                // `activate(null)` puts back what this extension's theme replaced.
                 None if ACTIVE_THEME
-                    .with(|a| *a.borrow() == self.extensions.v4_theme_requested) =>
+                    .with(|a| a.borrow().as_ref().is_some_and(|k| k.starts_with(&prefix))) =>
                 {
                     ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
-                    apply_theme(Vec::new(), cx);
+                    apply_theme(base_look(), cx);
                 }
                 None => {}
             }
-            self.extensions.v4_theme_requested = requested;
         }
         if let Some(active) = ACTIVE_THEME.with(|a| a.borrow().clone()) {
             match self.v4_theme(&active).map(|tokens| theme_patch(&tokens)) {
-                Some(Ok(patch)) => apply_theme(patch, cx),
+                Some(Ok(patch)) => apply_theme((patch.clone(), patch), cx),
                 Some(Err(message)) => self.errors.borrow_mut().tell("Theme", &message),
                 None => {
                     ACTIVE_THEME.with(|a| *a.borrow_mut() = None);
-                    apply_theme(Vec::new(), cx);
+                    apply_theme(base_look(), cx);
                 }
             }
         }
@@ -1563,18 +1567,27 @@ fn theme_patch(tokens: &Value) -> Result<pm_shell::theme::Patch, String> {
         })
         .collect()
 }
-/// Restyles every window with `patch` (empty: the built-in look), after the
-/// current update so each window's editor can be updated in turn.
-fn apply_theme(patch: pm_shell::theme::Patch, cx: &mut App) {
+/// Restyles every window with a dark and a light patch (empty: the built-in
+/// look), after the current update so each window's editor updates in turn.
+fn apply_theme((dark, light): Patches, cx: &mut App) {
     cx.defer(move |cx| {
         for window in cx.windows() {
             let Some(editor) = window.downcast::<pm_shell::view::Editor>() else {
                 continue;
             };
-            let patch = patch.clone();
-            let _ = editor.update(cx, |e, _, cx| e.apply_theme(patch, cx));
+            let (dark, light) = (dark.clone(), light.clone());
+            let _ = editor.update(cx, |e, _, cx| e.apply_themes(dark, light, cx));
         }
     });
+}
+/// What shows without a v4 theme: the active v1–3 theme, or the built-in look.
+fn base_look() -> Patches {
+    V1_THEME.with(|t| {
+        t.borrow()
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default()
+    })
 }
 
 #[cfg(test)]
@@ -1597,12 +1610,11 @@ mod theme_tests {
     }
 }
 
-/// Waits for a realm evaluation on a worker, up to `limit`.
+/// Waits for a realm evaluation on a worker until `deadline`.
 fn wait_ticket(
     ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>,
-    limit: std::time::Duration,
+    deadline: std::time::Instant,
 ) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + limit;
     loop {
         if let Some(result) = ticket.try_take() {
             return result.map(|e| e.value).map_err(|e| format!("{e:?}"));
@@ -1614,14 +1626,14 @@ fn wait_ticket(
     }
 }
 /// Every v4 extension's items for a menu, as native entries (off the main
-/// thread). Each realm answers within its own 100 ms, so this waits ~150 ms.
+/// thread). Realms gather in parallel, each giving its contributions 100 ms;
+/// one 150 ms deadline covers them all.
 fn v4_menu_items(runtime: &pm_builtins::Builtins, location: &str, ctx: &Value) -> Vec<MenuEntry> {
     let mut entries = vec![];
-    for (panel, ticket) in runtime.gather_menus(location, ctx) {
-        let Some(text) = ticket
-            .ok()
-            .and_then(|t| wait_ticket(t, std::time::Duration::from_millis(150)).ok())
-        else {
+    let tickets = runtime.gather_menus(location, ctx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+    for (panel, ticket) in tickets {
+        let Some(text) = ticket.ok().and_then(|t| wait_ticket(t, deadline).ok()) else {
             continue;
         };
         // The realm returns the items as JSON text.

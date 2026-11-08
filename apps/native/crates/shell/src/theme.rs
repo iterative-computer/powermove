@@ -9,7 +9,8 @@ use std::cell::RefCell;
 pub type Patch = Vec<(String, f64)>;
 
 thread_local! {
-    static THEME: RefCell<Patch> = const { RefCell::new(Vec::new()) };
+    /// The patch for dark and for light (a v1–3 theme has one per scheme).
+    static THEME: RefCell<[Patch; 2]> = const { RefCell::new([Vec::new(), Vec::new()]) };
 }
 
 /// Parses the theme pipeline's output: either `{ "nativePatch": { … } }`
@@ -31,25 +32,33 @@ pub fn parse(json: &str) -> Result<Patch, PatchError> {
         .collect()
 }
 
-/// Makes `patch` the current theme. A patch that pm-design rejects changes
-/// nothing (the previous theme stays).
+/// Makes `patch` the current theme for both schemes. A patch that pm-design
+/// rejects changes nothing (the previous theme stays).
 pub fn set(patch: Patch) -> Result<(), PatchError> {
-    Tokens::new(Scheme::Dark, Accessibility::default())
-        .apply_patch(patch.iter().map(|(k, v)| (k.as_str(), *v)))?;
-    THEME.with(|t| *t.borrow_mut() = patch);
+    set_schemes(patch.clone(), patch)
+}
+
+/// Makes `dark` and `light` the current theme, each used by windows in that
+/// appearance, so switching appearance needs no new theme.
+pub fn set_schemes(dark: Patch, light: Patch) -> Result<(), PatchError> {
+    for (scheme, patch) in [(Scheme::Dark, &dark), (Scheme::Light, &light)] {
+        Tokens::new(scheme, Accessibility::default())
+            .apply_patch(patch.iter().map(|(k, v)| (k.as_str(), *v)))?;
+    }
+    THEME.with(|t| *t.borrow_mut() = [dark, light]);
     Ok(())
 }
 
 /// Clears the theme (pm-design defaults).
 pub fn clear() {
-    THEME.with(|t| t.borrow_mut().clear());
+    THEME.with(|t| *t.borrow_mut() = [Vec::new(), Vec::new()]);
 }
 
 /// Tokens for `scheme` with the current theme applied.
 pub fn tokens(scheme: Scheme, accessibility: Accessibility) -> Tokens {
     let mut t = Tokens::new(scheme, accessibility);
     THEME.with(|p| {
-        let p = p.borrow();
+        let p = &p.borrow()[usize::from(scheme == Scheme::Light)];
         // `set` validated the patch; a failure here would leave `t` untouched.
         let _ = t.apply_patch(p.iter().map(|(k, v)| (k.as_str(), *v)));
     });
