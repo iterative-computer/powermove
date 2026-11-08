@@ -143,10 +143,15 @@ window is open is shown in it.
   stable), not the stored object. `structuredClone` accepts views; other natives that
   refuse proxies would not.
 
-- `render.raster` has no engine backend and raster overrides do not reach the viewer
-  or export (typewriter-effect, number-counter, linked-scene-bezier and
-  variable-font-anchor depend on them): the engine needs a render continuation that
-  asks the realm for a layer's canvas and resumes with its pixels (s5-compat.md §3).
+- Raster overrides (a `raster` service wrapper or a replaced `PM.raster`) draw in the
+  viewer and in exports through the engine's compat rasters (`pm_render::compat`):
+  `engine-service/src/compat.rs` holds the viewer's answers, a missed frame asks the
+  realm (`raster_overrides.rs`, `__compat.answerRasters`) and redraws when they land,
+  asking twelve frames ahead while playing; an export child asks the parent for each
+  layer through its pipes, with pixels in a private file. `render.raster`'s base is
+  lazy and painted by a second renderer on its own thread (`LayerRasters`), so a
+  pass-through costs one JS call and no paint. One window's realm answers for the app
+  (the last to register an override).
 - `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine as
   main draws it (opaque over black, motion blur unless `{mblur:false}`, a target canvas
   filled and returned; snapshot at most `maxWidth` wide, no blur, JPEG 0.74). Each new

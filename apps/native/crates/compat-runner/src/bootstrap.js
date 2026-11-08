@@ -200,7 +200,13 @@ globalThis.__compat = {
           return { native: true };
         }
       });
-      call("compat.answers", { batch, answers });
+      try {
+        call("compat.answers", { batch, answers });
+      } catch (error) {
+        // The engine waits for this batch; say why it never came.
+        this.reportFailure(error);
+        call("compat.answers", { batch, answers: answers.map(() => ({ native: true })) });
+      }
     };
     const capabilities = {
       rasterProducing: (on) => call("compat.producing", { on: !!on }),

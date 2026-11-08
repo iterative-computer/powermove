@@ -153,7 +153,7 @@ fn need_key(need: &CompatNeed) -> NeedKey {
     key(
         need.composition.as_str(),
         need.layer.as_str(),
-        need.time.get() as i64,
+        need.time.get(),
         need.scale,
         need.crop,
     )
@@ -222,12 +222,13 @@ impl CompatStore {
     pub fn set_frame(&self, ticks: i64) {
         self.answers.lock().unwrap().frame = ticks.max(0);
     }
-    /// A frame's missing answers: each is asked of the realm once, with the
-    /// same layers' next frames, so playback finds them answered.
-    pub(crate) fn request(&self, needs: Vec<CompatNeed>) {
+    /// A frame's missing answers: each is asked of the realm once, and while
+    /// playing with the same layers' next frames, so playback finds them answered.
+    pub(crate) fn request(&self, needs: Vec<CompatNeed>, playing: bool) {
         let mut answers = self.answers.lock().unwrap();
         let revision = answers.revision;
-        let frame = answers.frame;
+        // Ahead only while playing: a still frame needs itself alone.
+        let frame = if playing { answers.frame } else { 0 };
         let ahead = needs.iter().flat_map(|need| {
             (1..=AHEAD).filter(move |_| frame > 0).map(move |k| {
                 let mut next = need.clone();
@@ -301,7 +302,7 @@ impl CompatRasters for CompatStore {
         if source != CompatSource::RasterOverride {
             return CompatAnswer::Native;
         }
-        let ticks = pm_render::compat::ticks_of(time).get() as i64;
+        let ticks = pm_render::compat::ticks_of(time).get();
         self.answers
             .lock()
             .unwrap()

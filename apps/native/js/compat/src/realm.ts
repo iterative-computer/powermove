@@ -841,7 +841,17 @@ export class CompatRealm {
         uv: [0, 0, 1, 1],
       });
     };
-    const surface: Data = {};
+    // Today's cache key: the same layer, frame, scale and crop paint the same.
+    const surface: Data = {
+      key: JSON.stringify([
+        spec.id,
+        this.publication.revision,
+        time,
+        scale,
+        crop ?? null,
+        view ? null : spec.content,
+      ]),
+    };
     for (const key of ["cv", "w", "h", "anchorX", "anchorY", "selection", "fontOffset", "uv"])
       Object.defineProperty(surface, key, {
         enumerable: true,

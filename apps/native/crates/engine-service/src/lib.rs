@@ -1597,7 +1597,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                             _ => None,
                         };
                         if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
-                            store.request(needs);
+                            store.request(needs, spec.moment == policy::Moment::Playing);
                         }
                         if let Some(r) = runtime.get_mut(&id) {
                             let now = trace::now();
