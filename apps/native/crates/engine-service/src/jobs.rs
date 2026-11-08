@@ -40,6 +40,11 @@ pub struct ExportRequest {
     /// instead of refusing the job.
     #[serde(default)]
     pub bypass_missing_effects: bool,
+    /// Offline clips draw nothing and their audio is silent instead of
+    /// refusing the job (the shipped app's "Export Without Them"; its agent
+    /// exports never asked).
+    #[serde(default)]
+    pub without_offline: bool,
 }
 /// An export frame's raster override answer from the window that has the
 /// document open.
@@ -232,6 +237,7 @@ impl ExportRequest {
             resources: Default::default(),
             disk_reserve: DISK_RESERVE,
             bypass_missing_effects: false,
+            without_offline: false,
         })
     }
 }
@@ -566,17 +572,28 @@ pub fn run_child() -> Result<()> {
             request.revision,
         );
         doc.set_saving_app_version(request.saving_app_version);
-        ensure!(
-            // An output without audio doesn't need an offline audio clip.
-            pm_export::render::offline_media_with_audio(
-                &doc,
-                composition.as_str(),
-                &media,
-                settings.audio,
-            )
-            .is_empty(),
-            "export originals are offline; relink originals or explicitly choose draft"
+        // An output without audio doesn't need an offline audio clip.
+        let offline = pm_export::render::offline_media_with_audio(
+            &doc,
+            composition.as_str(),
+            &media,
+            settings.audio,
         );
+        if !offline.is_empty() && !request.without_offline {
+            let names: Vec<_> = offline.iter().take(3).map(|c| c.name.as_str()).collect();
+            let more = match offline.len().saturating_sub(3) {
+                0 => String::new(),
+                n => format!(" and {n} more"),
+            };
+            let count = match offline.len() {
+                1 => "1 clip is".to_owned(),
+                n => format!("{n} clips are"),
+            };
+            anyhow::bail!(
+                "{count} offline: {}{more}. Relink the originals, or choose Use Proxies (Draft) to export from proxies.",
+                names.join(", ")
+            );
+        }
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }

@@ -166,6 +166,8 @@ impl EngineJobs {
         }
         // A capture shows the project as the viewer does; a video is a delivery.
         request.bypass_missing_effects = look;
+        // As the shipped app's agent exports: offline clips are left out, not asked about.
+        request.without_offline = true;
         ExportHandle::start_scheduled(&self.executable, request, self.activity.clone())
     }
 }

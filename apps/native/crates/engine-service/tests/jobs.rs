@@ -9,7 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 fn request(destination: std::path::PathBuf, seconds: i32) -> ExportRequest {
-    let project = pm_model::json::parse(include_str!("fixtures/shapes.json")).unwrap();
+    request_for(include_str!("fixtures/shapes.json"), destination, seconds)
+}
+fn request_for(project: &str, destination: std::path::PathBuf, seconds: i32) -> ExportRequest {
+    let project = pm_model::json::parse(project).unwrap();
     #[cfg(feature = "kernel")]
     let s = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
     #[cfg(not(feature = "kernel"))]
@@ -308,4 +311,47 @@ fn child_export_renders_extension_effects_from_its_resources() {
     let status = run(request);
     assert_eq!(status.state, JobState::Done, "{status:?}");
     assert!(destination.is_file());
+}
+
+/// The fixture plus an image layer whose original is gone.
+fn with_offline_image() -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Limage".into();
+    layer["type"] = "image".into();
+    layer["name"] = "Gone".into();
+    layer["d"] = serde_json::json!({"asset":"Aimage"});
+    project["layers"].as_array_mut().unwrap().push(layer);
+    project["assets"] =
+        serde_json::json!({"Aimage":{"name":"gone.png","type":"image","w":40,"h":40}});
+    project.to_string()
+}
+#[test]
+fn an_offline_clip_refuses_by_name_unless_the_export_goes_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_offline_image();
+    let refused = ExportHandle::start(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        request_for(&project, dir.path().join("refused"), 1),
+    )
+    .unwrap()
+    .wait()
+    .unwrap();
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(message.contains("1 clip is offline: gone.png"), "{message}");
+    let mut without = request_for(&project, dir.path().join("without"), 1);
+    without.without_offline = true;
+    let done = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), without)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(done.state, JobState::Done, "{done:?}");
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("without"))
+            .unwrap()
+            .count(),
+        30
+    );
 }
