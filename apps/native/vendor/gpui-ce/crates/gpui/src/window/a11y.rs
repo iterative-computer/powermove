@@ -138,6 +138,9 @@ pub(crate) struct A11y {
     /// Updated by AccessKit using callbacks provided to the adapter. Can change
     /// halfway through a frame.
     active_flag: Arc<AtomicBool>,
+    /// The newest forced tree built while no assistive technology was
+    /// connected; handed to the adapter when it activates.
+    before_activation: Arc<parking_lot::Mutex<Option<TreeUpdate>>>,
     /// Whether a11y features are active for *this specific frame*.
     ///
     /// At the start of each frame, we load [`Self::active_flag`] (using
@@ -171,6 +174,7 @@ pub(crate) struct A11y {
 impl A11y {
     pub(crate) fn new(
         active_flag: Arc<AtomicBool>,
+        before_activation: Arc<parking_lot::Mutex<Option<TreeUpdate>>>,
         force_disabled: bool,
         forced: bool,
         window_title: Option<SharedString>,
@@ -179,6 +183,7 @@ impl A11y {
             force_disabled,
             forced,
             active_flag,
+            before_activation,
             active_this_frame: false,
             nodes: A11yNodeBuilder::new(),
             focus_ids: FxHashMap::default(),
@@ -290,6 +295,17 @@ impl A11y {
     }
 
     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
+    /// A forced tree the adapter would drop (nothing connected yet) is kept
+    /// for the activation, which otherwise returns only the root. Returns the
+    /// update when it is for the adapter instead.
+    pub(crate) fn keep_until_activation(&self, update: TreeUpdate) -> Option<TreeUpdate> {
+        if self.forced && !self.active_flag.load(Ordering::SeqCst) {
+            *self.before_activation.lock() = Some(update);
+            return None;
+        }
+        Some(update)
+    }
+
     pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
         let update = self.nodes.finalize();
         self.debug.capture(
@@ -676,7 +692,13 @@ mod tests {
     }
 
     fn new_a11y() -> A11y {
-        let mut a11y = A11y::new(Arc::new(AtomicBool::new(true)), false, false, None);
+        let mut a11y = A11y::new(
+            Arc::new(AtomicBool::new(true)),
+            Default::default(),
+            false,
+            false,
+            None,
+        );
         a11y.begin_frame();
         a11y
     }
@@ -684,7 +706,13 @@ mod tests {
     #[test]
     fn forced_builds_the_tree_without_an_assistive_client() {
         // No assistive technology has activated the platform adapter.
-        let mut a11y = A11y::new(Arc::new(AtomicBool::new(false)), false, true, None);
+        let mut a11y = A11y::new(
+            Arc::new(AtomicBool::new(false)),
+            Default::default(),
+            false,
+            true,
+            None,
+        );
         a11y.sync_active_flag();
         assert!(a11y.is_active());
 
@@ -695,7 +723,13 @@ mod tests {
 
     #[test]
     fn force_disabled_wins_over_forced() {
-        let mut a11y = A11y::new(Arc::new(AtomicBool::new(true)), true, true, None);
+        let mut a11y = A11y::new(
+            Arc::new(AtomicBool::new(true)),
+            Default::default(),
+            true,
+            true,
+            None,
+        );
         a11y.sync_active_flag();
         assert!(!a11y.is_active());
     }
