@@ -225,6 +225,7 @@ impl Controller {
     ) -> Self {
         let pro_media = Arc::new(crate::pro_media::ProMedia::new(
             profile.clone(),
+            crate::media::objects_dir(&profile),
             engine.export_activity(),
         ));
         pro_media.refresh_usage();
@@ -1152,6 +1153,7 @@ impl Controller {
             offline = resolved.resolution.failed.len();
             self.media_base = resolved.resolution.catalog;
             self.decorate_media();
+            self.identify_media();
             self.media_refresh.adopt(resolved.inputs);
         }
         self.mirror = None;

@@ -248,6 +248,7 @@ impl Controller {
         self.media_base = resolution.catalog;
         let before = std::mem::take(&mut self.media);
         self.decorate_media();
+        self.identify_media();
         if self.media != before {
             self.publish_media_catalog();
         }
@@ -263,7 +264,8 @@ impl Controller {
     pub(crate) fn decorate_media(&mut self) {
         let mut media = self.media_base.clone();
         if let Some(project) = self.session.as_ref().map(|s| s.project.clone()) {
-            self.pro_media.decorate(&project, &mut media);
+            self.pro_media
+                .decorate(&project, &mut media, &self.project_assets());
         }
         self.media = media;
     }
