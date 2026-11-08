@@ -79,7 +79,7 @@ export function planLoad(records: Data[]): {
     candidates.delete(target);
     skipped.push({ id: target, health: { state: "replaced", by } });
   }
-  for (let changed = true; changed;) {
+  for (let changed = true; changed; ) {
     changed = false;
     for (const id of [...candidates])
       for (const dep of byId.get(id)?.manifest?.dependsOn ?? []) {
@@ -324,7 +324,11 @@ export function createLoader(options: LoaderOptions) {
       for (const id of plan.order) {
         if (active.has(id)) continue;
         const record = records.get(id);
-        if (record) await activate(record);
+        if (!record) continue;
+        // Each activation is its own task: the watchdog times one extension,
+        // not a whole setup of them (and the page gets turns in between).
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await activate(record);
       }
     } finally {
       panels.dispose();
