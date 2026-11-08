@@ -1,6 +1,6 @@
 mod support;
 use pm_first_launch::{
-    Event, Outcome, State, Step, resume_with_secret_consent, run,
+    Event, Outcome, SHADER_CACHE, State, Step, resume_with_secret_consent, run,
     secrets::{SecretAccess, SecretStep},
 };
 use pm_kernel::{
@@ -645,6 +645,29 @@ fn kill_before_first_state_rename_resumes_only_own_bootstrap_artifacts() {
             .len(),
         1
     );
+}
+
+#[test]
+fn the_engines_shader_cache_written_before_the_gate_still_counts_as_fresh() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    let cache = config.native_profile.join(SHADER_CACHE).join("glsl");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("program.json"), b"{}").unwrap();
+    run(&config, |_| Ok(())).unwrap();
+    assert_eq!(
+        LibraryStore::open(&config.native_profile)
+            .projects()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Anything else there is someone's work: still refused.
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    fs::create_dir_all(config.native_profile.join("notes")).unwrap();
+    let error = run(&config, |_| Ok(())).unwrap_err();
+    assert!(format!("{error:#}").contains("not a fresh native beta profile"));
 }
 
 #[test]
