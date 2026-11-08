@@ -35,6 +35,29 @@ export interface BuiltinEnv {
   menus?: Menus;
   /** Extensions only: drawing over the viewer (see `Overlays`). */
   overlays?: Overlays;
+  /** Extensions only: the timeline's columns and metrics (see `Timeline`). */
+  timeline?: Timeline;
+}
+
+/**
+ * The timeline's chrome, as v1–3 extensions set `workspace.chrome.timeline`:
+ * `chrome({ rowHeight, gutterWidth, rulerHeight, clipRadius, keyframeSize,
+ * showLayerNumbers, showTypeBadges, toolbarDensity, surfaceOrder })`, each
+ * optional, within v1's ranges. What an extension changes is put back when it
+ * leaves.
+ */
+export interface Timeline {
+  chrome(patch: {
+    rowHeight?: number;
+    gutterWidth?: number;
+    rulerHeight?: number;
+    clipRadius?: number;
+    keyframeSize?: number;
+    showLayerNumbers?: boolean;
+    showTypeBadges?: boolean;
+    toolbarDensity?: "compact" | "normal";
+    surfaceOrder?: "normal" | "reversed";
+  }): void;
 }
 
 /**

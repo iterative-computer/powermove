@@ -256,7 +256,18 @@ impl TimelineSurface {
     }
     pub fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
         if self.tokens != tokens {
+            // A layer column the person never dragged follows the theme's
+            // (workspace timeline chrome); a dragged one stays.
+            let (old, new) = (
+                self.tokens.metrics.layer_column as f64,
+                tokens.metrics.layer_column as f64,
+            );
+            let follows = (self.view.layer_column - old).abs() < 0.5 && old != new;
             self.tokens = tokens;
+            if follows {
+                self.view.layer_column = new;
+                self.changed(false, cx);
+            }
             self.frame = None;
             self.published(cx);
         }

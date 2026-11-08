@@ -4,7 +4,7 @@ see its effect, revert it, see it gone. Synthetic extensions only.
 
 usage: agent-flows.py <powermove-native> <profile> [flow ...]
        (pm-gui launch <lane> <project> first; the profile is the lane's)
-Flows: v4-theme, v4-overlay, v1-theme (default: all). Exit status 1 on any failure.
+Flows: v4-theme, v4-overlay, v1-timeline, v4-timeline, v1-theme (default: all). Exit status 1 on any failure.
 """
 import base64, json, os, shutil, subprocess, sys, tempfile, time, zlib
 
@@ -81,6 +81,52 @@ def panel_colour(mcp):
     return png_pixel(image, w // 2, h - 40)[:3]
 
 
+def png_rows(data):
+    """(width, rows of RGBA bytes) of an 8-bit RGBA, non-interlaced PNG."""
+    at, chunks, width, height = 8, b"", 0, 0
+    while at < len(data):
+        length = int.from_bytes(data[at:at + 4], "big")
+        kind, body = data[at + 4:at + 8], data[at + 8:at + 8 + length]
+        if kind == b"IHDR":
+            width, height = int.from_bytes(body[:4], "big"), int.from_bytes(body[4:8], "big")
+        if kind == b"IDAT":
+            chunks += body
+        at += 12 + length
+    raw, stride = zlib.decompress(chunks), width * 4
+    rows, prev = [], bytearray(stride)
+    for r in range(height):
+        line = raw[r * (stride + 1):(r + 1) * (stride + 1)]
+        kind, row = line[0], bytearray(line[1:])
+        for i in range(stride):
+            a = row[i - 4] if i >= 4 else 0
+            b, c = prev[i], prev[i - 4] if i >= 4 else 0
+            if kind == 1: row[i] = (row[i] + a) & 255
+            elif kind == 2: row[i] = (row[i] + b) & 255
+            elif kind == 3: row[i] = (row[i] + (a + b) // 2) & 255
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                row[i] = (row[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(row)
+        prev = row
+    return width, rows
+
+
+CLIP = (31, 75, 82)
+
+
+def clip_left(mcp):
+    """Where the first clip starts in the timeline, in panel points: it sits at
+    the layer column's right edge."""
+    content = mcp.tool("capture_panel", {"panelId": "timeline"})
+    facts = json.loads(content[0]["text"])
+    width, rows = png_rows(base64.b64decode(content[1]["data"]))
+    points = facts["bounds"]["width"] / width
+    left = min((x for row in rows for x in range(width)
+                if near(tuple(row[x * 4:x * 4 + 3]), CLIP, 6)), default=None)
+    return None if left is None else round(left * points)
+
+
 def viewer_centre(mcp):
     """The viewer capture's centre: the composition's middle."""
     content = mcp.tool("capture_panel", {"panelId": "viewer"})
@@ -123,6 +169,21 @@ EXTENSIONS = {
                    "    background: '#5a1f8c' } }));\n"
                    "}\n"
                    "export function view() { return jsx('text', { children: 'Flow overlay' }); }\n"),
+    "v1-timeline": ({"id": "agent-flow-v1-timeline", "name": "Flow Timeline", "version": "1.0.0",
+                     "apiVersion": 3, "entry": "index.ts", "author": "agent"},
+                    "index.ts",
+                    "export default function activate(api) {\n"
+                    "  api.workspace.mutate((workspace) => {\n"
+                    "    workspace.chrome ??= {};\n"
+                    "    workspace.chrome.timeline = { ...(workspace.chrome.timeline ?? {}), gutterWidth: 420 };\n"
+                    "  });\n"
+                    "}\n"),
+    "v4-timeline": ({"id": "agent-flow-v4-timeline", "name": "Flow Timeline v4", "version": "1.0.0",
+                     "apiVersion": 4, "entry": "index.tsx", "author": "agent"},
+                    "index.tsx",
+                    "import { jsx } from 'powermove/jsx-runtime';\n"
+                    "export function activate({ timeline }) { timeline.chrome({ gutterWidth: 340 }); }\n"
+                    "export function view() { return jsx('text', { children: 'Flow timeline' }); }\n"),
     "v1-theme": ({"id": "agent-flow-v1-theme", "name": "Flow Theme v1", "version": "1.0.0",
                   "apiVersion": 3, "entry": "index.ts", "contributes": ["themes"], "author": "agent"},
                  "index.ts",
@@ -134,12 +195,21 @@ EXTENSIONS = {
 }
 
 
-PROBES = {"v4-overlay": viewer_centre}
+PROBES = {"v4-overlay": viewer_centre, "v1-timeline": clip_left, "v4-timeline": clip_left}
+# (visible?, reverted?) given the probe before and now; colours by default.
+CHECKS = {
+    "v1-timeline": (lambda before, now: now is not None and now >= 410,
+                    lambda before, now: now is not None and abs(now - before) <= 3),
+    "v4-timeline": (lambda before, now: now is not None and abs(now - 341) <= 3,
+                    lambda before, now: now is not None and abs(now - before) <= 3),
+}
+COLOUR = (lambda before, now: near(now, PURPLE), lambda before, now: near(now, before, 6))
 
 
 def flow(mcp, name):
     manifest, entry, source = EXTENSIONS[name]
     probe = PROBES.get(name, panel_colour)
+    visible, reverted = CHECKS.get(name, COLOUR)
     eid = manifest["id"]
     session = json.loads(mcp.tool("start_session", {"prompt": f"Agent flow {name}"})[0]["text"])
     stage = session["stagingDirectory"]
@@ -159,12 +229,13 @@ def flow(mcp, name):
             f.write(source)
         mcp.tool("publish_extensions", {"extensions": [
             {"id": eid, "action": "created", "summary": f"{name} flow"}]})
-        until(f"{name} visible", lambda: near(probe(mcp), PURPLE))
+        shown = until(f"{name} visible",
+                      lambda: (lambda now: visible(before, now) and [now])(probe(mcp)))[0]
         shutil.rmtree(folder)
         mcp.tool("publish_extensions", {"extensions": [
             {"id": eid, "action": "removed", "summary": f"{name} flow revert"}]})
-        until(f"{name} reverted", lambda: near(probe(mcp), before, 6))
-        print(f"ok {name}: {before} -> purple -> {probe(mcp)}")
+        until(f"{name} reverted", lambda: reverted(before, probe(mcp)))
+        print(f"ok {name}: {before} -> {shown} -> {probe(mcp)}")
     finally:
         mcp.tool("finish_session", {"commit": False})
 

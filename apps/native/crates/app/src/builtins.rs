@@ -451,7 +451,12 @@ impl Controller {
             return None;
         }
         let runtime = self.builtins.runtime.clone()?;
-        let t = self.host.borrow().tokens.clone();
+        let mut t = self.host.borrow().tokens.clone();
+        if id == "timeline"
+            && let Some(p) = &self.published
+        {
+            t = timeline_chrome(t, &p.workspace);
+        }
         if let Some(publication) = self.builtins.pending.remove(id) {
             let (tokens, natives) = (t.clone(), self.builtins.natives.clone());
             let outline = natives.outline.clone();
@@ -1244,4 +1249,36 @@ impl Render for SurfaceWindow {
             .bg(rgb(fill))
             .children(body)
     }
+}
+
+/// v1–3's timeline chrome (`workspace.chrome.timeline`, which extensions set
+/// through `workspace.mutate`) as the timeline's metrics, within v1's ranges:
+/// row height, layer column (gutter) width, ruler height and keyframe size.
+pub fn timeline_chrome(mut t: pm_design::Tokens, workspace: &pm_model::Value) -> pm_design::Tokens {
+    let chrome = workspace
+        .get("chrome")
+        .and_then(|c| c.get("timeline"))
+        .map(|c| {
+            serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(c))
+                .unwrap_or(Value::Null)
+        })
+        .unwrap_or(Value::Null);
+    let field = |key: &str, low: f64, high: f64| {
+        chrome[key]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(|v| v.round().clamp(low, high))
+    };
+    let m = &mut t.metrics;
+    for (target, value) in [
+        (&mut m.track_row, field("rowHeight", 22., 48.)),
+        (&mut m.layer_column, field("gutterWidth", 160., 640.)),
+        (&mut m.ruler, field("rulerHeight", 20., 42.)),
+        (&mut m.keyframe, field("keyframeSize", 4., 12.)),
+    ] {
+        if let Some(value) = value {
+            *target = value as f32;
+        }
+    }
+    t
 }

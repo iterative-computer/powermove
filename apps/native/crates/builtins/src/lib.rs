@@ -152,6 +152,9 @@ struct Broker {
     commands: Mutex<(u64, BTreeMap<String, Value>)>,
     /// Themes each extension realm offers (`themes.register`), by panel.
     themes: Mutex<(u64, BTreeMap<String, Value>)>,
+    /// The timeline chrome each extension replaced (`timeline.chrome`), put
+    /// back when it leaves, as v1's workspace ownership did.
+    timeline_owners: Mutex<BTreeMap<String, Value>>,
     /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
     overlays_cleared: Mutex<Vec<String>>,
 }
@@ -628,6 +631,7 @@ impl Builtins {
             commands: Default::default(),
             themes: Default::default(),
             overlays_cleared: Default::default(),
+            timeline_owners: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -696,6 +700,7 @@ impl Builtins {
         self.broker.forget_commands(panel);
         self.broker.forget_themes(panel);
         self.broker.forget_overlay(panel);
+        self.broker.forget_timeline(panel);
     }
     /// A user fork (manifest `replaces`) draws the built-in `panel` instead of
     /// it: same realm identity, routes and host operations, the fork's code.
@@ -770,6 +775,7 @@ impl Builtins {
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
         self.broker.forget_overlay(id);
+        self.broker.forget_timeline(id);
     }
     /// Every extension command in this window when they changed since `seen`:
     /// `(revision, [{panel, id, title, key}])`.
@@ -1508,6 +1514,37 @@ impl EngineProxy for Broker {
                     ),
                 }
             }
+            "timeline.chrome" => {
+                let patch = timeline_patch(input);
+                if patch.as_object().is_none_or(|p| p.is_empty()) {
+                    return Err(Error::Invalid(
+                        "timeline chrome needs at least one known field",
+                    ));
+                }
+                let current = self.workspace_value();
+                self.timeline_owners
+                    .lock()
+                    .unwrap()
+                    .entry(panel.into())
+                    .or_insert_with(|| current["chrome"]["timeline"].clone());
+                let mut next = current;
+                if !next["chrome"].is_object() {
+                    next["chrome"] = json!({});
+                }
+                let mut timeline = next["chrome"]["timeline"].clone();
+                if !timeline.is_object() {
+                    timeline = json!({});
+                }
+                for (key, value) in patch.as_object().into_iter().flatten() {
+                    if key == "surfaceOrder" {
+                        next["chrome"]["timelineSurfaceOrder"] = value.clone();
+                    }
+                    timeline[key] = value.clone();
+                }
+                next["chrome"]["timeline"] = timeline;
+                self.write_workspace(next)?;
+                Ok(Value::Null)
+            }
             "overlay.clear" => {
                 entry.overlay = Surface::default();
                 self.overlays_cleared
@@ -1683,6 +1720,44 @@ impl KernelHooks for Broker {
     fn seal_open_gestures(&self, _: &Generation) {}
 }
 impl Broker {
+    /// The project's workspace as JSON (`null` with none).
+    fn workspace_value(&self) -> Value {
+        self.kernel
+            .published(&self.project)
+            .and_then(|p| {
+                serde_json::from_str(&pm_model::json::to_canonical_string(&p.workspace)).ok()
+            })
+            .unwrap_or(Value::Null)
+    }
+    /// Queues the workspace write; host ops run on the main thread, which
+    /// never waits on the kernel (the publication follows on its own).
+    fn write_workspace(&self, next: Value) -> Result<()> {
+        let next =
+            pm_model::json::parse(&next.to_string()).map_err(|e| Error::Host(e.to_string()))?;
+        let call = pm_kernel::WorkspaceCall::Mutate { next, threw: None };
+        drop(self.kernel.call(
+            &self.project,
+            pm_kernel::Request::new(pm_kernel::Caller::native(), call),
+        ));
+        Ok(())
+    }
+    /// An extension leaving puts back the timeline chrome it replaced.
+    fn forget_timeline(&self, panel: &str) {
+        let Some(previous) = self.timeline_owners.lock().unwrap().remove(panel) else {
+            return;
+        };
+        let mut next = self.workspace_value();
+        if next["chrome"].is_object() {
+            if previous.is_null() {
+                if let Some(chrome) = next["chrome"].as_object_mut() {
+                    chrome.remove("timeline");
+                }
+            } else {
+                next["chrome"]["timeline"] = previous;
+            }
+            let _ = self.write_workspace(next);
+        }
+    }
     fn forget_overlay(&self, panel: &str) {
         let id = format!("{panel}{VIEWER_OVERLAY}");
         self.publications.lock().unwrap().remove(&id);
@@ -1728,3 +1803,39 @@ impl WatchdogHooks for Broker {
 
 #[cfg(test)]
 mod tests;
+
+/// v1–3's `sanitizeInterfaceEdit` for the timeline: known fields, v1's ranges.
+fn timeline_patch(input: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    let number = |key: &str, low: f64, high: f64, round: bool| {
+        input[key]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(|v| if round { v.round() } else { v }.clamp(low, high))
+    };
+    for (key, low, high, round) in [
+        ("rowHeight", 22., 48., true),
+        ("gutterWidth", 160., 360., true),
+        ("rulerHeight", 20., 42., true),
+        ("clipRadius", 0., 12., false),
+        ("keyframeSize", 4., 12., false),
+    ] {
+        if let Some(v) = number(key, low, high, round) {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    for key in ["showLayerNumbers", "showTypeBadges"] {
+        if let Some(v) = input[key].as_bool() {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    for (key, allowed) in [
+        ("toolbarDensity", ["compact", "normal"]),
+        ("surfaceOrder", ["normal", "reversed"]),
+    ] {
+        if let Some(v) = input[key].as_str().filter(|v| allowed.contains(v)) {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    Value::Object(out)
+}

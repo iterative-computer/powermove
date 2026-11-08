@@ -26,6 +26,7 @@ import type {
   Themes,
   Menus,
   Overlays,
+  Timeline,
 } from "../src/builtin";
 import { mount as layerEffects } from "../panels/effect-controls/mount";
 import { mount as fxbrowser } from "../panels/effects/mount";
@@ -297,6 +298,14 @@ function overlaysFor(env: { rootOptions: any }): Overlays {
     },
   };
 }
+/** v1–3's timeline chrome (`workspace.chrome.timeline`) for v4. */
+const timelineApi: Timeline = {
+  chrome(patch) {
+    if (!patch || typeof patch !== "object")
+      throw new Error("Timeline chrome is an object of fields");
+    native("timeline.chrome", patch as Json);
+  },
+};
 async function mountExtension(
   id: string,
   text: string,
@@ -319,6 +328,7 @@ async function mountExtension(
     menus: menuApi,
   };
   (env as any).overlays = overlaysFor(env as any);
+  (env as any).timeline = timelineApi;
   (globalThis as any).__powermove_runtime = RUNTIME;
   const graph = JSON.parse(text);
   const url = (name: string) =>
@@ -368,6 +378,7 @@ async function mountExtension(
     themes: themeApi,
     menus: menuApi,
     overlays: (env as any).overlays,
+    timeline: timelineApi,
   });
   // A component, so the view's hooks have one to belong to.
   const View = namespace.view;

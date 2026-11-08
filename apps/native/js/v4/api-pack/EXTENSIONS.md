@@ -52,7 +52,7 @@ The entry is TypeScript/TSX and exports one of:
   panel, `env.platform` requests (menus, focus), and `env.root()` for a surface.
   Return `{ root, dispose, settle?, show?, publish? }`.
 
-An optional `activate({ host, id, hot, commands, themes, menus, overlays })` runs before
+An optional `activate({ host, id, hot, commands, themes, menus, overlays, timeline })` runs before
 `view()` renders.
 
 Commands: `commands.register({ id, title, key }, run)` adds `title` to the
@@ -80,6 +80,11 @@ Viewer overlays: `overlays.viewer(({ frame }) => …)` draws over the compositio
 in the viewer, below the transform gizmos. `frame` is `{ x, y, width, height,
 scale }`, the composition's rectangle in the overlay's points; it follows pan
 and zoom. Display only. It returns a function that removes the overlay.
+
+Timeline: `timeline.chrome({ rowHeight, gutterWidth, rulerHeight,
+keyframeSize, … })` sets the timeline's chrome as v1–3's
+`workspace.chrome.timeline` did (each field optional, within v1's ranges);
+it's put back when the extension leaves.
 
 State survives a publish only through `hot` (in `mount(env)` it is `env.hot`).
 Each publish runs the new version in a fresh runtime. The old version first
