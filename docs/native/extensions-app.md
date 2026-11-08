@@ -151,3 +151,18 @@ window is open is shown in it.
 - Each window reserves 64 MiB per isolate for up to 64 isolates, so many windows
   can together reserve past the shared 4 GB cage; idle isolates are not parked.
 - Store panels have no recorder canvases, and `ui.*` from a helper is not attached.
+
+## v4 parity with v1–3 (2026-11-08)
+
+What a v1–3 extension could change and where v4 stands, without forking:
+
+| v1–3 could | v4 now |
+|---|---|
+| Commands, keybindings, panels | `commands.register`, `view()` / `mount(env)` |
+| Themes: tokens and CSS (`theme.register`, `theme.activate`) | `themes.register` / `themes.activate` (tokens). v1–3 CSS themes reach native chrome through the translator; surface rules beyond tokens aren't applied natively yet. |
+| Context menus (`menus.contribute`) | `menus.contribute` for panel, layer, timeline and viewer; `titlebar:right` not yet |
+| Viewer overlays (drawing on `ViewerService.ov` or the stage DOM) | Open: needs a v4 overlay surface over the viewer |
+| Timeline columns and painting (`TimelineService.cv`, gutter DOM) | Open: needs v4 outline columns and P-TEXTURE painters (TL-PAINT-1 ≤ 2 ms for 1,000 clips) |
+| Titlebar/toolbar items (`titlebar:right`, titlebar DOM) | Open: needs an extension slot in the window toolbar |
+
+Agent flows (publish → visible → revert) run with `scripts/agent-flows.py`.
