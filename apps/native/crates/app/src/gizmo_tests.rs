@@ -359,6 +359,20 @@ fn pressing_another_layer_selects_it_and_the_same_drag_moves_it(cx: &mut TestApp
         .to_vec();
     assert_eq!(selected, vec!["l1".to_string()]);
 }
+/// A tap-to-click (down and up in the same instant) picks like a held press.
+#[gpui::test]
+fn an_instant_click_on_another_layer_selects_it(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let at = s.point_of([460., 160.]);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l1".to_string()]
+    });
+}
 #[gpui::test]
 fn a_click_on_empty_canvas_clears_the_selection(cx: &mut TestAppContext) {
     let mut s = stage(cx);
