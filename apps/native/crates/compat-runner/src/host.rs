@@ -2280,7 +2280,7 @@ mod tests {
                 "index.ts",
                 "export default function(api){
                    api.theme.register({id:'synthetic-theme.warm',name:'Warm',scheme:'dark',
-                     tokens:{'--accent':'#123456'},css:':root{--bg-panel:#202020}'});
+                     tokens:{'--accent':'#123456','--bg-panel':'#202020'},css:''});
                    api.theme.activate('synthetic-theme.warm');
                    api.commands.register({id:'synthetic-theme.off',label:'Off',run(){api.theme.activate('default')}});
                  }",
@@ -2294,6 +2294,9 @@ mod tests {
         let theme = fixture.host.contributions().unwrap()["nativeTheme"].clone();
         assert_eq!(theme["dark"]["colors.accent"], 0x123456, "{theme}");
         assert_eq!(theme["light"]["colors.accent"], 0x123456, "{theme}");
+        // The timeline surface's inputs come with it (surface rules beyond tokens).
+        assert_eq!(theme["timeline"]["dark"]["track"], 0x202020, "{theme}");
+        assert_eq!(theme["timeline"]["dark"]["accent"], 0x123456, "{theme}");
         assert!(theme["error"].is_null(), "{theme}");
         // Going back to the default theme publishes an empty patch.
         fixture

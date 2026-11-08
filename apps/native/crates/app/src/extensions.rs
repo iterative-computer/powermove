@@ -170,6 +170,8 @@ pub struct Extensions {
     v4_choices: Vec<Choice>,
     v4_seen: u64,
     v4_theme_choices: Vec<Choice>,
+    /// The active v1–3 theme's timeline surface inputs, per scheme.
+    pub v1_timeline: Value,
     /// The viewport last sent to the compat realm.
     viewport: Option<(f32, f32, f32)>,
     /// The v4 theme an extension last asked to show (`themes.activate`).
@@ -217,6 +219,7 @@ impl Default for Extensions {
             v1_theme: None,
             v4_theme_requested: None,
             viewport: None,
+            v1_timeline: Value::Null,
             v4_themes: vec![],
             v4_themes_seen: 0,
             surfaces: BTreeMap::new(),
@@ -890,6 +893,7 @@ impl Controller {
             return;
         }
         self.extensions.v1_theme = Some(key);
+        self.extensions.v1_timeline = theme["timeline"].clone();
         if let Some(error) = theme["error"].as_str() {
             let name = theme["id"].as_str().unwrap_or("theme");
             self.errors.borrow_mut().tell(

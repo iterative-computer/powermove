@@ -156,3 +156,30 @@ panel_test!(
     "export",
     "Export"
 );
+
+#[::core::prelude::v1::test]
+fn timeline_chrome_follows_the_workspace_and_the_theme_surface() {
+    use pm_design::{Accessibility, Scheme, Tokens};
+    let base = Tokens::new(Scheme::Dark, Accessibility::default());
+    let workspace = pm_model::json::parse(
+        r#"{"chrome":{"timeline":{"rowHeight":30,"gutterWidth":900,"rulerHeight":28,"keyframeSize":7},"timelineSurfaceOrder":"normal"}}"#,
+    )
+    .unwrap();
+    let t = crate::builtins::timeline_chrome(base.clone(), &workspace, &serde_json::Value::Null);
+    assert_eq!(t.metrics.track_row, 30.);
+    assert_eq!(t.metrics.layer_column, 640., "v1's range");
+    assert_eq!((t.metrics.ruler, t.metrics.keyframe), (28., 7.));
+    let surface = serde_json::json!({"track":0x202020,"gutter":0x101010,"accent":0x123456});
+    let t = crate::builtins::timeline_chrome(base.clone(), &workspace, &surface);
+    assert_eq!(
+        (t.colors.panel, t.colors.panel_secondary, t.colors.accent),
+        (0x202020, 0x101010, 0x123456)
+    );
+    let reversed =
+        pm_model::json::parse(r#"{"chrome":{"timelineSurfaceOrder":"reversed"}}"#).unwrap();
+    let t = crate::builtins::timeline_chrome(base.clone(), &reversed, &surface);
+    assert_eq!(
+        (t.colors.panel, t.colors.panel_secondary),
+        (0x101010, 0x202020)
+    );
+}

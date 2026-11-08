@@ -464,7 +464,13 @@ impl Controller {
         if id == "timeline"
             && let Some(p) = &self.published
         {
-            t = timeline_chrome(t, &p.workspace);
+            let scheme = if t.scheme == pm_design::Scheme::Dark {
+                "dark"
+            } else {
+                "light"
+            };
+            let surface = self.extensions.v1_timeline[scheme].clone();
+            t = timeline_chrome(t, &p.workspace, &surface);
         }
         if let Some(publication) = self.builtins.pending.remove(id) {
             let (tokens, natives) = (t.clone(), self.builtins.natives.clone());
@@ -1315,7 +1321,29 @@ impl Render for SurfaceWindow {
 /// v1–3's timeline chrome (`workspace.chrome.timeline`, which extensions set
 /// through `workspace.mutate`) as the timeline's metrics, within v1's ranges:
 /// row height, layer column (gutter) width, ruler height and keyframe size.
-pub fn timeline_chrome(mut t: pm_design::Tokens, workspace: &pm_model::Value) -> pm_design::Tokens {
+pub fn timeline_chrome(
+    mut t: pm_design::Tokens,
+    workspace: &pm_model::Value,
+    surface: &Value,
+) -> pm_design::Tokens {
+    // The theme's timeline surface (track, gutter, accent, text, line).
+    let colour = |key: &str| {
+        surface[key]
+            .as_u64()
+            .filter(|c| *c <= 0xFF_FFFF)
+            .map(|c| c as u32)
+    };
+    for (target, key) in [
+        (&mut t.colors.panel, "track"),
+        (&mut t.colors.panel_secondary, "gutter"),
+        (&mut t.colors.accent, "accent"),
+        (&mut t.colors.text, "text"),
+        (&mut t.colors.separator, "line"),
+    ] {
+        if let Some(c) = colour(key) {
+            *target = c;
+        }
+    }
     let chrome = workspace
         .get("chrome")
         .and_then(|c| c.get("timeline"))
@@ -1340,6 +1368,19 @@ pub fn timeline_chrome(mut t: pm_design::Tokens, workspace: &pm_model::Value) ->
         if let Some(value) = value {
             *target = value as f32;
         }
+    }
+    // A reversed surface order swaps the track and gutter fills (T1).
+    let reversed = workspace
+        .get("chrome")
+        .and_then(|c| c.get("timelineSurfaceOrder"))
+        .and_then(|o| {
+            pm_model::json::to_canonical_string(o)
+                .parse::<String>()
+                .ok()
+        })
+        .is_some_and(|o| o == "\"reversed\"");
+    if reversed {
+        std::mem::swap(&mut t.colors.panel, &mut t.colors.panel_secondary);
     }
     t
 }

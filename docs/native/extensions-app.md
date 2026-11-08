@@ -159,7 +159,7 @@ What a v1–3 extension could change and where v4 stands, without forking:
 | v1–3 could | v4 now |
 |---|---|
 | Commands, keybindings, panels | `commands.register`, `view()` / `mount(env)` |
-| Themes: tokens and CSS (`theme.register`, `theme.activate`) | `themes.register` / `themes.activate` (tokens). v1–3 CSS themes reach native chrome through the translator; surface rules beyond tokens aren't applied natively yet. |
+| Themes: tokens and CSS (`theme.register`, `theme.activate`) | `themes.register` / `themes.activate` (tokens). v1–3 CSS themes reach native chrome through the translator, and the timeline surface (track, gutter, accent, text, line, surface order); other surface rules aren't applied natively yet. |
 | Context menus (`menus.contribute`) | `menus.contribute` for panel, layer, timeline and viewer; `titlebar:right` accepted and not shown, as on main |
 | Viewer overlays (drawing on `ViewerService.ov` or the stage DOM) | `overlays.viewer` (display only) |
 | Timeline chrome (`workspace.chrome.timeline`: rows, gutter, ruler, keys, columns) | `timeline.chrome`; the native timeline follows rows, gutter, ruler and key size, not yet clip radius, numbers, badges, density or surface order |
