@@ -69,3 +69,13 @@ uses. The governing rules stay in [language.md](language.md).
   `floating` with a `separator` edge under Reduce Transparency), corners at
   `metrics.popover_radius` (16), system shadow. The window no longer paints
   `colors.panel`. Plan §3.10 puts the agent composer on glass.
+
+## 8. Project Library window
+
+- Full-size content under a transparent title bar. The sidebar is a source
+  list on the window ground (`Tokens::ground` over the behind-window blur,
+  solid `window` under Reduce Transparency) with a `line` edge, starting
+  below the traffic lights (`toolbar`). Section rows are `row` high.
+- The content column is solid `panel`: the selected section's name as a
+  `heading` in the title band, then 28 pt rows, name truncating, facts in
+  `minimum`/`muted` tabular figures.

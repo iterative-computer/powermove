@@ -306,15 +306,25 @@ impl ProjectLibrary {
         }
         let this = cx.entity();
         let m = self.tokens.metrics;
+        let translucent = self.tokens.translucent();
         let focus = self.focus.clone();
         // The window's root is this entity, which is being updated now: open
         // it once the update ends (opening inside it panicked on File ▸ Projects…).
         cx.defer(move |cx| {
             let root = this.clone();
+            // A Mac library window: full-size content under a transparent
+            // title bar, the sidebar on the behind-window blur.
+            let background = if translucent {
+                gpui::MacosWindowBackground::Blurred
+            } else {
+                gpui::MacosWindowBackground::Opaque
+            };
             let handle = cx.open_window(
                 WindowOptions::new()
+                    .macos_window_background(background)
                     .titlebar(Some(TitlebarOptions {
                         title: Some(TITLE.into()),
+                        appears_transparent: true,
                         ..Default::default()
                     }))
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
@@ -401,23 +411,40 @@ impl Render for ProjectLibrary {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.tokens.clone();
         let (c, m) = (&t.colors, &t.metrics);
+        let (ground, ground_alpha) = t.ground();
+        let (line, line_alpha) = t.line();
+        // Source list (language §9): the sidebar sits on the window ground
+        // and starts below the traffic lights; rows are `row` high.
         let mut sidebar = div()
             .flex()
             .flex_col()
-            .gap(px(m.gap / 2.))
+            .flex_none()
+            .gap(px(m.border))
             .w(px(m.settings_sidebar))
-            .p(px(m.gap));
+            .h_full()
+            .pt(px(m.toolbar))
+            .px(px(m.gap))
+            .bg(pm_shell::view::tint(ground, ground_alpha))
+            .border_r(px(m.border))
+            .border_color(pm_shell::view::tint(line, line_alpha));
+        let mut heading = "";
         for (section, label) in [
             (Section::Recents, "Recents"),
             (Section::All, "All Projects"),
             (Section::Deleted, "Recently Deleted"),
         ] {
             let selected = self.controller.query.section == section;
+            if selected {
+                heading = label;
+            }
             sidebar = sidebar.child(
                 div()
                     .id(label)
                     .debug_selector(|| format!("section-{label}"))
-                    .p(px(m.gap))
+                    .flex()
+                    .items_center()
+                    .h(px(m.row))
+                    .px(px(m.gap))
                     .rounded(px(m.control_radius))
                     .when(selected, |d| d.bg(rgb(c.selected_fill)))
                     .child(label)
@@ -430,7 +457,8 @@ impl Render for ProjectLibrary {
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            .p(px(m.gap));
+            .px(px(m.gap))
+            .pb(px(m.gap));
         if !self.controller.query.text.is_empty() {
             list = list.child(
                 div()
@@ -472,13 +500,23 @@ impl Render for ProjectLibrary {
                     .id(SharedString::from(format!("project-{}", row.id)))
                     .debug_selector(|| format!("project-{id}", id = id.clone()))
                     .flex()
+                    .flex_none()
+                    .items_center()
                     .justify_between()
                     .gap(px(m.inset))
-                    .p(px(m.gap))
+                    .h(px(m.row))
+                    .px(px(m.gap))
                     .rounded(px(m.control_radius))
                     .when(selected, |d| d.bg(rgb(c.selected_fill)))
-                    .child(row.name.clone())
-                    .child(div().text_color(rgb(c.secondary)).child(facts))
+                    .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(t.typography.minimum))
+                            .text_color(rgb(c.muted))
+                            .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+                            .child(facts),
+                    )
                     .on_click({
                         let id = id.clone();
                         cx.listener(move |v, event: &ClickEvent, _, cx| {
@@ -498,17 +536,37 @@ impl Render for ProjectLibrary {
                     }),
             );
         }
+        // The content column is solid: the section name sits in the title
+        // band, level with the traffic lights, then the list.
+        let content = div()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(c.panel))
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(m.toolbar))
+                    .px(px(m.inset + m.gap))
+                    .text_size(px(t.typography.heading))
+                    .font_weight(FontWeight(t.typography.semibold_weight))
+                    .child(heading),
+            )
+            .child(list);
         div()
             .size_full()
             .flex()
-            .bg(rgb(c.panel))
             .text_color(rgb(c.text))
             .text_size(px(t.typography.body))
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .child(sidebar)
-            .child(list)
+            .child(content)
     }
 }
 /// The defaults of `createNewProjectForm`, for a window with no project.
