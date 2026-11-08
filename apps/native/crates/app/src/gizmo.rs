@@ -133,6 +133,9 @@ pub trait Host: 'static {
     fn navigate(&self, change: Navigate, cx: &mut App);
     /// The shared layer menu, on the selection the press made.
     fn layer_menu(&self, window: &mut Window, cx: &mut App);
+    /// The empty canvas's menu (v1–3's `viewer:context`): New, and what
+    /// extensions add. Nothing by default.
+    fn viewer_menu(&self, _time: f64, _window: &mut Window, _cx: &mut App) {}
     fn report(&self, message: String, cx: &mut App);
 }
 /// One selected layer's pose at the current time, in composition pixels.
@@ -663,6 +666,12 @@ impl GizmoSurface {
             let _ = this.update(cx, |s, cx| {
                 s.picks -= 1;
                 let Some(poses) = poses else {
+                    // Nothing under the pointer: the canvas's own menu.
+                    let host = s.host.clone();
+                    cx.defer(move |cx| {
+                        let _ = handle
+                            .update(cx, |_, window, cx| host.viewer_menu(press.time, window, cx));
+                    });
                     return;
                 };
                 s.poses = Arc::new(poses);

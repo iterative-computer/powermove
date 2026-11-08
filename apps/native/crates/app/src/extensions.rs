@@ -41,6 +41,9 @@ const V4_COMMAND: &str = "extension.v4:";
 const V4_OWNER: &str = "v4-extension:";
 /// `extension.v4theme:<panel>:<id>`, or `…:default` for the built-in look.
 const V4_THEME: &str = "extension.v4theme:";
+/// `extension.choice:<token>:<index>`: a built-in row of a menu that also
+/// carries extension items; its own callback runs.
+const CHOICE: &str = "extension.choice:";
 /// `extension.v4menu:<panel>:<key>`: a v4 extension's context-menu item.
 const V4_MENU: &str = "extension.v4menu:";
 thread_local! {
@@ -155,6 +158,8 @@ pub struct Extensions {
     /// Open panels with no body right now: tabs behind another.
     hidden: BTreeSet<String>,
     menu: Option<OpenMenu>,
+    /// A built-in menu's callback while extensions answer for its menu.
+    choice: Option<(u64, crate::timeline_surface::Choose)>,
     next_menu: u64,
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
@@ -196,6 +201,7 @@ impl Default for Extensions {
             open_panels: BTreeSet::new(),
             hidden: BTreeSet::new(),
             menu: None,
+            choice: None,
             next_menu: 0,
             placed: BTreeMap::new(),
             seen: 0,
@@ -458,19 +464,30 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
+        self.extension_menu("panel:context", json!({"panelId": id}), entries, at, cx)
+    }
+    /// A built-in context menu at `location` (v1–3's `MenuLocation`) with
+    /// what v4 and v1–3 extensions add to it. `None`: it opens once they answer.
+    pub fn extension_menu(
+        &mut self,
+        location: &'static str,
+        ctx: Value,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
         let compat = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0);
         let runtime = self.builtins.runtime.clone().filter(|r| r.has_extensions());
         // With no realm nothing can add to it, so it opens right away.
         if !compat && runtime.is_none() {
             return Some(entries);
         }
-        let ctx = json!({"panelId": id});
         cx.spawn(async move |this, cx| {
             let extra = match runtime {
                 Some(runtime) => {
                     let asked = ctx.clone();
                     cx.background_executor()
-                        .spawn(async move { v4_menu_items(&runtime, "panel:context", &asked) })
+                        .spawn(async move { v4_menu_items(&runtime, location, &asked) })
                         .await
                 }
                 None => vec![],
@@ -481,16 +498,61 @@ impl Controller {
                     entries.push(MenuEntry::separator());
                     entries.extend(extra);
                 }
-                v.open_compat_menu(entries, at, &ctx, cx);
+                v.open_compat_menu(location, entries, at, &ctx, cx);
             });
         })
         .detach();
         None
     }
+    /// True when some extension can add to a context menu.
+    pub fn extensions_listen(&self) -> bool {
+        self.extensions.host.as_ref().is_some_and(|h| h.view() != 0)
+            || self
+                .builtins
+                .runtime
+                .as_ref()
+                .is_some_and(|r| r.has_extensions())
+    }
+    /// A built-in menu given as rows (`{id,label,disabled?,checked?}` or
+    /// `null` for a separator) with extension items after them. A built-in
+    /// row runs `choose` with its index, as the plain native menu would.
+    pub fn extension_rows_menu(
+        &mut self,
+        location: &'static str,
+        ctx: Value,
+        rows: &[Value],
+        at: (f32, f32),
+        choose: crate::timeline_surface::Choose,
+        cx: &mut Context<Self>,
+    ) {
+        self.extensions.next_menu += 1;
+        let token = self.extensions.next_menu;
+        let entries = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                if row.is_null() {
+                    return MenuEntry::separator();
+                }
+                let mut entry = MenuEntry::item(
+                    row["label"].as_str().unwrap_or_default(),
+                    format!("{CHOICE}{token}:{i}"),
+                )
+                .checked(row["checked"] == true);
+                entry.enabled = row["disabled"] != true;
+                entry
+            })
+            .collect();
+        self.extensions.choice = Some((token, choose));
+        if let Some(entries) = self.extension_menu(location, ctx, entries, at, cx) {
+            self.host.borrow().context_menu(&entries, at.0, at.1);
+        }
+    }
     /// v1–3 realms add to the menu, which opens when they answer or the
     /// deadline passes.
     fn open_compat_menu(
         &mut self,
+        location: &str,
         entries: Vec<MenuEntry>,
         at: (f32, f32),
         ctx: &Value,
@@ -502,7 +564,7 @@ impl Controller {
         };
         self.extensions.next_menu += 1;
         let key = self.extensions.next_menu;
-        host.gather_menu("panel:context", ctx.clone(), key);
+        host.gather_menu(location, ctx.clone(), key);
         self.extensions.menu = Some(OpenMenu { key, entries, at });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(MENU_DEADLINE).await;
@@ -870,6 +932,18 @@ impl Controller {
                 && let (Ok(token), Ok(run)) = (token.parse(), run.parse::<u64>())
             {
                 host.answer(token, run.into());
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(CHOICE) {
+            if let Some((token, index)) = target.split_once(':')
+                && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
+                && let Some((_, choose)) = self
+                    .extensions
+                    .choice
+                    .take_if(|(pending, _)| *pending == token)
+            {
+                choose(Some(index), cx);
             }
             return true;
         }

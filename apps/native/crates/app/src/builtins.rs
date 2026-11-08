@@ -1025,6 +1025,34 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     ) {
         crate::v4_native::menu(window, &items, cx, choose);
     }
+    fn extension_menu(
+        &self,
+        location: &'static str,
+        ctx: Value,
+        items: Vec<Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    ) {
+        let Some(controller) = self.0.upgrade() else {
+            return;
+        };
+        if !controller.read(cx).extensions_listen() {
+            crate::v4_native::menu(window, &items, cx, choose);
+            return;
+        }
+        let at = window.mouse_position();
+        controller.update(cx, |v, cx| {
+            v.extension_rows_menu(
+                location,
+                ctx,
+                &items,
+                (f32::from(at.x), f32::from(at.y)),
+                choose,
+                cx,
+            )
+        });
+    }
 }
 impl crate::gizmo::Host for ControllerDelegate {
     fn time(&self, cx: &App) -> f64 {
@@ -1066,8 +1094,68 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
+    fn viewer_menu(&self, time: f64, window: &mut Window, cx: &mut App) {
+        let Some(controller) = self.0.upgrade() else {
+            return;
+        };
+        let at = window.mouse_position();
+        let at = (f32::from(at.x), f32::from(at.y));
+        controller.update(cx, |v, cx| {
+            // As the shipped app: New on an empty canvas. Text and Null have
+            // no native command yet, so they aren't offered.
+            let entries = vec![pm_shell::MenuEntry::submenu(
+                "New",
+                vec![
+                    pm_shell::MenuEntry::item("Solid", "newSolid"),
+                    pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+                    pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+                    pm_shell::MenuEntry::separator(),
+                    pm_shell::MenuEntry::item("Composition…", "newComposition"),
+                ],
+            )];
+            let ctx = serde_json::json!({"kind": "empty", "time": time});
+            if let Some(entries) = v.extension_menu("viewer:context", ctx, entries, at, cx) {
+                v.host.borrow().context_menu(&entries, at.0, at.1);
+            }
+        });
+    }
     fn layer_menu(&self, window: &mut Window, cx: &mut App) {
         let host = self.0.clone();
+        if let Some(controller) = host.upgrade()
+            && controller.read(cx).extensions_listen()
+        {
+            let layers: Vec<String> = controller
+                .read(cx)
+                .published
+                .as_ref()
+                .map(|p| p.selection.layers().to_vec())
+                .unwrap_or_default();
+            let at = window.mouse_position();
+            let ctx = serde_json::json!({"layerId": layers.first(), "layerIds": layers});
+            let choose: Box<dyn FnOnce(Option<usize>, &mut App)> = Box::new(move |index, cx| {
+                let rows = &crate::layer_commands::LAYER_MENU;
+                if let (Some((command, _)), Some(controller)) =
+                    (index.and_then(|i| rows.get(i)), host.upgrade())
+                {
+                    controller
+                        .read(cx)
+                        .host
+                        .borrow()
+                        .send_command(command, vec![]);
+                }
+            });
+            controller.update(cx, |v, cx| {
+                v.extension_rows_menu(
+                    "layer:context",
+                    ctx,
+                    &crate::layer_commands::layer_menu_rows(),
+                    (f32::from(at.x), f32::from(at.y)),
+                    choose,
+                    cx,
+                )
+            });
+            return;
+        }
         crate::v4_native::menu(
             window,
             &crate::layer_commands::layer_menu_rows(),

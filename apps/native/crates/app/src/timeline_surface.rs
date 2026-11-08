@@ -30,6 +30,19 @@ pub trait Delegate: 'static {
         cx: &mut App,
         choose: Choose,
     );
+    /// A context menu that extensions may add to (`location` as v1–3's
+    /// `MenuLocation`, `ctx` what it was opened on).
+    fn extension_menu(
+        &self,
+        _location: &'static str,
+        _ctx: serde_json::Value,
+        items: Vec<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Choose,
+    ) {
+        self.menu(items, window, cx, choose);
+    }
 }
 /// Runs with the picked row index once a native menu closes.
 pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
@@ -1042,7 +1055,10 @@ impl TimelineSurface {
             .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
             .collect();
         let weak = cx.entity().downgrade();
-        self.delegate.clone().menu(
+        let time = self.time_at(x);
+        self.delegate.clone().extension_menu(
+            "timeline:context",
+            serde_json::json!({"time": time, "kind": format!("{context:?}").split([' ', '{', '(']).next().unwrap_or_default().to_lowercase()}),
             rows,
             window,
             cx,
@@ -1065,11 +1081,18 @@ impl TimelineSurface {
     /// The shared layer menu runs ordinary commands on the row's selection.
     fn layer_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.model.selection.contains(&id) {
-            self.queue.push_back(Job::SelectLayer(id, Mods::default()));
+            self.queue
+                .push_back(Job::SelectLayer(id.clone(), Mods::default()));
             self.pump(cx);
         }
         let delegate = self.delegate.clone();
-        self.delegate.clone().menu(
+        let mut layers: Vec<String> = self.model.selection.layers().to_vec();
+        if !layers.contains(&id) {
+            layers = vec![id.clone()];
+        }
+        self.delegate.clone().extension_menu(
+            "layer:context",
+            serde_json::json!({"layerId": id, "layerIds": layers}),
             crate::layer_commands::layer_menu_rows(),
             window,
             cx,

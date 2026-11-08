@@ -102,7 +102,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 
 - **`activate({ themes })` / `env.themes` (2026-11-08, additive):** `themes.register({ id, title, tokens })` offers a whole-window theme as palette "Theme: <title>"; the app applies its token patch through the shell's theme pipeline (`pm_shell::theme`), restyling chrome and every panel in every window; it follows reloads and leaves with its extension. Tokens only (no surface rules yet); the choice lasts until quit.
 
-- **`activate({ menus })` / `env.menus` (2026-11-08, additive):** `menus.contribute(location, ctx => items)` with v1–3's `MenuContribution` shape and 100 ms answer limit; the app gathers v4 items off the main thread and merges them into panel tab context menus (`panel:context`) before v1–3's. Other locations are typed but not yet gathered by the native timeline, viewer or titlebar.
+- **`activate({ menus })` / `env.menus` (2026-11-08, additive):** `menus.contribute(location, ctx => items)` with v1–3's `MenuContribution` shape and 100 ms answer limit; the app gathers v4 items off the main thread, then v1–3's, into panel tab (`panel:context`), layer (`layer:context`, timeline rows, clips and viewer layers), timeline (`timeline:context`) and empty-canvas viewer (`viewer:context`, with the shipped New submenu) menus. `titlebar:right` isn't gathered yet (no extension toolbar slot).
 
 ## Look lane decisions (2026-11-08)
 

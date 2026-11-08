@@ -67,8 +67,10 @@ command palette; choosing it restyles the window chrome and every panel.
 (`"metrics.gap"`, `"translucency.panel"`, …). Unknown tokens are refused. It
 returns a function that removes the theme; a chosen theme follows reloads.
 
-Menus: `menus.contribute("panel:context", (ctx) => items)` adds items to a
-panel tab's context menu (`ctx.panelId`) each time it opens, as v1–3's
+Menus: `menus.contribute(location, (ctx) => items)` adds items to a context
+menu each time it opens: `"panel:context"` (`ctx.panelId`), `"layer:context"`
+(`ctx.layerId`, `ctx.layerIds`), `"timeline:context"` (`ctx.time`, `ctx.kind`)
+and `"viewer:context"` (empty canvas: `ctx.time`), as v1–3's
 `menus.contribute`: `"-"`, `{ header }` or `{ label, kb?, on?, disabled?,
 run?, submenu? }`; a Promise is waited for at most 100 ms.
 
