@@ -382,7 +382,13 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         let id = view.id;
-        let value = node.props.get("value").map(value_text).unwrap_or_default();
+        // Number fields read at their display precision, as when scrubbed.
+        let value = match (view.number, node.props.get("value")) {
+            (Some(number), Some(value)) if value.is_number() => {
+                number.text(value.as_f64().unwrap_or(number.value))
+            }
+            (_, value) => value.map(value_text).unwrap_or_default(),
+        };
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
             field.update(cx, |f, cx| {
