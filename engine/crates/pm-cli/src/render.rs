@@ -88,6 +88,10 @@ pub struct Options {
     /// winning registrations of the app that made the project, forks and
     /// overrides by id included.
     pub definitions: Option<PathBuf>,
+    /// The definitions installed extensions contribute (a
+    /// `DefinitionSetSnapshot` file), drawn over the document's versioned
+    /// built-ins exactly as the app's viewer and exports install them.
+    pub contributed: Option<PathBuf>,
     /// The editor's display scale factor (`crate::fonts`).
     pub ui_scale: Option<f32>,
     /// Parameter values supplied by the CLI user, parsed as JSON.
@@ -631,6 +635,7 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         composition: &job.composition,
         ui_scale: options.ui_scale,
         definitions: options.definitions.as_deref(),
+        contributed: options.contributed.as_deref(),
     })?;
     let headless = not_headless(&renderer, &job.document, &job.composition, &*job.media);
     if !headless.is_empty() {
@@ -719,6 +724,8 @@ pub(crate) struct HeadlessSetup<'a> {
     pub ui_scale: Option<f32>,
     /// A definition set snapshot file (`--definitions`), else the built-ins.
     pub definitions: Option<&'a Path>,
+    /// Contributed definitions (`--contributed`), as the app installs them.
+    pub contributed: Option<&'a Path>,
 }
 
 /// A renderer as every pm-cli command that draws a project uses it.
@@ -749,6 +756,20 @@ pub(crate) fn headless_renderer(setup: &HeadlessSetup<'_>) -> Result<Headless, F
         &mut renderer,
         setup.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
     );
+    if let Some(path) = setup.contributed {
+        let (set, source) = definitions(Some(path))?;
+        for refused in renderer
+            .set_document_effects(setup.document, &set.definitions)
+            .map_err(|e| Failure::Failed(format!("definitions: {e}")))?
+        {
+            eprintln!("pm-cli: {} (skipped, as in the app)", refused.message);
+        }
+        return Ok(Headless {
+            renderer,
+            angle_host,
+            definitions: format!("document built-ins + {source}"),
+        });
+    }
     let (definitions, source) = definitions(setup.definitions)?;
     if setup.definitions.is_none() {
         warn_built_in(setup.document, setup.composition);
