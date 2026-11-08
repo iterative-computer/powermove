@@ -87,10 +87,13 @@ export class CompatRealm {
       (error) => options.host.reportError(error),
       this.kernel,
     );
-    this.publication = { ...copy(options.initial), document: undefined };
-    this.mirror = new DocumentMirror(options.initial.document);
-    this.workspaceValue = copy(options.initial.workspace);
-    this.selection = copy(options.initial.selection);
+    // The first document becomes the live tree; the kept options drop it.
+    const { document, ...initial } = options.initial;
+    this.options = { ...options, initial: initial as Publication };
+    this.publication = { ...copy(initial), document: undefined };
+    this.mirror = new DocumentMirror(document, { owned: true });
+    this.workspaceValue = copy(initial.workspace);
+    this.selection = copy(initial.selection);
     this.channel = new HostChannel(
       options.host,
       options.id,

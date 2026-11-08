@@ -302,9 +302,11 @@ export class DocumentMirror {
   /** An extension replaced the whole project and holds it: every boundary
    * compares the whole tree, as before views. */
   private rawRoot = false;
-  constructor(document: Data) {
+  /** `owned`: the caller hands `document` over (a parsed publication), so it
+   * becomes the live tree rather than being copied a second time. */
+  constructor(document: Data, { owned = false } = {}) {
     this.base = copy(document);
-    this.root = copy(document);
+    this.root = owned ? document : copy(document);
   }
   get document(): Data {
     return this.rawRoot ? this.root : this.view(this.root);
