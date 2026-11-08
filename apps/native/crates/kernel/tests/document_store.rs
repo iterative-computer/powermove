@@ -764,7 +764,7 @@ fn raw_queries_address_a_root_level_composition() {
     )
     .unwrap();
     let mut store = DocumentStore::new_untitled(project);
-    let mut q = store.queries();
+    let q = store.queries();
     let request = parse(r#"{"op":"worldOpacity","comp":"","open":"","layer":0,"t":0}"#).unwrap();
     let value = q.query(&request).unwrap();
     assert_eq!(value.as_f64(), Some(0.4));
