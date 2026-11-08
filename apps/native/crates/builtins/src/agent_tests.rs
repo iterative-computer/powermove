@@ -419,10 +419,28 @@ fn claude_question_is_answered_with_the_cards_own_buttons() {
         |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
     panel.wait(open);
     assert!(panel.text().contains("Choose a style?"));
+    // thread_read sees the live run: its trace and the open question.
+    let live = panel.panels.agent_thread_live(&thread).unwrap();
+    assert_eq!(live["busy"], true, "{live}");
+    assert!(live["runId"].is_string(), "{live}");
+    let question = &live["questions"][0];
+    assert_eq!(question["blocking"], true, "{live}");
+    assert!(question["itemId"].is_string(), "{live}");
+    assert!(
+        question["questions"]
+            .to_string()
+            .contains("Choose a style?"),
+        "{live}"
+    );
+    assert!(panel.panels.agent_thread_live("no-such-thread").is_none());
     panel.click("live:question-question-0-Soft");
     panel.click("live:question-answer");
     panel.wait(idle);
     assert!(panel.text().contains("Using Soft"));
+    let settled = panel.panels.agent_thread_live(&thread).unwrap();
+    assert_eq!(settled["busy"], false);
+    assert_eq!(settled["activity"], "");
+    assert_eq!(settled["questions"], json!([]));
     panel.panels.close();
 }
 #[test]

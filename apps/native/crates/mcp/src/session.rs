@@ -335,9 +335,27 @@ impl McpSession {
             }
             let threads = host
                 .threads
-                .as_deref()
+                .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
-            return threads.read(name, session.project.as_deref(), args);
+            let surfaces = host.surfaces.clone();
+            drop(host);
+            let project = session.project.clone();
+            let mut read = threads.read(name, project.as_deref(), args)?;
+            // A live run's trace and open questions come from the window's panel.
+            if name == "thread_read"
+                && let Some(surfaces) = surfaces
+                && let Ok(live) = surfaces.call("thread_live", project.as_deref(), args)
+                && live.is_object()
+            {
+                read["activity"] = live["activity"].clone();
+                read["questions"] = live["questions"].clone();
+                if live["busy"] == true {
+                    read["thread"]["busy"] = json!(true);
+                    read["thread"]["status"] = json!("running");
+                    read["thread"]["runId"] = live["runId"].clone();
+                }
+            }
+            return Ok(read);
         }
         if ["store_search", "store_extension", "store_source"].contains(&name) {
             if let Some(id) = &session.project {

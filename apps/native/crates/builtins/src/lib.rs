@@ -179,6 +179,46 @@ impl Builtins {
             .store(true, std::sync::atomic::Ordering::Release);
         Some(carry)
     }
+    /// What `thread_read` adds from this window's live Agent panel: the
+    /// running trace as text, open questions, and the run. `None` when the
+    /// panel holds no session for the thread.
+    pub fn agent_thread_live(&self, thread: &str) -> Option<Value> {
+        let shared = {
+            let entries = self.broker.entries.lock().unwrap();
+            let entry = entries.get("agent")?;
+            let state = entry.backend.lock().unwrap().native.agent.clone();
+            state.or_else(|| self.broker.carried.lock().unwrap().clone())?
+        };
+        let state = shared.lock().unwrap();
+        let session = state.panel.session(thread).ok()?;
+        let busy = session.run.is_some();
+        let steps: Vec<Value> = session.trace.rows.values().cloned().collect();
+        let mut activity = if busy {
+            pm_agents::conversation::message_text(&json!({"role":"trace","steps":steps}))
+        } else {
+            String::new()
+        };
+        // Main keeps the last 20,000 UTF-16 units.
+        let units: Vec<u16> = activity.encode_utf16().collect();
+        if units.len() > 20_000 {
+            activity = String::from_utf16_lossy(&units[units.len() - 20_000..]);
+        }
+        let questions: Vec<Value> = session
+            .trace
+            .rows
+            .page(0..session.trace.rows.len())
+            .iter()
+            .filter(|row| row.value["kind"] == "question" && row.value["status"] == "open")
+            .map(|row| {
+                json!({"itemId":row.id,"blocking":row.value["blocking"] != false,
+                    "questions":row.value["questions"].clone()})
+            })
+            .collect();
+        Some(
+            json!({"busy":busy,"runId":session.run.as_ref().map(|run| run.id.clone()),
+            "activity":activity,"questions":questions}),
+        )
+    }
     fn create(
         kernel: KernelHandle,
         project: &str,

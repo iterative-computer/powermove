@@ -152,6 +152,15 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
     let args = &call.args;
     let panel = args["panelId"].as_str().unwrap_or_default().to_owned();
     match call.tool.as_str() {
+        "thread_live" => target.with(cx, |c, _, _, cx| {
+            let thread = args["threadId"].as_str().unwrap_or_default();
+            Ok(c.read(cx)
+                .builtins
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.agent_thread_live(thread))
+                .unwrap_or(Value::Null))
+        }),
         "get_panel_layout" => target.settled(cx, |_, editor, _, cx| Ok(live_layout(editor, cx))),
         "get_workspace_state" => target.settled(cx, |c, editor, window, cx| {
             Ok(workspace(windows, c, editor, window, cx))

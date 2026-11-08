@@ -35,8 +35,9 @@ no production caller.
   main thread through `app/src/panel_bridge.rs`, against the shell's live
   layout and the v4 panels' compiled trees. Compat (WebKit) panel bodies and
   the viewer's Metal layer aren't in captures or reads yet.
-- `thread_list` and `thread_read` read the durable thread archive. `activity` and
-  `questions` stay empty, because a live session isn't reachable from an MCP worker.
+- `thread_list` and `thread_read` read the durable thread archive. In the app,
+  `thread_read` adds a live run's trace (`activity`, last 20,000 units) and open
+  questions from the window's Agent panel (`Builtins::agent_thread_live`).
 
 Of the 68 tools, 46 have bodies in the app. The other 22 refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
