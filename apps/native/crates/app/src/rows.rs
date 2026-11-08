@@ -4,9 +4,9 @@
 use pm_kernel::{LayerInfo, document::Snapshot};
 use std::sync::Arc;
 
-/// Compositions up to this size list their rows inline (a few ms at most),
-/// so small projects keep deterministic, same-turn rows.
-pub const INLINE_LAYERS: usize = 2_000;
+/// Compositions up to this size list their rows inline (about 30 µs a row in
+/// a release build, so a few ms), so small projects keep same-turn rows.
+pub const INLINE_LAYERS: usize = 150;
 
 /// (document session, revision): revisions only grow within one session.
 pub type Key = (u64, u64);

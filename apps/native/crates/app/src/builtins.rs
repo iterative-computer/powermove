@@ -210,6 +210,7 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
+            crate::diag::line(serde_json::json!({"open":"settled"}));
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
