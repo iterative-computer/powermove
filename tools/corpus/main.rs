@@ -441,9 +441,14 @@ fn project(
         raw.clone()
     };
     let dur = canonical["dur"].as_f64().unwrap_or(1.).max(1. / 30.);
-    let rate = canonical["fps"].as_f64().filter(|x| *x > 0.).unwrap_or(30.);
+    // The app's rule: `fpsRational`, else the stored float snapped (29.97 → 30000/1001).
+    let rational = canonical["fpsRational"]
+        .as_array()
+        .filter(|a| a.len() == 2)
+        .and_then(|a| Some([a[0].as_i64()?, a[1].as_i64()?]));
     let frame_rate =
-        pm_time::Rate::new((rate * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+        pm_model::ingest::IngestRate::from_document(rational, canonical["fps"].as_f64())
+            .map_or(pm_time::Rate::FPS_30, |r| r.rate);
     let frame_ticks = frame_rate
         .exact_frame_ticks()
         .unwrap_or(pm_protocol::common::TICKS_PER_SECOND / 30);

@@ -1047,9 +1047,7 @@ impl Controller {
         };
         self.duration = number("dur", 1.).max(0.001);
         self.dimensions = [number("w", 1920.), number("h", 1080.)];
-        let fps = number("fps", 30.);
-        self.rate =
-            pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+        self.rate = composition_rate(composition);
         let media = self.media.clone();
         self.background = composition
             .get("bg")
@@ -1527,6 +1525,17 @@ pub const SAVING: &str = "Saving…";
 /// Status note for a save in flight, including saves started by MCP or the
 /// kernel. Returns a replacement message on a transition only, so other
 /// notes (refusals, errors) set during the save are kept until it ends.
+/// `fpsRational`, else the stored float snapped to its exact rate: a project
+/// saved at 29.97 plays on the 30000/1001 grid the engine draws.
+fn composition_rate(composition: &pm_model::Node) -> pm_time::Rate {
+    let rational = composition.get("fpsRational").map(|n| n.to_value());
+    pm_model::ingest::IngestRate::from_document(
+        pm_model::ingest::fps_rational_of(rational.as_ref()),
+        composition.get("fps").and_then(crate::node_number),
+    )
+    .map_or(pm_time::Rate::FPS_30, |r| r.rate)
+}
+
 pub fn save_note(was: bool, now: bool, dirty: bool, message: &str) -> Option<&'static str> {
     // Close/quit refusals explain why the window stayed open; keep them.
     let refusal = message.starts_with("Saving in progress")
@@ -1564,6 +1573,27 @@ impl Drop for Controller {
 mod save_note_tests {
     use super::*;
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn ntsc_projects_get_the_exact_rate_the_viewer_needs() {
+        let rate = |json: &str| {
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(json).unwrap()), 1);
+            composition_rate(doc.root().unwrap())
+        };
+        assert_eq!(
+            rate(r#"{"fps":29.97}"#),
+            pm_time::Rate::new(30000, 1001).unwrap()
+        );
+        assert_eq!(
+            rate(r#"{"fps":23.976}"#),
+            pm_time::Rate::new(24000, 1001).unwrap()
+        );
+        assert_eq!(
+            rate(r#"{"fps":30,"fpsRational":[60000,1001]}"#),
+            pm_time::Rate::new(60000, 1001).unwrap()
+        );
+        assert_eq!(rate(r#"{"fps":25}"#), pm_time::Rate::new(25, 1).unwrap());
+        assert!(rate(r#"{"fps":29.97}"#).exact_frame_ticks().is_some());
+    }
     #[::core::prelude::v1::test]
     fn save_note_shows_progress_keeps_refusals_and_reports_the_outcome() {
         assert_eq!(save_note(false, true, true, "Opened"), Some(SAVING));
