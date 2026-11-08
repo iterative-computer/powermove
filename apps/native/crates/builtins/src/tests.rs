@@ -1014,6 +1014,8 @@ fn effect_controls_native_binding_and_diamond_use_published_playhead() {
     finish(
         panels
             .realms
+            .lock()
+            .unwrap()
             .get("layer-effects")
             .unwrap()
             .eval(format!(
@@ -1399,7 +1401,7 @@ fn collapsed_properties_dispose_native_binding_capabilities() {
         .as_str()
         .unwrap()
         .to_owned();
-    finish(panels.realms.get("inspector").unwrap().eval("__pmBuiltin.command('panel.inspector',{type:'collapse',section:'transform',collapsed:true})").unwrap());
+    finish(panels.realms.lock().unwrap().get("inspector").unwrap().eval("__pmBuiltin.command('panel.inspector',{type:'collapse',section:'transform',collapsed:true})").unwrap());
     let before = kernel.published("synthetic").unwrap().revision();
     let ticket = panels.write("inspector", &handle, json!(77.)).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);

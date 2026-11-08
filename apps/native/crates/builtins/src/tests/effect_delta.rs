@@ -267,6 +267,8 @@ fn e07_application_reset_at_playhead_keeps_animation_and_is_one_undo_step() {
     finish(
         panels
             .realms
+            .lock()
+            .unwrap()
             .get("layer-effects")
             .unwrap()
             .eval(format!(
@@ -370,6 +372,8 @@ fn e07_application_saved_ramp_v1_keeps_legacy_controls_and_reset_defaults() {
         finish(
             panels
                 .realms
+                .lock()
+                .unwrap()
                 .get("layer-effects")
                 .unwrap()
                 .eval(format!(
