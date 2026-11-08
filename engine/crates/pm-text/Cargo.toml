@@ -48,7 +48,7 @@ pm-color = { path = "../pm-color", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 memmap2 = "0.9"
 objc2 = "0.6.5"
-objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSString", "NSValue", "NSDictionary"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSString", "NSValue", "NSDictionary", "NSObjCRuntime"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSFont", "NSFontManager", "objc2-core-foundation"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-text = "0.3.2"

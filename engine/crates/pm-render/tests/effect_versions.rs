@@ -183,3 +183,46 @@ fn current_gradient_uses_layer_pixels_without_reinterpreting_the_tag_revision() 
         [0.53125, 0.53125, 0.53125, 1.]
     );
 }
+
+/// A fork that wins a built-in id draws every saved version 1 instance with
+/// its own program, as the app that made the project did; a later saved
+/// revision has no provider and is refused, never drawn by the built-in.
+#[test]
+fn a_winning_fork_draws_saved_version_one_and_refuses_later_revisions() {
+    use pm_protocol::{common::DefinitionId, definitions::DefinitionOrigin};
+    let mut renderer = Renderer::headless().unwrap();
+    renderer
+        .set_definitions(&pm_render::all_builtin_definitions())
+        .unwrap();
+    let inverted = draw(&mut renderer, &doc("invert", None));
+    let mut fork = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    fork.id = DefinitionId::new("gradient");
+    fork.origin = DefinitionOrigin::Fork;
+    for version in [None, Some(1)] {
+        let saved = doc("gradient", version);
+        let refused = renderer
+            .set_document_effects(&saved, std::slice::from_ref(&fork))
+            .unwrap();
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(inverted, draw(&mut renderer, &saved), "{version:?}");
+    }
+    let later = doc("gradient", Some(2));
+    renderer
+        .set_document_effects(&later, std::slice::from_ref(&fork))
+        .unwrap();
+    let frame = renderer.render(
+        &later,
+        "Ptest-root",
+        ticks(0.),
+        &RenderRequest::sized(Size::new(16, 16), Precision::Float16),
+        &MapResolver::default(),
+    );
+    assert!(
+        frame.is_err() || !frame.unwrap().failures.is_empty(),
+        "a saved revision the fork never had must not draw"
+    );
+}

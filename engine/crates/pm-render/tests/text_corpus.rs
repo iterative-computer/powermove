@@ -154,7 +154,10 @@ fn outlined_frame(
     }
     // Values an effect's formula leaves open below the text take the value
     // nearest the engine's own frame without text.
-    let hidden_unit: Vec<f64> = hidden_pixels.iter().map(|v| f64::from(*v) / 255.0).collect();
+    let hidden_unit: Vec<f64> = hidden_pixels
+        .iter()
+        .map(|v| f64::from(*v) / 255.0)
+        .collect();
     let background_pixels = base.opaque_resolved(&hidden_unit).rgba;
     let mut classes = vec![Class::Unreferenced; w * h];
     let mut text_seen = false;
@@ -170,9 +173,11 @@ fn outlined_frame(
         // and the stack with it (`runTransition`).
         let transition = match &draw.content {
             pm_render::plan::Content::Composite(node) => match node.as_ref() {
-                pm_render::composite::Node::Layer(layer) if layer.transition.is_some() => {
-                    Some(facts.transition(&layer.layer)?.ok_or("inactive text layer transition")?)
-                }
+                pm_render::composite::Node::Layer(layer) if layer.transition.is_some() => Some(
+                    facts
+                        .transition(&layer.layer)?
+                        .ok_or("inactive text layer transition")?,
+                ),
                 _ => None,
             },
             _ => None,
@@ -288,7 +293,10 @@ fn outlined_frame(
         // any engine ink in this near-outline halo is a real edge error.
         classes[i] = Class::Edge;
     }
-    let engine: Vec<f64> = engine_pixels.iter().map(|v| f64::from(*v) / 255.0).collect();
+    let engine: Vec<f64> = engine_pixels
+        .iter()
+        .map(|v| f64::from(*v) / 255.0)
+        .collect();
     Ok(Outlined {
         rgba: base.opaque_resolved(&engine).rgba,
         classes,
@@ -339,7 +347,7 @@ fn main() {
     let mut exact = 0;
     let mut level2 = text::Level2Routes::new();
     if captures.is_empty() && (narrowed || corpus_root().is_none()) {
-        eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
+        eprintln!("NOT RUN text_corpus: no parity corpus capture (set PM_ENGINE_CORPUS_ROOT)");
         return;
     }
     let only = std::env::var("PM_TEXT_ONLY").ok();
@@ -504,7 +512,8 @@ fn main() {
                 // float paint, captions and image glyph sampling where the
                 // flat document has no intervening feature. Unsupported
                 // text composition remains a failing reference gap.
-                let ideal = outlined_frame(&mut renderer, &p, &hidden, s.time, (w, h), &base, &ours);
+                let ideal =
+                    outlined_frame(&mut renderer, &p, &hidden, s.time, (w, h), &base, &ours);
                 let mut why = Vec::new();
                 let mut gap = None;
                 let mut modeled_reach = None;
@@ -675,9 +684,12 @@ fn main() {
                     &classes,
                 );
                 let owner = |reasons: &[String]| {
-                    if reasons.iter().any(|r| r.contains("effect") || r.contains("transition")
-                        || r.contains("motion-blurred") || r.contains("matte"))
-                    {
+                    if reasons.iter().any(|r| {
+                        r.contains("effect")
+                            || r.contains("transition")
+                            || r.contains("motion-blurred")
+                            || r.contains("matte")
+                    }) {
                         "L6"
                     } else {
                         "L4"
@@ -690,9 +702,12 @@ fn main() {
                         owner: owner(&r.unmodelled).into(),
                         reason: r.unmodelled.join(", "),
                         checks: problems.clone(),
-                        measurement_sha256: pending::measurement(&engine, &today, &wanted, &classes),
+                        measurement_sha256: pending::measurement(
+                            &engine, &today, &wanted, &classes,
+                        ),
                     },
-                    !r.unmodelled.is_empty() && problems.iter().all(|p| p.starts_with("unreferenced:")),
+                    !r.unmodelled.is_empty()
+                        && problems.iter().all(|p| p.starts_with("unreferenced:")),
                 );
                 let rest_ok = problems.is_empty() || rest_owned;
                 // Text the reference cannot model yet (effects, projection,
@@ -793,7 +808,14 @@ fn main() {
                     if !why.is_empty() {
                         println!("  frame {} why: {}", compared - 1, why.join("; "));
                     }
-                    failed.push(format!("{line}: {}", why.iter().chain(&problems).cloned().collect::<Vec<_>>().join("; ")));
+                    failed.push(format!(
+                        "{line}: {}",
+                        why.iter()
+                            .chain(&problems)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
                 }
                 if !fails && gap.is_none() && !inactive_text {
                     covered.insert(p.name.clone());
@@ -849,11 +871,19 @@ fn main() {
         let paired = isolated_proofs.get(&gap.pair);
         let mut entry = gap.entry;
         if let Some(proof) = paired {
-            entry.reason = format!("{} with passing authored-isolation outline reference", entry.reason);
-            entry.checks.push(format!("paired isolated text passes; engine {proof}"));
+            entry.reason = format!(
+                "{} with passing authored-isolation outline reference",
+                entry.reason
+            );
+            entry
+                .checks
+                .push(format!("paired isolated text passes; engine {proof}"));
         } else if gap.over2 > 0 && gap.outside_mask_band == 0 {
             entry.owner = "L4".into();
-            entry.reason = format!("{}; every text pixel over 2 CV is in the independent mask band", entry.reason);
+            entry.reason = format!(
+                "{}; every text pixel over 2 CV is in the independent mask band",
+                entry.reason
+            );
         }
         let eligible = quality::text_context_is_owned_gap(
             gap.in_isolation,
@@ -866,7 +896,10 @@ fn main() {
         if owned {
             text_pending += 1;
         } else {
-            failed.push(format!("frame {}: unowned text reference gap", gate_rows[gap.row]["case"]));
+            failed.push(format!(
+                "frame {}: unowned text reference gap",
+                gate_rows[gap.row]["case"]
+            ));
         }
     }
     println!("owned text reference gaps: {text_pending}");

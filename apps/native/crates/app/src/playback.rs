@@ -178,6 +178,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         }),
     );
     let weak = entity.downgrade();
+    // The viewer's last status line shown (an error, or what a frame leaves
+    // out): set when it changes, cleared only while no other message
+    // replaced it.
+    let mut shown = None::<String>;
     cx.spawn(async move|cx| {
         loop {
             if rx.recv().await.is_err() { break; }
@@ -197,9 +201,14 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 let status=viewer.status();
                 // Run through the audio-start wait too: its vsync phase places the start.
                 link.set_paused(!status.wants_display);
-                if let Some(error)=status.error {
-                    let error=format!("Viewer: {error}");
-                    if v.message!=error {v.message=error;cx.notify();}
+                let line=status.error.as_ref().map(|e|format!("Viewer: {e}")).or_else(||status.notice());
+                if line!=shown {
+                    match &line {
+                        Some(text)=>{v.message=text.clone();cx.notify();}
+                        None if shown.as_ref()==Some(&v.message)=>{v.message.clear();cx.notify();}
+                        None=>{}
+                    }
+                    shown=line;
                 }
                 v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();

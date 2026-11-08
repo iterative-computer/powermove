@@ -246,10 +246,9 @@ fn main() {
         .filter_map(|p| support::newest_capture(p))
         .collect(),
     };
-    if sets.is_empty() && support::corpus_root().is_none() {
-        eprintln!("no private corpus directory: G-T1 has no captured witnesses");
+    let Some(sets) = support::gate_captures("text_raster G-T1", sets) else {
         return;
-    }
+    };
     let mut failures = Vec::new();
     let (mut seen, mut image_pixels) = (0, 0);
     let mut rows = Vec::new();

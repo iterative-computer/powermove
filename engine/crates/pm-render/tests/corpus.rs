@@ -981,11 +981,9 @@ fn prove_path_mask_canvases(
 
 #[test]
 fn corpus_own_layers_reference_gate() {
-    let captures = corpus_dirs();
-    if captures.is_empty() {
-        eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
+    let Some(captures) = gate_captures("corpus_own_layers_reference_gate", corpus_dirs()) else {
         return;
-    }
+    };
     let only = std::env::var("PM_RENDER_ONLY").ok();
     let pending: std::collections::BTreeSet<String> =
         serde_json::from_str::<Vec<pending::Entry>>(include_str!("fixtures/corpus-pending.json"))
@@ -1063,11 +1061,9 @@ fn corpus_render_parity() {
     use sha2::{Digest, Sha256};
     let mut frame_results = std::env::var_os("PM_CORPUS_FRAME_RESULTS")
         .map(|path| std::fs::File::create(path).expect("frame attribution output"));
-    let captures = corpus_dirs();
-    if captures.is_empty() {
-        eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
+    let Some(captures) = gate_captures("corpus_render_parity", corpus_dirs()) else {
         return;
-    }
+    };
     let only = std::env::var("PM_RENDER_ONLY").ok();
     let diffs = std::env::var("PM_RENDER_DIFFS")
         .ok()

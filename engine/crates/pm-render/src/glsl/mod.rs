@@ -188,13 +188,19 @@ pub fn write(
     stage: naga::ShaderStage,
     entries: &[Entry],
 ) -> Result<(String, String), String> {
-    let slots = slots(entries).into_iter().map(|s| pm_glsl::compiler::Slot {
-        group: s.group, binding: s.binding, buffer: s.buffer,
-        texture: s.texture, sampler: s.sampler,
-    }).collect();
-    let (source, entry) = pm_glsl::compiler::msl(
-        module, stage, slots, pm_glsl::cache::DEFAULT_DEADLINE,
-    ).map_err(|e| e.to_string())?;
+    let slots = slots(entries)
+        .into_iter()
+        .map(|s| pm_glsl::compiler::Slot {
+            group: s.group,
+            binding: s.binding,
+            buffer: s.buffer,
+            texture: s.texture,
+            sampler: s.sampler,
+        })
+        .collect();
+    let (source, entry) =
+        pm_glsl::compiler::msl(module, stage, slots, pm_glsl::cache::DEFAULT_DEADLINE)
+            .map_err(|e| e.to_string())?;
     Ok((angle_calls(&source), entry))
 }
 
@@ -238,17 +244,23 @@ pub fn half_store(msl: &str, entry_point: &str) -> Option<String> {
         return None;
     }
     let body = body
-        .replacen(&signature, &format!("fragment pm_half_Output {entry_point}("), 1)
+        .replacen(
+            &signature,
+            &format!("fragment pm_half_Output {entry_point}("),
+            1,
+        )
         .lines()
-        .map(|line| match line.trim_start().strip_prefix("return main_Output {") {
-            Some(rest) => {
-                let indent = &line[..line.len() - line.trim_start().len()];
-                rest.strip_suffix(" };")
-                    .map(|values| format!("{indent}return pm_half(main_Output {{{values} }});"))
-                    .unwrap_or_else(|| line.to_owned())
-            }
-            None => line.to_owned(),
-        })
+        .map(
+            |line| match line.trim_start().strip_prefix("return main_Output {") {
+                Some(rest) => {
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    rest.strip_suffix(" };")
+                        .map(|values| format!("{indent}return pm_half(main_Output {{{values} }});"))
+                        .unwrap_or_else(|| line.to_owned())
+                }
+                None => line.to_owned(),
+            },
+        )
         .collect::<Vec<_>>()
         .join("\n");
     if body.matches("return pm_half(").count() != returns {
@@ -262,7 +274,12 @@ pub fn half_store(msl: &str, entry_point: &str) -> Option<String> {
 }
 
 /// A stage compiled from MSL `source` (passthrough).
-pub fn msl_stage(device: &wgpu::Device, label: &str, source: String, entry_point: &str) -> Result<Stage, String> {
+pub fn msl_stage(
+    device: &wgpu::Device,
+    label: &str,
+    source: String,
+    entry_point: &str,
+) -> Result<Stage, String> {
     let compiled = pm_gpu::msl::from_source(device, label, &source, entry_point)?;
     Ok(Stage {
         module: compiled.module,
@@ -328,7 +345,6 @@ mod tests {
 
     #[test]
     fn round_polyfill_reaches_naga_as_a_named_function() {
-        let _compiler_fixture = crate::compiler_fixture();
         // The prefix `ANGLE_POLYFILLS` matches what naga writes for
         // `pm_glsl`'s polyfill.
         let src = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x), roundEven(u_x), round(v_uv)); }\n";
@@ -362,9 +378,16 @@ mod tests {
         let msl = "struct main_Output {\n    metal::float4 member [[color(0)]];\n    float gl_FragDepth [[depth(any)]];\n};\nfragment main_Output main_(\n  main_Input varyings [[stage_in]]\n) {\n    if (x) {\n        return main_Output { a, d };\n    }\n    return main_Output { _e7, d };\n}\n";
         let out = half_store(msl, "main_").expect("naga's form");
         assert!(out.contains("struct pm_half_Output {\n    metal::half4 member [[color(0)]];\n    float gl_FragDepth [[depth(any)]];\n};"), "{out}");
-        assert!(out.contains("return pm_half_Output { metal::half4(o.member), o.gl_FragDepth };"), "{out}");
+        assert!(
+            out.contains("return pm_half_Output { metal::half4(o.member), o.gl_FragDepth };"),
+            "{out}"
+        );
         assert!(out.contains("fragment pm_half_Output main_("), "{out}");
-        assert_eq!(out.matches("return pm_half(main_Output {").count(), 2, "{out}");
+        assert_eq!(
+            out.matches("return pm_half(main_Output {").count(),
+            2,
+            "{out}"
+        );
         assert!(!out.contains("        return main_Output {"), "{out}");
         // Not naga's form: left to the caller.
         assert!(half_store("fragment float4 main_() { return x; }", "main_").is_none());

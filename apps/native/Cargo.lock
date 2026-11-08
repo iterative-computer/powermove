@@ -4842,6 +4842,7 @@ dependencies = [
  "pm-engine",
  "pm-eval",
  "pm-export",
+ "pm-glsl",
  "pm-gpu",
  "pm-kernel",
  "pm-media",

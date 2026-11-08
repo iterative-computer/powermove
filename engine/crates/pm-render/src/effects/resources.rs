@@ -38,6 +38,9 @@ pub(crate) struct Assets {
     sources: BTreeMap<Request, (PathBuf, (u64, u128))>,
     /// Prepared assets' textures, by content. Only what `prepared` holds stays.
     uploads: HashMap<[u8; 32], pm_gpu::Target>,
+    /// The effect asset references of the last document walked, by its
+    /// edition: a frame of an unchanged document skips the whole-tree walk.
+    walked: Option<(u64, BTreeSet<Request>)>,
 }
 impl Assets {
     /// `asset`'s texture, uploaded on first use.
@@ -87,7 +90,6 @@ impl Assets {
         document: &pm_model::Document,
         resolver: &dyn crate::assets::AssetResolver,
     ) {
-        let mut requests = BTreeSet::new();
         fn walk(n: &pm_model::Node, out: &mut BTreeSet<(String, bool)>) {
             match n.kind() {
                 pm_model::NodeKind::Object(map) => {
@@ -121,7 +123,15 @@ impl Assets {
             self.uploads.clear();
             return;
         };
-        walk(root, &mut requests);
+        let requests = match self.walked.take() {
+            Some((edition, requests)) if edition == document.edition() => requests,
+            _ => {
+                let mut requests = BTreeSet::new();
+                walk(root, &mut requests);
+                requests
+            }
+        };
+        self.walked = Some((document.edition(), requests.clone()));
         let old = std::mem::take(&mut self.prepared);
         let sources = std::mem::take(&mut self.sources);
         for (id, lut) in requests {

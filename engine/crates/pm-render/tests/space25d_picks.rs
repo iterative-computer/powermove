@@ -39,10 +39,9 @@ fn main() {
             .filter_map(|p| newest_capture(p))
             .collect(),
     };
-    if captures.is_empty() {
-        eprintln!("note: no compclose capture; 2.5D picks not measured");
+    let Some(captures) = gate_captures("space25d_picks", captures) else {
         return;
-    }
+    };
     let only = [
         "space25d/vector",
         "space25d/text",

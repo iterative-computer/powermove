@@ -30,10 +30,20 @@ pub fn repo_root() -> PathBuf {
         .unwrap()
 }
 
-/// The newest capture whose id starts with `prefix`.
+/// The newest capture whose id starts with `prefix`, by its manifest's
+/// `createdAt` (ids are not uniformly dated: `threed-modelgroup2-…` sorts
+/// after `threed-20261019-…` though it was captured first). Captures without
+/// a manifest time sort before dated ones, then by id.
 pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
     let base = corpus_root()?;
-    let mut caps: Vec<PathBuf> = std::fs::read_dir(&base)
+    let created = |dir: &Path| -> String {
+        std::fs::read_to_string(dir.join("manifest.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|m| m.get("createdAt")?.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    std::fs::read_dir(&base)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
@@ -41,9 +51,18 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with(prefix))
         })
-        .collect();
-    caps.sort();
-    caps.pop()
+        .max_by_key(|p| (created(p), p.clone()))
+}
+
+/// The newest `prefix*` capture, required on a machine with the private
+/// corpus: a missing witness fails the gate there. Elsewhere `None`, and the
+/// caller prints `NOT RUN`.
+pub fn required_capture(prefix: &str) -> Option<PathBuf> {
+    let found = newest_capture(prefix);
+    if found.is_none() && corpus_root().is_some() {
+        panic!("the private corpus has no `{prefix}*` capture; this gate cannot run");
+    }
+    found
 }
 
 /// The captures to compare against: `PM_ENGINE_CORPUS` (comma-separated),
@@ -55,9 +74,16 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
 /// captures `compclose-*`, `compclose2-*` and `compclose3-*`
 /// (`compclose.ts`), and the newest `threed-*` capture (`space.ts`:
 /// `3d/model-group`, `3d/group-roles`, `3d/maps-level1`).
+///
+/// On a machine with the private corpus every family is required: a gate
+/// that silently measured fewer captures must not pass. Without a corpus
+/// the list is empty and callers report NOT RUN (see [`gate_captures`]).
 pub fn corpus_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
         return p.split(',').map(PathBuf::from).collect();
+    }
+    if corpus_root().is_none() {
+        return Vec::new();
     }
     [
         "v1-",
@@ -71,13 +97,30 @@ pub fn corpus_dirs() -> Vec<PathBuf> {
         "threed-",
     ]
     .iter()
-    .filter_map(|p| newest_capture(p))
+    .map(|p| {
+        newest_capture(p).unwrap_or_else(|| {
+            panic!("the private corpus has no `{p}*` capture; this gate cannot run complete")
+        })
+    })
     .collect()
 }
 
-/// The private corpus directory, when this machine has one (gates with
-/// approved residuals require their captures there; elsewhere they report
-/// and pass vacuously).
+/// The captures for `gate`, or `None` when this machine has no corpus at
+/// all. That case prints `NOT RUN` (counted as not run in the Gate E ledger,
+/// never as a pass); on a corpus machine an empty selection fails.
+pub fn gate_captures(gate: &str, captures: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+    if !captures.is_empty() {
+        return Some(captures);
+    }
+    if corpus_root().is_some() || std::env::var_os("PM_ENGINE_CORPUS").is_some() {
+        panic!("{gate}: no capture selected on a machine with the private corpus");
+    }
+    eprintln!("NOT RUN {gate}: no private corpus (set PM_ENGINE_CORPUS_ROOT)");
+    None
+}
+
+/// The private corpus directory, when this machine has one (gates require
+/// their captures there; elsewhere they print NOT RUN and return).
 pub fn corpus_root() -> Option<PathBuf> {
     std::env::var_os("PM_ENGINE_CORPUS_ROOT")
         .map(PathBuf::from)

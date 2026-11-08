@@ -532,11 +532,12 @@ mod support;
 #[test]
 fn corpus_plans_with_reused_draws_match() {
     use pm_render::all_builtin_definitions;
-    let captures = support::corpus_dirs();
-    if captures.is_empty() {
-        eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
+    let Some(captures) = support::gate_captures(
+        "corpus_plans_with_reused_draws_match",
+        support::corpus_dirs(),
+    ) else {
         return;
-    }
+    };
     let mut with = Renderer::headless().expect("a Metal device");
     let mut without = Renderer::headless().expect("a Metal device");
     // The reference reads every channel (no channel memo either).

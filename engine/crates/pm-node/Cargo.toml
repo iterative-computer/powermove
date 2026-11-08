@@ -60,6 +60,8 @@ remote-layer = ["pm-gpu/remote-layer"]
 test-hooks = []
 
 [dev-dependencies]
+# Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
+pm-glsl = { path = "../pm-glsl", features = ["test-admission"] }
 tempfile = "3"
 pm-model = { path = "../pm-model" }
 pm-reference = { path = "../pm-reference" }

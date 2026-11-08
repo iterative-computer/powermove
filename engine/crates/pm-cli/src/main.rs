@@ -80,6 +80,9 @@ const USAGE: &str = "usage:
       --definitions FILE  a definition set snapshot (contract 10, JSON) to draw
                effects, transitions, and extension layers with (default: the
                built-in definitions)
+      --contributed FILE  definitions installed extensions contribute (same
+               JSON), drawn over the document's versioned built-ins as the
+               app's viewer and exports install them
       --param NAME=JSON (repeatable; validates against the parameter definition)
       --ui-scale S  the editor's display scale factor, which fixes how its
                     renderer measures system-ui text (default 2)
@@ -253,6 +256,7 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
                 .parameters
                 .push(parameters::parse(value(args, &mut i, a)?)?),
             "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
+            "--contributed" => o.contributed = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => {
@@ -266,6 +270,9 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
     o.input = input.ok_or("no project file")?;
     if o.output.as_os_str().is_empty() {
         return Err("no output (-o)".into());
+    }
+    if o.definitions.is_some() && o.contributed.is_some() {
+        return Err("--definitions and --contributed draw different sets; pass one".into());
     }
     Ok(o)
 }

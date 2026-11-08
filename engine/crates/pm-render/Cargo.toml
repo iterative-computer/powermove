@@ -39,6 +39,8 @@ blake3 = "1.8"
 serde_json.workspace = true
 
 [dev-dependencies]
+# Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
+pm-glsl = { path = "../pm-glsl", features = ["test-admission"] }
 tempfile = "3"
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
 # f64 reference renders for the quality gates (docs/engine/gate-policy.md).

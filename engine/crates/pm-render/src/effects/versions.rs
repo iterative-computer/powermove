@@ -132,6 +132,19 @@ impl Effects {
                 Ok(id.into())
             };
         };
+        // A fork or override that wins a built-in id is the registration the
+        // kernel chose, as for an extension's own effect. Contributed effects
+        // carry no history, so it is its own version 1 (absent saved versions
+        // mean 1); any other saved revision has no provider and stays refused.
+        if current.origin != DefinitionOrigin::BuiltIn {
+            return if revision == 1 {
+                Ok(id.into())
+            } else {
+                Err(format!(
+                    "saved {id} version {revision}: winning provider history unavailable"
+                ))
+            };
+        }
         let registered_source = &main_effects()
             .shaders
             .iter()
@@ -143,11 +156,10 @@ impl Effects {
             .source;
         // History always belongs to the winning registration, never a built-in
         // underneath a fork/local/Store registration with the same ID.
-        if current.origin != DefinitionOrigin::BuiltIn
-            || current
-                .glsl
-                .as_ref()
-                .is_none_or(|g| g.source != *registered_source)
+        if current
+            .glsl
+            .as_ref()
+            .is_none_or(|g| g.source != *registered_source)
         {
             return Err(format!(
                 "saved {id} version {revision}: winning provider history unavailable"

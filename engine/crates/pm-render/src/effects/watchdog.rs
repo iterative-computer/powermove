@@ -74,7 +74,7 @@
 //! passing at will. Production renderers set neither.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -299,10 +299,17 @@ enum Stage {
     Encoded,
     /// Submitted; waiting for completion.
     Submitted,
-    /// The resolve was submitted after the frame completed; set when the
-    /// readback can be read.
-    Resolving(Arc<AtomicBool>),
+    /// The resolve was submitted after the frame completed and its readback
+    /// is mapping ([`PENDING`], [`MAPPED`] or [`FAILED`]).
+    Resolving(Arc<AtomicU8>),
 }
+
+/// A readback map still in flight.
+const PENDING: u8 = 0;
+/// A readback mapped and readable.
+const MAPPED: u8 = 1;
+/// A readback whose map failed: it is not mapped.
+const FAILED: u8 = 2;
 
 /// One query slot: a query set and its buffers, allocated once.
 struct Timing {
@@ -737,8 +744,19 @@ impl Watchdog {
     /// programs: the next frame cannot start before it completes.
     pub(crate) fn finish(&mut self, _encoder: &mut wgpu::CommandEncoder, timer: FrameTimer) {
         while self.inflight.len() >= INFLIGHT {
-            // Dropped unjudged: nothing is turned off without evidence.
-            self.inflight.pop_front();
+            // Dropped unjudged: nothing is turned off without evidence. Its
+            // slot is free again only once its readback is not mapped, or the
+            // next resolve into it is refused.
+            if let Some(Inflight {
+                stage: Stage::Resolving(map),
+                slot: Some(slot),
+                ..
+            }) = self.inflight.pop_front()
+                && map.load(Ordering::Acquire) != FAILED
+                && let Some(timing) = self.slots.get(slot)
+            {
+                timing.readback.unmap();
+            }
         }
         self.inflight.push_back(Inflight {
             slot: timer.slot.filter(|_| !timer.spans.is_empty()),
@@ -873,15 +891,16 @@ impl Watchdog {
                 encoder.resolve_query_set(&timing.set, 0..count, &timing.resolve, 0);
                 encoder.copy_buffer_to_buffer(&timing.resolve, 0, &timing.readback, 0, bytes);
                 queue.submit([encoder.finish()]);
-                let mapped = Arc::new(AtomicBool::new(false));
+                let mapped = Arc::new(AtomicU8::new(PENDING));
                 let flag = mapped.clone();
                 timing
                     .readback
                     .slice(..)
                     .map_async(wgpu::MapMode::Read, move |result| {
-                        if result.is_ok() {
-                            flag.store(true, Ordering::Release);
-                        }
+                        flag.store(
+                            if result.is_ok() { MAPPED } else { FAILED },
+                            Ordering::Release,
+                        );
                     });
                 frame.stage = Stage::Resolving(mapped);
                 progressed = true;
@@ -890,12 +909,18 @@ impl Watchdog {
                 i += 1;
                 continue;
             };
-            if !mapped.load(Ordering::Acquire) {
+            let map = mapped.load(Ordering::Acquire);
+            if map == PENDING {
                 i += 1;
                 continue;
             }
             let frame = self.remove(i);
-            let times = self.read_timestamps(&frame, slot, wall, queue);
+            let times = if map == MAPPED {
+                self.read_timestamps(&frame, slot, wall, queue)
+            } else {
+                // No readback (the map failed): judged without timestamps.
+                vec![SpanTime::Unknown; frame.spans.len()]
+            };
             self.judge(&frame.spans, &times, frame.suspect);
             progressed = true;
         }
@@ -1134,9 +1159,12 @@ pub(crate) fn plausible_spans(
 
 #[cfg(test)]
 mod tests {
-    use super::{Inflight, SpanTime, Stage, Watchdog, plausible_spans};
+    use super::{
+        FrameTimer, INFLIGHT, Inflight, MAPPED, SpanTime, Stage, Watchdog, plausible_spans,
+    };
+    use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn device_release_waits_for_unjudged_frame_and_keeps_policy() {
@@ -1155,6 +1183,63 @@ mod tests {
         watchdog.inflight.clear();
         assert!(watchdog.release_device());
         assert_eq!(watchdog.budget(), Some(Duration::from_millis(7)));
+    }
+
+    /// A viewer that followed more frames than it keeps dropped the oldest,
+    /// whose readback was mapped; the next frame given its slot resolved into
+    /// the mapped buffer and every later submission was refused (a frozen
+    /// viewer).
+    #[test]
+    fn a_dropped_resolving_frame_unmaps_its_readback() {
+        let gpu = pm_gpu::Gpu::new("watchdog drop test").unwrap();
+        if !gpu
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            eprintln!("NOT RUN: no timestamp queries on this device");
+            return;
+        }
+        let mut watchdog = Watchdog::default();
+        let slot = watchdog
+            .frame_timer(&gpu.device)
+            .slot
+            .expect("a free query slot");
+        let readback = watchdog.slots[slot].readback.clone();
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let frame = |stage, slot| Inflight {
+            spans: Vec::new(),
+            slot,
+            stage,
+            submitted: Some(Instant::now()),
+            completed: Arc::new(Mutex::new(None)),
+            suspect: false,
+        };
+        watchdog.inflight.push_back(frame(
+            Stage::Resolving(Arc::new(AtomicU8::new(MAPPED))),
+            Some(slot),
+        ));
+        while watchdog.inflight.len() < INFLIGHT {
+            watchdog.inflight.push_back(frame(Stage::Submitted, None));
+        }
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        watchdog.finish(
+            &mut encoder,
+            FrameTimer {
+                spans: Vec::new(),
+                gpu: None,
+                slot: None,
+            },
+        );
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let timing = &watchdog.slots[slot];
+        encoder.copy_buffer_to_buffer(&timing.resolve, 0, &timing.readback, 0, 16);
+        gpu.queue.submit([encoder.finish()]);
+        assert!(pollster::block_on(scope.pop()).is_none());
+        assert_eq!(watchdog.frames_in_flight(), INFLIGHT);
     }
 
     fn ms(v: f64) -> SpanTime {

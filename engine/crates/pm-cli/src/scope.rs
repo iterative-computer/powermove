@@ -514,6 +514,7 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
             composition: &loaded.composition,
             ui_scale: options.ui_scale,
             definitions: options.definitions.as_deref(),
+            contributed: None,
         })?;
         let headless =
             crate::render::not_headless(&renderer, doc, &loaded.composition, &loaded.media);

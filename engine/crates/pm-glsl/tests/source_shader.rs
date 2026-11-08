@@ -2,10 +2,12 @@
 #[test]
 fn source_shader_validates_for_every_working_storage_format() {
     for format in ["rgba8unorm", "rgba16float", "rgba32float"] {
+        // Composed exactly as pm-render's `pipelines.rs` builds the source pass.
         let shader = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             pm_color::wgsl::COLOR,
             pm_color::tonemap::wgsl(),
+            pm_color::camera_log::wgsl(),
             include_str!("../../pm-render/src/shaders/source.wgsl").replace("OUT_FORMAT", format)
         );
         let module = naga::front::wgsl::parse_str(&shader)

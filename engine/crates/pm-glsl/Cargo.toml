@@ -27,6 +27,9 @@ path = "src/bin/compiler.rs"
 [features]
 # The production Metal inventory also pulls the macOS renderer/media stack.
 macos-inventory = []
+# Test builds only: the process-wide pool waits for a free slot within the
+# request deadline (parallel fixtures), never in shipped builds.
+test-admission = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

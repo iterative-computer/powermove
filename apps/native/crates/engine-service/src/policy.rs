@@ -18,6 +18,30 @@ pub struct Crop {
     pub canvas_height: u32,
 }
 impl Output {
+    /// This output drawn into a `width`×`height` drawable. A crop keeps its
+    /// place on the canvas, scaled with the drawable, and stays inside it.
+    pub fn resized(self, width: u32, height: u32) -> Output {
+        if (width, height) == (self.width, self.height) || width == 0 || height == 0 {
+            return self;
+        }
+        let sx = f64::from(width) / f64::from(self.width);
+        let sy = f64::from(height) / f64::from(self.height);
+        let scaled = |v: u32, s: f64| (f64::from(v) * s).round() as u32;
+        Output {
+            width,
+            height,
+            crop: self.crop.map(|c| {
+                let (x, y) = (scaled(c.x, sx), scaled(c.y, sy));
+                Crop {
+                    x,
+                    y,
+                    canvas_width: scaled(c.canvas_width, sx).max(x + width),
+                    canvas_height: scaled(c.canvas_height, sy).max(y + height),
+                }
+            }),
+            ..self
+        }
+    }
     pub fn validate(self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.width > 0 && self.height > 0 && self.width <= 16384 && self.height <= 16384,

@@ -592,16 +592,18 @@ impl Engine {
             None
         };
         trace.lock().unwrap().drawable_acquired = now();
-        if let Some(d) = &drawable {
-            if d.texture().width() != output.width as u64
-                || d.texture().height() != output.height as u64
-            {
-                return Ok(None);
-            }
-        } else if self
-            .offscreen
-            .as_ref()
-            .is_none_or(|t| t.width() != output.width as u64 || t.height() != output.height as u64)
+        // The drawable is what is shown. A layer resized after the last
+        // configure (its size publication can lag or be refused) is drawn at
+        // its real size: dropping the drawable would retry this frame forever
+        // and never show another.
+        let output = match &drawable {
+            Some(d) => output.resized(d.texture().width() as u32, d.texture().height() as u32),
+            None => output,
+        };
+        if drawable.is_none()
+            && self.offscreen.as_ref().is_none_or(|t| {
+                t.width() != output.width as u64 || t.height() != output.height as u64
+            })
         {
             let desc = metal::TextureDescriptor::new();
             desc.set_texture_type(metal::MTLTextureType::D2);

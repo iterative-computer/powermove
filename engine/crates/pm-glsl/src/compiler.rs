@@ -88,12 +88,21 @@ pub struct Pool {
     capacity: usize,
     active: AtomicUsize,
     resident_limit: u64,
+    /// Test builds only (`test-admission`): the process-wide pool waits for
+    /// a slot within the request's deadline instead of failing, so parallel
+    /// test fixtures never see a busy compiler as a broken shader.
+    waits: bool,
+    freed: (std::sync::Mutex<()>, std::sync::Condvar),
 }
 
-struct Permit<'a>(&'a AtomicUsize);
+struct Permit<'a>(&'a Pool);
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+        if self.0.waits {
+            let _guard = self.0.freed.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.0.freed.1.notify_one();
+        }
     }
 }
 struct Worker(Child);
@@ -290,7 +299,16 @@ impl Pool {
             capacity,
             active: AtomicUsize::new(0),
             resident_limit: MAX_RESIDENT_BYTES,
+            waits: false,
+            freed: Default::default(),
         }
+    }
+    /// Waits for a free slot within each request's deadline instead of
+    /// failing busy. Test fixtures only (`test-admission`); production
+    /// admission never queues.
+    pub fn with_test_admission(mut self) -> Self {
+        self.waits = true;
+        self
     }
     /// Host-selected memory budget; source code cannot change it.
     pub fn with_resident_limit(mut self, bytes: u64) -> Self {
@@ -300,18 +318,42 @@ impl Pool {
     pub fn active(&self) -> usize {
         self.active.load(Ordering::Acquire)
     }
-    fn admit(&self) -> Result<Permit<'_>, Failure> {
-        self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < self.capacity).then_some(n + 1)
-            })
-            .map(|_| Permit(&self.active))
-            .map_err(|_| {
-                Failure::new(
+    fn admit(&self, deadline: Instant) -> Result<Permit<'_>, Failure> {
+        let take = || {
+            self.active
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    (n < self.capacity).then_some(n + 1)
+                })
+                .is_ok()
+        };
+        let mut guard = None;
+        loop {
+            if take() {
+                return Ok(Permit(self));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !self.waits || left.is_zero() {
+                return Err(Failure::new(
                     FailureStage::CompilerBusy,
                     "all GLSL compiler process slots are occupied; retry later",
-                )
-            })
+                ));
+            }
+            let held = match guard.take() {
+                Some(held) => held,
+                None => self.freed.0.lock().unwrap_or_else(|e| e.into_inner()),
+            };
+            // Re-check under the lock: a release between the failed take and
+            // the wait has already notified.
+            if take() {
+                return Ok(Permit(self));
+            }
+            let (held, _) = self
+                .freed
+                .1
+                .wait_timeout(held, left)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = Some(held);
+        }
     }
 
     #[cfg(unix)]
@@ -323,10 +365,10 @@ impl Pool {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg(test)]
         TEST_REQUEST_START.set(Some(Instant::now()));
-        let _permit = self.admit()?;
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| process_error("invalid compiler deadline"))?;
+        let _permit = self.admit(deadline)?;
         let (mut host, child) = UnixStream::pair()
             .map_err(|e| process_error(format!("cannot create compiler IPC socket: {e}")))?;
         // Darwin refuses timeout socket options once the peer has closed,
@@ -427,7 +469,12 @@ pub fn default_pool() -> &'static Pool {
                 };
                 dir.join("pm-glsl-compiler")
             });
-        Pool::new(executable, PROCESS_SLOTS)
+        let pool = Pool::new(executable, PROCESS_SLOTS);
+        if cfg!(feature = "test-admission") {
+            pool.with_test_admission()
+        } else {
+            pool
+        }
     })
 }
 

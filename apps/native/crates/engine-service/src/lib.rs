@@ -45,7 +45,7 @@ use pm_protocol::{
 pub use policy::{Crop, Moment, Output, Quality, Stamp};
 pub use render::{FrameSpec, Scene, metal_device};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
     thread::JoinHandle,
     time::Duration,
@@ -231,6 +231,32 @@ pub struct ViewerStatus {
     /// Clips the viewer plays from a proxy (View › Media). Never counted as
     /// originals.
     pub proxied: usize,
+}
+impl ViewerStatus {
+    /// What the frame on screen leaves out, for the viewer's status line:
+    /// the commonest reason and how many layers it hides. `None`: nothing.
+    pub fn notice(&self) -> Option<String> {
+        let mut reasons: Vec<(&str, BTreeSet<&str>)> = Vec::new();
+        for f in &self.layer_failures {
+            match reasons.iter_mut().find(|(m, _)| *m == f.message) {
+                Some((_, layers)) => {
+                    layers.insert(&f.layer);
+                }
+                None => reasons.push((&f.message, BTreeSet::from([f.layer.as_str()]))),
+            }
+        }
+        reasons.sort_by_key(|(_, layers)| std::cmp::Reverse(layers.len()));
+        let (message, layers) = reasons.first()?;
+        let count = match layers.len() {
+            1 => "1 layer".to_owned(),
+            n => format!("{n} layers"),
+        };
+        let more = match reasons.len() - 1 {
+            0 => String::new(),
+            n => format!(" (and {n} more)"),
+        };
+        Some(format!("Not drawn, {count}: {message}{more}"))
+    }
 }
 struct View {
     config: ViewerConfig,
@@ -836,9 +862,11 @@ struct Runtime {
     auto: policy::AutoQuality,
     /// A transient refusal: draw again no earlier than this.
     not_before: f64,
-    /// Frames in a row the layer had no drawable of the output's size. Each
-    /// retry renders a whole frame, so they back off until it is reconfigured.
+    /// Frames in a row the layer gave no drawable (`nextDrawable` returned
+    /// nil). Each retry renders a whole frame, so they back off until one lands.
     drawable_misses: u32,
+    /// When the frames started being refused as transient, while they are.
+    waiting_since: Option<f64>,
     prepared: f64,
 }
 struct Flight {
@@ -881,6 +909,8 @@ const RETRY_SECONDS: f64 = 0.016;
 fn drawable_retry(misses: u32) -> f64 {
     (RETRY_SECONDS * f64::from(1u32 << misses.min(6))).min(1.)
 }
+/// A frame refused as transient this long is reported while it is retried.
+const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
@@ -1189,6 +1219,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     auto: Default::default(),
                     not_before: 0.,
                     drawable_misses: 0,
+                    waiting_since: None,
                     prepared: 0.,
                 }
             });
@@ -1435,6 +1466,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 .and_then(|overlays| {
                     engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
                 });
+            // Media ahead of the playhead is prepared after this frame is
+            // submitted: building its plan must not delay this present.
+            let mut prepare_at = None;
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
                 && now - r.prepared >= PREPARE_EVERY_SECONDS
@@ -1443,7 +1477,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 let ahead = (PREPARE_AHEAD_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
                     * f64::from(r.transport.rate().num.signum());
                 let at = (spec.time.get() + ahead as i64).max(0);
-                engine.prepare(&scene, Ticks::new(at).unwrap_or(spec.time), spec);
+                prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
             }
             #[cfg(test)]
             if let Some(hook) = shared.before_submit.lock().unwrap().take() {
@@ -1465,12 +1499,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 match result {
                     Ok(Some(s)) => {
                         v.status.error = None;
+                        // The drawable was another size than configured (a
+                        // resize whose publication lagged): later frames
+                        // render at the size actually shown.
+                        let shown = v.config.output.resized(s.width, s.height);
+                        if s.drawable.is_some() && shown != v.config.output {
+                            v.config.output = shown;
+                            v.dirty = true;
+                        }
                         v.status.stand_in_frames +=
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
                         v.status.effective_quality = spec.scale;
                         if let Some(r) = runtime.get_mut(&id) {
                             r.stand_in = s.stand_ins.then_some(landed_before);
                             r.drawable_misses = 0;
+                            r.waiting_since = None;
                         }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
@@ -1512,15 +1555,29 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         v.dirty = true;
                         v.input = input;
                         if let Some(r) = runtime.get_mut(&id) {
-                            r.not_before = trace::now() + RETRY_SECONDS;
+                            let now = trace::now();
+                            r.not_before = now + RETRY_SECONDS;
+                            // Retried for good, but never silently: past a few
+                            // seconds the viewer says what it waits for.
+                            let since = *r.waiting_since.get_or_insert(now);
+                            if now - since >= WAITING_SHOWN_SECONDS {
+                                v.status.error = Some(format!("Still waiting: {e}"));
+                            }
                         }
                     }
                     Err(e) => {
                         v.status.error = Some(e.to_string());
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.waiting_since = None;
+                        }
                     }
                 }
             }
             state.notify();
+            drop(state);
+            if let Some(at) = prepare_at {
+                engine.prepare(&scene, at, spec);
+            }
         } else {
             let waiting = runtime
                 .values()
@@ -1779,6 +1836,78 @@ mod worker_tests {
             assert!(std::time::Instant::now() < deadline, "{status:?}");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// A layer resized without a configure (its size publication lagged):
+    /// the frame is drawn at the drawable's size and later frames follow it,
+    /// instead of the drawable being dropped and the frame retried forever.
+    #[test]
+    fn a_drawable_of_another_size_is_drawn_not_retried() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("drawable-size-test").unwrap()).unwrap();
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_framebuffer_only(false);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(200., 100.));
+        let v = shapes_viewer(&service, Some(layer));
+        // The first frame shows that the drawable differs; the next renders
+        // at its size.
+        std::thread::sleep(Duration::from_millis(300));
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        assert_eq!(status.error, None);
+        assert_eq!(status.no_drawable, 0);
+        let pixels = status.frame.unwrap().pixels.unwrap();
+        assert_eq!(pixels.len(), 200 * 100);
+        // Settled: no frame keeps being asked for.
+        std::thread::sleep(Duration::from_millis(300));
+        let completed = || v.status().frame.and_then(|f| f.completion_host_seconds);
+        let settled = completed();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(completed(), settled, "a paused viewer stays idle");
+        assert_eq!(v.status().no_drawable, 0);
+    }
+
+    #[test]
+    fn the_notice_names_the_commonest_reason_a_layer_is_not_drawn() {
+        let failure = |layer: &str, message: &str| pm_render::LayerFailure {
+            composition: "c".into(),
+            layer: layer.into(),
+            message: message.into(),
+        };
+        let mut status = ViewerStatus::default();
+        assert_eq!(status.notice(), None);
+        status.layer_failures = vec![
+            failure("a", "no definition for effect deep-glow.effect"),
+            failure("b", "no definition for effect deep-glow.effect"),
+            failure("b", "no definition for effect deep-glow.effect"),
+            failure("c", "no definition for effect progressive-blur"),
+        ];
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 2 layers: no definition for effect deep-glow.effect (and 1 more)")
+        );
+    }
+
+    #[test]
+    fn a_resized_crop_stays_inside_its_canvas() {
+        let output = Output {
+            width: 100,
+            height: 50,
+            display: 1,
+            headroom: 1.,
+            crop: Some(Crop {
+                x: 30,
+                y: 10,
+                canvas_width: 130,
+                canvas_height: 60,
+            }),
+        };
+        let resized = output.resized(103, 51);
+        assert_eq!((resized.width, resized.height), (103, 51));
+        resized.validate().unwrap();
+        assert_eq!(output.resized(100, 50), output);
     }
 
     /// A removed or reset GPU: the worker rebuilds its device, points the

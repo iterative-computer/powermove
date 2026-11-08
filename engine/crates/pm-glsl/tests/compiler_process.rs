@@ -139,6 +139,56 @@ fn timeouts_reap_workers_and_admission_never_queues() {
     std::fs::remove_file(file).unwrap();
 }
 #[test]
+fn test_admission_waits_for_a_slot_within_the_deadline() {
+    use std::os::unix::fs::PermissionsExt;
+    let file = std::env::temp_dir().join(format!("pm-glsl-wait-{}", std::process::id()));
+    std::fs::write(&file, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let pool = Arc::new(Pool::new(file.clone(), 1).with_test_admission());
+    let holder = {
+        let pool = pool.clone();
+        std::thread::spawn(move || {
+            pool.run(request(SRC), Duration::from_millis(300))
+                .err()
+                .unwrap()
+                .stage
+        })
+    };
+    let start = Instant::now();
+    while pool.active() != 1 {
+        assert!(start.elapsed() < Duration::from_secs(2));
+        std::thread::yield_now();
+    }
+    // Admitted once the holder is reaped, then stopped by its own deadline.
+    let waited = Instant::now();
+    let stage = pool
+        .run(request(SRC), Duration::from_secs(2))
+        .err()
+        .unwrap()
+        .stage;
+    assert_eq!(stage, FailureStage::Deadline);
+    assert!(waited.elapsed() >= Duration::from_millis(150));
+    assert_eq!(holder.join().unwrap(), FailureStage::Deadline);
+    // A deadline that ends while waiting is still a busy compiler.
+    let holder = {
+        let pool = pool.clone();
+        std::thread::spawn(move || pool.run(request(SRC), Duration::from_millis(500)))
+    };
+    while pool.active() != 1 {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        pool.run(request(SRC), Duration::from_millis(50))
+            .err()
+            .unwrap()
+            .stage,
+        FailureStage::CompilerBusy
+    );
+    holder.join().unwrap().err().unwrap();
+    assert_eq!(pool.active(), 0);
+    std::fs::remove_file(file).unwrap();
+}
+#[test]
 fn adversarial_compilation_is_killable_and_next_request_recovers() {
     let pool = pool(1);
     let mut sources = pm_glsl::fuzz::bombs();
