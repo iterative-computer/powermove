@@ -13,6 +13,8 @@ use crate::plan::{Content, Draw, Source};
 pub struct MediaPreparation {
     pub queued_videos: usize,
     pub failures: Vec<String>,
+    /// The video draws the plan selected: (layer, instance).
+    pub videos: Vec<(String, u64)>,
 }
 
 fn visit_content(content: &Content, layer: &str, visit: &mut impl FnMut(&str, &Source)) {
@@ -105,7 +107,7 @@ impl Renderer {
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
-        let (plan, build) = plan::build_reusing(
+        let (plan, _) = plan::build_reusing(
             &mut self.evaluator,
             &comp,
             &project,
@@ -122,9 +124,9 @@ impl Renderer {
             None,
         );
         self.evaluator.close_channel_memo();
-        if !build.unsupported.is_empty() {
-            return Err(RenderError::Unsupported(build.unsupported));
-        }
+        // A layer the renderer cannot draw is reported by the frame itself;
+        // the media of every other layer is still prepared (refusing here
+        // left a project with one such layer without any look-ahead).
         let mut result = MediaPreparation::default();
         if !request.export {
             visit_plan(&plan, &mut |_, source| {
@@ -134,6 +136,7 @@ impl Renderer {
             });
         }
         for v in planned_videos(&plan) {
+            result.videos.push((v.layer.clone(), v.instance));
             match self.media.prepare_video(
                 &v.path,
                 v.instance,

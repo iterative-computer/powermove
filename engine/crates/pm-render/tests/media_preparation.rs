@@ -339,3 +339,46 @@ fn sources_past_the_preparation_cap_still_open_together() {
     let stats = renderer.scrub_stats();
     assert_eq!((stats.cached, stats.decoded), (n, 0), "{stats:?}");
 }
+
+/// A layer the renderer cannot draw (here an unknown type, as a missing
+/// extension's) leaves the media of every other layer prepared.
+#[test]
+fn media_is_prepared_beside_a_layer_the_renderer_cannot_draw() {
+    let _serial = serial_preparation();
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/video/h264-709-limited.mp4");
+    let (w, h) = (256, 144);
+    let mut project = doc::project(
+        w,
+        h,
+        2.0,
+        doc::no_fill(),
+        vec![
+            doc::layer(
+                "v",
+                "video",
+                json!({"asset":"clip","fit":"stretch","w":w,"h":h,"trim":0,"speed":1}),
+                f64::from(w) / 2.0,
+                f64::from(h) / 2.0,
+                2.0,
+            ),
+            doc::layer("x", "not-installed", json!({}), 0.0, 0.0, 2.0),
+        ],
+    );
+    doc::asset(&mut project, "clip", "video", "mp4", w, h, 2.0);
+    let document = doc::load(&project);
+    let mut assets = MapResolver::default();
+    assets.paths.insert("clip".into(), path);
+    let request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+    let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    let prepared = renderer
+        .prepare_media(&document, "Ptest-root", time, &request, &assets)
+        .unwrap();
+    assert_eq!(prepared.queued_videos, 1);
+    assert_eq!(
+        prepared.videos,
+        vec![("v".to_owned(), prepared.videos[0].1)]
+    );
+    assert!(renderer.finish_media_preparation().is_empty());
+}
