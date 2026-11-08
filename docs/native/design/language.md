@@ -450,8 +450,9 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
   `secondary`.
 - Clips: label-colour fill, `inner_radius`, 20 pt tall in a 28 pt row, name
   inside in `body` (`text`), trimmed with an ellipsis. Selection is a 1.5 pt
-  `text`-coloured ring plus brighter fill — **never a solid accent fill**
-  (that is how a selected clip would hide its keyframes).
+  `accent` ring plus brighter fill — **never a solid accent fill** (that is
+  how a selected clip would hide its keyframes). The selected row is filled
+  in the layer column only (the owner's demo, 2026-11-08).
 - Property sub-rows `property_row` 22: keyframe navigator (‹ ◆ ›, three
   `hit` squares from the inset), label `secondary` after it, and the value
   readout trailing in the layer column when it fits.

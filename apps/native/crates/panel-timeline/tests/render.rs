@@ -44,7 +44,7 @@ fn all_reviewed_paint_states_have_wire_snapshots_in_each_appearance() {
     assert_eq!(actual, expected);
 }
 #[test]
-fn selected_clips_use_label_mix_and_text_ring_and_exact_authored_times() {
+fn selected_clips_use_label_mix_and_accent_ring_and_exact_authored_times() {
     for scheme in [Scheme::Light, Scheme::Dark] {
         let t = Tokens::new(scheme, Accessibility::default());
         let f = scene(&t).prepare(viewport(&t), &t).unwrap();
@@ -55,7 +55,7 @@ fn selected_clips_use_label_mix_and_text_ring_and_exact_authored_times() {
         assert_ne!(clip.color, t.colors.accent);
         assert_ne!(clip.color, t.colors.labels.teal);
         let ring = f.ops.iter().find(|o| o.id == "clip-ring:selected").unwrap();
-        assert_eq!(ring.color, t.colors.text);
+        assert_eq!(ring.color, t.colors.accent);
         assert_eq!(ring.stroke, t.metrics.playhead as f64);
         let content = f
             .ops

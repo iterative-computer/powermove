@@ -632,7 +632,9 @@ impl Scene {
             let row = &self.rows[i];
             let y = m.ruler as f64 + self.tops[i] - v.scroll_y;
             let h = row.height(t);
-            let rect = Rect::new(0., y, v.width, h);
+            // Selection and hover fill the outline column only; in the tracks
+            // the clip's accent ring marks the selection (the owner's demo).
+            let rect = Rect::new(0., y, v.layer_column, h);
             if row.selected || row.hovered {
                 ops.push(Op::new(
                     format!("row:{}", row.id),
@@ -1017,7 +1019,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
             format!("clip-ring:{}", c.id),
             "outside-ring",
             r,
-            colors.text,
+            colors.accent,
         );
         o.stroke = m.playhead as f64;
         o.radius = m.clip_radius as f64;

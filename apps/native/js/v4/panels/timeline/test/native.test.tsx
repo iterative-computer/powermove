@@ -79,7 +79,11 @@ test("real Rust model window -> presentation authority guard -> accepted v4/Acce
     (n) => n.props["data-pm-component"] === "tree-item",
   );
   expect(rows.map((row) => row.props["aria-selected"])).toEqual([true, true]);
-  expect(root.host.root.textContent).toContain("2 layers selected");
+  // The count is announced (a status label), not drawn over the rows.
+  const status = [...root.host.nodes.values()].find(
+    (n) => n.props.id === "timeline:selection",
+  );
+  expect(status?.props.label).toBe("2 layers selected");
   await root.dispose();
 });
 

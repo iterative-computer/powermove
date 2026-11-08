@@ -6601,15 +6601,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
           "type": "text",
         },
         {
-          "children": [
-            {
-              "props": {},
-              "text": "That time is outside the composition",
-              "type": "text",
-            },
-          ],
           "props": {
             "id": "timeline:announcement",
+            "label": "That time is outside the composition",
             "metadata": {
               "sequence": "2",
             },
@@ -8877,15 +8871,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
           "type": "text",
         },
         {
-          "children": [
-            {
-              "props": {},
-              "text": "2 layers selected",
-              "type": "text",
-            },
-          ],
           "props": {
             "id": "timeline:selection",
+            "label": "2 layers selected",
             "role": "status",
           },
           "type": "text",

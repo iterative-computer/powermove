@@ -436,6 +436,36 @@ fn compile(
         };
     }
     let mut compiled = apply(sheet, &style, table);
+    // Wells in an inspector value column share it equally (Position X | Y)
+    // whether or not they are leased native fields (language §9).
+    let in_value_slot = node
+        .parent
+        .and_then(|p| surface.node(p))
+        .is_some_and(|p| p.props.get("data-pm-slot").and_then(Value::as_str) == Some("value"));
+    if in_value_slot
+        && matches!(
+            component,
+            Some(Component::NumberField | Component::TextField | Component::PopUpButton)
+        )
+    {
+        compiled.sheet = compiled.sheet.flex_1().min_w(px(0.)).overflow_hidden();
+    }
+    // A host-menu trigger in the value column (Font, Fill) reads as a well.
+    // Icon actions beside wells (Position's Pad) keep their hit square.
+    let titled = !node.children.is_empty() || !node.text.is_empty();
+    if in_value_slot && titled && component == Some(Component::ToolbarItem) {
+        compiled.sheet = compiled
+            .sheet
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .justify_start()
+            .h(px(t.metrics.field))
+            .min_h(px(t.metrics.field))
+            .px(px(t.metrics.gap))
+            .bg(rgb(t.colors.field))
+            .rounded(px(t.metrics.control_radius));
+    }
     match node.props.get("data-pm-slot").and_then(Value::as_str) {
         Some("label") => compiled.sheet = compiled.sheet.flex_1(),
         Some("value") => {
@@ -443,7 +473,31 @@ fn compile(
                 .sheet
                 .flex_row()
                 .items_center()
-                .gap(px(t.metrics.gap));
+                .gap(px(t.metrics.inner_radius));
+            // A trailing control (Scale's link) sits outside the column; the
+            // wells give up its width so the column's leading edge stays put.
+            let trailing = node
+                .parent
+                .and_then(|p| surface.node(p))
+                .is_some_and(|row| {
+                    row.children.iter().any(|c| {
+                        surface.node(*c).is_some_and(|c| {
+                            c.props.get("data-pm-slot").and_then(Value::as_str) == Some("trailing")
+                        })
+                    })
+                });
+            if trailing {
+                let w = px(t.metrics.value_column - t.metrics.hit);
+                compiled.sheet = compiled.sheet.w(w).min_w(w).max_w(w);
+            }
+        }
+        Some("trailing") => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .w(px(t.metrics.hit))
+                .items_center()
+                .justify_center();
         }
         _ => {}
     }

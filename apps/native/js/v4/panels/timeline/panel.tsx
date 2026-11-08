@@ -790,18 +790,21 @@ export function TimelinePanel({
           </div>
           <text id="timeline:render-bar" label={f.renderSummary} />
           {f.selection && f.selection.count > 1 && (
-            <text id="timeline:selection" role="status">
-              {`${f.selection.count} ${f.selection.kind === "layers" ? "layers" : "keyframes"} selected`}
-            </text>
+            // Spoken, not drawn: the rows and rings already show the selection,
+            // and the inspector shows the count (as v1 does).
+            <text
+              id="timeline:selection"
+              role="status"
+              label={`${f.selection.count} ${f.selection.kind === "layers" ? "layers" : "keyframes"} selected`}
+            />
           )}
           {f.announcement && (
             <text
               id="timeline:announcement"
               role="status"
+              label={announcementText(f.announcement.value)}
               metadata={{ sequence: f.announcement.sequence }}
-            >
-              {announcementText(f.announcement.value)}
-            </text>
+            />
           )}
         </>
       )}
