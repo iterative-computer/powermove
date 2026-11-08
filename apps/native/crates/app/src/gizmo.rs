@@ -142,7 +142,8 @@ pub trait Host: 'static {
     fn overlay(&self, lines: Vec<OverlayLine>, cx: &mut App);
     fn navigate(&self, change: Navigate, cx: &mut App);
     /// The shared layer menu, on the selection the press made.
-    fn layer_menu(&self, window: &mut Window, cx: &mut App);
+    /// The right-click menu over `layer`, or over empty canvas.
+    fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
     /// The Shape tool's variant.
     fn shape_variant(&self, _: &App) -> String {
@@ -788,7 +789,7 @@ impl GizmoSurface {
         let handle = window.window_handle();
         self.picks += 1;
         cx.spawn(async move |this, cx| {
-            let poses = cx
+            let picked = cx
                 .background_executor()
                 .spawn(async move {
                     let p = kernel.published(&project)?;
@@ -798,28 +799,34 @@ impl GizmoSurface {
                     let hit = crate::text_host::query(&p, |q| {
                         q.pick(None, press.at[0], press.at[1], press.time, &options)
                     })
-                    .ok()?
-                    .layer_id?;
+                    .ok()
+                    .and_then(|hit| hit.layer_id);
+                    // Empty canvas: the viewer's own menu, which only extensions fill.
+                    let Some(hit) = hit else {
+                        return Some((None, None));
+                    };
                     if !p.selection.layers().contains(&hit) {
-                        let ids = vec![hit];
+                        let ids = vec![hit.clone()];
                         let selection = SelectionCall::Layers { ids, add: false };
                         let request = Request::new(Caller::native(), selection);
                         kernel.call(&project, request).await?.ok()?;
                     }
                     let p = kernel.published(&project)?;
-                    read_at(&p, press.time)
+                    Some((Some(hit), read_at(&p, press.time)))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.picks -= 1;
-                let Some(poses) = poses else {
+                let Some((hit, poses)) = picked else {
                     return;
                 };
-                s.poses = Arc::new(poses);
-                s.draw(cx);
+                if let Some(poses) = poses {
+                    s.poses = Arc::new(poses);
+                    s.draw(cx);
+                }
                 let host = s.host.clone();
                 cx.defer(move |cx| {
-                    let _ = handle.update(cx, |_, window, cx| host.layer_menu(window, cx));
+                    let _ = handle.update(cx, |_, window, cx| host.layer_menu(hit, window, cx));
                 });
             });
         })

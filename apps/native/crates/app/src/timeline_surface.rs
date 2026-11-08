@@ -23,8 +23,10 @@ pub trait Delegate: 'static {
     /// Run a shell command by name, as its menu item or chord would.
     fn command(&self, name: &str, cx: &mut App);
     /// `choose` runs with the picked row, on the main thread, once tracking ends.
+    /// Extensions' rows for `locations` follow the native ones.
     fn menu(
         &self,
+        locations: Vec<(&'static str, serde_json::Value)>,
         items: Vec<serde_json::Value>,
         window: &mut Window,
         cx: &mut App,
@@ -993,6 +995,13 @@ impl TimelineSurface {
             }
             return;
         }
+        let time = self.time_at(x);
+        let at = |kind: &str, layer: Option<&str>| {
+            vec![(
+                "timeline:context",
+                serde_json::json!({"kind":kind,"layerId":layer,"time":time}),
+            )]
+        };
         let context = if y < ruler {
             match frame.hit_op("marker:", x, y, 2.) {
                 Some(op) => MenuContext::Marker {
@@ -1026,6 +1035,21 @@ impl TimelineSurface {
                 _ => MenuContext::Empty,
             }
         };
+        // Main's contexts: a row's kind, `layerId` only on a layer row (with
+        // `layer:context` too), `empty` on the ruler and between rows.
+        let key_row = frame
+            .hit_key(x, y, 3.)
+            .and_then(|(row, _)| pm_panel_timeline::v4::parse_row(&row).ok());
+        let locations = match (&context, key_row) {
+            (MenuContext::Keys { .. }, Some(RowId::Layer(id))) => {
+                let mut locations = vec![("layer:context", serde_json::json!({ "layerId": id }))];
+                locations.extend(at("layer", Some(&id)));
+                locations
+            }
+            (MenuContext::Keys { .. } | MenuContext::Track { .. }, _) => at("prop", None),
+            (MenuContext::Graph { .. }, _) => at("graph", None),
+            _ => at("empty", None),
+        };
         let mut items = self.model.menu(&context);
         // Graph Fit and Merge have no host. Never offer them live.
         for item in &mut items {
@@ -1038,6 +1062,7 @@ impl TimelineSurface {
             .collect();
         let weak = cx.entity().downgrade();
         self.delegate.clone().menu(
+            locations,
             rows,
             window,
             cx,
@@ -1060,11 +1085,21 @@ impl TimelineSurface {
     /// The shared layer menu runs ordinary commands on the row's selection.
     fn layer_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.model.selection.contains(&id) {
-            self.queue.push_back(Job::SelectLayer(id, Mods::default()));
+            self.queue
+                .push_back(Job::SelectLayer(id.clone(), Mods::default()));
             self.pump(cx);
         }
         let delegate = self.delegate.clone();
+        let time = self.delegate.time(cx);
+        let locations = vec![
+            ("layer:context", serde_json::json!({ "layerId": id })),
+            (
+                "timeline:context",
+                serde_json::json!({"kind":"layer","layerId":id,"time":time}),
+            ),
+        ];
         self.delegate.clone().menu(
+            locations,
             crate::layer_commands::layer_menu_rows(),
             window,
             cx,

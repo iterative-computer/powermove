@@ -16,7 +16,10 @@ pub struct CanvasFrame {
     pub version: u64,
     pub width: u32,
     pub height: u32,
+    /// Encoded bytes: a canvas's PNG, or the file behind an `<img>`.
     pub png: Arc<[u8]>,
+    /// `image/png` for a canvas; the image's own type for an `<img>`.
+    pub mime: Arc<str>,
 }
 
 /// Per-host generation; resource IDs never repeat, including after consumption.
@@ -26,7 +29,7 @@ pub struct CanvasFrame {
 pub(crate) struct CanvasResources {
     next: u64,
     bytes: usize,
-    entries: BTreeMap<u64, Arc<[u8]>>,
+    entries: BTreeMap<u64, (Arc<[u8]>, Arc<str>)>,
 }
 #[cfg(any(target_os = "macos", test))]
 impl CanvasResources {
@@ -46,14 +49,15 @@ impl CanvasResources {
         }
         self.next = self.next.checked_add(1).ok_or(Error::Backpressure)?;
         self.bytes += frame.png.len();
-        self.entries.insert(self.next, frame.png.clone());
+        self.entries
+            .insert(self.next, (frame.png.clone(), frame.mime.clone()));
         Ok(self.next)
     }
-    pub fn get(&self, id: u64) -> Result<Arc<[u8]>> {
+    pub fn get(&self, id: u64) -> Result<(Arc<[u8]>, Arc<str>)> {
         self.entries.get(&id).cloned().ok_or(Error::InvalidRequest)
     }
     pub fn remove(&mut self, id: u64) -> Result<()> {
-        let bytes = self.entries.remove(&id).ok_or(Error::InvalidRequest)?;
+        let (bytes, _) = self.entries.remove(&id).ok_or(Error::InvalidRequest)?;
         self.bytes -= bytes.len();
         Ok(())
     }
@@ -72,15 +76,16 @@ mod tests {
             width: 1,
             height: 1,
             png: vec![1; bytes].into(),
+            mime: "image/png".into(),
         }
     }
     #[test]
     fn native_resources_remain_immutable_until_ack_and_pressure_never_evicts() {
         let mut resources = CanvasResources::default();
         let first = resources.insert(&frame(MAX_PENDING_BYTES)).unwrap();
-        let held = resources.get(first).unwrap();
+        let (held, _) = resources.get(first).unwrap();
         assert_eq!(resources.insert(&frame(1)), Err(Error::Backpressure));
-        assert_eq!(resources.get(first).unwrap().len(), MAX_PENDING_BYTES);
+        assert_eq!(resources.get(first).unwrap().0.len(), MAX_PENDING_BYTES);
         resources.remove(first).unwrap();
         assert!(resources.get(first).is_err());
         assert_eq!(held.len(), MAX_PENDING_BYTES);

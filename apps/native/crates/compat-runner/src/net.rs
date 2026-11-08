@@ -25,7 +25,12 @@ pub enum Reach {
     Open,
     /// Confined code: public HTTPS hosts only, also across redirects.
     Public,
+    /// `assets.importUrl`, as the shipped app downloads media: public HTTPS
+    /// only, across at most five redirects, without credentials.
+    Media,
 }
+/// Media downloads follow at most this many redirects.
+const MEDIA_REDIRECTS: usize = 5;
 
 fn local_v4(ip: Ipv4Addr) -> bool {
     let [a, b, ..] = ip.octets();
@@ -154,7 +159,12 @@ mod system {
                 let delivery = self.ivars();
                 let mut count = delivery.redirects.lock().unwrap();
                 *count += 1;
-                let allowed = if *count > MAX_REDIRECTS {
+                let limit = if delivery.reach == Reach::Media {
+                    MEDIA_REDIRECTS
+                } else {
+                    MAX_REDIRECTS
+                };
+                let allowed = if *count > limit {
                     Err(Error::Host("Too many redirects".into()))
                 } else {
                     admit(&next, delivery.reach)
@@ -381,6 +391,13 @@ pub fn fetch(request: FetchRequest, reach: Reach, _: Cancellation) -> Result<Box
 
 /// Worker-only: the whole response, or the first failure.
 pub fn get(url: &str, max_bytes: usize, seconds: u64) -> Result<FetchResponse> {
+    request(url, max_bytes, seconds, Reach::Open)
+}
+/// Worker-only: `assets.importUrl`'s download (`Reach::Media`).
+pub fn download(url: &str, max_bytes: usize, seconds: u64) -> Result<FetchResponse> {
+    request(url, max_bytes, seconds, Reach::Media)
+}
+fn request(url: &str, max_bytes: usize, seconds: u64, reach: Reach) -> Result<FetchResponse> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
     let mut request = fetch(
         FetchRequest {
@@ -391,7 +408,7 @@ pub fn get(url: &str, max_bytes: usize, seconds: u64) -> Result<FetchResponse> {
             max_response_bytes: max_bytes,
             deadline,
         },
-        Reach::Open,
+        reach,
         Cancellation::default(),
     )?;
     loop {

@@ -120,7 +120,7 @@ impl Host for Recording {
     fn navigate(&self, change: Navigate, _: &mut App) {
         self.0.navigation.borrow_mut().push(change);
     }
-    fn layer_menu(&self, _: &mut gpui::Window, _: &mut App) {
+    fn layer_menu(&self, _: Option<String>, _: &mut gpui::Window, _: &mut App) {
         self.0.menus.set(self.0.menus.get() + 1);
     }
     fn report(&self, message: String, _: &mut App) {
@@ -580,7 +580,7 @@ impl Host for OwnerHost {
         let _ = self.0.update(cx, |o, _| o.overlays += 1);
     }
     fn navigate(&self, _: Navigate, _: &mut App) {}
-    fn layer_menu(&self, _: &mut gpui::Window, _: &mut App) {}
+    fn layer_menu(&self, _: Option<String>, _: &mut gpui::Window, _: &mut App) {}
     fn report(&self, _: String, _: &mut App) {}
 }
 #[gpui::test]

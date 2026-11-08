@@ -52,7 +52,9 @@ events there, and the realm positions the panel's root at the shell's rectangle.
 The root stays hidden until placed; the extension builds into a body inside it,
 which it may style. The page carries the compat theme edition for the window's
 appearance, so `--tx`, `--bg-field` and the rest resolve as in the shipped app. Recorder canvases reach the page as immutable
-PNG resources. Inspector sections share a contributed `extension-properties` panel,
+PNG resources, and an `<img>` whose source is realm-local (`blob:`, `data:`) as its own
+bytes. Images decode natively in the realm (`image.rs`: ImageIO, resvg for SVG), so
+`decode()`, `naturalWidth` and `drawImage` of an image or `ImageBitmap` work. Inspector sections share a contributed `extension-properties` panel,
 because the v4 Inspector has no DOM slot.
 
 ## Failure
@@ -81,6 +83,15 @@ returns through the host's inbox, resolving the realm's promise or running the m
 item's closure. `ui.confirm`, `ui.menu`, `ui.openExternal`, `panels.open` and
 `panel:context` contributions take this path. A tab menu waits 150 ms for
 contributions, then opens without them.
+
+`assets.import` and `PM.assets.add` go through Import Media (probe, retain, Project
+panel, no layer) and answer with the new asset; bytes the realm made are written to a
+private temporary file first. `assets.pick` is the open panel; a picked file stays on
+disk behind an opaque token (`compat-runner/src/files.rs`) and reads its bytes only when
+asked, so importing it copies nothing into V8. `assets.import` takes 3D models (glb,
+glTF, OBJ) and keeps `layerDefinition` on the asset, as main does. `assets.importUrl`
+is main's media download, run by the app on a worker: public HTTPS only, at most five
+redirects, 512 MiB, the file type taken from its bytes.
 
 `api.storage` is the kernel's `ext.<id>` settings, the keys the shipped app wrote,
 so values survive a restart and are read by a later window.
@@ -128,19 +139,60 @@ window is open is shown in it.
 
 ## Known limits
 
-- Images do not decode in the realm (`Image.decode`, `naturalWidth`, `drawImage` of an
-  image), so checks such as Commons Logos' transparency test fail.
 - `PM.proj` hands out views: a project record read back is a view (its identity is
   stable), not the stored object. `structuredClone` accepts views; other natives that
   refuse proxies would not.
 
-- `render.raster`, `renderFrameTo` and `snapshot` have no engine backend, and raster
-  overrides do not reach the viewer.
-- `api.services` holds only what extensions register; the built-in `viewer`,
-  `timeline`, `inspector`, `tool` and `shaderHooks` services do not exist natively.
-- `ui.modal` and `PM.Fonts` throw `Unavailable`.
-- `layer:context`, `timeline:context` and `viewer:context` have nowhere to appear,
-  because those native surfaces have no context menus. `titlebar:right` has no host.
+- Raster overrides (a `raster` service wrapper or a replaced `PM.raster`) draw in the
+  viewer and in exports through the engine's compat rasters (`pm_render::compat`):
+  `engine-service/src/compat.rs` holds the viewer's answers, a missed frame asks the
+  realm (`raster_overrides.rs`, `__compat.answerRasters`) and redraws when they land,
+  asking twelve frames ahead while playing; an export child asks the parent for each
+  layer through its pipes, with pixels in a private file. `render.raster`'s base is
+  lazy and painted by a second renderer on its own thread (`LayerRasters`), so a
+  pass-through costs one JS call and no paint. A result counts as the layer only
+  while it is that layer's untouched base at the asked frame, scale and crop; any
+  write, canvas read, replacement layer or other frame sends its pixels (with `uv`, so
+  a crop window keeps its place). `null` draws nothing, as main; a throwing or
+  unreadable override fails that frame (the viewer holds it and does not ask again
+  until an edit or new wrappers; an export fails with the extension's message).
+  Answers are per document (kernel `doc_id`) and per wrapper generation (any
+  registration, removal or `PM.raster` change forgets them). An export pins its
+  frozen snapshot: the realm answers from that project (base rasters paint from that
+  document) and fails the export if its wrappers change mid-run. A capture
+  (`renderFrameTo`, snapshot) of the realm's own project answers the overrides it
+  needs inline while the realm waits (`render.continue`). Cancelling an export or
+  closing its window ends any wait at once; pixel files carry the job id. Override
+  pixels travel premultiplied (the engine's fast upload) and each renderer keeps one
+  texture per raster for every band. Release, 2 s
+  test export with four overrides: 16 s against 4.5 s without extensions (76 s before
+  the upload fixes); about 6 s of that is realm answers (480 asks, ~12 ms each).
+- `render.renderFrameTo` and `PM.Export.snapshot` render one frame through the engine as
+  main draws it (opaque over black, motion blur unless `{mblur:false}`, a target canvas
+  filled and returned; snapshot at most `maxWidth` wide, no blur, JPEG 0.74). Each new
+  frame is still a one-frame export in the engine process (`mcp_services::frame_renderer`);
+  the last four are cached by revision, and a stopped task or the 30 s host deadline
+  cancels it. `mbSamples` is not honoured: the engine picks its own sample count.
+- Built-in services: `tool` follows the shell's tool (`toolSelect` is `select`; a
+  `tool` bus event on change); `setTool` and its writable `tool`/`toolShape` change at
+  once, as main, and run the shell's tool command (the native Shape tool draws
+  rectangles whatever the shape). `viewer` reports the viewer's zoom, pan and fit plus
+  `worldBounds`; `setZoom` leaves fit at the clamped zoom as main. The native viewer
+  is Metal under no DOM, so `viewer.stage` and `ov` are `null`: an extension drawing a
+  DOM overlay on the viewer (displacement-origin-guide) finds no stage and draws
+  nothing. `timeline`, `inspector` and `shaderHooks` are not registered.
+- `ui.modal` is a native sheet on the window: AppKit title and buttons (primary last,
+  on Return), the extension's body DOM in a child web view the page moves it into; a
+  button clicks a hidden twin in the realm, so actions run there with main's rules
+  (run then close unless it returns `false`; Escape dismisses unless
+  `dismissible: false`; `onClose` once on any close). The sheet's document is attached
+  to the panel's remote-DOM applier, so its input reaches the realm as the panel's
+  own. Its body is a fixed 280 pt tall and scrolls. `PM.Fonts`
+  throws `Unavailable`.
+- `titlebar:right` has no host. `layer:context`, `timeline:context` and `viewer:context`
+  rows follow the native rows in the timeline's and viewer's right-click NSMenus
+  (`Controller::surface_menu`, the same 150 ms deadline as tab menus), with v1's contexts:
+  a layer gathers both `layer:context` and its surface's location.
 - Contributed layer types render and label their timeline row, but their parameters
   have no Properties rows until per-kind controls are designed.
 - Layout reads in the realm are cached from the last page report (`remote-dom.md`).

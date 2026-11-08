@@ -29,6 +29,42 @@ pub fn extensions() -> Vec<&'static str> {
     [IMAGES, AUDIO, VIDEO].concat()
 }
 
+/// An HTML `accept` list (`image/*`, `.png`, `video/mp4`) as open-panel
+/// extensions; empty when any file is allowed.
+pub fn accept_extensions(accept: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for token in accept.split(',').map(|t| t.trim().to_ascii_lowercase()) {
+        let listed: &[&str] = match token.as_str() {
+            "" => continue,
+            "image/*" => IMAGES,
+            "video/*" => VIDEO,
+            "audio/*" => AUDIO,
+            "image/jpeg" => &["jpg", "jpeg"],
+            "image/svg+xml" => &["svg"],
+            "image/tiff" => &["tif", "tiff"],
+            "video/quicktime" => &["mov"],
+            "video/x-matroska" => &["mkv"],
+            "audio/mpeg" => &["mp3"],
+            "audio/mp4" => &["m4a"],
+            "audio/wav" | "audio/x-wav" => &["wav"],
+            "application/json" => &["json"],
+            "text/plain" => &["txt"],
+            other => {
+                match other.strip_prefix('.').or_else(|| other.split('/').nth(1)) {
+                    Some(extension) if !extension.is_empty() && extension != "*" => {
+                        out.push(extension.into())
+                    }
+                    // `*/*` or an unknown wildcard: anything goes.
+                    _ => return vec![],
+                }
+                continue;
+            }
+        };
+        out.extend(listed.iter().map(|e| e.to_string()));
+    }
+    out.dedup();
+    out
+}
 fn extension(path: &Path) -> String {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -139,6 +175,19 @@ pub struct ImportRequest {
     pub replace: Option<String>,
     /// `placement`: a layer per file at this time. `None`: Project panel only.
     pub place_at: Option<f64>,
+    /// An extension's `assets.import`: 3D models (glb, glTF, OBJ) are media too.
+    pub models: bool,
+    /// The layer definition an extension asked its asset to place as.
+    pub layer_definition: Option<String>,
+}
+/// A 3D model's type, for imports that take models.
+fn model_mime(path: &Path) -> Option<&'static str> {
+    match extension(path).as_str() {
+        "glb" => Some("model/gltf-binary"),
+        "gltf" => Some("model/gltf+json"),
+        "obj" => Some("model/obj"),
+        _ => None,
+    }
 }
 #[derive(Debug, Default, PartialEq)]
 pub struct Outcome {
@@ -211,26 +260,41 @@ impl Builtins {
             let name = path
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-            let Some(kind) = kind(&path) else {
+            let model = request.models.then(|| model_mime(&path)).flatten();
+            let Some(kind) = kind(&path).or(model.map(|_| "model")) else {
                 outcome.failed.push((name, "Unsupported file".into()));
                 continue;
             };
-            let retained = decodes(&path, kind)
-                .and_then(|()| {
-                    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-                    metadata(&path, kind, size)
+            let type_ = model.map_or_else(|| mime(&path, kind), str::to_owned);
+            let retained = (if model.is_some() {
+                Ok(())
+            } else {
+                decodes(&path, kind)
+            })
+            .and_then(|()| {
+                let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+                let mut asset = match model {
+                    // A model has no media facts; the scene system reads its bytes.
+                    Some(_) => json!({"name":name,"kind":"model","size":size,"persisted":true,
+                            "sourcePath":path.to_string_lossy()}),
+                    None => crate::data::wire(&metadata(&path, kind, size)?),
+                };
+                if let Some(definition) = &request.layer_definition {
+                    asset["layerDefinition"] = json!(definition);
+                }
+                crate::data::model(&asset)
+            })
+            .and_then(|metadata| {
+                let original = archive
+                    .retain_path(&path, &type_, cancel)
+                    .map_err(|e| e.to_string())?;
+                Ok(RetainedAsset {
+                    id: pm_kernel::new_id("a"),
+                    metadata,
+                    original,
+                    previous: previous.clone(),
                 })
-                .and_then(|metadata| {
-                    let original = archive
-                        .retain_path(&path, &mime(&path, kind), cancel)
-                        .map_err(|e| e.to_string())?;
-                    Ok(RetainedAsset {
-                        id: pm_kernel::new_id("a"),
-                        metadata,
-                        original,
-                        previous: previous.clone(),
-                    })
-                });
+            });
             match retained {
                 Ok(item) => items.push(item),
                 Err(error) => outcome.failed.push((name, error)),

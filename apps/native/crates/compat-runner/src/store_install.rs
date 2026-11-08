@@ -21,6 +21,24 @@ pub fn available() -> bool {
     !PINNED_KEYS.is_empty()
 }
 
+/// Why a release was not installed, in words a person can act on.
+fn refusal(error: pm_store_host::Error) -> Error {
+    use pm_store_host::Error as Store;
+    Error::Host(match error {
+        Store::Integrity(_) => {
+            "This release's signature doesn't match its files, so it wasn't installed.".into()
+        }
+        Store::Invalid(_) => "This isn't a valid Store release, so it wasn't installed.".into(),
+        Store::Conflict | Store::Stale => {
+            "Another change to this extension happened first. Try installing again.".into()
+        }
+        Store::Io(message) | Store::Platform(message) => {
+            format!("The release couldn't be saved: {message}")
+        }
+        other => format!("The release wasn't installed ({other})."),
+    })
+}
+
 pub fn pinned() -> Result<TrustStore> {
     let mut trust = TrustStore::default();
     for (publisher, key, bytes) in PINNED_KEYS {
@@ -44,8 +62,7 @@ pub fn install_verified(
     trust: &TrustStore,
     repo: &str,
 ) -> Result<String> {
-    let mut artifacts = FileArtifacts::new(profile.join("store-artifacts"))
-        .map_err(|e| Error::Host(format!("{e:?}")))?;
+    let mut artifacts = FileArtifacts::new(profile.join("store-artifacts")).map_err(refusal)?;
     let (_, verified) = KernelStoreAdapter::new(kernel)
         .install_archive(
             &mut artifacts,
@@ -57,7 +74,7 @@ pub fn install_verified(
                 expected: None,
             },
         )
-        .map_err(|e| Error::Host(format!("{e:?}")))?;
+        .map_err(refusal)?;
     let id = release.statement.extension.as_str().to_owned();
     let root = profile.join("extensions");
     let staging = root.join(format!(".{id}.install"));

@@ -1,6 +1,7 @@
 //! In-process native rendering. No Node, napi entrypoints, bridge or GPUI.
 //! Callers own below-slot placement and pump native layers on the main thread.
 pub mod color;
+pub mod compat;
 pub mod jobs;
 pub mod layers;
 pub mod policy;
@@ -693,6 +694,8 @@ impl Viewer {
 pub struct EngineService {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    compat: Arc<compat::CompatStores>,
+    layer_rasters: Option<Arc<compat::LayerRasters>>,
 }
 impl EngineService {
     /// Start off the UI thread: renderer/shader initialization may take time.
@@ -708,11 +711,30 @@ impl EngineService {
         shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
+        let layer_rasters = compat::LayerRasters::start(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            Some(fonts.clone()),
+        )?;
         let mut engine = render::Engine::with_shader_cache(gpu, shader_cache)?;
         engine.set_fonts(fonts);
-        Self::start_engine(device, engine)
+        let mut service = Self::start_engine(device, engine)?;
+        service.layer_rasters = Some(layer_rasters);
+        Ok(service)
     }
-    fn start_engine(device: metal::Device, engine: render::Engine) -> Result<Self> {
+    /// The base rasters raster overrides start from (`render.raster`).
+    pub fn layer_rasters(&self) -> Option<Arc<compat::LayerRasters>> {
+        self.layer_rasters.clone()
+    }
+    /// A document's raster override answers (`compat::CompatStore`).
+    pub fn compat(&self, doc_id: u64) -> Arc<compat::CompatStore> {
+        self.compat.document(doc_id)
+    }
+    /// A document closed: its answers go.
+    pub fn forget_compat(&self, doc_id: u64) {
+        self.compat.forget(doc_id);
+    }
+    fn start_engine(device: metal::Device, mut engine: render::Engine) -> Result<Self> {
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -727,6 +749,20 @@ impl EngineService {
             #[cfg(test)]
             invalid_call: Default::default(),
         });
+        // Answers that land redraw every viewer, as a font change does.
+        let compat = Arc::new(compat::CompatStores::default());
+        let redraw = Arc::downgrade(&shared);
+        compat.set_redraw(Arc::new(move || {
+            if let Some(shared) = redraw.upgrade() {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+                drop(state);
+                shared.wake.try_send(()).ok();
+            }
+        }));
+        engine.set_compat(Some(compat.clone()));
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
@@ -734,6 +770,8 @@ impl EngineService {
         Ok(Self {
             shared,
             thread: Some(thread),
+            compat,
+            layer_rasters: None,
         })
     }
     /// Call after the main-thread font broker's generation changes.
@@ -1549,6 +1587,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             }));
             engine.mastering = mastering;
             engine.set_resources(resources);
+            engine.use_compat_document(stamp.doc_id);
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes
@@ -1662,6 +1701,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         v.capture |= capture;
                         v.dirty = true;
                         v.input = input;
+                        // A raster override's layers: asked of the realm; its
+                        // answers redraw (`CompatStore::answer_all`).
+                        let pending = match e.downcast_ref::<pm_render::RenderError>() {
+                            Some(pm_render::RenderError::CompatPending(needs)) => {
+                                Some(needs.clone())
+                            }
+                            _ => None,
+                        };
+                        if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
+                            store.request(needs, spec.moment == policy::Moment::Playing);
+                        }
                         if let Some(r) = runtime.get_mut(&id) {
                             let now = trace::now();
                             r.refusals = r.refusals.saturating_add(1);

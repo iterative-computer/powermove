@@ -34,6 +34,7 @@ mod platform;
 mod playback;
 mod pro_media;
 mod project_library;
+mod raster_overrides;
 mod rows;
 mod session;
 mod shape_tool;

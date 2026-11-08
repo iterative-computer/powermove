@@ -21,7 +21,17 @@ struct State {
     dom: Vec<Value>,
     bindings: BTreeMap<u64, String>,
     dom_sequence: u64,
+    /// Decoded images by id (`image-N`, `svg-N` for vector sources).
+    images: BTreeMap<String, crate::image::Encoded>,
+    /// Bytes held by images and their SVG rasters, against `IMAGE_BUDGET`.
+    image_bytes: u64,
+    /// An SVG raster pin's bytes and its raster-to-intrinsic scale per axis.
+    rasters: BTreeMap<(String, u64), (u64, f64, f64)>,
 }
+/// Decoded image memory one realm may hold at once.
+const IMAGE_BUDGET: u64 = 1 << 30;
+/// SVG rasters are cached in quarter-scale steps: version `q` is `q / 4` scale.
+const SVG_STEPS: f64 = 4.;
 /// Everything a host owner hears from its realm, without waiting on it.
 pub trait RealmEvents: Send + Sync + 'static {
     fn health(&self, _id: &str, _health: &Value) {}
@@ -58,8 +68,35 @@ pub struct NativeHost {
     transport: crate::transport::Transport,
     events: Box<dyn RealmEvents>,
     text: Mutex<Option<CanvasText>>,
+    frames: Mutex<Option<crate::FrameRenderer>>,
+    rasters: Mutex<Option<crate::RasterHooks>>,
+    /// The capture (`renderFrameTo`, `PM.Export.snapshot`) the realm waits for.
+    capture: Mutex<Option<Capture>>,
+    /// While a capture runs, override asks for this realm come here: the
+    /// waiting realm answers them inline (the capture draws its own project).
+    nested: Mutex<Option<std::sync::mpsc::Sender<CaptureEvent>>>,
 }
-fn host_error(error: pm_recorder::Error) -> Error {
+pub(crate) enum CaptureEvent {
+    Frame(std::result::Result<Vec<u8>, String>),
+    Asks(u64, Value),
+}
+struct Capture {
+    method: String,
+    events: std::sync::mpsc::Receiver<CaptureEvent>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+/// Straight RGBA8 to premultiplied, as a canvas's backing store holds it.
+fn premultiply(straight: &[u8]) -> Vec<u8> {
+    let mut out = straight.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
+            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+    out
+}
+pub(crate) fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
 }
 fn num(args: &[Value], index: usize) -> Result<f64> {
@@ -133,7 +170,327 @@ impl NativeHost {
             transport,
             events,
             text: Mutex::new(None),
+            frames: Mutex::new(None),
+            rasters: Mutex::new(None),
+            capture: Mutex::new(None),
+            nested: Mutex::new(None),
         }
+    }
+    /// An override ask while this realm waits for a capture: handed to the
+    /// wait (true), or not (false: the realm is free; use its inbox).
+    pub(crate) fn nested_ask(&self, batch: u64, ask: Value) -> std::result::Result<(), Value> {
+        match self.nested.lock().unwrap().as_ref() {
+            Some(tx) => tx
+                .send(CaptureEvent::Asks(batch, ask))
+                .map_err(|e| match e.0 {
+                    CaptureEvent::Asks(_, ask) => ask,
+                    CaptureEvent::Frame(_) => Value::Null,
+                }),
+            None => Err(ask),
+        }
+    }
+    fn end_capture(&self) {
+        *self.nested.lock().unwrap() = None;
+        if let Some(capture) = self.capture.lock().unwrap().take() {
+            capture
+                .stop
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    pub fn set_rasters(&self, hooks: Option<crate::RasterHooks>) {
+        *self.rasters.lock().unwrap() = hooks;
+    }
+    /// A recorder canvas holding straight RGBA8 pixels, as a surface id.
+    fn canvas_of(&self, width: u32, height: u32, rgba: Vec<u8>) -> Result<String> {
+        crate::image::rgba_bytes(u64::from(width), u64::from(height))?;
+        let pixels = ImageData::from_rgba(width, height, rgba).map_err(host_error)?;
+        let mut state = self.state.lock().unwrap();
+        state.next += 1;
+        let id = state.next;
+        let mut canvas = Canvas::new(id, width, height).map_err(host_error)?;
+        canvas
+            .put_image_data(pixels, 0, 0, None)
+            .map_err(host_error)?;
+        state.surfaces.insert(id.to_string(), canvas);
+        Ok(id.to_string())
+    }
+    /// `render.raster(layer, scale, time, uploaded, crop)`'s base: the layer as
+    /// the engine paints it, with today's geometry, as a recorder canvas.
+    /// Args: `[{id, content?, composition?}, scale, time, crop?]`.
+    fn base_raster(&self, args: &Value) -> Result<Value> {
+        let hooks = self.rasters.lock().unwrap().clone().ok_or_else(|| {
+            Error::Host("render.raster needs the engine, which this host does not have".into())
+        })?;
+        let spec = &args[0];
+        let (document, open) = self.kernel.lock().unwrap().document()?;
+        let number = |i: usize, default: f64| {
+            args.get(i)
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite())
+                .unwrap_or(default)
+        };
+        let crop = args.get(3).and_then(|c| {
+            let at = |k: &str| c[k].as_f64().filter(|v| *v >= 0.).map(|v| v as u32);
+            Some([at("x")?, at("y")?, at("width")?, at("height")?])
+        });
+        let content = match &spec["content"] {
+            Value::Object(_) => Some(
+                pm_model::json::parse(&spec["content"].to_string())
+                    .map_err(|_| Error::Invalid("raster layer object"))?,
+            ),
+            _ => None,
+        };
+        let reply = (hooks.base)(crate::BaseRasterRequest {
+            document,
+            composition: spec["composition"].as_str().map_or(open, str::to_owned),
+            layer: spec["id"].as_str().unwrap_or_default().to_owned(),
+            content,
+            seconds: number(2, self.transport.time()),
+            scale: number(1, 1.).max(1e-6),
+            crop,
+            job: spec["job"].as_str().map(str::to_owned),
+        })
+        .map_err(Error::Host)?;
+        let Some(reply) = reply else {
+            return Ok(Value::Null);
+        };
+        let surface = self.canvas_of(reply.width, reply.height, reply.straight_rgba)?;
+        Ok(
+            json!({"kind":"recorder-surface","surface":surface,"width":reply.width,
+            "height":reply.height,"w":reply.size.0,"h":reply.size.1,
+            "anchorX":reply.anchor.0,"anchorY":reply.anchor.1,"uv":reply.uv,
+            "selection":reply.selection.map(|[x0,y0,x1,y1]| json!({"x0":x0,"y0":y0,"x1":x1,"y1":y1})),
+            "fontOffset":reply.font_offset.map(|(x,y)| json!({"x":x,"y":y}))}),
+        )
+    }
+    /// One batch of override answers: `{batch, answers: [{native} | {hidden} |
+    /// {retry} | {error} | {surface, w, h, anchorX, anchorY, uv?}]}`, the
+    /// canvases read here, on the realm worker.
+    fn raster_answers(&self, input: &Value) -> Result<Value> {
+        let Some(hooks) = self.rasters.lock().unwrap().clone() else {
+            return Ok(Value::Null);
+        };
+        let batch = input["batch"]
+            .as_u64()
+            .ok_or(Error::Invalid("raster batch"))?;
+        let items = input["answers"]
+            .as_array()
+            .ok_or(Error::Invalid("raster answers"))?;
+        let mut answers = Vec::with_capacity(items.len());
+        let mut state = self.state.lock().unwrap();
+        for item in items {
+            let surface = item["surface"]
+                .as_str()
+                .and_then(|id| state.surfaces.get_mut(id));
+            let number = |k: &str, default: f64| {
+                item[k]
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(default)
+            };
+            let answer = match surface {
+                _ if item["native"] == true => crate::RasterAnswer::Native,
+                _ if item["hidden"] == true => crate::RasterAnswer::Hidden,
+                _ if item["retry"] == true => crate::RasterAnswer::Retry,
+                _ if item["error"].is_string() => {
+                    crate::RasterAnswer::Failed(item["error"].as_str().unwrap_or_default().into())
+                }
+                // An empty canvas draws nothing, as on main.
+                Some(canvas) if canvas.size().0 == 0 || canvas.size().1 == 0 => {
+                    crate::RasterAnswer::Hidden
+                }
+                Some(canvas) => {
+                    let (width, height) = canvas.size();
+                    match canvas.get_image_data(0, 0, width as i32, height as i32) {
+                        Ok(pixels) => crate::RasterAnswer::Raster {
+                            width,
+                            height,
+                            premultiplied_rgba: premultiply(pixels.bytes()),
+                            size: [
+                                number("w", f64::from(width)),
+                                number("h", f64::from(height)),
+                            ],
+                            anchor: [number("anchorX", 0.), number("anchorY", 0.)],
+                            uv: match item["uv"].as_array().map(Vec::as_slice) {
+                                Some([a, b, c, d]) => {
+                                    [a, b, c, d].map(|v| v.as_f64().unwrap_or(0.))
+                                }
+                                _ => [0., 0., 1., 1.],
+                            },
+                        },
+                        Err(error) => crate::RasterAnswer::Failed(error.to_string()),
+                    }
+                }
+                None => crate::RasterAnswer::Failed("The override's canvas is gone".into()),
+            };
+            answers.push(answer);
+        }
+        drop(state);
+        (hooks.answers)(batch, answers);
+        Ok(Value::Null)
+    }
+    #[cfg(test)]
+    pub(crate) fn kernel_size(&self) -> (f64, f64) {
+        self.kernel.lock().unwrap().size().unwrap()
+    }
+    pub fn set_frames(&self, frames: Option<crate::FrameRenderer>) {
+        *self.frames.lock().unwrap() = frames;
+    }
+    /// `render.renderFrameTo(time, width, height)` and `PM.Export.snapshot(time,
+    /// maxWidth)`: an engine render of the open composition. The frame becomes a
+    /// recorder canvas (pixels the extension can read) or a JPEG data URL.
+    fn render_query(&self, method: &str, args: &Value, budget: &HostBudget) -> Result<Value> {
+        let renderer = self.frames.lock().unwrap().clone().ok_or_else(|| {
+            Error::Host(format!(
+                "{method} needs the engine, which this host does not have"
+            ))
+        })?;
+        let number = |i: usize| args.get(i).and_then(Value::as_f64);
+        let time = number(0).filter(|t| t.is_finite()).unwrap_or(0.).max(0.);
+        let (width, height, motion_blur) = match method {
+            // renderFrameTo(time, width, height, {mblur}): motion blur unless off.
+            "render.renderFrameTo" => (
+                number(1).ok_or(Error::Invalid("render width"))?,
+                number(2).ok_or(Error::Invalid("render height"))?,
+                args.get(3).and_then(|o| o.get("mblur")) != Some(&Value::Bool(false)),
+            ),
+            _ => {
+                // Snapshot: scaled down to at most `maxWidth`, never up; no blur.
+                let (w, h) = self.kernel.lock().unwrap().size()?;
+                let scale = (number(1).unwrap_or(480.) / w).min(1.);
+                (
+                    (w * scale).round().max(2.),
+                    (h * scale).round().max(2.),
+                    false,
+                )
+            }
+        };
+        let side = |v: f64| {
+            (v.is_finite() && (1. ..=16384.).contains(&v.round())).then(|| v.round() as u32)
+        };
+        let (Some(width), Some(height)) = (side(width), side(height)) else {
+            return Err(Error::Invalid("render size"));
+        };
+        crate::image::rgba_bytes(u64::from(width), u64::from(height))?;
+        // The capture renders on its own thread; this realm waits for it, and
+        // answers the overrides it asks for meanwhile (`wait_capture`).
+        self.end_capture();
+        let (tx, events) = std::sync::mpsc::channel();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        *self.nested.lock().unwrap() = Some(tx.clone());
+        std::thread::Builder::new()
+            .name("pm-compat-capture".into())
+            .spawn(move || {
+                let stop = || stopped.load(std::sync::atomic::Ordering::Acquire);
+                let png = renderer(&crate::FrameRequest {
+                    time,
+                    width,
+                    height,
+                    motion_blur,
+                    stop: &stop,
+                });
+                let _ = tx.send(CaptureEvent::Frame(png));
+            })
+            .map_err(|e| Error::Host(e.to_string()))?;
+        *self.capture.lock().unwrap() = Some(Capture {
+            method: method.to_owned(),
+            events,
+            stop,
+        });
+        self.wait_capture(budget)
+    }
+    /// The capture's frame, or the next override ask it has for this realm
+    /// (`{kind: "raster-asks", batches}`: the realm answers, then continues).
+    fn wait_capture(&self, budget: &HostBudget) -> Result<Value> {
+        use std::sync::mpsc::RecvTimeoutError;
+        loop {
+            let event = {
+                let capture = self.capture.lock().unwrap();
+                let capture = capture
+                    .as_ref()
+                    .ok_or(Error::Invalid("no capture is running"))?;
+                capture
+                    .events
+                    .recv_timeout(std::time::Duration::from_millis(20))
+            };
+            match event {
+                Ok(CaptureEvent::Asks(batch, ask)) => {
+                    return Ok(json!({"kind":"raster-asks","batches":[{
+                        "batch": batch, "needs": ask["needs"], "ask": ask["ask"]}]}));
+                }
+                Ok(CaptureEvent::Frame(png)) => {
+                    let method = self
+                        .capture
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|c| c.method.clone())
+                        .unwrap_or_default();
+                    self.end_capture();
+                    let png = png.map_err(Error::Host)?;
+                    budget.check()?;
+                    return self.decode_frame(&method, &png);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Err(error) = budget.check() {
+                        self.end_capture();
+                        return Err(error);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.end_capture();
+                    return Err(Error::Host("The capture stopped".into()));
+                }
+            }
+        }
+    }
+    fn decode_frame(&self, method: &str, png: &[u8]) -> Result<Value> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png));
+        let mut reader = decoder
+            .read_info()
+            .map_err(|e| Error::Host(e.to_string()))?;
+        let mut rgba = vec![
+            0;
+            reader
+                .output_buffer_size()
+                .ok_or(Error::Quota("render frame"))?
+        ];
+        let info = reader
+            .next_frame(&mut rgba)
+            .map_err(|e| Error::Host(e.to_string()))?;
+        rgba.truncate(info.buffer_size());
+        if info.bit_depth != png::BitDepth::Eight {
+            return Err(Error::Host("engine frame is not 8-bit".into()));
+        }
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => rgba,
+            // An opaque frame: RGB, alpha 255.
+            png::ColorType::Rgb => rgba
+                .chunks_exact(3)
+                .flat_map(|px| [px[0], px[1], px[2], 255])
+                .collect(),
+            _ => return Err(Error::Host("engine frame is not RGB".into())),
+        };
+        let pixels = ImageData::from_rgba(info.width, info.height, rgba).map_err(host_error)?;
+        if method == "render.snapshot" {
+            return Ok(json!(format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(crate::image::jpeg(&pixels, 0.74)?)
+            )));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.next += 1;
+        let id = state.next;
+        let mut canvas = Canvas::new(id, info.width, info.height).map_err(host_error)?;
+        canvas
+            .put_image_data(pixels, 0, 0, None)
+            .map_err(host_error)?;
+        state.surfaces.insert(id.to_string(), canvas);
+        Ok(
+            json!({"kind":"recorder-surface","surface":id.to_string(),"width":info.width,"height":info.height}),
+        )
     }
     pub fn set_text(&self, text: CanvasText) {
         *self.text.lock().unwrap() = Some(text);
@@ -180,7 +537,24 @@ impl NativeHost {
             return Err(Error::Invalid("canvas DOM batch is not flushed"));
         }
         let mut changed = vec![];
+        let mut images = vec![];
         for (node, id) in bindings {
+            if let Some(image) = state.images.get(&id) {
+                if known.get(&(node, id.clone())) != Some(&1) {
+                    images.push(pm_compat_host::CanvasFrame {
+                        generation: 1,
+                        node,
+                        dom_sequence: sequence,
+                        surface: id,
+                        version: 1,
+                        width: image.width,
+                        height: image.height,
+                        png: image.bytes.clone(),
+                        mime: image.mime.as_str().into(),
+                    });
+                }
+                continue;
+            }
             let canvas = state
                 .surfaces
                 .get_mut(&id)
@@ -214,8 +588,10 @@ impl NativeHost {
                     width,
                     height,
                     png: png.into(),
+                    mime: "image/png".into(),
                 })
             })
+            .chain(images.into_iter().map(Ok))
             .collect()
     }
     fn recorder(&self, operation: &str, input: &Value) -> Result<Value> {
@@ -248,7 +624,10 @@ impl NativeHost {
                 .ok_or(Error::Invalid("unretained source"))?;
             entry.1 -= 1;
             if entry.1 == 0 {
-                state.pins.remove(&(id, version));
+                state.pins.remove(&(id.clone(), version));
+                if let Some((charge, ..)) = state.rasters.remove(&(id, version)) {
+                    state.image_bytes = state.image_bytes.saturating_sub(charge);
+                }
             }
             return Ok(Value::Null);
         }
@@ -257,6 +636,69 @@ impl NativeHost {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid("surface id"))?
             .to_string();
+        if operation == "recorder.release" && id.starts_with(['i', 's']) {
+            let image = state
+                .images
+                .remove(&id)
+                .ok_or(Error::Invalid("unknown image"))?;
+            state.image_bytes = state.image_bytes.saturating_sub(image.cost);
+            return Ok(Value::Null);
+        }
+        if operation == "recorder.retainVersion" && state.images.contains_key(&id) {
+            let State {
+                images,
+                pins,
+                rasters,
+                image_bytes,
+                ..
+            } = &mut *state;
+            let image = &images[&id];
+            // A vector image rasterizes at the scale it is drawn, in quarter steps.
+            let version = if image.is_vector() {
+                (args
+                    .get(1)
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.)
+                    .clamp(0.25, 64.)
+                    * SVG_STEPS)
+                    .ceil() as u64
+            } else {
+                1
+            };
+            if let Some(pin) = pins.get_mut(&(id.clone(), version)) {
+                pin.1 += 1;
+            } else {
+                let size = image.raster_size(version as f64 / SVG_STEPS);
+                // A new SVG raster is admitted before it is allocated.
+                let charge = match size {
+                    Some((w, h)) => crate::image::rgba_bytes(u64::from(w), u64::from(h))?,
+                    None => 0,
+                };
+                let total = image_bytes
+                    .checked_add(charge)
+                    .filter(|total| *total <= IMAGE_BUDGET)
+                    .ok_or(Error::Quota("image memory"))?;
+                let pixels = image.pixels(size)?;
+                *image_bytes = total;
+                if let Some((w, h)) = size {
+                    let (nw, nh) = image.natural();
+                    rasters.insert(
+                        (id.clone(), version),
+                        (charge, f64::from(w) / nw, f64::from(h) / nh),
+                    );
+                }
+                let number = id[id.find('-').map_or(0, |i| i + 1)..].parse().unwrap_or(0);
+                let source = Source {
+                    key: pm_recorder::SourceKey {
+                        id: number,
+                        version,
+                    },
+                    pixels,
+                };
+                pins.insert((id.clone(), version), (source, 1));
+            }
+            return Ok(json!({"surface":id,"version":version}));
+        }
         if operation == "recorder.release" {
             state
                 .surfaces
@@ -333,6 +775,7 @@ impl NativeHost {
             surfaces,
             paints,
             next,
+            rasters,
             ..
         } = &mut *state;
         let handle = |paints: &mut BTreeMap<String, Paint>, next: &mut u64, paint: Paint| {
@@ -367,10 +810,18 @@ impl NativeHost {
                     Value::Null
                 }
             },
+            // Hints a CPU recorder already meets (willReadFrequently,
+            // desynchronized) and the default sRGB, alpha, unorm8 context.
             ("recorder.command", "context")
-                if values
-                    .first()
-                    .is_some_and(|v| v.as_object().is_some_and(|v| v.is_empty())) =>
+                if values.first().and_then(Value::as_object).is_some_and(|o| {
+                    o.iter().all(|(key, value)| match key.as_str() {
+                        "willReadFrequently" | "desynchronized" => true,
+                        "alpha" => value.as_bool() != Some(false),
+                        "colorSpace" => value == "srgb",
+                        "colorType" => value == "unorm8",
+                        _ => false,
+                    })
+                }) =>
             {
                 Value::Null
             }
@@ -662,7 +1113,16 @@ impl NativeHost {
             }
             ("recorder.command", "drawImage") => {
                 let source = source.unwrap();
-                let (sw, sh) = (source.pixels.width() as f64, source.pixels.height() as f64);
+                // An SVG raster's scale from intrinsic size, per axis (it may be
+                // capped); the caller's coordinates are intrinsic, as in a browser.
+                let (fx, fy) = values[0]["surface"]
+                    .as_str()
+                    .and_then(|id| rasters.get(&(id.to_owned(), source.key.version)))
+                    .map_or((1., 1.), |(_, fx, fy)| (*fx, *fy));
+                let (sw, sh) = (
+                    source.pixels.width() as f64 / fx,
+                    source.pixels.height() as f64 / fy,
+                );
                 let (src, dst) = match values.len() {
                     3 => (
                         Rect::new(0., 0., sw, sh),
@@ -690,6 +1150,7 @@ impl NativeHost {
                     ),
                     _ => return Err(Error::Invalid("drawImage arity")),
                 };
+                let src = Rect::new(src.x0 * fx, src.y0 * fy, src.x1 * fx, src.y1 * fy);
                 canvas.draw_image(source, src, dst).map_err(host_error)?;
                 Value::Null
             }
@@ -846,6 +1307,75 @@ impl NativeHost {
     }
 }
 impl EngineProxy for NativeHost {
+    fn call_bytes(
+        &self,
+        _: &Generation,
+        operation: &str,
+        bytes: &[u8],
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<Value> {
+        budget.check()?;
+        match operation {
+            "image.load" => {
+                let mut reserved = 0;
+                // Reserved before decoding allocates; refused past the budget.
+                let image = crate::image::Encoded::load(
+                    bytes,
+                    input["type"].as_str().unwrap_or(""),
+                    |cost| {
+                        let mut state = self.state.lock().unwrap();
+                        state.image_bytes = state
+                            .image_bytes
+                            .checked_add(cost)
+                            .filter(|total| *total <= IMAGE_BUDGET)
+                            .ok_or(Error::Quota("image memory"))?;
+                        reserved = cost;
+                        Ok(())
+                    },
+                );
+                let mut state = self.state.lock().unwrap();
+                let image = match image {
+                    Ok(image) => image,
+                    Err(error) => {
+                        // A failed decode returns its reservation.
+                        state.image_bytes = state.image_bytes.saturating_sub(reserved);
+                        return Err(error);
+                    }
+                };
+                state.next += 1;
+                let kind = if image.is_vector() { "svg" } else { "image" };
+                let id = format!("{kind}-{}", state.next);
+                let reply = json!({"surface":id,"width":image.width,"height":image.height,"type":image.mime});
+                state.images.insert(id, image);
+                Ok(reply)
+            }
+            "assets.stage" => {
+                let token = crate::files::stage(bytes, input["name"].as_str().unwrap_or(""))?;
+                Ok(json!({"token":token.to_string()}))
+            }
+            _ => Err(Error::Host(format!("{operation} is unavailable"))),
+        }
+    }
+    fn read_bytes(
+        &self,
+        _: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<Vec<u8>> {
+        budget.check()?;
+        match operation {
+            "file.read" => {
+                let token = input["token"]
+                    .as_str()
+                    .and_then(|t| t.parse().ok())
+                    .ok_or(Error::Invalid("file token"))?;
+                crate::files::read(token, budget.max_response_bytes)
+            }
+            _ => Err(Error::Host(format!("{operation} is unavailable"))),
+        }
+    }
     fn call_text(
         &self,
         generation: &Generation,
@@ -870,6 +1400,13 @@ impl EngineProxy for NativeHost {
     ) -> Result<Value> {
         budget.check()?;
         match operation {
+            "file.release" => {
+                // The realm collected the last File for this picked token.
+                if let Some(token) = input["token"].as_str().and_then(|t| t.parse().ok()) {
+                    crate::files::release(token);
+                }
+                return Ok(Value::Null);
+            }
             "transport.command" => {
                 let base = self.kernel.lock().unwrap().timebase()?;
                 return self.transport.command(input, base);
@@ -879,7 +1416,29 @@ impl EngineProxy for NativeHost {
                 return self.kernel.lock().unwrap().call(input, time);
             }
             "kernel.publication" => return self.kernel.lock().unwrap().publication(),
+            "kernel.query"
+                if matches!(
+                    input["method"].as_str(),
+                    Some("render.renderFrameTo" | "render.snapshot")
+                ) =>
+            {
+                let method = input["method"].as_str().unwrap_or_default();
+                return self.render_query(method, &input["args"]["args"], &budget);
+            }
+            "kernel.query" if input["method"] == "render.continue" => {
+                return self.wait_capture(&budget);
+            }
+            "kernel.query" if input["method"] == "render.raster" => {
+                return self.base_raster(&input["args"]["args"]);
+            }
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
+            "compat.producing" => {
+                if let Some(hooks) = self.rasters.lock().unwrap().clone() {
+                    (hooks.producing)(input["on"] == true, input["epoch"].as_u64().unwrap_or(0));
+                }
+                return Ok(Value::Null);
+            }
+            "compat.answers" => return self.raster_answers(input),
             "extension.health" => {
                 self.events
                     .health(input["id"].as_str().unwrap_or_default(), &input["health"]);
@@ -960,7 +1519,9 @@ impl EngineProxy for NativeHost {
                 let id = input["surface"]
                     .as_str()
                     .ok_or(Error::Invalid("canvas surface"))?;
-                if !state.surfaces.contains_key(id) || bindings.insert(node, id.into()).is_some() {
+                if !(state.surfaces.contains_key(id) || state.images.contains_key(id))
+                    || bindings.insert(node, id.into()).is_some()
+                {
                     return Err(Error::Invalid("canvas binding conflict"));
                 }
             }

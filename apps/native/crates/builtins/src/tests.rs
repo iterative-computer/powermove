@@ -998,12 +998,12 @@ fn effect_controls_native_binding_and_diamond_use_published_playhead() {
     finish(panels.mount("layer-effects").unwrap());
     let projection = panels
         .broker
-        .entries
+        .entry("layer-effects")
+        .unwrap()
         .lock()
         .unwrap()
-        .get("layer-effects")
-        .unwrap()
         .backend
+        .clone()
         .lock()
         .unwrap()
         .projection()
@@ -1019,12 +1019,12 @@ fn effect_controls_native_binding_and_diamond_use_published_playhead() {
     finish(panels.write("layer-effects", handle, json!(7.5)).unwrap());
     let projection = panels
         .broker
-        .entries
+        .entry("layer-effects")
+        .unwrap()
         .lock()
         .unwrap()
-        .get("layer-effects")
-        .unwrap()
         .backend
+        .clone()
         .lock()
         .unwrap()
         .projection()
@@ -1351,12 +1351,12 @@ fn effect_controls_edits_every_supported_scalar_type_through_registered_native_f
     ] {
         let projection = panels
             .broker
-            .entries
+            .entry("layer-effects")
+            .unwrap()
             .lock()
             .unwrap()
-            .get("layer-effects")
-            .unwrap()
             .backend
+            .clone()
             .lock()
             .unwrap()
             .projection()
@@ -1380,12 +1380,12 @@ fn effect_controls_edits_every_supported_scalar_type_through_registered_native_f
         );
         let after = panels
             .broker
-            .entries
+            .entry("layer-effects")
+            .unwrap()
             .lock()
             .unwrap()
-            .get("layer-effects")
-            .unwrap()
             .backend
+            .clone()
             .lock()
             .unwrap()
             .projection()

@@ -109,15 +109,27 @@ The native client refuses a release without this, and `PINNED_KEYS` in
 `store_install.rs` stays empty until it exists. Public catalog hashes are not a
 signature: they arrive over the same channel as the bytes.
 
-- `GET /v1/store/releases/<id>/signature` returns `SignedRelease` as JSON:
-  `{"statement":{"format":1,"key_id","publisher","extension","release_id",
-  "archive_sha256","files":{"<path>":{"sha256","bytes"}}},"signature":[64 bytes]}`.
-- `statement.files` lists every file of the existing `/tar` archive with its SHA-256
-  and size. Paths sort lexicographically.
-- `signature` is Ed25519 over `powermove.store-release.v1\0` followed by the
-  `serde_json` bytes of `statement`, in the field order above.
-- The private key stays server-side. Its public key and `key_id` ship in the app;
-  rotation adds a new pin in a release before the server switches.
+- `GET /v1/store/releases/<id>/signature` (HTTP 200, at most 8 MiB) returns
+  `SignedRelease` as JSON with exactly two fields and no others:
+  `{"statement":{...},"signature":[<64 integers 0–255>]}`.
+- `statement` has exactly these fields, serialized in this order:
+  `format` (the number `1`), `key_id` (≤128 bytes), `publisher` (≤256 bytes),
+  `extension` (the extension id), `release_id` (the `<id>` in the URL, 1–256 bytes),
+  `archive_sha256` (lowercase hex SHA-256 of the `/tar` response body), `files`.
+- `files` maps every file in the `/tar` archive to `{"sha256":"<lowercase hex>","bytes":<size>}`,
+  keys sorted bytewise, 1–4,096 entries, ≤128 MiB in total. Paths are `/`-separated,
+  ≤1,024 bytes, with no empty or dot-leading segment, no `\`, `:`, NUL or control
+  characters. The archive itself is at most 64 MiB.
+- `signature` is Ed25519 (`verify_strict`) over the bytes `powermove.store-release.v1\0`
+  followed by compact `serde_json` of `statement` (no whitespace, fields in the order
+  above, `files` keys sorted).
+- The private key stays server-side. Each `(publisher, key_id, public key)` the app
+  trusts is a compile-time entry in `PINNED_KEYS` (`compat-runner/src/store_install.rs`);
+  rotation ships a new pin in an app release before the server signs with the new key.
+
+Until a key is pinned, the palette offers no Store install and `install` refuses with
+"Store installs need a signed release, and the Store doesn't sign releases yet."
+Installs the shipped app made keep running with legacy provenance.
 
 ## Signed release admission and install transactions
 

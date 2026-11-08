@@ -40,6 +40,15 @@ fn realized(published: &Published) -> pm_model::Value {
             .unwrap_or(pm_model::Value::Null),
     )
 }
+/// A frozen document's text (an export's snapshot) as the realm's mirror
+/// shows a project.
+pub(crate) fn realized_wire(document: &str) -> std::result::Result<String, String> {
+    let value =
+        pm_model::json::parse(document).map_err(|_| "The export's project is unreadable")?;
+    Ok(pm_model::json::to_canonical_string(
+        &canonical::realize_project(value),
+    ))
+}
 fn selection_wire(selection: &pm_kernel::Selection) -> Value {
     json!({"layers":selection.layers(),"keys":selection.keys(),"chan":selection.channel()})
 }
@@ -275,6 +284,24 @@ impl KernelAdapter {
         }
     }
     /// Revision and timing facts for a transport without a document copy.
+    /// The published document and the composition the viewer renders.
+    pub fn document(&self) -> Result<(Arc<pm_model::Document>, String)> {
+        let p = self.published()?;
+        Ok((p.snapshot.document.clone(), p.snapshot.render_comp()))
+    }
+    /// The open composition's width and height.
+    pub fn size(&self) -> Result<(f64, f64)> {
+        let p = self.published()?;
+        let root = p.snapshot.root().ok_or(Error::Invalid("no open project"))?;
+        let open = p.snapshot.open_comp();
+        let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+        let number = |key: &str, default: f64| {
+            comp.get(key)
+                .and_then(|n| n.to_value().as_f64())
+                .unwrap_or(default)
+        };
+        Ok((number("w", 1920.), number("h", 1080.)))
+    }
     pub fn timebase(&self) -> Result<crate::transport::TimeBase> {
         let p = self.published()?;
         Ok(crate::transport::TimeBase::of(&p))

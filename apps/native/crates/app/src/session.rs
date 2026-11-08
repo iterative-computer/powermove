@@ -46,6 +46,9 @@ pub struct Controller {
     /// Window ▸ Background Tasks, while open.
     pub tasks_window: Option<Entity<crate::tasks_window::TasksWindow>>,
     pub opening: bool,
+    /// Held while a project opens and its panels settle: no App Nap or
+    /// background throttling.
+    pub(crate) busy: Option<crate::platform::Busy>,
     /// The project an open is reading, shown until it lands or fails, and
     /// then until the panels have drawn it (`settling`).
     pub opening_name: Option<String>,
@@ -99,7 +102,10 @@ pub struct Controller {
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
     /// Queued batches and the cancel flag of the running one.
-    pub(crate) imports: std::collections::VecDeque<pm_builtins::media_import::ImportRequest>,
+    pub(crate) imports: std::collections::VecDeque<(
+        pm_builtins::media_import::ImportRequest,
+        Option<crate::media_import::ExtensionImport>,
+    )>,
     pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Arrow-key nudges less than [`NUDGE_IDLE`] apart are one undo step
     /// (keymap.ts): the history mark taken before the first, and the timer
@@ -333,6 +339,7 @@ impl Controller {
             pro_media,
             tasks_window: None,
             opening: false,
+            busy: None,
             opening_name: None,
             settling: None,
             rows: Default::default(),
@@ -486,6 +493,8 @@ impl Controller {
             self.seek(time);
         }
         self.refresh_media(cx);
+        // Raster override answers are for one revision; frames ask afresh.
+        crate::raster_overrides::published(&self.engine, &p);
         if let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
@@ -1001,6 +1010,7 @@ impl Controller {
         let old = self.session.clone();
         let kernel = self.kernel.clone();
         self.opening = true;
+        self.busy = Some(crate::platform::Busy::begin("Opening a project"));
         self.message = format!("Opening “{name}”…");
         self.opening_name = Some(name.clone());
         cx.notify();
@@ -1068,8 +1078,10 @@ impl Controller {
                     Some(Ok(ShellReply::Opened { session, .. })) => Some(session.project.clone()),
                     _ => None,
                 };
+                // Held until the panels have drawn the project (`settled`).
                 if v.settling.is_none() {
                     v.opening_name = None;
+                    v.busy = None;
                 }
                 match result {
                     Some(Ok(ShellReply::Opened {
@@ -1370,6 +1382,12 @@ impl Controller {
             // The Pen tool shows the selection's paths; others hide them.
             if let Some(gizmos) = self.builtins.gizmos.clone() {
                 gizmos.update(cx, |g, cx| g.refresh(cx));
+            }
+            // The `tool` service names it as v1 did: toolSelect is "select".
+            if let Some(host) = &self.extensions.host {
+                let name = &cmd.name[4..];
+                let tool = name[..1].to_lowercase() + &name[1..];
+                host.shell_state(serde_json::json!({ "tool": tool }));
             }
             return false;
         }

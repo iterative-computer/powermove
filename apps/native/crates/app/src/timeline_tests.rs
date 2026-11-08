@@ -41,6 +41,7 @@ impl Delegate for Recording {
     }
     fn menu(
         &self,
+        _: Vec<(&'static str, serde_json::Value)>,
         items: Vec<serde_json::Value>,
         _: &mut Window,
         cx: &mut App,

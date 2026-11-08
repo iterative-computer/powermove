@@ -194,8 +194,16 @@ impl Agent {
         }
     }
     fn agent(&self) -> agent_host::SharedAgent {
-        let entries = self.panels.broker.entries.lock().unwrap();
-        let backend = entries["agent"].backend.lock().unwrap();
+        let backend = self
+            .panels
+            .broker
+            .entry("agent")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let backend = backend.lock().unwrap();
         backend.native.agent.clone().unwrap()
     }
     fn wait(&self, until: impl Fn(&agent_host::AgentState) -> bool) {
@@ -540,8 +548,16 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
     assert_eq!(read(&accounts).1, "Sign in to ChatGPT in Settings.");
     assert!(panel.text().contains("Connect Your Agent"));
     let settings = |panel: &Agent, action: Value| {
-        let entries = panel.panels.broker.entries.lock().unwrap();
-        let mut backend = entries["settings"].backend.lock().unwrap();
+        let backend = panel
+            .panels
+            .broker
+            .entry("settings")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut backend = backend.lock().unwrap();
         let revision = backend.settings_snapshot().unwrap()["revision"].clone();
         match backend
             .native_command(

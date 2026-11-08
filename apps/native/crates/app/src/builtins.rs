@@ -211,6 +211,7 @@ impl Controller {
             self.settling = None;
             self.opening_name = None;
             crate::diag::line(serde_json::json!({"open":"settled"}));
+            self.busy = None;
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
@@ -962,6 +963,13 @@ impl Controller {
         after: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(host) = &self.extensions.host {
+            host.shell_state(serde_json::json!({
+                "zoom": self.view.zoom.unwrap_or(1.),
+                "fit": self.view.zoom.is_none(),
+                "pan": self.view.pan,
+            }));
+        }
         self.view_write = Some(cx.spawn(async move |this, cx| {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;
@@ -1037,12 +1045,18 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
     fn menu(
         &self,
+        locations: Vec<(&'static str, Value)>,
         items: Vec<Value>,
         window: &mut Window,
         cx: &mut App,
         choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
     ) {
-        crate::v4_native::menu(window, &items, cx, choose);
+        match self.0.upgrade() {
+            Some(controller) => controller.update(cx, |v, cx| {
+                v.surface_menu(locations, items, choose, window, cx)
+            }),
+            None => crate::v4_native::menu(window, &items, cx, choose),
+        }
     }
 }
 impl crate::gizmo::Host for ControllerDelegate {
@@ -1087,25 +1101,50 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
-    fn layer_menu(&self, window: &mut Window, cx: &mut App) {
+    fn layer_menu(&self, layer: Option<String>, window: &mut Window, cx: &mut App) {
         let host = self.0.clone();
-        crate::v4_native::menu(
-            window,
-            &crate::layer_commands::layer_menu_rows(),
-            cx,
-            move |index, cx| {
-                let rows = &crate::layer_commands::LAYER_MENU;
-                if let (Some((command, _)), Some(controller)) =
-                    (index.and_then(|i| rows.get(i)), host.upgrade())
-                {
-                    controller
-                        .read(cx)
-                        .host
-                        .borrow()
-                        .send_command(command, vec![]);
-                }
-            },
-        );
+        let Some(controller) = self.0.upgrade() else {
+            return;
+        };
+        let time = controller.read(cx).time();
+        // Over a layer: its menu and what extensions add for it, as the shipped
+        // viewer's layer menu; over nothing: only what they add to the viewer.
+        let (locations, rows) = match &layer {
+            Some(id) => (
+                vec![
+                    ("layer:context", json!({ "layerId": id })),
+                    (
+                        "viewer:context",
+                        json!({"kind":"layer","layerId":id,"time":time}),
+                    ),
+                ],
+                crate::layer_commands::layer_menu_rows(),
+            ),
+            None => (
+                vec![("viewer:context", json!({"layerId":null,"time":time}))],
+                vec![],
+            ),
+        };
+        controller.update(cx, |v, cx| {
+            v.surface_menu(
+                locations,
+                rows,
+                Box::new(move |index, cx| {
+                    let rows = &crate::layer_commands::LAYER_MENU;
+                    if let (Some((command, _)), Some(controller)) =
+                        (index.and_then(|i| rows.get(i)), host.upgrade())
+                    {
+                        controller
+                            .read(cx)
+                            .host
+                            .borrow()
+                            .send_command(command, vec![]);
+                    }
+                }),
+                window,
+                cx,
+            )
+        });
     }
     fn navigate(&self, change: crate::gizmo::Navigate, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {

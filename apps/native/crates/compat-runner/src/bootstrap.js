@@ -48,10 +48,13 @@ globalThis.__compat = {
             ? cancelAnimationFrame
             : (id) => clearTimeout(id),
           reportError: (error) => host.reportError(error),
+          pageAttribute: (node, name, value) =>
+            this.pageAttribute ? this.pageAttribute(node, name, value) : value,
         })
       : undefined;
     // AppKit answers on the main thread, so the realm asks and carries on.
     const asks = new Map();
+    let modals = 0;
     let asked = 0;
     let openMenu = 0;
     const ask = (request) =>
@@ -91,7 +94,11 @@ globalThis.__compat = {
       if (choice !== null && choice !== undefined) await runs[choice]?.();
     };
     this.gatherMenu = (location, context, key) => {
-      showMenu(this.realm.kernel.gatherMenu(location, context), { key }).catch(
+      // An empty location gathers each `[location, context]` pair, in order.
+      const lists = location
+        ? [this.realm.kernel.gatherMenu(location, context)]
+        : context.map(([at, value]) => this.realm.kernel.gatherMenu(at, value));
+      showMenu(Promise.all(lists).then((all) => all.flat()), { key }).catch(
         (error) => this.reportFailure(error),
       );
     };
@@ -106,9 +113,123 @@ globalThis.__compat = {
         });
       unsaved.set(key, value);
     };
+    // Media an extension imports goes through the app's Import Media: probed,
+    // retained in the project's media store, in the Project panel. A picked
+    // file stays on disk behind a token; only bytes the realm made are written.
+    const imported = (id, file, reply) =>
+      this.realm.PM.proj.assets?.[id] ?? {
+        id,
+        name: file.name,
+        kind: reply.kind,
+        size: file.size,
+      };
+    this.assets = {
+      get: (id) => this.realm.PM.proj.assets?.[id],
+      import: async (file, options = {}) => {
+        if (!(file instanceof File)) throw Error("assets.import requires a File");
+        const token =
+          runtime.fileToken(file) ??
+          runtime.bytes("assets.stage", file, { name: file.name }).token;
+        const reply = await ask({
+          kind: "import",
+          file: token,
+          name: file.name,
+          layerDefinition: options?.layerDefinition ?? null,
+        });
+        if (!reply?.id) throw Error(reply?.error ?? `Could not import ${file.name || "asset"}`);
+        return imported(reply.id, file, reply);
+      },
+      pick: async (options = {}) => {
+        const files = await ask({
+          kind: "pick",
+          accept: String(options?.accept ?? ""),
+          multiple: options?.multiple === true,
+        });
+        return (files ?? []).map((file) => runtime.hostFile(file));
+      },
+      importUrl: async (url) => {
+        const target = new URL(String(url));
+        if (target.protocol !== "https:" || target.username || target.password || String(url).length > 2048)
+          throw new TypeError(
+            "assets.importUrl accepts an https URL of at most 2 KB without credentials",
+          );
+        // The app downloads it as main does: public HTTPS, at most five
+        // redirects, 512 MiB, its type from its bytes; then Import Media.
+        const reply = await ask({ kind: "download", url: target.href });
+        if (!reply?.id) throw Error(reply?.error ?? "The download could not be imported");
+        return reply.id;
+      },
+    };
     const reveal = (id, open) =>
       call("ui.request", { kind: "panel", id, open });
+    // Raster overrides: the viewer and exports ask for layers they need, a
+    // batch at a time. An override's canvas goes back as pixels, a pass-through
+    // as native, a null result (main draws nothing) as hidden, and a failure
+    // as an error: the frame fails rather than draw the layer without it.
+    const layerIn = (project, composition, id) => {
+      const comps = project?.comps;
+      const nested = Array.isArray(comps)
+        ? comps.find((c) => c?.id === composition)
+        : comps?.[composition];
+      for (const list of [nested?.layers, project?.layers])
+        for (const layer of list ?? []) if (layer?.id === id) return layer;
+      return null;
+    };
+    const failure = (error) => String(error?.message ?? error ?? "The override failed");
+    /** `ask`: `{revision}` for the viewer; `{job, epoch}` for an export, which
+     * reads its frozen project and the wrappers it started with. */
+    this.answerRasters = (batch, needs, ask = {}) => {
+      const realm = this.realm;
+      const project = ask.job ? realm.pinnedProject(ask.job) : realm.PM.proj;
+      const answers = needs.map((need) => {
+        // This realm has not seen the viewer's revision yet: ask again.
+        if (ask.revision !== undefined && ask.revision > realm.revision) return { retry: true };
+        if (ask.job && !project) return { error: "The export's project is not available to its extensions" };
+        if (ask.epoch !== undefined && ask.epoch !== realm.rasterGeneration)
+          return { error: "The extension that draws this layer changed during the export" };
+        try {
+          const layer = layerIn(project, need.composition, need.layer);
+          if (!layer) return { native: true };
+          realm.rasterContext = { composition: need.composition, job: ask.job, layer };
+          const result = realm.PM.raster(
+            layer,
+            need.scale,
+            need.seconds,
+            undefined,
+            need.crop ?? undefined,
+          );
+          if (!result) return { hidden: true };
+          if (realm.isBaseRaster(result, need)) return { native: true };
+          const surface = this.nativeSurfaceOf?.(result.cv);
+          if (!surface) return { error: "The override returned a canvas the engine cannot read" };
+          return {
+            surface,
+            w: result.w,
+            h: result.h,
+            anchorX: result.anchorX,
+            anchorY: result.anchorY,
+            uv: Array.isArray(result.uv) ? result.uv : undefined,
+          };
+        } catch (error) {
+          this.reportFailure(error);
+          return { error: failure(error) };
+        } finally {
+          realm.rasterContext = null;
+        }
+      });
+      try {
+        call("compat.answers", { batch, answers });
+      } catch (error) {
+        // The asker waits for this batch; say why it never came.
+        this.reportFailure(error);
+        call("compat.answers", { batch, answers: answers.map(() => ({ error: failure(error) })) });
+      }
+    };
+    this.pinProject = (job, project) => this.realm.pinProject(job, project);
     const capabilities = {
+      rasterProducing: (on, epoch) => call("compat.producing", { on: !!on, epoch }),
+      // A capture this realm waits for asks it for overrides: answered inline.
+      answerRasters: (batch, needs, ask) => this.answerRasters(batch, needs, ask),
       ui: { controls: PowermoveCompat.controls },
       extensions: {
         list: () => this.loader.records(),
@@ -117,9 +238,7 @@ globalThis.__compat = {
         },
         reload: (id) => this.loader.reload(id),
       },
-      assets: {
-        get: (id) => this.realm.PM.proj.assets?.[id],
-      },
+      assets: this.assets,
       panelsBackend: Object.fromEntries(
         ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
           (name) => [
@@ -146,6 +265,80 @@ globalThis.__compat = {
               sticky: options.sticky,
             },
           }),
+        // ui.modal: the body is DOM the extension keeps using. The page shows
+        // it in a native sheet (title and actions are the sheet's own); a sheet
+        // button clicks its hidden twin here, so actions run in this realm.
+        modal: (options = {}) => {
+          const document = this.dom?.document;
+          if (!document) throw Error("ui.modal needs the window's page");
+          const id = ++modals;
+          const el = document.createElement("div");
+          el.setAttribute("data-pm-modal", String(id));
+          const body = document.createElement("div");
+          body.className = "pm-modal-body";
+          if (typeof options.body === "string") body.textContent = options.body;
+          else if (options.body) body.append(options.body);
+          const actions = Array.isArray(options.actions) ? options.actions : [];
+          const twins = document.createElement("div");
+          twins.hidden = true;
+          let pending = false;
+          let open = true;
+          const handle = {
+            el,
+            body,
+            // As main: closing (an action, a dismissal or close()) removes the
+            // sheet, then calls onClose once.
+            close: () => {
+              if (!open) return;
+              open = false;
+              el.remove();
+              try {
+                options.onClose?.();
+              } catch (error) {
+                this.reportFailure(error);
+              }
+            },
+          };
+          actions.forEach((action, index) => {
+            const button = document.createElement("button");
+            button.setAttribute("data-pm-modal-action", String(index));
+            button.addEventListener("click", async () => {
+              if (pending) return;
+              try {
+                const result = action?.run?.();
+                if (result && typeof result.then === "function") {
+                  pending = true;
+                  const value = await result;
+                  if (value !== false) handle.close();
+                } else if (result !== false) handle.close();
+              } catch (error) {
+                this.reportFailure(error);
+              } finally {
+                pending = false;
+              }
+            });
+            twins.append(button);
+          });
+          // Escape, the close button or a click outside: as main's dismissible modal.
+          const dismiss = document.createElement("button");
+          dismiss.setAttribute("data-pm-modal-dismiss", "");
+          dismiss.addEventListener("click", () => {
+            if (options.dismissible !== false && !pending) handle.close();
+          });
+          twins.append(dismiss);
+          el.setAttribute(
+            "data-pm-modal-frame",
+            JSON.stringify({
+              title: String(options.title ?? ""),
+              width: Math.max(240, Math.min(1200, Number(options.width) || 420)),
+              actions: actions.map((a) => ({ label: String(a?.label ?? ""), pri: !!a?.pri })),
+              dismissible: options.dismissible !== false,
+            }),
+          );
+          el.append(body, twins);
+          document.body.append(el);
+          return handle;
+        },
         confirm: (title, body = "") =>
           ask({ kind: "confirm", title: String(title), body: String(body) }),
         openExternal: (url) => ask({ kind: "openExternal", url: String(url) }),
@@ -186,9 +379,7 @@ globalThis.__compat = {
         },
         assets: {
           get: (id) => this.realm.PM.proj.assets?.[id],
-          add: () => {
-            throw Error("Import media from the Project panel");
-          },
+          add: (file, options) => this.assets.import(file, options),
         },
         store: {
           get: (key, fallback) => storage[key] ?? fallback,
@@ -298,6 +489,75 @@ globalThis.__compat = {
     };
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
+    // Built-in services v1 registered for extensions: `tool` (the shell's tool)
+    // and `viewer` (its navigation; the native viewer has no DOM stage).
+    const shell = { tool: "select", toolShape: "rect", zoom: 1, pan: [0, 0], fit: true };
+    this.shellState = (state) => {
+      const tool = state.tool !== undefined && state.tool !== shell.tool;
+      Object.assign(shell, state);
+      if (tool) this.realm.PM.bus.emit("tool", shell.tool);
+    };
+    // As main's toolbar service: the change is immediate here, and the shell
+    // follows (its command carries a shape tool's shape).
+    this.realm.services.register("tool", {
+      get tool() {
+        return shell.tool;
+      },
+      set tool(value) {
+        shell.tool = String(value);
+      },
+      get toolShape() {
+        return shell.toolShape;
+      },
+      set toolShape(value) {
+        shell.toolShape = String(value);
+      },
+      setTool: (tool, detail) => {
+        const name = String(tool ?? "");
+        const changed = name !== shell.tool;
+        shell.tool = name;
+        if (name === "shape" && detail) shell.toolShape = String(detail);
+        if (changed) this.realm.PM.bus.emit("tool", name);
+        if (!/^[a-z]+$/.test(name)) return;
+        call("ui.request", {
+          kind: "command",
+          name: "tool" + name[0].toUpperCase() + name.slice(1),
+          shape: name === "shape" ? shell.toolShape : undefined,
+        });
+      },
+    });
+    this.realm.services.register("viewer", {
+      get pan() {
+        return [...shell.pan];
+      },
+      get zoom() {
+        return shell.zoom;
+      },
+      get fit() {
+        return shell.fit;
+      },
+      shown: 1,
+      showControls: true,
+      stage: null,
+      ov: null,
+      layout: () => undefined,
+      attach: () => undefined,
+      worldBounds: (layer, time) => this.realm.PM.GL?.bounds?.(layer, time) ?? null,
+      snapshotSnapCandidates: () => ({ x: [], y: [] }),
+      isNavigating: () => false,
+      deferNavigationRender: () => false,
+      // As main: a finite zoom leaves fit (centred when it was fitting),
+      // clamped to 5%–800%; the viewer takes it and reports where it landed.
+      setZoom: (zoom) => {
+        const value = Number(zoom);
+        if (!Number.isFinite(value)) return false;
+        if (shell.fit) shell.pan = [0, 0];
+        shell.fit = false;
+        shell.zoom = Math.min(8, Math.max(0.05, value));
+        call("ui.request", { kind: "viewerZoom", zoom: shell.zoom, pan: [...shell.pan] });
+        return shell.zoom;
+      },
+    });
     this.realm.installGlobals(globalThis);
     __installNativeCanvas(this);
     if (globalThis.__extcheckClock)

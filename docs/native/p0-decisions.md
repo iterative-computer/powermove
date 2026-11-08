@@ -167,3 +167,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - `pm_protocol::priority` gains `ProxySize::Full` and `ProxyFormat::ProResHq` (additive; bindings regenerated).
 - Pro media renditions are keyed by the original's content (media-cache object name or a once-per-stamp BLAKE3), not its path and mtime; Clear… keeps anything another original, attached record, task or the open project references (wave 16 review).
 - The direct glyph cache charges and evicts whole chunk textures, and still prefetch counts decoded bytes from the worker's decode and drops stills no frame asked for within 4 s (wave 16 review).
+## Extension backends (compat lane, wave 16)
+
+- Realm images decode natively on the realm worker: ImageIO for rasters (embedded profile to sRGB, EXIF orientation, as WebKit shows them), resvg for SVG, rasterized at the scale it is drawn (×2 for Retina) instead of stretched. An SVG's intrinsic size is usvg's (`viewBox` when width/height are missing), not Chromium's 300×150 fallback.
+- The realm gains the web platform's `Blob`, `File`, `FileReader`, `URL.createObjectURL`, `atob`/`btoa`, `Image`, `ImageBitmap` and `createImageBitmap`; a realm `blob:`/`data:` image reaches the page as its bytes, never as a URL.
+- While a project opens and until its panels have drawn it, the app holds a user-initiated activity (idle system sleep allowed), so App Nap never throttles an open in the background; measured on the T3 project with the screen locked: open finished in ~70 s instead of not finishing after 13 min at priority 4.
+- Built-in panels lock only their own broker entry, and wait for host replies with a backoff (1 ms ×4, then doubling to 16 ms) instead of polling every 1 ms.
+- `assets.import` from an extension imports into the Project panel without a layer, as v1; bytes the realm made are written to a private temporary file first, a picked file never is.
+- Raster overrides answer per frame from the window's realm: the viewer never waits (a missing answer re-renders when it lands); exports wait per layer up to 60 s, then fail the frame rather than draw without the override.
+- `render.raster`'s base result is lazy and writable, as main: only the untouched base of the asked layer, frame, scale and crop passes the layer through; nothing is painted unless an override reads it.
+- An export's overrides answer from its frozen snapshot (section 17: edits never reach a running export); reloading or replacing the wrappers mid-export fails it rather than mix generations.
+- A capture of the realm's own project answers the overrides it needs inline while the realm waits (the same-realm continuation), instead of deadlocking.

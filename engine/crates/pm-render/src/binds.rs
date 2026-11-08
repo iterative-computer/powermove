@@ -21,6 +21,9 @@ pub(crate) struct BindCache {
     textures: HashMap<wgpu::TextureView, (wgpu::BindGroup, u64)>,
     quads: HashMap<(wgpu::Buffer, u64), (wgpu::BindGroup, u64)>,
     resamples: HashMap<(wgpu::TextureView, wgpu::TextureView), (wgpu::BindGroup, u64)>,
+    /// Compatibility rasters' textures on this renderer's device
+    /// (`crate::compat::upload_cached`).
+    pub compat: crate::compat::Uploads,
     frame: u64,
 }
 
@@ -43,6 +46,7 @@ impl BindCache {
         self.textures.clear();
         self.quads.clear();
         self.resamples.clear();
+        self.compat.clear();
     }
 
     /// The texture group (`binding 0`: `view`, `binding 1`: `sampler`) of

@@ -87,6 +87,40 @@ struct OpenMenu {
     entries: Vec<MenuEntry>,
     at: (f32, f32),
 }
+/// A native surface's right-click menu (layer, timeline, viewer) waiting for the
+/// extensions' rows for its locations.
+struct SurfaceMenu {
+    key: u64,
+    rows: Vec<Value>,
+    choose: crate::timeline_surface::Choose,
+    window: AnyWindowHandle,
+}
+/// Rows and their descendants, in the menu's preorder index space.
+fn preorder_len(rows: &[Value]) -> usize {
+    rows.iter()
+        .map(|row| 1 + row["children"].as_array().map_or(0, |c| preorder_len(c)))
+        .sum()
+}
+/// An extension's menu items as native menu rows; `runs` gets each row's
+/// closure index in the realm, in preorder.
+fn contributed_rows(items: &[Value], runs: &mut Vec<Option<u64>>) -> Vec<Value> {
+    items
+        .iter()
+        .map(|item| {
+            if item["separator"] == true {
+                runs.push(None);
+                return json!({"separator":true});
+            }
+            runs.push(item["run"].as_u64());
+            let mut row = json!({"label":item["label"],"checked":item["on"] == true,
+                "disabled":item["disabled"] == true || (item["run"].is_null() && item["submenu"].is_null())});
+            if let Some(children) = item["submenu"].as_array() {
+                row["children"] = contributed_rows(children, runs).into();
+            }
+            row
+        })
+        .collect()
+}
 
 /// What an extension's menu items are in the native menu.
 fn menu_entries(items: &[Value], token: u64) -> Vec<MenuEntry> {
@@ -130,6 +164,10 @@ fn external_link(url: &str) -> bool {
 pub struct Extensions {
     window: u64,
     pub host: Option<ExtensionHost>,
+    /// This window's raster overrides; dropped with its host.
+    overrides: Option<crate::raster_overrides::Overrides>,
+    /// The document whose captures carry this window's definitions.
+    doc_id: Option<u64>,
     /// One WebKit document per trust domain: the trusted realm's under the empty
     /// key, then each Store extension's own. Never shared.
     pages: BTreeMap<String, Page>,
@@ -147,6 +185,7 @@ pub struct Extensions {
     /// Open panels with no body right now: tabs behind another.
     hidden: BTreeSet<String>,
     menu: Option<OpenMenu>,
+    surface_menu: Option<SurfaceMenu>,
     next_menu: u64,
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
@@ -172,6 +211,8 @@ impl Default for Extensions {
         Self {
             window: NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             host: None,
+            overrides: None,
+            doc_id: None,
             pages: BTreeMap::new(),
             views: Rc::default(),
             data_stores: StoreDataStores::default(),
@@ -183,6 +224,7 @@ impl Default for Extensions {
             open_panels: BTreeSet::new(),
             hidden: BTreeSet::new(),
             menu: None,
+            surface_menu: None,
             next_menu: 0,
             placed: BTreeMap::new(),
             seen: 0,
@@ -201,6 +243,9 @@ impl Default for Extensions {
 impl Drop for Extensions {
     fn drop(&mut self) {
         layout::set_contributed_panels(self.window, []);
+        if let Some(doc_id) = self.doc_id {
+            crate::mcp_services::set_resources(doc_id, None);
+        }
     }
 }
 impl Extensions {
@@ -239,8 +284,22 @@ impl Controller {
         let project = session.project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
+        let doc_id = self.kernel.published(&project).map(|p| p.snapshot.doc_id);
+        let rasters = crate::raster_overrides::Overrides::new(
+            &self.engine,
+            self.kernel.clone(),
+            project.clone(),
+        );
+        let frames = crate::mcp_services::frame_renderer(
+            self.kernel.clone(),
+            project.clone(),
+            self.profile.clone(),
+        )
+        .ok();
         let host = ExtensionHost::start(HostConfig {
             kernel: self.kernel.clone(),
+            frames,
+            rasters: Some(rasters.hooks()),
             project,
             roots: roots(&self.profile),
             cache: self.profile.join("extensions-build"),
@@ -255,6 +314,9 @@ impl Controller {
                 let _ = wake_tx.try_send(());
             }),
         });
+        rasters.connect(host.raster_inbox());
+        self.extensions.doc_id = doc_id;
+        self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {
@@ -390,6 +452,58 @@ impl Controller {
                 })
                 .detach();
             }
+            Some("import") => match request["file"].as_str().and_then(|t| t.parse::<u64>().ok()) {
+                Some(file) => {
+                    let definition = request["layerDefinition"].as_str().map(str::to_owned);
+                    self.import_for_extension(token, file, definition, cx)
+                }
+                None => {
+                    if let Some(host) = &self.extensions.host {
+                        host.answer(
+                            token,
+                            serde_json::json!({"error":"assets.import requires a File"}),
+                        );
+                    }
+                }
+            },
+            // The `tool` service's setTool: only the shell's tool commands.
+            Some("command") => {
+                if let Some(name) = request["name"].as_str().filter(|n| {
+                    n.starts_with("tool")
+                        && n.len() > 4
+                        && n.chars().all(|c| c.is_ascii_alphabetic())
+                }) {
+                    // A shape tool's shape rides along as the Shape tool's variant
+                    // (v1's rect, rounded, ellipse, polygon, star).
+                    let args = request["shape"]
+                        .as_str()
+                        .map(|shape| vec![serde_json::json!(shape)])
+                        .unwrap_or_default();
+                    self.host.borrow().send_command(name, args);
+                }
+            }
+            // The `viewer` service's setZoom: the viewer leaves fit at that zoom
+            // (as far as the display can show it) and reports where it landed.
+            Some("viewerZoom") => {
+                use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
+                if let Some(zoom) = request["zoom"].as_f64().filter(|z| z.is_finite()) {
+                    let pan = match request["pan"].as_array().map(Vec::as_slice) {
+                        Some([x, y]) => [x.as_f64().unwrap_or(0.), y.as_f64().unwrap_or(0.)],
+                        _ => self.view.pan,
+                    };
+                    let top = ZOOM_MAX.min(self.zoom_limit()).max(ZOOM_MIN);
+                    self.view.place(Some(zoom.clamp(ZOOM_MIN, top)), pan);
+                    self.write_view(None, cx);
+                }
+            }
+            Some("download") => {
+                let url = request["url"].as_str().unwrap_or_default().to_owned();
+                self.download_for_extension(token, url, cx);
+            }
+            Some("pick") => {
+                let accept = request["accept"].as_str().unwrap_or_default().to_owned();
+                self.pick_for_extension(token, &accept, request["multiple"] == true, cx);
+            }
             Some("openExternal") => {
                 let url = request["url"].as_str().unwrap_or_default();
                 let opened = external_link(url) && crate::platform::open_url(url);
@@ -402,6 +516,19 @@ impl Controller {
                 let shell = self.host.borrow();
                 let size = shell.gpui.bounds().size;
                 shell.context_menu(&entries, size.width as f32 / 2., size.height as f32 / 2.);
+            }
+            Some("menu")
+                if self
+                    .extensions
+                    .surface_menu
+                    .as_ref()
+                    .is_some_and(|m| Some(m.key) == request["key"].as_u64()) =>
+            {
+                let menu = self.extensions.surface_menu.take().unwrap();
+                let mut runs = vec![];
+                let items =
+                    contributed_rows(request["items"].as_array().unwrap_or(&vec![]), &mut runs);
+                self.open_surface_menu(menu, items, runs, token, cx);
             }
             Some("menu") => {
                 let items = menu_entries(request["items"].as_array().unwrap_or(&vec![]), token);
@@ -430,6 +557,84 @@ impl Controller {
             }
             _ => (),
         }
+    }
+    /// A right-click menu on a native surface: `rows` first, so the positions
+    /// people learned never move, then what extensions contribute for
+    /// `locations` after a separator (`layer:context`, `timeline:context`,
+    /// `viewer:context`). It opens when they answer or at the deadline.
+    pub(crate) fn surface_menu(
+        &mut self,
+        locations: Vec<(&str, Value)>,
+        rows: Vec<Value>,
+        choose: crate::timeline_surface::Choose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
+            crate::v4_native::menu(window, &rows, cx, choose);
+            return;
+        };
+        self.extensions.next_menu += 1;
+        let key = self.extensions.next_menu;
+        let pairs = locations
+            .into_iter()
+            .map(|(location, context)| json!([location, context]))
+            .collect();
+        host.gather_menus(pairs, key);
+        if let Some(stale) = self.extensions.surface_menu.replace(SurfaceMenu {
+            key,
+            rows,
+            choose,
+            window: window.window_handle(),
+        }) {
+            (stale.choose)(None, cx);
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MENU_DEADLINE).await;
+            let _ = this.update(cx, |v, cx| {
+                if let Some(menu) = v.extensions.surface_menu.take_if(|m| m.key == key) {
+                    v.open_surface_menu(menu, vec![], vec![], 0, cx);
+                }
+            });
+        })
+        .detach();
+    }
+    fn open_surface_menu(
+        &mut self,
+        menu: SurfaceMenu,
+        items: Vec<Value>,
+        runs: Vec<Option<u64>>,
+        token: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let SurfaceMenu {
+            mut rows,
+            choose,
+            window,
+            ..
+        } = menu;
+        let native = preorder_len(&rows);
+        if !items.is_empty() {
+            rows.push(json!({"separator":true}));
+            rows.extend(items);
+        }
+        let host = cx.entity().downgrade();
+        let _ = window.update(cx, move |_, window, cx| {
+            crate::v4_native::menu(window, &rows, cx, move |index, cx| {
+                // A contributed row runs its closure in the realm; anything else
+                // (a native row, or no choice) tells the realm nothing was chosen.
+                let run = index
+                    .and_then(|i| i.checked_sub(native + 1))
+                    .and_then(|i| runs.get(i).copied().flatten());
+                if token != 0
+                    && let Some(controller) = host.upgrade()
+                    && let Some(extensions) = &controller.read(cx).extensions.host
+                {
+                    extensions.answer(token, run.map_or(Value::Null, Value::from));
+                }
+                choose(index.filter(|i| *i < native), cx);
+            });
+        });
     }
     /// Extensions add to a tab's menu asynchronously, so it opens when they
     /// answer or the deadline passes, whichever comes first.
@@ -746,6 +951,9 @@ impl Controller {
                 definitions,
                 ..Default::default()
             });
+            if let Some(doc_id) = self.extensions.doc_id {
+                crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+            }
             self.apply_extension_resources();
         }
         self.update_builtins(cx);
