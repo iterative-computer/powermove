@@ -53,12 +53,19 @@ The entry is TypeScript/TSX and exports one of:
   panel, `env.platform` requests (menus, focus), and `env.root()` for a surface.
   Return `{ root, dispose, settle?, show?, publish? }`.
 
-An optional `activate({ host, id })` runs before `view()` renders.
+An optional `activate({ host, id, hot })` runs before `view()` renders.
+
+State survives a publish only through `hot` (in `mount(env)` it is `env.hot`).
+Each publish runs the new version in a fresh runtime. The old version first
+calls its `hot.dispose` callbacks, and what they put in `hot.data` is the new
+version's `hot.data` (keep it JSON). Register `dispose` once, in `activate`,
+not on every render; `samples/hello-panel` shows the pattern.
 
 Imports: relative files inside the extension folder, plus `preact`,
 `preact/hooks`, `powermove/hooks`, `powermove/ui` (controls: `Row`, `Section`,
 `NumField`, `SliderField`, `SelectField`, `ToggleField`, `Segmented`, `Menu`,
-`ToolbarItem`, `Glass`, …), `powermove/runtime`, `powermove/protocol`,
+`Glass`, …; these draw inside your panel, so `ToolbarItem` does not reach the
+window toolbar), `powermove/runtime`, `powermove/protocol`,
 `powermove/host-api`, `powermove/components`, `powermove/memo`,
 `powermove/renderer` and `powermove/builtin`. There is no DOM, `window`,
 `document` or Node; JSX produces native elements.
