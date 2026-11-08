@@ -66,8 +66,9 @@ command palette; choosing it restyles the window chrome and every panel.
 (`"colors.accent"`, `"colors.panel"`, …), lengths and alphas as numbers
 (`"metrics.gap"`, `"translucency.panel"`, …). Unknown tokens are refused. It
 returns a function that removes the theme; a chosen theme follows reloads.
-`themes.activate(id)` shows it right away (as v1–3's `theme.activate`);
-`themes.activate(null)` puts the built-in look back.
+`themes.activate(id)` shows it right away (as v1–3's `theme.activate`); the
+latest activation from any extension wins, and activating again shows it again.
+`themes.activate(null)` puts back what your theme replaced.
 
 Menus: `menus.contribute(location, (ctx) => items)` adds items to a context
 menu each time it opens: `"panel:context"` (`ctx.panelId`), `"layer:context"`
@@ -79,15 +80,21 @@ run?, submenu? }`; a Promise is waited for at most 100 ms.
 Viewer overlays: `overlays.viewer(({ frame }) => …)` draws over the composition
 in the viewer, below the transform gizmos. `frame` is `{ x, y, width, height,
 scale }`, the composition's rectangle in the overlay's points; it follows pan
-and zoom. Display only. It returns a function that removes the overlay.
+and zoom. Display only. Calling it again replaces the overlay. It returns a
+function that removes the overlay.
 
 Timeline: `timeline.chrome({ rowHeight, gutterWidth, rulerHeight,
-keyframeSize, … })` sets the timeline's chrome as v1–3's
+keyframeSize, clipRadius, surfaceOrder })` sets the timeline's chrome as v1–3's
 `workspace.chrome.timeline` did (each field optional, within v1's ranges);
-it's put back when the extension leaves. `timeline.paint((clips) => shapes)`
+when the extension leaves, each field goes back to what it showed before (or
+another extension's value), unless something else changed it since.
+`showLayerNumbers`, `showTypeBadges` and `toolbarDensity` throw: the native
+timeline doesn't draw them yet. `timeline.paint((clips) => shapes)`
 paints on clips: it runs when the visible clips change (never per playback
 frame) and returns `{ [clipId]: [{ rect: [x, y, w, h], color: "#rrggbb",
-opacity?, radius? } | { text, x, y, color, size? }] }` in clip points.
+opacity?, radius? } | { text, x, y, color, size? }] }` in clip points: at most
+64 shapes per clip (all painters together), text up to 200 characters, numbers
+clamped to ±4096 points; a painter has 100 ms per request.
 
 State survives a publish only through `hot` (in `mount(env)` it is `env.hot`).
 Each publish runs the new version in a fresh runtime. The old version first

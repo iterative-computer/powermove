@@ -241,6 +241,9 @@ def flow(mcp, name):
                 {"id": eid, "action": "removed", "summary": f"{name} leftover"}]})
             time.sleep(2)
         before = probe(mcp)
+        # A baseline that already passes the check would prove nothing.
+        assert before is not None and not visible(before, before), \
+            f"{name}: the baseline already shows the effect ({before})"
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "manifest.json"), "w") as f:
             json.dump(manifest, f)
