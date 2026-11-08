@@ -275,7 +275,10 @@ impl Builtins {
         for entry in self.broker.entries.lock().unwrap().values_mut() {
             let mut backend = entry.backend.lock().unwrap();
             backend.native.originals = originals.clone();
-            backend.native.media_runtime = observed.clone();
+            if backend.native.media_runtime != observed {
+                backend.native.media_runtime = observed.clone();
+                backend.native.media_sequence += 1;
+            }
         }
     }
     /// Admit worker-owned originals, then await the actor's durable outcome.

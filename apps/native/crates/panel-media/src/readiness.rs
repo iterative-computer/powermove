@@ -2,7 +2,7 @@
 //! paths and proxy presence do not prove that an original can be decoded.
 use crate::{MediaRuntime, RuntimeState, Stamp};
 use std::collections::BTreeMap;
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ObservedRuntime {
     stamp: Option<Stamp>,
     states: BTreeMap<String, RuntimeState>,

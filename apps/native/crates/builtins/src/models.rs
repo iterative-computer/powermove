@@ -48,6 +48,9 @@ pub(crate) struct Models {
     pub export: Value,
     pub project_reply: Option<Value>,
     pub media_runtime: ObservedRuntime,
+    /// Moves with every new observation, so the Project panel asks for rows
+    /// again when readiness lands without a document revision.
+    pub media_sequence: u64,
     pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
     pub export_probe_stamp: String,
     timeline_job: Option<TimelineJob>,
@@ -103,6 +106,7 @@ impl Models {
             timeline_editor: None,
             project_reply: None,
             media_runtime: Default::default(),
+            media_sequence: 0,
             originals: Default::default(),
             export_probe_stamp: String::new(),
         })
@@ -605,7 +609,7 @@ impl Backend {
         if self.panel_id == "assets" && matches!(query, Query::Project) {
             let p = self.published().ok_or("closed")?;
             return Ok(Some(
-                json!({"stamp":{"project":p.project,"document":p.snapshot.doc_id,"revision":p.revision()}}),
+                json!({"stamp":{"project":p.project,"document":p.snapshot.doc_id,"revision":p.revision()},"media":self.native.media_sequence}),
             ));
         }
         Ok(None)
