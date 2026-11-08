@@ -112,7 +112,8 @@ def png_rows(data):
     return width, rows
 
 
-CLIP = (31, 75, 82)
+# The teal clip fill in dark and in light windows (pm-design `teal`).
+CLIPS = ((31, 75, 82), (194, 226, 227))
 
 
 def clip_left(mcp):
@@ -123,7 +124,8 @@ def clip_left(mcp):
     width, rows = png_rows(base64.b64decode(content[1]["data"]))
     points = facts["bounds"]["width"] / width
     left = min((x for row in rows for x in range(width)
-                if near(tuple(row[x * 4:x * 4 + 3]), CLIP, 6)), default=None)
+                if any(near(tuple(row[x * 4:x * 4 + 3]), clip, 6) for clip in CLIPS)),
+               default=None)
     return None if left is None else round(left * points)
 
 
@@ -241,8 +243,10 @@ def flow(mcp, name):
                 {"id": eid, "action": "removed", "summary": f"{name} leftover"}]})
             time.sleep(2)
         before = probe(mcp)
-        # A baseline that already passes the check would prove nothing.
-        assert before is not None and not visible(before, before), \
+        # A baseline the probe can't read, or that already passes the check,
+        # would prove nothing.
+        assert before is not None, f"{name}: the probe found nothing to measure"
+        assert not visible(before, before), \
             f"{name}: the baseline already shows the effect ({before})"
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "manifest.json"), "w") as f:
