@@ -88,7 +88,14 @@ pub struct Controller {
     /// Queued batches and the cancel flag of the running one.
     pub(crate) imports: std::collections::VecDeque<pm_builtins::media_import::ImportRequest>,
     pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Arrow-key nudges less than [`NUDGE_IDLE`] apart are one undo step
+    /// (keymap.ts): the history mark taken before the first, and the timer
+    /// that squashes the burst once the keys rest.
+    nudge_mark: Option<ActorHistoryMark>,
+    nudge_idle: Option<gpui::Task<()>>,
 }
+/// How long arrow keys rest before a run of nudges becomes its undo step.
+const NUDGE_IDLE: std::time::Duration = std::time::Duration::from_millis(180);
 
 /// Why a project opened as a copy, in user language (never the enum name).
 /// A banner with a lock badge replaces this status copy in P3.
@@ -325,6 +332,8 @@ impl Controller {
             close_after_save: None,
             imports: Default::default(),
             importing: None,
+            nudge_mark: None,
+            nudge_idle: None,
         }
     }
     pub fn initialize(&mut self, launch: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -550,6 +559,9 @@ impl Controller {
         let Some(published) = self.published.clone() else {
             return false;
         };
+        if name == "nudgeSelection" {
+            self.extend_nudge_burst(cx);
+        }
         let (name, args, time) = (name.to_owned(), args.to_vec(), self.time());
         cx.spawn(async move |this, cx| {
             let plan = cx
@@ -568,6 +580,55 @@ impl Controller {
         })
         .detach();
         true
+    }
+    /// The first nudge of a burst marks history before its own write reaches
+    /// the kernel (calls run in order); every nudge restarts the rest timer.
+    fn extend_nudge_burst(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
+        if self.nudge_idle.is_none() {
+            self.nudge_mark = None;
+            let mark = self.kernel.call(
+                &session.project,
+                Request::new(Caller::native(), HistoryCall::Mark),
+            );
+            cx.spawn(async move |this, cx| {
+                if let Some(Ok(Ack {
+                    reply: Reply::Mark(mark),
+                    ..
+                })) = mark.await
+                {
+                    let _ = this.update(cx, |v, _| v.nudge_mark = Some(mark));
+                }
+            })
+            .detach();
+        }
+        self.nudge_idle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NUDGE_IDLE).await;
+            let _ = this.update(cx, |v, cx| v.close_nudge_burst(cx));
+        }));
+    }
+    /// Squashes the burst into one "Nudge Selection" step. The kernel refuses
+    /// when anything else wrote since the mark; the nudges then stay separate.
+    fn close_nudge_burst(&mut self, cx: &mut Context<Self>) {
+        self.nudge_idle = None;
+        let (Some(mark), Some(session)) = (self.nudge_mark.take(), &self.session) else {
+            return;
+        };
+        let (kernel, project) = (self.kernel.clone(), session.project.clone());
+        cx.background_spawn(async move {
+            let Some(published) = kernel.published(&project) else {
+                return;
+            };
+            let squash = HistoryCall::Squash {
+                mark,
+                label: "Nudge Selection".into(),
+                expected_revision: published.revision(),
+            };
+            let _ = kernel
+                .call(&project, Request::new(Caller::native(), squash))
+                .await;
+        })
+        .detach();
     }
     /// Selected keyframes take precedence over their layers, as Delete does.
     fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) -> bool {
