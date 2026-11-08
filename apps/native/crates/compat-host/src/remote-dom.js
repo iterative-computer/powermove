@@ -23,24 +23,29 @@
     return reply.value;
   };
   /** Frames whose DOM has applied. A canvas the document no longer has
-   * releases its resource; it never stops the page. */
+   * releases its resource quietly; a frame that cannot draw is reported. Neither
+   * stops the page. */
   const drawWaiting = async () => {
     while (waiting.length && waiting[0].dom_sequence <= applied) {
       const event = waiting.shift();
-      const canvas = applier?.node(event.node);
-      if (canvas?.localName === "canvas") {
-        canvas.width = event.width;
-        canvas.height = event.height;
+      const node = applier?.node(event.node);
+      let failed = !!node && node.localName !== "canvas";
+      if (node?.localName === "canvas") {
+        node.width = event.width;
+        node.height = event.height;
         if (event.width && event.height) {
-          const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
-          if (response.ok) {
+          try {
+            const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
+            if (!response.ok) throw Error(String(response.status));
             const bitmap = await createImageBitmap(await response.blob());
-            try { canvas.getContext("2d").drawImage(bitmap, 0, 0); }
+            try { node.getContext("2d").drawImage(bitmap, 0, 0); }
             finally { bitmap.close(); }
+          } catch (_) {
+            failed = true;
           }
         }
       }
-      call({ kind: "canvas_applied", panel, payload: {resource:event.resource} });
+      call({ kind: "canvas_applied", panel, payload: {resource:event.resource, failed} });
     }
   };
   const apply = async (event) => {

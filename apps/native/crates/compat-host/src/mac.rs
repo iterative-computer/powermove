@@ -136,6 +136,10 @@ impl Shared {
             "canvas_applied" => {
                 let resource = payload["resource"].as_u64().ok_or(Error::InvalidRequest)?;
                 self.canvases.borrow_mut().remove(resource)?;
+                if payload["failed"] == true {
+                    self.handler
+                        .event(HostEvent::Failure("compat_canvas_frame_unavailable"));
+                }
                 Ok(Value::Null)
             }
             "remote_dom" => {

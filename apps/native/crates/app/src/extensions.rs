@@ -915,6 +915,7 @@ impl Controller {
                     HostEvent::CompositionChanged => cx.notify(),
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::Recovered { .. } => page.ready = true,
+                    HostEvent::Failure(code) => eprintln!("extension page: {code}"),
                     _ => (),
                 }
             }
