@@ -189,13 +189,25 @@ export function EffectControls(props: PanelProps) {
             fontWeight: t("typography.semibold_weight"),
           }}
         >
-          <text>{p.name}</text>
           <text
             style={{
-              color: t("colors.muted"),
-              fontWeight: t("typography.regular_weight"),
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
             }}
-          >{`· ${p.typeLabel}`}</text>
+          >
+            {p.name}
+          </text>
+          {p.typeLabel && (
+            <text
+              style={{
+                color: t("colors.muted"),
+                fontWeight: t("typography.regular_weight"),
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+              }}
+            >{`· ${p.typeLabel}`}</text>
+          )}
           {p.locked && (
             <text
               attr={{ symbol: "lock" }}
@@ -387,6 +399,7 @@ export function EffectControls(props: PanelProps) {
                         display: "flex",
                         flexDirection: "row",
                         alignItems: "center",
+                        overflow: "hidden",
                       }}
                     >
                       <UI.ToolbarItem
@@ -422,6 +435,13 @@ export function EffectControls(props: PanelProps) {
                         onKeyDown={stop}
                       />
                       <text
+                        title={row.label}
+                        style={{
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          paddingLeft: t("metrics.gap"),
+                        }}
                         onClick={(e) => {
                           stop(e);
                           send({
@@ -442,6 +462,8 @@ export function EffectControls(props: PanelProps) {
                             color: t("colors.danger"),
                             fontSize: t("typography.minimum"),
                             paddingLeft: t("metrics.gap"),
+                            whiteSpace: "nowrap",
+                            flexShrink: 0,
                           }}
                         >
                           Not installed
