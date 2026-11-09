@@ -268,11 +268,23 @@ fn surface_transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
 }
 
 struct Medium { sigma:f32, albedo:vec3f, g:f32 }
+// The global atmosphere is one finite volume, shared by every camera,
+// continuation and shadow segment. Restarting a distance budget at each bounce
+// changes the light's optical depth and makes overlapping paths disagree.
+fn global_fog_density(p:vec3f)->f32 {
+  let h=world_row(3u);let q=p-P.cam_pos.xyz;
+  if(dot(q,q)>h.w*h.w){return 0.;}
+  return world_row(2u).w*exp(-max(p.y-h.y,0.)*h.z);
+}
+fn fog_interval(ro:vec3f,rd:vec3f,end:f32)->vec2f {
+  let radius=world_row(3u).w;
+  return volume_interval(vec4f(P.cam_pos.xyz,1.),vec4f(vec3f(radius),0.),ro,rd,end);
+}
 fn medium_at(p:vec3f)->Medium {
   var sigma=0.;var albedo=vec3f(0.);var g=0.;
   if(!world_on()){return Medium(0.,vec3f(0.),0.);}
   let fog=world_row(2u);let h=world_row(3u);
-  let global=fog.w*exp(-max(p.y-h.y,0.)*h.z);
+  let global=global_fog_density(p);
   sigma=global;albedo=fog.xyz*global;g=h.x*global;
   let config=world_row(4u);
   for(var i=0u;i<u32(config.y);i++){
@@ -291,7 +303,7 @@ fn medium_at(p:vec3f)->Medium {
 fn sample_medium(p:vec3f)->Medium {
   let combined=medium_at(p);if(combined.sigma<=0.){return combined;}
   var choice=rnd()*combined.sigma;let fog=world_row(2u);let h=world_row(3u);
-  let global=fog.w*exp(-max(p.y-h.y,0.)*h.z);
+  let global=global_fog_density(p);
   if(choice<global){return Medium(combined.sigma,fog.xyz,h.x);}choice-=global;
   let config=world_row(4u);
   for(var i=0u;i<u32(config.y);i++){
@@ -307,7 +319,6 @@ fn medium_majorant()->f32 {
   for(var i=0u;i<u32(c.y);i++){m+=world_row(u32(c.x)+3u*i+1u).w;}
   return m;
 }
-fn medium_distance(dist:f32)->f32 {if(!world_on()){return 0.;}return min(dist,world_row(3u).w);}
 fn volume_interval(center:vec4f,size:vec4f,ro:vec3f,rd:vec3f,end:f32)->vec2f {
   let q=ro-center.xyz;var near=0.;var far=0.;
   if(center.w>0.5){let b=dot(q,rd);let disc=b*b-dot(q,q)+size.x*size.x;if(disc<=0.){return vec2f(0.);}near=-b-sqrt(disc);far=-b+sqrt(disc);}
@@ -318,9 +329,13 @@ fn volume_interval(center:vec4f,size:vec4f,ro:vec3f,rd:vec3f,end:f32)->vec2f {
 // height-aware majorant. A small dense steam volume must not make a kilometre
 // of empty ray march at the steam density.
 fn tracking_segment(ro:vec3f,rd:vec3f,dist:f32)->vec3f {
-  let end=medium_distance(dist);let fog=world_row(2u);let h=world_row(3u);
+  let end=dist;let fog=world_row(2u);let h=world_row(3u);
   var near=end;var far=0.;var majorant=0.;
-  if(fog.w>0.){near=0.;far=end;majorant=fog.w*exp(-max(min(ro.y,ro.y+rd.y*end)-h.y,0.)*h.z);}
+  let global=fog_interval(ro,rd,end);
+  if(fog.w>0. && global.y>global.x){
+    near=global.x;far=global.y;
+    majorant=fog.w*exp(-max(min(ro.y+rd.y*near,ro.y+rd.y*far)-h.y,0.)*h.z);
+  }
   let config=world_row(4u);
   for(var i=0u;i<u32(config.y);i++){
     let at=u32(config.x)+3u*i;let interval=volume_interval(world_row(at),world_row(at+1u),ro,rd,end);
@@ -335,12 +350,13 @@ fn tracking_segment(ro:vec3f,rd:vec3f,dist:f32)->vec3f {
 // still uses delta tracking, so multiple volume scattering is unchanged.
 fn live_optical_depth(ro:vec3f,rd:vec3f,end:f32)->f32 {
   let fog=world_row(2u);let h=world_row(3u);var optical=0.;
-  let y0=ro.y-h.y;let y1=y0+rd.y*end;let k=h.z;
-  if(k==0.){optical=fog.w*end;}
-  else if(abs(k*rd.y)*end<1e-4){optical=fog.w*exp(-k*max((y0+y1)*0.5,0.))*end;}
+  let global=fog_interval(ro,rd,end);let length=max(0.,global.y-global.x);
+  let y0=ro.y+rd.y*global.x-h.y;let y1=y0+rd.y*length;let k=h.z;
+  if(k==0.){optical=fog.w*length;}
+  else if(abs(k*rd.y)*length<1e-4){optical=fog.w*exp(-k*max((y0+y1)*0.5,0.))*length;}
   else {
     var below=0.;
-    if(rd.y>0.){below=clamp(-y0/rd.y,0.,end);}else{below=end-clamp(y0/(-rd.y),0.,end);}
+    if(rd.y>0.){below=clamp(-y0/rd.y,0.,length);}else{below=length-clamp(y0/(-rd.y),0.,length);}
     let upper=max(y0,y1);let lower=max(min(y0,y1),0.);
     optical=fog.w*(below+(exp(-k*lower)-exp(-k*max(upper,0.)))/(k*abs(rd.y)));
   }
@@ -353,7 +369,7 @@ fn live_optical_depth(ro:vec3f,rd:vec3f,end:f32)->f32 {
 }
 fn medium_transmittance(ro:vec3f,rd:vec3f,dist:f32)->f32 {
   if(!world_on()){return 1.;}
-  return exp(-live_optical_depth(ro,rd,medium_distance(dist)));
+  return exp(-live_optical_depth(ro,rd,dist));
 }
 fn transmittance(ro:vec3f,rd:vec3f,dist:f32)->vec3f {
   return surface_transmittance(ro,rd,dist)*medium_transmittance(ro,rd,dist);
@@ -707,7 +723,12 @@ fn lobe_probs(m: Material, nv: f32) -> Lobes {
   let fc = m.spec.y * fresnel_dielectric(nv, 1.5);
   let fs = fresnel_base(m, nv);
   let under = 1.0 - fc;
-  var w = Lobes(fc, under * (1.0 - tr) * max(dot(fs, vec3f(0.333)), 0.04), under * (1.0 - metallic) * (1.0 - tr) * dot(m.base.xyz, vec3f(0.333)) * (1.0 - fs.x), under * tr);
+  // A narrow coat above a rough base sees a much spikier incident signal.
+  // Give it more continuation samples; evaluation and the full mixture PDF
+  // retain the actual Fresnel weights, so this changes variance, not energy.
+  let sharp_coat=smoothstep(0.05,0.3,m.spec.x-m.spec.z);
+  let coat_sample=mix(fc,sqrt(max(fc,0.)),sharp_coat);
+  var w = Lobes(coat_sample, under * (1.0 - tr) * max(dot(fs, vec3f(0.333)), 0.04), under * (1.0 - metallic) * (1.0 - tr) * dot(m.base.xyz, vec3f(0.333)) * (1.0 - fs.x), under * tr);
   let s = w.coat + w.spec + w.diff + w.trans;
   if (s <= 0.0) { return Lobes(0.0, 1.0, 0.0, 0.0); }
   return Lobes(w.coat / s, w.spec / s, w.diff / s, w.trans / s);
@@ -1292,7 +1313,7 @@ fn path(px: vec2f) -> Sample {
     let segment=min(min(h.t,tf),light_distance);
     if(medium_majorant()>0.){
       if(P.opts.x!=0u){
-        let end=medium_distance(segment);let dt=end/2.;
+        let end=tracking_segment(ro,rd,segment).y;let dt=end/2.;
         if(primary){
           for(var step=0u;step<2u;step++){
             let point=ro+rd*((f32(step)+rnd())*dt);let med=medium_at(point);

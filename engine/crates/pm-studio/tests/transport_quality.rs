@@ -352,3 +352,188 @@ fn a_lossless_filmed_metal_cannot_absorb_a_white_furnace() {
         );
     }
 }
+
+#[test]
+fn finite_global_fog_has_the_same_boundary_for_camera_and_shadow_rays() {
+    let mut scene = receiver();
+    scene.camera = Camera::lens(v3(0., 0.5, 3.), Vec3::ZERO, 5000., 0.);
+    scene.world.atmosphere.density = 0.2;
+    scene.world.atmosphere.color = Vec3::ZERO;
+    scene.world.atmosphere.distance = 3.1;
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.live = true; // Analytic absorption isolates the boundary from collision noise.
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(4, 2, true, 1000000);
+    let pixels = r.linear_beauty();
+    let distance = 9.25f32.sqrt();
+    let shadow_distance = 0.5 + (3.1f32 * 3.1 - 9.).sqrt();
+    let expected = 0.7 / std::f32::consts::PI * (-0.2 * (distance + shadow_distance)).exp();
+    let actual = pixels[(12 * 24 + 12) * 4];
+    eprintln!("finite global fog: {actual}, expected {expected}");
+    assert!(
+        (actual / expected - 1.).abs() < 0.015,
+        "all segments must use the same physical fog boundary"
+    );
+}
+
+#[test]
+fn local_volumes_keep_their_bounds_outside_the_global_fog_radius() {
+    let mut scene = receiver();
+    scene.objects.clear();
+    scene.extra_lights.clear();
+    scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 5000., 0.);
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 8,
+        height: 4,
+        pixels: vec![Vec3::splat(1.); 32],
+        ..Default::default()
+    });
+    scene.world.atmosphere.distance = 1.;
+    scene.world.volumes.push(Volume {
+        shape: VolumeShape::Box,
+        center: Vec3::ZERO,
+        size: Vec3::splat(1.),
+        density: 0.2,
+        color: Vec3::ZERO,
+        anisotropy: 0.,
+    });
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.live = true;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(4, 2, true, 1000000);
+    let actual = r.linear_beauty()[(12 * 24 + 12) * 4];
+    let expected = (-0.4f32).exp();
+    assert!(
+        (actual - expected).abs() < 0.002,
+        "local volume was clipped by the global radius: {actual} != {expected}"
+    );
+}
+
+#[test]
+fn glossy_coat_samples_converge_in_a_small_bright_environment() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.objects[0].mesh = pm_studio::mesh::sphere(Vec3::ZERO, 1., 32, 64);
+    scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 70., 0.);
+    let mut environment = vec![Vec3::splat(0.05); 32 * 16];
+    for y in 6..10 {
+        for x in [0, 1, 30, 31] {
+            environment[y * 32 + x] = Vec3::splat(12.);
+        }
+    }
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 32,
+        height: 16,
+        pixels: environment,
+        ..Default::default()
+    });
+    scene.materials[0] = Material {
+        coat: 1.,
+        coat_roughness: 0.01,
+        ..Material::dielectric(Vec3::splat(0.4), 0.8)
+    };
+    let mut r = Renderer::new(32, 32).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.set_time_seed(7);
+    r.trace(4096, 4, true, 1000000);
+    let reference = r.linear_beauty();
+    let mut error = 0.;
+    let mut mean = 0.;
+    let mut expected = 0.;
+    let mut count = 0.;
+    for seed in 0..4 {
+        r.set_time_seed(seed);
+        r.trace(64, 4, true, 1000000);
+        let pixels = r.linear_beauty();
+        for y in 10..22 {
+            for x in 10..22 {
+                let i = (y * 32 + x) * 4;
+                error += (pixels[i] - reference[i]).powi(2);
+                mean += pixels[i];
+                expected += reference[i];
+                count += 1.;
+            }
+        }
+    }
+    let rms = (error / count).sqrt();
+    let gain = mean / expected;
+    eprintln!("glossy coat 64spp RMS {rms}, aggregate gain {gain}");
+    assert!(
+        (gain - 1.).abs() < 0.03,
+        "coat sampling must retain the converged energy: {gain}"
+    );
+    assert!(rms < 0.10, "coat highlight noise regressed: {rms}");
+}
+
+#[test]
+fn conservative_subsurface_walk_preserves_a_white_furnace() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.objects[0].mesh = pm_studio::mesh::sphere(Vec3::ZERO, 1., 32, 64);
+    scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 70., 0.);
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 8,
+        height: 4,
+        pixels: vec![Vec3::splat(1.); 32],
+        ..Default::default()
+    });
+    scene.materials[0] = Material {
+        subsurface: 0.2,
+        specular: 0.,
+        ..Material::dielectric(Vec3::splat(1.), 0.45)
+    };
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(2048, 4, true, 1000000);
+    let pixels = r.linear_beauty();
+    let actual = (8..16)
+        .flat_map(|y| (8..16).map(move |x| (y * 24 + x) * 4))
+        .map(|i| pixels[i])
+        .sum::<f32>()
+        / 64.;
+    eprintln!("conservative subsurface furnace: {actual}");
+    assert!(
+        (actual - 1.).abs() < 0.03,
+        "a conservative bounded walk must return its white incident energy: {actual}"
+    );
+}
+
+#[test]
+fn advanced_materials_agree_in_native_and_portable_traversal() {
+    let scene = pm_studio::scene::preset("materials", "starlight", 0.).unwrap();
+    let mut r = Renderer::new(64, 36).expect("GPU");
+    if !r.has_hardware_rt() {
+        return;
+    }
+    r.set_scene(&scene, &scene.prepare());
+    r.caustics = false;
+    r.hardware_rt = true;
+    r.trace(256, 8, true, 1000000);
+    let native = r.linear_beauty();
+    r.hardware_rt = false;
+    r.trace(256, 8, true, 1000000);
+    let portable = r.linear_beauty();
+    let mut error = 0.;
+    let mut energy = 0.;
+    let mut count = 0.;
+    for (a, b) in native.chunks_exact(4).zip(portable.chunks_exact(4)) {
+        if a[3] > 0.98 && b[3] > 0.98 {
+            for c in 0..3 {
+                error += (a[c] - b[c]).abs();
+                energy += a[c].abs();
+                count += 1.;
+            }
+        }
+    }
+    let relative = error / energy;
+    eprintln!("advanced-material native/portable relative MAE {relative}, {count} components");
+    assert!(count > 100., "comparison must cover visible materials");
+    assert!(
+        relative < 0.01,
+        "native/portable advanced material transport disagreed: {relative}"
+    );
+}

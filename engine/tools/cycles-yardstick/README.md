@@ -84,3 +84,26 @@ Native ray queries and portable BVH traversal use the same WGSL changes.
 Color-matching reference: [Wyman, Sloan and Shirley, JCGT 2(2), 2013](https://jcgt.org/published/0002/02/01/).
 The film quadrature constants are reproducible with `generate_film_response.py`.
 No Blender or Mitsuba implementation code or rendered lookup images are embedded.
+
+## Shared finite atmosphere
+
+`Atmosphere.distance` now defines a camera-centered sphere for global fog.
+Camera, continuation and shadow rays all intersect this same boundary. The
+previous per-segment distance budget could change the optical depth of the
+same light path after a bounce. Local boxes and spheres use their own bounds;
+the global radius no longer clips a separate local volume. Cycles uses the
+same sphere, with a small tessellation approximation. Primary miss rays retain
+the same maximum fog distance as before. This changes secondary fog lighting
+intentionally; saved scene parameters and the GPU upload layout are unchanged.
+
+Analytic absorption tests verify the shared shadow boundary and a local volume
+outside the global radius. The former per-segment implementation was 31% too
+dark in the isolated test. In the room corpus the raw luminance ratio improved
+from .886 to .970, removing most of the exposure discrepancy; stochastic
+indirect/volume noise and the diffuse model remain visible.
+
+Narrow coats above rough bases also receive more continuation samples. Only
+the proposal probabilities change; BSDF evaluation and the full mixture PDF
+retain physical Fresnel weights. An unclamped HDR environment regression uses
+four independent 64-sample estimates against a 4,096-sample estimate. Its RMS
+noise fell from .1304 to .0843 while aggregate energy stayed within .2%.
