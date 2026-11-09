@@ -1,8 +1,7 @@
 use base64::Engine;
 use pm_recorder::{
     Affine, Canvas, Cap, Direction, FillRule, Gradient, GradientKind, ImageData, Join, Paint,
-    Pattern, Point, Rect, Repetition, Source, TextAlign, TextBaseline, TextLayout, TextProvider,
-    Vec2,
+    Pattern, Point, Rect, Repetition, Source, TextAlign, TextBaseline, TextProvider, Vec2,
 };
 use pm_runtime_v8::*;
 use serde_json::{Value, json};
@@ -74,17 +73,6 @@ pub struct NoEvents;
 impl RealmEvents for NoEvents {}
 /// Canvas text shapes against the app's font service.
 pub type CanvasText = Box<dyn TextProvider + Send>;
-struct Text<'a>(&'a mut dyn TextProvider);
-impl TextProvider for Text<'_> {
-    fn layout(
-        &mut self,
-        font: &pm_recorder::Font,
-        text: &[u16],
-        direction: Direction,
-    ) -> std::result::Result<TextLayout, pm_recorder::Error> {
-        self.0.layout(font, text, direction)
-    }
-}
 pub struct NativeHost {
     state: Mutex<State>,
     kernel: Mutex<crate::adapter::KernelAdapter>,
@@ -1322,7 +1310,7 @@ impl NativeHost {
                     .as_mut()
                     .ok_or_else(|| Error::Host("canvas text backend not attached".into()))?;
                 let metrics = canvas
-                    .measure_text(&text, &mut Text(&mut **provider))
+                    .measure_text(&text, &mut **provider)
                     .map_err(host_error)?;
                 json!({"width":metrics.width,"actualBoundingBoxLeft":metrics.actual_bounding_box_left,
                     "actualBoundingBoxRight":metrics.actual_bounding_box_right,
@@ -1345,9 +1333,9 @@ impl NativeHost {
                     .as_mut()
                     .ok_or_else(|| Error::Host("canvas text backend not attached".into()))?;
                 if name == "fillText" {
-                    canvas.fill_text(&text, x, y, width, &mut Text(&mut **provider))
+                    canvas.fill_text(&text, x, y, width, &mut **provider)
                 } else {
-                    canvas.stroke_text(&text, x, y, width, &mut Text(&mut **provider))
+                    canvas.stroke_text(&text, x, y, width, &mut **provider)
                 }
                 .map_err(host_error)?;
                 Value::Null
