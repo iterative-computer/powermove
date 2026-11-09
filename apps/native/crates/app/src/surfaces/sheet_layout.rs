@@ -29,6 +29,28 @@ impl SheetLayout {
     pub fn label_width(self) -> f64 {
         self.value_x() - self.inset * 2.
     }
+    /// Units sit in their own column after number fields, so every number's
+    /// right edge lines up whatever its unit.
+    pub fn unit_width(self) -> f64 {
+        self.field
+    }
+    /// Where number fields end: before the unit column.
+    pub fn number_right(self, gap: f64) -> f64 {
+        self.width - self.inset - self.unit_width() - gap
+    }
+    /// A number field's width: two of them, a `×` and their gaps fill the
+    /// value column up to the units (`1920 × 1080`).
+    pub fn number_width(self, gap: f64) -> f64 {
+        ((self.value_column - self.unit_width() - 3. * gap - self.cross_width()) / 2.).floor()
+    }
+    pub fn cross_width(self) -> f64 {
+        (self.field / 2.).round()
+    }
+    /// The band under the last row: the footer's buttons, and the gap above
+    /// them that holds the footer hairline.
+    pub fn footer_band(self) -> f64 {
+        self.row + self.inset
+    }
 }
 #[cfg(target_os = "macos")]
 pub mod native {
@@ -73,7 +95,7 @@ pub mod native {
             let layout = SheetLayout::resolve(tokens, wide);
             // Each title, detail and help/error line occupies a token row. The
             // caller counts its real lines; no fixed guessed sheet height.
-            let height = layout.inset * 2. + layout.row * (rows + 2) as f64;
+            let height = layout.inset * 2. + layout.row * (rows + 1) as f64 + layout.footer_band();
             let rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(layout.width, height));
             let window = unsafe {
                 NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -145,22 +167,73 @@ pub mod native {
             label
         }
         pub fn row(&mut self, label: &str, view: &NSView) {
+            self.label_row(label);
+            self.place(view, self.layout.value_x(), self.layout.value_column);
+        }
+        /// Starts a row: its label on the left. Controls go at `self.y`.
+        fn label_row(&mut self, label: &str) {
             self.y -= self.layout.row;
             let field = NSTextField::labelWithString(&NSString::from_str(label), self.mtm);
             field.setFont(Some(&NSFont::systemFontOfSize(
                 self.tokens.typography.body.into(),
             )));
             field.setTextColor(Some(&colour(self.tokens.colors.secondary)));
-            field.setFrame(NSRect::new(
-                NSPoint::new(self.layout.inset, self.y),
-                NSSize::new(self.layout.label_width(), self.layout.field),
-            ));
+            self.place_label(&field, self.layout.inset, self.layout.label_width());
+        }
+        /// A label centred on the row's field height, so its text sits level
+        /// with the control beside it.
+        fn place_label(&self, label: &NSTextField, x: f64, width: f64) {
+            let height = label
+                .sizeThatFits(NSSize::new(width, f64::MAX))
+                .height
+                .ceil();
+            let y = self.y + ((self.layout.field - height) / 2.).round();
+            label.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)));
+            self.content.addSubview(label);
+        }
+        fn place(&self, view: &NSView, x: f64, width: f64) {
             view.setFrame(NSRect::new(
-                NSPoint::new(self.layout.value_x(), self.y),
-                NSSize::new(self.layout.value_column, self.layout.field),
+                NSPoint::new(x, self.y),
+                NSSize::new(width, self.layout.field),
             ));
-            self.content.addSubview(&field);
             self.content.addSubview(view);
+        }
+        fn gap(&self) -> f64 {
+            self.tokens.metrics.gap.into()
+        }
+        /// A right-aligned number field, its id and AX label set.
+        fn number_field(
+            &self,
+            id: &str,
+            label: &str,
+            value: &str,
+            enabled: bool,
+        ) -> Retained<NSTextField> {
+            let field = NSTextField::textFieldWithString(&NSString::from_str(value), self.mtm);
+            field.setFocusRingType(NSFocusRingType::None);
+            field.setAlignment(NSTextAlignment::Right);
+            field.setIdentifier(Some(&NSString::from_str(id)));
+            field.setAccessibilityLabel(Some(&NSString::from_str(label)));
+            field.setEnabled(enabled);
+            field
+        }
+        fn small_label(&self, text: &str) -> Retained<NSTextField> {
+            let label = NSTextField::labelWithString(&NSString::from_str(text), self.mtm);
+            label.setFont(Some(&NSFont::systemFontOfSize(
+                self.tokens.typography.minimum.into(),
+            )));
+            label.setTextColor(Some(&colour(self.tokens.colors.muted)));
+            label
+        }
+        /// The unit column after the number fields: a unit, or a small control
+        /// such as the size's aspect link.
+        pub fn trailing(&self, view: &NSView) {
+            let x = self.layout.number_right(self.gap()) + self.gap();
+            self.place(view, x, self.layout.unit_width());
+        }
+        fn unit(&self, text: &str) {
+            let x = self.layout.number_right(self.gap()) + self.gap();
+            self.place_label(&self.small_label(text), x, self.layout.unit_width());
         }
         pub fn text(&mut self, id: &str, label: &str, value: &str, secure: bool, enabled: bool) {
             let field: Retained<NSTextField> = if secure {
@@ -182,23 +255,48 @@ pub mod native {
             self.fields.insert(id.into(), field);
         }
         pub fn number(&mut self, id: &str, label: &str, value: &str, unit: &str, enabled: bool) {
-            let group = NSStackView::new(self.mtm);
-            group.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-            group.setSpacing(self.tokens.metrics.gap.into());
-            let field = NSTextField::textFieldWithString(&NSString::from_str(value), self.mtm);
-            field.setFocusRingType(NSFocusRingType::None);
-            field.setIdentifier(Some(&NSString::from_str(id)));
-            field.setAccessibilityLabel(Some(&NSString::from_str(label)));
-            field.setEnabled(enabled);
-            group.addArrangedSubview(&field);
-            let units = NSTextField::labelWithString(&NSString::from_str(unit), self.mtm);
-            units.setFont(Some(&NSFont::systemFontOfSize(
-                self.tokens.typography.minimum.into(),
-            )));
-            units.setTextColor(Some(&colour(self.tokens.colors.muted)));
-            group.addArrangedSubview(&units);
-            self.row(label, &group);
+            self.label_row(label);
+            let (gap, width) = (self.gap(), self.layout.number_width(self.gap()));
+            let field = self.number_field(id, label, value, enabled);
+            self.place(&field, self.layout.number_right(gap) - width, width);
+            if !unit.is_empty() {
+                self.unit(unit);
+            }
             self.fields.insert(id.into(), field);
+        }
+        /// Two numbers on one row, `a × b` (a size), each its own field and id.
+        pub fn pair(
+            &mut self,
+            label: &str,
+            [(a, a_label, a_value), (b, b_label, b_value)]: [(&str, &str, &str); 2],
+            unit: &str,
+            enabled: bool,
+        ) {
+            self.label_row(label);
+            let (gap, width) = (self.gap(), self.layout.number_width(self.gap()));
+            let right = self.layout.number_right(gap);
+            let second = self.number_field(b, b_label, b_value, enabled);
+            self.place(&second, right - width, width);
+            let cross = self.small_label("×");
+            cross.setAlignment(NSTextAlignment::Center);
+            let cross_x = right - width - gap - self.layout.cross_width();
+            self.place_label(&cross, cross_x, self.layout.cross_width());
+            let first = self.number_field(a, a_label, a_value, enabled);
+            self.place(&first, cross_x - gap - width, width);
+            if !unit.is_empty() {
+                self.unit(unit);
+            }
+            self.fields.insert(a.into(), first);
+            self.fields.insert(b.into(), second);
+        }
+        /// A colour well as a swatch, not a value column-wide bar.
+        pub fn swatch(&mut self, id: &str, label: &str, well: Retained<NSColorWell>) {
+            well.setColorWellStyle(NSColorWellStyle::Minimal);
+            well.setAccessibilityLabel(Some(&NSString::from_str(label)));
+            well.setIdentifier(Some(&NSString::from_str(id)));
+            self.label_row(label);
+            self.place(&well, self.layout.value_x(), 2. * self.layout.field);
+            self.controls.insert(id.into(), well.into_super());
         }
         /// A radio or checkbox whose title is its own full-width label.
         pub fn option(&mut self, id: &str, control: Retained<NSControl>) {
@@ -257,6 +355,17 @@ pub mod native {
         }
         /// Footer order is the spec's reading order, with a leading tertiary action.
         pub fn footer(&self, order: &[&str], leading: Option<&str>) {
+            // v1's footer sits under a hairline across the sheet.
+            let rule = NSBox::new(self.mtm);
+            rule.setBoxType(NSBoxType::Separator);
+            rule.setFrame(NSRect::new(
+                NSPoint::new(
+                    0.,
+                    self.layout.inset + self.layout.row + self.layout.inset / 2.,
+                ),
+                NSSize::new(self.layout.width, 1.),
+            ));
+            self.content.addSubview(&rule);
             let mut x = self.layout.width - self.layout.inset;
             for id in order.iter().rev() {
                 let b = &self.buttons[*id];

@@ -9,10 +9,10 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSColorWell, NSColorWellStyle, NSControl, NSControlTextEditingDelegate, NSPopUpButton,
-    NSTextField, NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
+    NSColorWell, NSControl, NSControlTextEditingDelegate, NSPopUpButton, NSTextField,
+    NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
 };
-use objc2_foundation::{NSNotification, NSRect, NSSize, NSString};
+use objc2_foundation::{NSNotification, NSRect, NSString};
 use std::collections::BTreeMap;
 
 pub struct TargetState {
@@ -162,14 +162,8 @@ pub fn hex_colour(hex: &str) -> Option<u32> {
 }
 /// The token rows a surface takes, so the footer sits below all of them.
 fn rows(surface: &Surface) -> usize {
-    let controls: usize = surface
-        .fields
-        .iter()
-        .map(|f| match f.piece {
-            NativePiece::NumberField => f.values.len().max(1),
-            _ => 1,
-        })
-        .sum();
+    // A size's two numbers share one row.
+    let controls = surface.fields.len();
     let lines = surface
         .fields
         .iter()
@@ -204,29 +198,27 @@ pub fn from_surface(
             );
         }
         match field.piece {
-            NativePiece::NumberField if field.values.len() > 1 => {
-                for (index, value) in field.values.iter().enumerate() {
-                    let id = format!("{}.{index}", field.id);
-                    let label = if index == 0 { field.label.as_str() } else { "" };
-                    sheet.number(&id, label, value, &field.unit, field.enabled);
-                }
+            NativePiece::NumberField if field.values.len() == 2 => {
+                let (a, b) = (format!("{}.0", field.id), format!("{}.1", field.id));
+                sheet.pair(
+                    &field.label,
+                    [
+                        (&a, "Width", &field.values[0]),
+                        (&b, "Height", &field.values[1]),
+                    ],
+                    &field.unit,
+                    field.enabled,
+                );
             }
             NativePiece::NumberField => {
                 sheet.number(&field.id, &field.label, value, &field.unit, field.enabled)
             }
             NativePiece::ColourWell => {
                 let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), NSRect::ZERO);
-                well.setColorWellStyle(NSColorWellStyle::Minimal);
                 if let Some(rgb) = hex_colour(value) {
                     well.setColor(&crate::dialogs::sheet_layout::native::colour(rgb));
                 }
-                // A minimal well is a swatch, not a value column-wide bar.
-                let swatch = NSSize::new(
-                    f64::from(2. * tokens.metrics.field),
-                    f64::from(tokens.metrics.field),
-                );
-                sheet.control(&field.id, &field.label, well.clone().into_super());
-                well.setFrameSize(swatch);
+                sheet.swatch(&field.id, &field.label, well);
             }
             NativePiece::PopUpButton => {
                 let popup = NSPopUpButton::initWithFrame_pullsDown(
@@ -307,11 +299,11 @@ mod tests {
             background: "#000000".into(),
         };
         let (id, owner) = (DialogId("sheet".into()), WindowId("window".into()));
-        // Six fields, Size takes two rows, and Duration has its detail line.
+        // Six fields (Size's two numbers share a row) and Duration's detail line.
         let plain = draft.surface(id.clone(), owner.clone(), false, 0);
-        assert_eq!(rows(&plain), 8);
+        assert_eq!(rows(&plain), 7);
         let warned = draft.surface(id.clone(), owner.clone(), true, 2);
-        assert_eq!(rows(&warned), 8);
+        assert_eq!(rows(&warned), 7);
         let number = MixedNumber::new(&[1.]);
         let velocity = VelocityDraft {
             incoming_speed: number.clone(),

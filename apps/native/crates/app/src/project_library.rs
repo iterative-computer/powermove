@@ -41,6 +41,8 @@ pub struct ProjectLibrary {
     window: Option<WindowHandle<ProjectLibrary>>,
     /// Hover washes on sidebar sections, rows and buttons.
     motion: pm_shell::motion::Motion<u64>,
+    /// The library's own AppKit window, which its sheets attach to.
+    ns_window: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
 }
 impl ProjectLibrary {
     /// The worker and its wake channel, started before the view exists.
@@ -81,6 +83,7 @@ impl ProjectLibrary {
             sheet: Rc::default(),
             window: None,
             motion: Default::default(),
+            ns_window: None,
         }
     }
     /// Takes finished work and turns the controller's effects into platform calls.
@@ -91,8 +94,13 @@ impl ProjectLibrary {
         }
         cx.notify();
     }
+    /// Sheets attach to the library window (whether or not the app is
+    /// active), or to the key window when the library isn't open.
     fn parent(&self, cx: &App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
         let _ = cx;
+        if let Some(window) = self.ns_window.clone().filter(|w| w.isVisible()) {
+            return Some(window);
+        }
         let mtm = objc2::MainThreadMarker::new()?;
         objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow()
     }
@@ -295,6 +303,7 @@ impl ProjectLibrary {
         {
             return;
         }
+        self.ns_window = None;
         let this = cx.entity();
         let m = self.tokens.metrics;
         let translucent = self.tokens.translucent();
@@ -522,6 +531,9 @@ impl ProjectLibrary {
 impl Render for ProjectLibrary {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.frame(window);
+        if self.ns_window.is_none() {
+            self.ns_window = crate::platform::ns_window(window);
+        }
         let t = self.tokens.clone();
         let (c, m) = (&t.colors, &t.metrics);
         let (ground, ground_alpha) = t.ground();
