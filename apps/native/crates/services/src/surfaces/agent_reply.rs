@@ -149,8 +149,8 @@ pub fn reply_media(text: &str, home: &Path) -> Vec<ReplyMedia> {
         while i < text.len() {
             let rest = &text[i..];
             let prev = text[..i].chars().next_back().unwrap_or(' ');
-            if rest.starts_with('\\') {
-                i += 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+            if let Some(escaped) = rest.strip_prefix('\\') {
+                i += 1 + escaped.chars().next().map_or(0, char::len_utf8);
                 continue;
             }
             if rest.starts_with('`') {
