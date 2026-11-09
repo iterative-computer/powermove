@@ -1074,14 +1074,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
     engine.set_waker(Some(shared.wake.clone()));
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
-    let recorder =
-        std::env::var_os("PM_ENGINE_TRACE").and_then(|path| match trace::Recorder::open(path) {
-            Ok(recorder) => Some(recorder),
-            Err(error) => {
-                eprintln!("Viewer diagnostic trace unavailable: {error}");
-                None
-            }
-        });
+    // `PM_ENGINE_TRACE`, or the app's `PMEngineTrace` default (`defaults
+    // write <bundle id> PMEngineTrace <file>`) for an app launched without
+    // a custom environment.
+    let trace_path = std::env::var_os("PM_ENGINE_TRACE").or_else(|| {
+        objc2_foundation::NSUserDefaults::standardUserDefaults()
+            .stringForKey(&objc2_foundation::NSString::from_str("PMEngineTrace"))
+            .map(|path| path.to_string().into())
+    });
+    let recorder = trace_path.and_then(|path| match trace::Recorder::open(path) {
+        Ok(recorder) => Some(recorder),
+        Err(error) => {
+            eprintln!("Viewer diagnostic trace unavailable: {error}");
+            None
+        }
+    });
     // Diagnostic A/B only: the pre-latency-pass schedule (re-present every
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
