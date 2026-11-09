@@ -11,6 +11,8 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$here/Info.plist" "$app/Contents/Info.plist"
 cp "$binary" "$app/Contents/MacOS/powermove-native"
+# Agent notifications play this as their own sound (S114).
+cp "$here/little-victory-deep.wav" "$app/Contents/Resources/"
 # The app starts these by path; without the shader compiler no effect draws.
 for helper in pm-glsl-compiler pm-store-helper; do
   if [ -x "$(dirname "$binary")/$helper" ]; then

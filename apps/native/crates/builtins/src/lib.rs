@@ -2,11 +2,12 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+pub use agent_host::NoticeSink;
 mod agent_tasks;
 mod chrome;
 pub use agent_host::AgentCarry;
 pub use models::APPLICATION_AGENT_STORE;
-pub use settings::RESOLUTIONS;
+pub use settings::{RESOLUTIONS, set_notification_status};
 #[cfg(test)]
 mod agent_tests;
 mod data;
@@ -899,6 +900,10 @@ impl Builtins {
         open: std::sync::Arc<pm_agents::account::Opener>,
     ) {
         self.broker.agent.set_environment(environment, open);
+    }
+    /// Who hears that an agent run was sent, finished or asked a question.
+    pub fn set_agent_notices(&self, sink: std::sync::Arc<NoticeSink>) {
+        self.broker.agent.set_notices(sink);
     }
     /// A third-party v4 extension: its own isolate, the same host and native
     /// surface path as a built-in, and a module graph from the native compiler.
