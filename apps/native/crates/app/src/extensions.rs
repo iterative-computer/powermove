@@ -13,9 +13,9 @@ use pm_compat_runner::{
     transport::{TransportOwner, TransportRequest},
 };
 use pm_engine_service::resources::ResourceSnapshot;
-use pm_text::host::BrokerResolver;
 use pm_protocol::{clock::TransportCommand, common::PlaybackRate};
 use pm_shell::{Command as ShellCommand, MenuEntry, keyboard::Binding, layout, transient::Choice};
+use pm_text::host::BrokerResolver;
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,

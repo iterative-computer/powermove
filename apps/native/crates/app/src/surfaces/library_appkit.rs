@@ -57,7 +57,7 @@ pub fn new_project_sheet(
         objc2_foundation::NSRect::ZERO,
         false,
     );
-    for (label, _, _) in PRESETS {
+    for (label, _, _) in pm_builtins::RESOLUTIONS {
         popup.addItemWithTitle(&NSString::from_str(label));
     }
     popup
@@ -65,7 +65,7 @@ pub fn new_project_sheet(
         .unwrap()
         .addItem(&NSMenuItem::separatorItem(mtm));
     popup.addItemWithTitle(&NSString::from_str(CUSTOM_PRESET));
-    popup.selectItemAtIndex(form.preset.unwrap_or(PRESETS.len() + 1) as isize);
+    popup.selectItemAtIndex(form.preset.unwrap_or(pm_builtins::RESOLUTIONS.len() + 1) as isize);
     popup.setEnabled(!form.submitting);
     sheet.control("resolution", "Resolution", popup.into_super().into_super());
     // Two number wells in the one shared value column, with the inspector Link.

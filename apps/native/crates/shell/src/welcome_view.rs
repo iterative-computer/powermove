@@ -12,9 +12,11 @@ pub struct WelcomeView {
     pub frame: Frame,
     on_action: OnAction,
     focus: FocusHandle,
-    started: Instant,
+    opened: Instant,
+    /// When the animation last started, in seconds since the view opened.
+    started: f64,
     details_open: bool,
-    /// Tests pin the animation clock; the window uses wall time.
+    /// Tests pin the clock (seconds since the view opened); the window uses wall time.
     pub clock: Option<f64>,
 }
 impl WelcomeView {
@@ -24,7 +26,8 @@ impl WelcomeView {
             frame,
             on_action,
             focus: cx.focus_handle(),
-            started: Instant::now(),
+            opened: Instant::now(),
+            started: 0.,
             details_open: false,
             clock: None,
         }
@@ -33,20 +36,22 @@ impl WelcomeView {
         self.focus.clone()
     }
     pub fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
-        // Each state change restarts nothing but the Details disclosure.
         if frame.surface != self.frame.surface {
             self.details_open = false;
         }
-        // The animation plays from its start whenever it comes into view.
         if frame.animate && !self.frame.animate {
-            self.started = Instant::now();
+            self.started = self.now();
         }
         self.frame = frame;
         cx.notify();
     }
-    pub fn time(&self) -> f64 {
+    fn now(&self) -> f64 {
         self.clock
-            .unwrap_or_else(|| self.started.elapsed().as_secs_f64())
+            .unwrap_or_else(|| self.opened.elapsed().as_secs_f64())
+    }
+    /// Seconds into the animation.
+    pub fn time(&self) -> f64 {
+        self.now() - self.started
     }
     fn act(&self, id: &str, cx: &mut App) {
         (self.on_action)(id, cx);
@@ -507,7 +512,7 @@ fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
 fn mark_canvas(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
     let accent = tokens.colors.accent;
     let ground = tokens.colors.window;
-    canvas(
+    let mark = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
             let Some(state) = welcome::mark_at(time) else {
@@ -560,10 +565,14 @@ fn mark_canvas(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
             });
         },
     )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
+    .size_full();
+    div()
+        .debug_selector(|| "welcome-mark".into())
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .child(mark)
 }
 /// Standard titled window, centred on the active display. Closing it quits.
 pub fn open_welcome(

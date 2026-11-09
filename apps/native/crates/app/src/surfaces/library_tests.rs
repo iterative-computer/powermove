@@ -352,8 +352,8 @@ fn new_project_defaults_current_format_and_uniqued_untitled_name() {
 #[test]
 fn preset_copy_dimensions_and_manual_edits_switch_to_custom() {
     assert_eq!(
-        PRESETS.iter().map(|p| p.0).collect::<Vec<_>>(),
-        vec![
+        pm_builtins::RESOLUTIONS.map(|p| p.0),
+        [
             "4K UHD · 3840×2160",
             "HD 1080p · 1920×1080",
             "HD 720p · 1280×720",
@@ -363,7 +363,7 @@ fn preset_copy_dimensions_and_manual_edits_switch_to_custom() {
         ]
     );
     let mut f = NewProjectForm::new("owner".into(), None, &format(), &[]);
-    for (index, (_, w, h)) in PRESETS.iter().enumerate() {
+    for (index, (_, w, h)) in pm_builtins::RESOLUTIONS.iter().enumerate() {
         f.choose_preset(Some(index)).unwrap();
         assert_eq!(f.width, w.to_string());
         assert_eq!(f.height, h.to_string());

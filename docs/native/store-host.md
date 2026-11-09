@@ -384,20 +384,9 @@ The initial container lacked that script/toolchain; Rust 1.96.1, rustfmt,
 Clippy and gitleaks were provisioned outside the repo, under `/workspace/.tools`.
 
 ```sh
-cd apps/native
-cargo test --locked -p pm-store-host
-```
-
-Attempted: blocked because the shared native lockfile needs the new package and
-Ed25519/tar dependencies. This lane owns neither workspace manifest nor lock.
-The existing `crates/*` glob discovers the crate. Integration must regenerate
-the shared lock, then rerun that exact command; it must not be silently unlocked
-here. The owned isolated manifest builds **the same source and test files**:
-
-```sh
-cargo test --locked --manifest-path apps/native/crates/store-host/isolated/Cargo.toml
-cargo clippy --locked --manifest-path apps/native/crates/store-host/isolated/Cargo.toml --all-targets --no-deps -- -D warnings
-cargo fmt --manifest-path apps/native/crates/store-host/isolated/Cargo.toml --check
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-store-host
+cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-store-host --all-targets --no-deps -- -D warnings
+cargo fmt --manifest-path apps/native/Cargo.toml -p pm-store-host --check
 ```
 
 Linux evidence: **88 contract tests pass** (72 existing + 16 review regression

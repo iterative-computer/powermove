@@ -254,10 +254,7 @@ fn main() -> Result<()> {
                     let service = service.clone();
                     cx.spawn(async move |_| {
                         while rx.recv().await.is_ok() {
-                            pm_text::host::serve(
-                                &mut *service.borrow_mut(),
-                                broker.take_asks(),
-                            );
+                            pm_text::host::serve(&mut *service.borrow_mut(), broker.take_asks());
                         }
                     })
                     .detach();

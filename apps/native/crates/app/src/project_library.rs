@@ -394,7 +394,7 @@ impl ProjectLibrary {
         });
     }
 }
-const PRESET_COUNT: usize = crate::library_surface::form::PRESETS.len();
+const PRESET_COUNT: usize = pm_builtins::RESOLUTIONS.len();
 impl Render for ProjectLibrary {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.tokens.clone();

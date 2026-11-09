@@ -79,13 +79,15 @@ const EXPORT_FRAME_RATES: [f64; 8] = [
     60000. / 1001.,
     60.,
 ];
-const SIZE_PRESETS: [(f64, f64, &str); 6] = [
-    (3840., 2160., "4K UHD · 3840×2160"),
-    (1920., 1080., "HD 1080p · 1920×1080"),
-    (1280., 720., "HD 720p · 1280×720"),
-    (1080., 1920., "Vertical HD · 1080×1920"),
-    (1080., 1350., "Portrait 4:5 · 1080×1350"),
-    (1080., 1080., "Square · 1080×1080"),
+/// The shipped composition sizes (v1.2.0 RESOLUTION_PRESETS) as (label,
+/// width, height), in menu order. Every size picker offers these, then Custom.
+pub const RESOLUTIONS: [(&str, u32, u32); 6] = [
+    ("4K UHD · 3840×2160", 3840, 2160),
+    ("HD 1080p · 1920×1080", 1920, 1080),
+    ("HD 720p · 1280×720", 1280, 720),
+    ("Vertical HD · 1080×1920", 1080, 1920),
+    ("Portrait 4:5 · 1080×1350", 1080, 1350),
+    ("Square · 1080×1080", 1080, 1080),
 ];
 
 impl Backend {
@@ -262,13 +264,13 @@ impl Backend {
                 .round()
         };
         let (w, h) = (size("w"), size("h"));
-        let preset = SIZE_PRESETS
+        let preset = RESOLUTIONS
             .iter()
-            .find(|(pw, ph, _)| *pw == w && *ph == h)
-            .map(|(pw, ph, _)| format!("{pw}x{ph}"));
-        let mut options: Vec<Value> = SIZE_PRESETS
+            .find(|(_, pw, ph)| f64::from(*pw) == w && f64::from(*ph) == h)
+            .map(|(_, pw, ph)| format!("{pw}x{ph}"));
+        let mut options: Vec<Value> = RESOLUTIONS
             .iter()
-            .map(|(pw, ph, label)| json!({"v":format!("{pw}x{ph}"),"label":label}))
+            .map(|(label, pw, ph)| json!({"v":format!("{pw}x{ph}"),"label":label}))
             .collect();
         options.push(json!({"v":"custom","label":format!("Custom · {w}×{h}")}));
         rows.insert(

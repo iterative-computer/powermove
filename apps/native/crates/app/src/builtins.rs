@@ -100,6 +100,7 @@ impl Controller {
             let delegate = Rc::new(ControllerDelegate(cx.entity().downgrade()));
             let tokens = self.host.borrow().tokens.clone();
             let (kernel, outline) = (self.kernel.clone(), self.builtins.natives.outline.clone());
+            let offline = self.offline_media();
             let surface = cx.new(|cx| {
                 crate::timeline_surface::TimelineSurface::new(
                     kernel,
@@ -107,6 +108,7 @@ impl Controller {
                     tokens,
                     delegate,
                     outline,
+                    offline,
                     cx,
                 )
             });
@@ -398,11 +400,6 @@ impl Controller {
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.offline_changed)
-            && let Some(timeline) = self.builtins.timeline.clone()
-        {
-            timeline.update(cx, |t, cx| t.published(cx));
-        }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         if self.builtins.updating {

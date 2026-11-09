@@ -47,8 +47,6 @@ pub struct Controller {
     /// A media resolution for this session has landed: only then do missing
     /// files read as offline (before it, everything is still loading).
     pub(crate) media_resolved: bool,
-    /// The offline set changed since the timeline last rebuilt.
-    pub(crate) offline_changed: bool,
     /// Proxies, optimized media and their Background Tasks.
     pub pro_media: Arc<crate::pro_media::ProMedia>,
     /// Window ▸ Background Tasks, while open.
@@ -382,7 +380,6 @@ impl Controller {
             media_refresh: Default::default(),
             media_base: MediaCatalog::default(),
             media_resolved: false,
-            offline_changed: false,
             pro_media,
             tasks_window: None,
             opening: false,

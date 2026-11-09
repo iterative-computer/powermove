@@ -6,6 +6,7 @@ mod agent_tasks;
 mod chrome;
 pub use agent_host::AgentCarry;
 pub use models::APPLICATION_AGENT_STORE;
+pub use settings::RESOLUTIONS;
 #[cfg(test)]
 mod agent_tests;
 mod data;

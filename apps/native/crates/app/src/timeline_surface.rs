@@ -12,7 +12,12 @@ use pm_panel_timeline::{
     graph_render::{self, Graph},
     render::{Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, Viewport},
 };
-use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, VecDeque},
+    rc::Rc,
+    sync::Arc,
+};
 
 /// Host services a gesture needs. Implemented by the Controller; tests record.
 pub trait Delegate: 'static {
@@ -157,6 +162,9 @@ pub struct TimelineSurface {
     client: Option<TimelineClient>,
     queue: VecDeque<Job>,
     busy: bool,
+    /// Assets this editor's viewer cannot read: their clips show Media
+    /// Offline (docs/native/design/media-offline.md).
+    offline: Arc<BTreeSet<String>>,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     graph: Option<Arc<Graph>>,
@@ -191,6 +199,7 @@ impl TimelineSurface {
         tokens: Tokens,
         delegate: Rc<dyn Delegate>,
         outline: Rc<Outline>,
+        offline: BTreeSet<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let layer_column = tokens.metrics.layer_column as f64;
@@ -212,6 +221,7 @@ impl TimelineSurface {
             client: None,
             queue: VecDeque::new(),
             busy: true,
+            offline: Arc::new(offline),
             model: Default::default(),
             scene: None,
             graph: None,
@@ -252,6 +262,7 @@ impl TimelineSurface {
             }
         })
         .detach();
+        let offline = this.offline.clone();
         cx.spawn(async move |this, cx| {
             // Indexing the document is O(layers): never on the main thread.
             let created = cx
@@ -259,7 +270,7 @@ impl TimelineSurface {
                 .spawn(async move {
                     TimelineClient::new(kernel, project, Caller::native()).map(|mut client| {
                         let _ = client.adopt_view();
-                        let built = build(&client, &tokens);
+                        let built = build(&client, &tokens, offline);
                         (client, built)
                     })
                 })
@@ -307,6 +318,12 @@ impl TimelineSurface {
             self.queue.push_back(Job::Sync);
         }
         self.pump(cx);
+    }
+    pub fn set_offline_media(&mut self, offline: BTreeSet<String>, cx: &mut Context<Self>) {
+        if *self.offline != offline {
+            self.offline = Arc::new(offline);
+            self.published(cx);
+        }
     }
     pub fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
         if self.tokens != tokens {
@@ -440,13 +457,13 @@ impl TimelineSurface {
             job = self.queue.pop_front().unwrap();
         }
         self.busy = true;
-        let tokens = self.tokens.clone();
+        let (tokens, offline) = (self.tokens.clone(), self.offline.clone());
         cx.spawn(async move |this, cx| {
             let (client, effects, built) = cx
                 .background_executor()
                 .spawn(async move {
                     let effects = run(&mut client, job).await;
-                    let built = build(&client, &tokens);
+                    let built = build(&client, &tokens, offline);
                     (client, effects, built)
                 })
                 .await;
@@ -1586,30 +1603,8 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         }
     })
 }
-/// Assets the viewer cannot read, per project: their clips show Media
-/// Offline (docs/native/design/media-offline.md).
-static OFFLINE: std::sync::Mutex<
-    std::collections::BTreeMap<String, Arc<std::collections::BTreeSet<String>>>,
-> = std::sync::Mutex::new(std::collections::BTreeMap::new());
-/// Replaces `project`'s offline assets; `true` when they changed.
-pub fn set_offline_media(project: &str, offline: std::collections::BTreeSet<String>) -> bool {
-    let mut all = OFFLINE.lock().unwrap_or_else(|e| e.into_inner());
-    if all.get(project).is_some_and(|o| **o == offline) {
-        return false;
-    }
-    all.insert(project.to_owned(), Arc::new(offline));
-    true
-}
-fn offline_media(project: &str) -> Arc<std::collections::BTreeSet<String>> {
-    OFFLINE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(project)
-        .cloned()
-        .unwrap_or_default()
-}
 struct Presenter {
-    offline: Arc<std::collections::BTreeSet<String>>,
+    offline: Arc<BTreeSet<String>>,
 }
 impl ModelPresenter for Presenter {
     fn accessibility_label(&self, row: &RowId) -> String {
@@ -1654,11 +1649,13 @@ impl ModelPresenter for Presenter {
         Some(format!("{area:?} {}", lane + 1))
     }
 }
-fn build(client: &TimelineClient, tokens: &Tokens) -> Option<Built> {
+fn build(
+    client: &TimelineClient,
+    tokens: &Tokens,
+    offline: Arc<BTreeSet<String>>,
+) -> Option<Built> {
     let published: Arc<Published> = client.kernel.published(&client.project)?;
-    let presenter = Presenter {
-        offline: offline_media(&client.project),
-    };
+    let presenter = Presenter { offline };
     let mut scene = Scene::from_model(&client.model, &presenter, tokens, 0.).ok()?;
     scene.bars = crate::render_frames::bars(client.model.index.comp_id.as_deref());
     let graph = (client.model.graph_display != GraphDisplay::DopeSheet)
