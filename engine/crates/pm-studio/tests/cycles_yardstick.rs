@@ -24,10 +24,14 @@ fn cycles_corpus_stays_within_scene_tolerances_when_blender_is_present() {
         return;
     };
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let out = std::env::temp_dir().join(format!(
-        "pm-shots/studio3d/laneE/regression-{}",
-        std::process::id()
-    ));
+    let out = std::env::var_os("PM_STUDIO_YARDSTICK_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "pm-shots/studio3d/cycles-regression-{}",
+                std::process::id()
+            ))
+        });
     let mut command = Command::new("python3");
     command
         .arg(root.join("engine/tools/cycles-yardstick/run.py"))

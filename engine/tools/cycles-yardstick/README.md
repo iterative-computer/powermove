@@ -37,7 +37,7 @@ material; unsupported features are not hidden from it.
   to a physical Metallic BSDF for uncoated, isotropic filmed metals. Filmed
   layering and spectral/Fresnel approximations remain labeled limitations.
   These inferred optical constants are not measured material data.
-- **Sheen and subsurface remain different models.** Additive Charlie sheen and
+- **Sheen and subsurface remain different models.** Energy-layered Charlie sheen and
   Studio's simple isotropic subsurface walk are not equivalent to Principled's
   layered microfiber and calibrated BSSRDF. Their regions remain scored.
 - **Droplets remain unmapped procedural normals.** Their error is labeled.
@@ -52,7 +52,9 @@ A three-dimensional normalized stencil is not a surface irradiance estimator.
 The photon grid now uses a bilinear tent in the receiver's dominant-axis
 projection, whose projected bin represents `cell_size² / abs(normal_major)` of
 surface area. Deposited centroids reject neighboring parallel surfaces. The
-same eight-word grid layout is retained. Photon emission also includes the
+same eight-word grid layout is retained. The shared WGSL uses half the
+hosts' nominal grid spacing to preserve focused peaks; both hosts retain their
+existing parameter layout and allocation. Photon emission also includes the
 softbox's rim attenuation.
 
 The GPU regression sends light through an IOR=1 sheet. Such a sheet cannot
@@ -107,3 +109,35 @@ the proposal probabilities change; BSDF evaluation and the full mixture PDF
 retain physical Fresnel weights. An unclamped HDR environment regression uses
 four independent 64-sample estimates against a 4,096-sample estimate. Its RMS
 noise fell from .1304 to .0843 while aggregate energy stayed within .2%.
+
+## Sheen energy and wavelength correlation
+
+Charlie's directional albedo is integrated from the engine's own closure by
+`generate_sheen_lut.py`. A reciprocal layer reserves that energy from the base
+before adding sheen. The low-roughness grazing closure is also normalized by
+its maximum directional albedo, avoiding negative base weights. Underlying
+emission loses the same exiting share. A white-furnace regression improves from
+1.1255 to 1.0003, target 1. Reflection plus underlying white emission also sums
+to one in an independent oblique-plane check. This is still Charlie, not the
+Principled microfiber model.
+
+At the first dispersive interface, the three wavelength strata share random
+continuation numbers. Each individual channel retains its original marginal
+estimator; the correlation removes neutral RGB speckles. An almost
+nondispersive glass under achromatic HDR illumination reduces channel RMS from
+.5332 to .0218 at 96 samples; its independently seeded converged mean is within
+.15% of ordinary RGB glass. Primary coverage and the wavelength-dependent IOR
+are retained.
+
+## Regression coverage
+
+`tolerances.json` now covers all eleven scenes at 128×72, 128 Studio samples
+and 256 Cycles samples. Mean color error, SSIM and fitted exposure are bounded
+separately. These are low-sample drift alarms with explicit margins, not the
+quality target or a claim of parity. Set `PM_STUDIO_YARDSTICK_OUT` when invoking
+Cargo tests to direct every optional reference artifact to a chosen external
+directory. The runner rejects destinations inside the repository.
+
+`studio-reference` also exports `studio-scene.json`, the complete shared scene
+contract, alongside its original Mitsuba description. This lets an older
+`studio-yardstick --input` replay exactly the same physical-floor geometry.

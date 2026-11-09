@@ -537,3 +537,139 @@ fn advanced_materials_agree_in_native_and_portable_traversal() {
         "native/portable advanced material transport disagreed: {relative}"
     );
 }
+
+#[test]
+fn nearly_nondispersive_glass_keeps_achromatic_lighting_neutral() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.objects[0].mesh = pm_studio::mesh::sphere(Vec3::ZERO, 1., 32, 64);
+    scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 70., 0.);
+    let pixels = (0..16)
+        .flat_map(|y| {
+            (0..32).map(move |x| {
+                let dx = (x as f32 - 16.) / 5.;
+                let dy = (y as f32 - 8.) / 3.;
+                Vec3::splat(0.05 + 8. * (-0.5 * (dx * dx + dy * dy)).exp())
+            })
+        })
+        .collect();
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 32,
+        height: 16,
+        pixels,
+        ..Default::default()
+    });
+    scene.materials[0] = Material {
+        dispersion: 0.00001,
+        ..Material::glass(Vec3::splat(1.), 0.)
+    };
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(96, 8, true, 1000000);
+    let pixels = r.linear_beauty();
+    let error = (8..16)
+        .flat_map(|y| (8..16).map(move |x| (y * 24 + x) * 4))
+        .map(|i| (pixels[i] - pixels[i + 1]).powi(2) + (pixels[i + 1] - pixels[i + 2]).powi(2))
+        .sum::<f32>();
+    let rms = (error / 128.).sqrt();
+    // Correlation must change variance without changing the mean. Compare
+    // nearly identical IORs with the ordinary RGB path on independent seeds.
+    r.set_time_seed(11);
+    r.trace(2048, 8, true, 1000000);
+    let dispersed = r.linear_beauty();
+    scene.materials[0].dispersion = 0.;
+    r.set_scene(&scene, &scene.prepare());
+    r.set_time_seed(19);
+    r.trace(2048, 8, true, 1000000);
+    let ordinary = r.linear_beauty();
+    let (mut a, mut b) = (0., 0.);
+    for y in 8..16 {
+        for x in 8..16 {
+            for c in 0..3 {
+                let i = (y * 24 + x) * 4 + c;
+                a += dispersed[i];
+                b += ordinary[i];
+            }
+        }
+    }
+    let gain = a / b;
+    eprintln!("coupled wavelength energy ratio {gain}");
+    assert!(
+        (gain - 1.).abs() < 0.02,
+        "correlation must preserve the achromatic transport mean: {gain}"
+    );
+
+    eprintln!("nearly nondispersive achromatic glass channel RMS: {rms}");
+    assert!(
+        rms < 0.03,
+        "wavelength sampling should not tint neutral highlights: {rms}"
+    );
+}
+
+#[test]
+fn sheen_layers_cannot_create_energy_in_a_white_furnace() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.objects[0].mesh = pm_studio::mesh::sphere(Vec3::ZERO, 1., 32, 64);
+    scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 70., 0.);
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 8,
+        height: 4,
+        pixels: vec![Vec3::splat(1.); 32],
+        ..Default::default()
+    });
+    scene.materials[0] = Material {
+        sheen: 1.,
+        ..Material::dielectric(Vec3::splat(1.), 0.75)
+    };
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(2048, 4, true, 1000000);
+    let pixels = r.linear_beauty();
+    let actual = (8..16)
+        .flat_map(|y| (8..16).map(move |x| (y * 24 + x) * 4))
+        .map(|i| pixels[i])
+        .sum::<f32>()
+        / 64.;
+    eprintln!("layered sheen white furnace: {actual}");
+    assert!(
+        (actual - 1.).abs() < 0.035,
+        "white sheen must replace base energy rather than add it: {actual}"
+    );
+}
+
+#[test]
+fn sheen_reserves_the_same_energy_for_reflection_and_emission() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.camera = Camera::lens(v3(0., 0.5, 3.), Vec3::ZERO, 5000., 0.);
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 8,
+        height: 4,
+        pixels: vec![Vec3::splat(1.); 32],
+        ..Default::default()
+    });
+    scene.materials[0] = Material {
+        sheen: 1.,
+        specular: 0.,
+        emission: Vec3::splat(1.),
+        ..Material::dielectric(Vec3::ZERO, 0.75)
+    };
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(2048, 4, true, 1000000);
+    let pixels = r.linear_beauty();
+    let actual = (8..16)
+        .flat_map(|y| (8..16).map(move |x| (y * 24 + x) * 4))
+        .map(|i| pixels[i])
+        .sum::<f32>()
+        / 64.;
+    eprintln!("sheen reflected plus emitted white energy: {actual}");
+    assert!(
+        (actual - 1.).abs() < 0.035,
+        "sheen reflection and underlying emission must sum to one: {actual}"
+    );
+}

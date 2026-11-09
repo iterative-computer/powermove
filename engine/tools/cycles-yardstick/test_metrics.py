@@ -77,6 +77,16 @@ class MetricsTests(unittest.TestCase):
         self.assertIn('def conductor_ior(',exporter_script())
         compile(exporter_script(),'render_cycles.py','exec')
 
+    def test_sheen_energy_matches_quadrature_and_is_bounded(self):
+        from pathlib import Path
+        from generate_sheen_lut import text,tables
+        shader = Path(__file__).resolve().parents[2]/'crates/pm-studio/src/shaders/trace.wgsl'
+        self.assertIn(text(),shader.read_text())
+        values,average = tables()
+        normalized = values/np.maximum(1,values.max(axis=1))[:,None]
+        self.assertTrue(np.all((normalized>=0)&(normalized<=1)))
+        self.assertTrue(np.all((average>=0)&(average<1)))
+
     def test_absent_blender_skips_without_building(self):
         import run
         with patch('sys.argv',['run.py']), patch.object(run,'blender_path',return_value=None), patch('subprocess.run') as child:

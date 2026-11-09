@@ -94,7 +94,7 @@ fn vector_to_world(i: u32, v: vec3f) -> vec3f {
 // Corner positions, 3 per triangle in BVH order (intersection reads only these).
 @group(0) @binding(11) var<storage, read> pos: array<vec4f>;
 // Caustics: a hashed photon grid at two cell sizes, 8 words per slot: flux
-// (rgb, f32 bits), the cell's key, the photon count.
+// (rgb, f32 bits), cell key, photon count, local-centroid sums (xyz).
 @group(0) @binding(12) var<storage, read_write> grid: array<atomic<u32>>;
 const GRID_CELLS: u32 = 524288u;
 
@@ -107,6 +107,7 @@ var<private> seed: u32;
 var<private> shade_t: vec3f;
 // Randomly rotated three-sample wavelength strata, set by the camera kernel.
 var<private> spectral_band: i32;
+var<private> spectral_seed: u32;
 fn pcg(v: u32) -> u32 {
   let s = v * 747796405u + 2891336453u;
   let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
@@ -835,6 +836,47 @@ fn ggx_multiscatter(m:Material,nv:f32,nl:f32)->vec3f {
   return color*(m.base.w*shape*nl/PI);
 }
 
+// BEGIN SHEEN ENERGY LUT (generate_sheen_lut.py, 65536 samples/cell)
+const SHEEN_ENERGY = array<f32,256>(
+  1.50847010, 0.99402264, 0.70757273, 0.51275362, 0.37216965, 0.26829940, 0.19093669, 0.13337999, 0.09089168, 0.05995812, 0.03788951, 0.02258374, 0.01237701, 0.00594384, 0.00222686, 0.00038563,
+  1.50847010, 0.99402264, 0.70757273, 0.51275362, 0.37216965, 0.26829940, 0.19093669, 0.13337999, 0.09089168, 0.05995812, 0.03788951, 0.02258374, 0.01237701, 0.00594384, 0.00222686, 0.00038563,
+  1.15284207, 0.83612111, 0.64902717, 0.51338629, 0.40835824, 0.32448035, 0.25640478, 0.20070781, 0.15501122, 0.11756470, 0.08702351, 0.06231970, 0.04258276, 0.02708807, 0.01522218, 0.00645845,
+  0.98550639, 0.74870419, 0.60568813, 0.49927878, 0.41441698, 0.34436765, 0.28539071, 0.23513768, 0.19201038, 0.15485714, 0.12281155, 0.09519944, 0.07148174, 0.05121760, 0.03403956, 0.01963629,
+  0.88894499, 0.69403206, 0.57520293, 0.48567138, 0.41318888, 0.35231717, 0.30006198, 0.25456141, 0.21456224, 0.17917231, 0.14772935, 0.11972555, 0.09476129, 0.07251538, 0.05272509, 0.03517231,
+  0.82519305, 0.65613984, 0.55265878, 0.47416501, 0.41006978, 0.35569010, 0.30845880, 0.26678726, 0.22961182, 0.19617965, 0.16593550, 0.13845662, 0.11341297, 0.09054165, 0.06962979, 0.05050275,
+  0.77962766, 0.62814817, 0.53529394, 0.46459973, 0.40657253, 0.35702377, 0.31366284, 0.27507574, 0.24031806, 0.20872303, 0.17980007, 0.15317655, 0.12856229, 0.10572665, 0.08448337, 0.06467998,
+  0.74529572, 0.60654346, 0.52149101, 0.45660852, 0.40318076, 0.35736818, 0.31707415, 0.28100606, 0.24830158, 0.21835234, 0.19071095, 0.16503761, 0.14106746, 0.11858976, 0.09743389, 0.07745969,
+  0.71842978, 0.58932292, 0.51024518, 0.44986439, 0.40004617, 0.35721080, 0.31940537, 0.28542680, 0.25447283, 0.22597751, 0.19952444, 0.17479694, 0.15154775, 0.12957943, 0.10873140, 0.08887096,
+  0.69679671, 0.57525312, 0.50089934, 0.44411034, 0.39720216, 0.35679613, 0.32105028, 0.28883040, 0.25938024, 0.23216617, 0.20679521, 0.18296802, 0.16045023, 0.13905404, 0.11862583, 0.09903785,
+  0.67898263, 0.56352931, 0.49300527, 0.43914987, 0.39463875, 0.35625351, 0.32224049, 0.29152018, 0.26337281, 0.23729025, 0.21289793, 0.18991008, 0.16810233, 0.14729419, 0.12733723, 0.10810733,
+  0.66404595, 0.55360236, 0.48624635, 0.43483283, 0.39233120, 0.35565386, 0.32311915, 0.29369213, 0.26668269, 0.24160342, 0.21809471, 0.19588170, 0.17474808, 0.15451919, 0.13505070, 0.11622139,
+  0.65133391, 0.54508386, 0.48039240, 0.43104356, 0.39025130, 0.35503682, 0.32377832, 0.29547790, 0.26947007, 0.24528466, 0.22257443, 0.20107360, 0.18057253, 0.16090140, 0.14191922, 0.12350729,
+  0.64037901, 0.53769084, 0.47527186, 0.42769197, 0.38837186, 0.35442469, 0.32427924, 0.29696887, 0.27184894, 0.24846380, 0.22647670, 0.20562955, 0.18571835, 0.16657740, 0.14806859, 0.13007547,
+  0.63083715, 0.53121203, 0.47075421, 0.42470704, 0.38666827, 0.35382982, 0.32466377, 0.29823027, 0.27390251, 0.25123732, 0.22990696, 0.20965993, 0.19029716, 0.17165648, 0.15360231, 0.13602035,
+  0.62244923, 0.52548630, 0.46673833, 0.42203214, 0.38511892, 0.35325877, 0.32496127, 0.29930978, 0.27569295, 0.25367845, 0.23294636, 0.21325097, 0.19439748, 0.17622689, 0.15860585, 0.14142215,
+);
+const SHEEN_ENERGY_AVG = array<f32,16>(0.09787395, 0.09787395, 0.13201923, 0.15598465, 0.17336176, 0.18664373, 0.19716006, 0.20570674, 0.21279585, 0.21877400, 0.22388498, 0.22830562, 0.23216749, 0.23557057, 0.23859225, 0.24129339);
+const SHEEN_NORMALIZATION = array<f32,16>(1.50847010, 1.50847010, 1.15284207, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000, 1.00000000);
+// END SHEEN ENERGY LUT
+fn sheen_normalization(roughness:f32)->f32 {
+  let q=clamp(roughness,0.,1.)*15.;let lo=u32(floor(q));let hi=min(lo+1u,15u);
+  return mix(SHEEN_NORMALIZATION[lo],SHEEN_NORMALIZATION[hi],fract(q));
+}
+fn sheen_energy(roughness:f32,cosine:f32)->f32 {
+  let q=clamp(vec2f(cosine,roughness),vec2f(0.),vec2f(1.))*15.;
+  let p=vec2u(floor(q));let hi=min(p+vec2u(1u),vec2u(15u));let f=fract(q);
+  return mix(mix(SHEEN_ENERGY[p.y*16u+p.x],SHEEN_ENERGY[p.y*16u+hi.x],f.x),
+             mix(SHEEN_ENERGY[hi.y*16u+p.x],SHEEN_ENERGY[hi.y*16u+hi.x],f.x),f.y);
+}
+fn sheen_layer_weight(m:Material,nv:f32,nl:f32)->f32 {
+  if(m.layers.x<=0.){return 1.;}
+  let q=clamp(m.spec.x,0.,1.)*15.;let index=u32(floor(q));let hi=min(index+1u,15u);
+  let average=m.layers.x*mix(SHEEN_ENERGY_AVG[index],SHEEN_ENERGY_AVG[hi],fract(q))/sheen_normalization(m.spec.x);
+  let incoming=clamp(m.layers.x*sheen_energy(m.spec.x,nl)/sheen_normalization(m.spec.x),0.,1.);
+  let outgoing=clamp(m.layers.x*sheen_energy(m.spec.x,nv)/sheen_normalization(m.spec.x),0.,1.);
+  return (1.-incoming)*(1.-outgoing)/max(1.-average,1e-6);
+}
+
 // BSDF × cos for reflection (coat over specular + diffuse).
 fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let nl = dot(n, l);
@@ -860,7 +902,7 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let fc = m.spec.y * fresnel_dielectric(vh, 1.5);
   let coat = fc * ggx_d(nh, ca) * smith_g2(nv, nl, ca) / (4.0 * nv);
   let atten = (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * (1.0 - m.spec.y * fresnel_dielectric(nl, 1.5));
-  return vec3f(coat) + (spec + diff + sheen(m, nh, nl, nv)) * atten;
+  return vec3f(coat) + (sheen(m, nh, nl, nv) + (spec + diff)*sheen_layer_weight(m,nv,nl)) * atten;
 }
 
 // Thin-film interference integrates polarized Airy reflectance over the
@@ -965,7 +1007,7 @@ fn sheen(m: Material, nh: f32, nl: f32, nv: f32) -> vec3f {
   let s2 = max(1.0 - nh * nh, 0.0);
   let d = (2.0 + inv) * pow(s2, inv * 0.5) / (2.0 * PI);
   let vis = 1.0 / (4.0 * (nl + nv - nl * nv));
-  return vec3f(m.layers.x * d * vis * nl);
+  return vec3f(m.layers.x * d * vis * nl / sheen_normalization(m.spec.x));
 }
 
 fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
@@ -1422,7 +1464,8 @@ fn path(px: vec2f) -> Sample {
     var nv = max(dot(n, v), 1e-4);
     // Emission originates below the coat and loses its reflected share on exit.
     if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
-      let emitted = m.emit.xyz * (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5));
+      let sheen_exit=clamp(m.layers.x*sheen_energy(m.spec.x,nv)/sheen_normalization(m.spec.x),0.,1.);
+      let emitted = m.emit.xyz * (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * (1.-sheen_exit);
       if (primary) { s.emit += tp * emitted; } else { s.radiance += tp * emitted; }
     }
     if ((u32(m.policy.y) & 8u) != 0u) { return s; }
@@ -1455,6 +1498,10 @@ fn path(px: vec2f) -> Sample {
     if (pick < w.trans) {
       // This lobe is the glass share of the surface (under any coat), chosen with probability w.trans.
       tp *= (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * m.spec.w * (1.0 - m.base.w) / w.trans;
+      // Couple the three wavelength strata after their first dispersive
+      // interface. Shared random numbers preserve each marginal path while
+      // preventing identical neutral reflections from becoming RGB speckles.
+      if(m.layers.z>0. && band<0){seed=spectral_seed;}
       // Rough dielectric transmission/reflection through a sampled microfacet.
       let a = max(m.spec.x * m.spec.x, 0.0005);
       let tb = basis(n);
@@ -1564,6 +1611,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let path_index=(P.dims.z-1u)*P.dims.w+i;
     let rotation=pcg(idx ^ pcg(path_index/3u+0xa511e9b3u))%3u;
     spectral_band=i32((path_index%3u+rotation)%3u);
+    spectral_seed=pcg(idx ^ pcg(path_index/3u+0x63d83595u));
     var smp = path(vec2f(f32(gid.x), f32(gid.y)) + jitter);
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }
@@ -1602,7 +1650,9 @@ fn oct_encode(n: vec3f) -> vec2f {
 
 // ── Caustics: photons from the lights through glass and mirrors ──
 // Level 0: fine cells for sharp caustics; level 1: 4× larger, for sparse light.
-fn cell_size(level: i32) -> f32 { return P.caustic.x * select(1.0, 4.0, level == 1); }
+// Both hosts supply the same nominal bounds/160 scale. The surface kernel
+// uses half that spacing to retain focused peaks without enlarging the grid.
+fn cell_size(level: i32) -> f32 { return P.caustic.x * select(0.5, 2.0, level == 1); }
 fn cell_of(p: vec3f, level: i32) -> vec3i { return vec3i(floor(p / cell_size(level))); }
 fn cell_hash(c: vec3i, level: i32) -> u32 {
   return pcg((bitcast<u32>(c.x) * 73856093u) ^ pcg((bitcast<u32>(c.y) * 19349663u) ^ pcg(bitcast<u32>(c.z) * 83492791u + u32(level))));

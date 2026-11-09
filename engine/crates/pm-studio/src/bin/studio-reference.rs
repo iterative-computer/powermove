@@ -70,6 +70,9 @@ fn main() {
         .unwrap_or((480u32, 270u32));
     let spp: u32 = arg(&args, "--spp").and_then(|s| s.parse().ok()).unwrap_or(1024);
     let (scene, mut spec) = reference(args.iter().any(|a| a == "--matte"));
+    // The full shared contract allows an older tracer to replay exactly this
+    // physical-floor reference for before/after transport isolation.
+    std::fs::write(out.join("studio-scene.json"), serde_json::to_vec(&scene).unwrap()).unwrap();
     let mut r = Renderer::new(w, h).expect("GPU");
     if args.iter().any(|a| a == "--no-rt") {
         r.hardware_rt = false;
