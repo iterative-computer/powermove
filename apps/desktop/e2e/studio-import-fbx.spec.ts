@@ -22,15 +22,24 @@ for(const fixture of ['tiny-static','tiny-animated'])test(`FBX ${fixture} import
       let red=0,xsum=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i]>pixels[i+1]+20&&pixels[i]>pixels[i+2]+20){red++;xsum+=(i/4)%640;}
       captures.push({time,png:canvas.toDataURL('image/png'),red,center:red?xsum/red:0});
     }
-    return {id:layer.id,format:asset.format,clips:asset.animations.length,parts:parts.map((p:any)=>p.name),importMs,captures};
+    return {id:layer.id,format:asset.format,clips:asset.animations.length,parts:parts.map((p:any)=>p.name),importMs,captures,status:PM.Studio.status()};
   },{bytes,fixture});
   expect(result.format).toBe('glb');expect(result.clips).toBe(fixture==='tiny-animated'?1:0);
+  if(process.platform==='darwin')expect(result.status.backend).toBe('native-studio');
   expect(result.parts).toEqual(expect.arrayContaining(['Triangle','Joint','Camera','KeyLight']));
   for(const capture of result.captures){expect(capture.red).toBeGreaterThan(500);await writeFile(`${shots}/fbx-${fixture}-${capture.time}.png`,Buffer.from(capture.png.split(',')[1],'base64'));}
   if(fixture==='tiny-animated')expect(result.captures[1]!.center-result.captures[0]!.center).toBeGreaterThan(30);
   const file=path.join(session.userData,`${fixture}.pmv`);
   await session.app.evaluate(({dialog},filePath)=>{dialog.showSaveDialog=async()=>({canceled:false,filePath});dialog.showOpenDialog=async()=>({canceled:false,filePaths:[filePath]});},file);
-  await session.page.evaluate(async()=>{const PM=(window as any).PM;await PM.saveProject();await PM.openProject();await PM.prepareFrame(.5,{mblur:false});});
+  const reopened=await session.page.evaluate(async id=>{
+    const PM=(window as any).PM;await PM.saveProject();await PM.openProject();await PM.prepareFrame(.5,{mblur:false});
+    const layer=PM.proj.layers.find((layer:any)=>layer.id===id),asset=PM.assets.get(layer.d.data.object.source.assetId);
+    const canvas=PM.renderFrameTo(.5,640,360,{mblur:false}),pixels=canvas.getContext('2d').getImageData(0,0,640,360).data;
+    let red=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i]>pixels[i+1]+20&&pixels[i]>pixels[i+2]+20)red++;
+    return {format:asset.format,clips:asset.animations.length,red,status:PM.Studio.status()};
+  },result.id);
+  expect(reopened.format).toBe('glb');expect(reopened.clips).toBe(result.clips);expect(reopened.red).toBeGreaterThan(500);
+  if(process.platform==='darwin')expect(reopened.status.backend).toBe('native-studio');
   expect(session.diagnostics.pageErrors).toEqual([]);
-  await writeFile(`${shots}/fbx-${fixture}-metrics.json`,JSON.stringify({importMs:result.importMs,parts:result.parts,clips:result.clips},null,2));
+  await writeFile(`${shots}/fbx-${fixture}-metrics.json`,JSON.stringify({importMs:result.importMs,parts:result.parts,clips:result.clips,captures:result.captures.map(({time,red,center})=>({time,red,center})),reopened},null,2));
 });

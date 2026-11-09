@@ -37,6 +37,7 @@ test('bundled variable fonts and Arial extrude without losing the scene', async 
     }, font);
     await writeFile(`${shots}/font-${font.replaceAll(' ', '-')}.png`, Buffer.from(result.png.split(',')[1], 'base64'));
     expect(result.lit, `${font}: ${JSON.stringify(result.status)}`).toBeGreaterThan(600);
+    if(process.platform==='darwin')expect(result.status.backend).toBe('native-studio');
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
