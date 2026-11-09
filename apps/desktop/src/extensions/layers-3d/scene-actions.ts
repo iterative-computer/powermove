@@ -66,7 +66,7 @@ export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[
   /* Scatter asks "what" (a model) and then "on what" (terrain first). */
   const scatter:MenuContribution=models.length&&surfaces.length>1
     ?{label:'Scatter',submenu:[{header:'Copies of'},...models.map(m=>({label:m.name,submenu:[{header:'Over'},...[...surfaces].sort((a,b)=>Number(b.terrain)-Number(a.terrain)).filter(s=>s.id!==m.id).map(s=>({label:s.name,run:()=>addScatter(api,m.id,s.id)}))] as MenuContribution[]}))]}
-    :{label:'Scatter (add a model and a terrain first)',disabled:true};
+    :{label:models.length?'Scatter (add a Terrain to cover first)':'Scatter (add a model to copy first)',disabled:true};
   return [
     ...PRIMITIVES.map(p=>({label:p.label,run:()=>addPrimitive(api,p.id)})),
     '-',
