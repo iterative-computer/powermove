@@ -218,6 +218,123 @@ pub fn for_document(document: &pm_model::Document) -> DefinitionSetSnapshot {
     set
 }
 
+/// An effect type the document uses that no definition in its set provides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingEffect {
+    pub effect: String,
+    /// Layers that use it.
+    pub layers: usize,
+}
+
+/// The enabled effect types the layers drawn by `composition` (and the
+/// compositions it nests) use that `known` has no definition for, commonest
+/// first. Effects switched off, on layers switched off, in hidden groups or in
+/// compositions it never reaches don't count: they never draw.
+pub fn missing_effects(
+    document: &pm_model::Document,
+    composition: &str,
+    known: &dyn Fn(&str) -> bool,
+) -> Vec<MissingEffect> {
+    use pm_eval::node;
+    use pm_model::{Node, NodeKind};
+    let Some(root) = document.root() else {
+        return vec![];
+    };
+    let open = crate::capability::open_composition_id(root);
+    let comp_node = |id: &str| -> Option<&Node> {
+        if open.as_deref() == Some(id) && node::member(Some(root), "layers").is_some() {
+            return Some(root);
+        }
+        node::member(node::member(Some(root), "comps"), id)
+    };
+    // `on` as authored: a plain false, or a property held at false, is off.
+    let off = |n: Option<&Node>| match n.map(Node::kind) {
+        Some(NodeKind::Bool(false)) => true,
+        _ if node::is_property(n) => {
+            !node::has_kf_array(n)
+                && matches!(
+                    node::member(n, "v").map(Node::kind),
+                    Some(NodeKind::Bool(false))
+                )
+        }
+        _ => false,
+    };
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = vec![composition.to_owned()];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(comp) = comp_node(&id) else { continue };
+        let layers = node::array(node::member(Some(comp), "layers")).unwrap_or(&[]);
+        let layer_id = |l: &Node| {
+            node::js_value_opt(node::member(Some(l), "id"))
+                .to_js_string()
+                .to_string_lossy()
+        };
+        // A matte source draws even when it is switched off.
+        let matte = |l: &Node| {
+            let id = layer_id(l);
+            layers.iter().any(|o| {
+                node::js_value_opt(node::member(Some(o), "matteSource"))
+                    .to_js_string()
+                    .to_string_lossy()
+                    == id
+            })
+        };
+        let hidden_group = |l: &Node| {
+            let mut at = node::member(Some(l), "group");
+            for _ in 0..64 {
+                let Some(g) = at.filter(|g| node::truthy(Some(g))) else {
+                    return false;
+                };
+                let g = node::js_value_opt(Some(g)).to_js_string().to_string_lossy();
+                let Some(group) = layers.iter().find(|o| layer_id(o) == g) else {
+                    return false;
+                };
+                if off(node::member(Some(group), "on")) {
+                    return true;
+                }
+                at = node::member(Some(group), "group");
+            }
+            false
+        };
+        for layer in layers {
+            if (off(node::member(Some(layer), "on")) || hidden_group(layer)) && !matte(layer) {
+                continue;
+            }
+            if crate::js::layer_type(layer) == "precomp"
+                && let Some(c) = node::member(node::member(Some(layer), "d"), "comp")
+                    .filter(|c| node::truthy(Some(c)))
+            {
+                stack.push(node::js_value_opt(Some(c)).to_js_string().to_string_lossy());
+            }
+            let mut types = std::collections::BTreeSet::new();
+            for fx in node::array(node::member(Some(layer), "fx")).unwrap_or(&[]) {
+                if off(node::member(Some(fx), "on")) {
+                    continue;
+                }
+                if let Some(ty) = node::string(node::member(Some(fx), "type")) {
+                    let ty = ty.to_string_lossy();
+                    if !known(&ty) {
+                        types.insert(ty);
+                    }
+                }
+            }
+            for ty in types {
+                *counts.entry(ty).or_default() += 1;
+            }
+        }
+    }
+    let mut out: Vec<_> = counts
+        .into_iter()
+        .map(|(effect, layers)| MissingEffect { effect, layers })
+        .collect();
+    out.sort_by_key(|m| std::cmp::Reverse(m.layers));
+    out
+}
+
 pub(crate) fn main_definition(key: &str) -> Option<&'static Definition> {
     let key = key.strip_prefix("pm.history.main.")?;
     let (id, version) = key.rsplit_once('.')?;

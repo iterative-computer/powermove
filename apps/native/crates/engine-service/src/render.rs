@@ -155,6 +155,9 @@ pub struct Engine {
     resources: Arc<crate::resources::ResourceSnapshot>,
     /// Why a contributed definition cannot draw, for the viewer's status.
     pub definition_failure: Option<String>,
+    /// Effects the document uses that no installed provider defines; the
+    /// viewer draws their layers without them.
+    pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
     compat: Option<Arc<crate::compat::CompatStores>>,
     /// The store of the document whose frame is rendering.
     compat_document: Option<Arc<crate::compat::CompatStore>>,
@@ -311,6 +314,7 @@ impl Engine {
             waker,
             resources: Arc::default(),
             definition_failure: None,
+            missing_effects: Vec::new(),
             compat: None,
             compat_document: None,
             hdr: None,
@@ -410,6 +414,7 @@ impl Engine {
                 return Err(anyhow::Error::new(CompilerBusy));
             }
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
+            self.missing_effects = self.renderer.missing_effects().to_vec();
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
             // A document's first frame compiles the frame and text pipelines

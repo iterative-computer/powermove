@@ -973,6 +973,151 @@ pub fn offline_media_with_audio(
     out
 }
 
+/// Offline clips the export would hear in `range` (seconds): enabled audio
+/// layers, and video layers with unmuted embedded audio and no time remap,
+/// through precomps, as the shipped mixer collects them (`audioLayers`,
+/// `collectDecodedClips`). The shipped app failed any export, its agents'
+/// included, naming such a clip; silent offline media rendered absent.
+pub fn offline_audible_media(
+    document: &Document,
+    composition: &str,
+    media: &MediaPaths,
+    range: (f64, f64),
+) -> Vec<OfflineClip> {
+    use pm_eval::node;
+    let Some(root) = document.root() else {
+        return vec![];
+    };
+    let open = node::string(node::member(Some(root), "compId"))
+        .or_else(|| node::string(node::member(Some(root), "id")))
+        .map(|s| s.to_string_lossy());
+    let comp_node = |id: &str| -> Option<&Node> {
+        if open.as_deref() == Some(id) && node::member(Some(root), "layers").is_some() {
+            return Some(root);
+        }
+        node::member(node::member(Some(root), "comps"), id)
+    };
+    // A static value: a property's `v`, or the plain number.
+    let value = |n: Option<&Node>| {
+        if node::is_property(n) {
+            node::to_number(node::member(n, "v"))
+        } else {
+            node::to_number(n)
+        }
+    };
+    let finite = |x: f64| if x.is_finite() { x } else { 0. };
+    let remapped = |d: Option<&Node>| {
+        let t = node::member(d, "timeRemap");
+        if node::is_property(t) {
+            node::truthy(node::member(t, "v")) || node::has_kf_array(t)
+        } else {
+            node::truthy(t)
+        }
+    };
+    let assets = node::member(Some(root), "assets");
+    let string = |n: Option<&Node>| node::js_value_opt(n).to_js_string().to_string_lossy();
+    let mut out: Vec<OfflineClip> = vec![];
+    // (composition, offset, window start, window end, depth)
+    let mut stack = vec![(composition.to_owned(), 0., range.0, range.1, 0u32)];
+    while let Some((id, offset, from, to, depth)) = stack.pop() {
+        let Some(comp) = comp_node(&id).filter(|_| depth <= 32) else {
+            continue;
+        };
+        let layers = node::array(node::member(Some(comp), "layers")).unwrap_or(&[]);
+        let by_id = |id: &str| {
+            layers
+                .iter()
+                .find(|l| string(node::member(Some(l), "id")) == id)
+        };
+        let groups = |layer: &Node| {
+            let mut chain = vec![];
+            let mut at = node::member(Some(layer), "group");
+            while let Some(group) = at
+                .filter(|g| node::truthy(Some(g)))
+                .and_then(|g| by_id(&string(Some(g))))
+            {
+                if chain.len() > 64 {
+                    break;
+                }
+                chain.push(group);
+                at = node::member(Some(group), "group");
+            }
+            chain
+        };
+        let soloing = layers
+            .iter()
+            .any(|l| node::truthy(node::member(Some(l), "solo")));
+        for layer in layers {
+            let off = |l: &Node| {
+                node::member(Some(l), "on")
+                    .is_some_and(|on| matches!(on.kind(), pm_model::NodeKind::Bool(false)))
+            };
+            if off(layer) {
+                continue;
+            }
+            let chain = groups(layer);
+            if soloing
+                && !node::truthy(node::member(Some(layer), "solo"))
+                && !chain
+                    .iter()
+                    .any(|g| node::truthy(node::member(Some(g), "solo")))
+            {
+                continue;
+            }
+            if chain.iter().any(|g| off(g)) {
+                continue;
+            }
+            let start = offset + finite(value(node::member(Some(layer), "from")));
+            let end = start + finite(value(node::member(Some(layer), "dur"))).max(0.);
+            let (a, b) = (from.max(start), to.min(end));
+            if b - a <= 1e-4 {
+                continue;
+            }
+            let d = node::member(Some(layer), "d");
+            let audible = match pm_render::js::layer_type(layer).as_str() {
+                "audio" => true,
+                "video" => {
+                    node::member(d, "embeddedAudio")
+                        .is_some_and(|e| matches!(e.kind(), pm_model::NodeKind::Bool(true)))
+                        && !node::member(d, "audioMuted")
+                            .is_some_and(|m| matches!(m.kind(), pm_model::NodeKind::Bool(true)))
+                        && !remapped(d)
+                }
+                "precomp" => {
+                    let muted = node::member(d, "audioMuted")
+                        .is_some_and(|m| matches!(m.kind(), pm_model::NodeKind::Bool(true)));
+                    if let Some(c) = node::member(d, "comp").filter(|c| node::truthy(Some(c)))
+                        && !muted
+                        && !remapped(d)
+                    {
+                        let trim = finite(value(node::member(d, "trim")));
+                        stack.push((string(Some(c)), start - trim, a, b, depth + 1));
+                    }
+                    false
+                }
+                _ => false,
+            };
+            if !audible {
+                continue;
+            }
+            let asset = node::member(d, "asset")
+                .map(|a| string(Some(a)))
+                .unwrap_or_default();
+            if media.paths.contains_key(&asset) || out.iter().any(|c| c.asset == asset) {
+                continue;
+            }
+            let record = node::member(assets, &asset);
+            let name = node::member(Some(layer), "name")
+                .map(|n| string(Some(n)))
+                .filter(|n| !n.is_empty())
+                .or_else(|| node::member(record, "name").map(|n| string(Some(n))))
+                .unwrap_or_else(|| "Audio".into());
+            out.push(OfflineClip { asset, name });
+        }
+    }
+    out
+}
+
 /// Validates `job` and builds its plan: capability routing (pm-render's
 /// `unsupported_with_media`, audio sources pm-audio cannot open), the encoder
 /// spec, and the audio graph. Offline media is not checked here; the job

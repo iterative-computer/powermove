@@ -140,6 +140,7 @@ impl EngineJobs {
         published: &Published,
         settings: ExportSettings,
         destination: PathBuf,
+        look: bool,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
             &published.snapshot,
@@ -163,6 +164,11 @@ impl EngineJobs {
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
         }
+        // A capture shows the project as the viewer does; a video is a delivery.
+        request.bypass_missing_effects = look;
+        // As the shipped app's agent exports: silent offline clips are left
+        // out, not asked about; missing audio still fails by name.
+        request.without_offline = true;
         ExportHandle::start_scheduled(&self.executable, request, self.activity.clone())
     }
 }
@@ -238,7 +244,7 @@ impl ExportChild for EngineJobs {
             .directory
             .join(file_name(&name, options.format.extension()));
         let handle = self
-            .start(&published, settings, destination)
+            .start(&published, settings, destination, false)
             .map_err(failed)?;
         let started = Instant::now();
         while !matches!(
@@ -381,7 +387,7 @@ fn frame(
         draft_from_proxies: true,
         delivery: Default::default(),
     };
-    let mut handle = jobs.start(published, settings, destination)?;
+    let mut handle = jobs.start(published, settings, destination, true)?;
     while matches!(
         handle.status().state,
         JobState::Queued | JobState::Running | JobState::WaitingForMedia

@@ -3268,6 +3268,18 @@ impl Interactivity {
                         window.next_frame.tab_stops.insert(focus_handle);
                     }
 
+                    // Powermove: an assistive Press activates the element's own click
+                    // handlers, as Return does, rather than a pointer click at its
+                    // centre that a child with its own handler would take.
+                    let a11y_click = (window.a11y.is_active()
+                        && !self.disabled
+                        && !self.click_listeners.is_empty()
+                        && !self
+                            .a11y_action_listeners
+                            .iter()
+                            .any(|(action, _)| *action == accesskit::Action::Click))
+                    .then(|| self.click_listeners.clone())
+                    .zip(hitbox.map(|h| h.bounds));
                     if let Some(hitbox) = hitbox {
                         #[cfg(debug_assertions)]
                         self.paint_debug_info(global_id, hitbox, &style, window, cx);
@@ -3304,7 +3316,6 @@ impl Interactivity {
 
                     if window.a11y.is_active()
                         && let Some(global_id) = global_id
-                        && !self.a11y_action_listeners.is_empty()
                     {
                         let node_id = global_id.accesskit_node_id();
 
@@ -3314,6 +3325,21 @@ impl Interactivity {
                             }
 
                             window.on_a11y_action(node_id, action, listener);
+                        }
+                        if let Some((listeners, bounds)) = a11y_click {
+                            window.on_a11y_action(
+                                node_id,
+                                accesskit::Action::Click,
+                                move |_, window, cx| {
+                                    let event = ClickEvent::Keyboard(KeyboardClickEvent {
+                                        button: KeyboardButton::Enter,
+                                        bounds,
+                                    });
+                                    for listener in &listeners {
+                                        listener(&event, window, cx);
+                                    }
+                                },
+                            );
                         }
                     }
 

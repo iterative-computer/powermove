@@ -236,6 +236,9 @@ pub struct ViewerStatus {
     pub represented: u64,
     /// Layers missing from the frame on screen, with why. The rest is drawn.
     pub layer_failures: Vec<pm_render::LayerFailure>,
+    /// Effects the project uses whose provider isn't installed. Their
+    /// layers draw without them (bypassed, as After Effects does).
+    pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
     /// Playing frames with a stand-in for a decode that missed its allowance.
     pub stand_in_frames: u64,
     /// Auto's current playing resolution, for the viewer chrome.
@@ -263,16 +266,29 @@ impl ViewerStatus {
             }
         }
         reasons.sort_by_key(|(_, layers)| std::cmp::Reverse(layers.len()));
-        let (message, layers) = reasons.first()?;
-        let count = match layers.len() {
+        let layers = |n: usize| match n {
             1 => "1 layer".to_owned(),
             n => format!("{n} layers"),
         };
-        let more = match reasons.len() - 1 {
+        let more = |n: usize| match n {
             0 => String::new(),
             n => format!(" (and {n} more)"),
         };
-        Some(format!("Not drawn, {count}: {message}{more}"))
+        if let Some((message, failed)) = reasons.first() {
+            let others = reasons.len() - 1 + self.missing_effects.len();
+            return Some(format!(
+                "Not drawn, {}: {message}{}",
+                layers(failed.len()),
+                more(others)
+            ));
+        }
+        let missing = self.missing_effects.first()?;
+        Some(format!(
+            "Effect not installed: {}, bypassed on {}{}",
+            missing.effect,
+            layers(missing.layers),
+            more(self.missing_effects.len() - 1)
+        ))
     }
 }
 struct View {
@@ -1636,6 +1652,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 if let Some(failure) = &engine.definition_failure {
                     v.status.error = Some(failure.clone());
                 }
+                if v.status.missing_effects != engine.missing_effects {
+                    v.status.missing_effects = engine.missing_effects.clone();
+                }
                 // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp {
                     v.status.stale_rejections += 1;
@@ -2051,6 +2070,31 @@ mod worker_tests {
         assert_eq!(
             status.notice().as_deref(),
             Some("Not drawn, 2 layers: no definition for effect deep-glow.effect (and 1 more)")
+        );
+    }
+
+    #[test]
+    fn the_notice_names_an_effect_that_is_bypassed_because_it_is_not_installed() {
+        let missing = |effect: &str, layers| pm_render::effects::versions::MissingEffect {
+            effect: effect.into(),
+            layers,
+        };
+        let mut status = ViewerStatus {
+            missing_effects: vec![missing("acme.glow", 4), missing("acme.blur", 1)],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Effect not installed: acme.glow, bypassed on 4 layers (and 1 more)")
+        );
+        status.layer_failures = vec![pm_render::LayerFailure {
+            composition: "c".into(),
+            layer: "a".into(),
+            message: "media for asset x is offline".into(),
+        }];
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 1 layer: media for asset x is offline (and 2 more)")
         );
     }
 

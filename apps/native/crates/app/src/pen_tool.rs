@@ -367,6 +367,10 @@ impl GizmoSurface {
         }
         self.pen_reading += 1;
         let ticket = self.pen_reading;
+        // A read taken while the Pen's own steps are still queued (a new path
+        // layer is selected only after its first vertex lands) may see the
+        // old selection; it must not end the open path.
+        let own_work = self.busy || !self.queue.is_empty();
         let (kernel, project, time) = (
             self.kernel.clone(),
             self.project.clone(),
@@ -381,8 +385,10 @@ impl GizmoSurface {
                 if s.pen_reading == ticket {
                     // The open path lives on while its layer is the one
                     // selected (a new path layer's own selection keeps it).
-                    if s.pen_active.as_ref().map(|(layer, _)| layer)
-                        != pose.as_ref().map(|p| &p.layer)
+                    let own_work = own_work || s.busy || !s.queue.is_empty();
+                    if !own_work
+                        && s.pen_active.as_ref().map(|(layer, _)| layer)
+                            != pose.as_ref().map(|p| &p.layer)
                     {
                         s.pen_active = None;
                     }

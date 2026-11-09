@@ -79,7 +79,9 @@ fn launch(
         if smoke {
             cx.quit();
         } else {
-            cx.activate(true);
+            // Cooperative activation: a launch in the background (`open -g`,
+            // a login item, an agent) leaves the user's app in front.
+            cx.activate(false);
         }
     });
     Ok(())

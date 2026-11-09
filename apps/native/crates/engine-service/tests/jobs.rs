@@ -9,7 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 fn request(destination: std::path::PathBuf, seconds: i32) -> ExportRequest {
-    let project = pm_model::json::parse(include_str!("fixtures/shapes.json")).unwrap();
+    request_for(include_str!("fixtures/shapes.json"), destination, seconds)
+}
+fn request_for(project: &str, destination: std::path::PathBuf, seconds: i32) -> ExportRequest {
+    let project = pm_model::json::parse(project).unwrap();
     #[cfg(feature = "kernel")]
     let s = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
     #[cfg(not(feature = "kernel"))]
@@ -308,4 +311,124 @@ fn child_export_renders_extension_effects_from_its_resources() {
     let status = run(request);
     assert_eq!(status.state, JobState::Done, "{status:?}");
     assert!(destination.is_file());
+}
+
+/// The fixture plus an image layer whose original is gone.
+fn with_offline_image() -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Limage".into();
+    layer["type"] = "image".into();
+    layer["name"] = "Gone".into();
+    layer["d"] = serde_json::json!({"asset":"Aimage"});
+    project["layers"].as_array_mut().unwrap().push(layer);
+    project["assets"] =
+        serde_json::json!({"Aimage":{"name":"gone.png","type":"image","w":40,"h":40}});
+    project.to_string()
+}
+#[test]
+fn an_offline_clip_refuses_by_name_unless_the_export_goes_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_offline_image();
+    let refused = ExportHandle::start(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        request_for(&project, dir.path().join("refused"), 1),
+    )
+    .unwrap()
+    .wait()
+    .unwrap();
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(message.contains("1 clip is offline: gone.png"), "{message}");
+    let mut without = request_for(&project, dir.path().join("without"), 1);
+    without.without_offline = true;
+    let done = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), without)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(done.state, JobState::Done, "{done:?}");
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("without"))
+            .unwrap()
+            .count(),
+        30
+    );
+}
+/// The fixture plus an audio clip whose original is gone.
+fn with_offline_audio() -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Lvoice".into();
+    layer["type"] = "audio".into();
+    layer["name"] = "Voiceover".into();
+    layer["d"] = serde_json::json!({"asset":"Avoice","gain":1,"trim":0,"fadeIn":0,"fadeOut":0});
+    project["layers"].as_array_mut().unwrap().push(layer);
+    project["assets"] =
+        serde_json::json!({"Avoice":{"name":"voice.wav","type":"audio","format":"wav","dur":3}});
+    project.to_string()
+}
+#[test]
+fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_offline_audio();
+    let mut request = request_for(&project, dir.path().join("talk.mov"), 1);
+    request.without_offline = true;
+    let JobSpec::Export { settings, .. } = &mut request.spec else {
+        unreachable!()
+    };
+    settings.format = ExportFormat::ProRes {
+        profile: pm_protocol::priority::ProResProfile::Hq,
+    };
+    settings.color = OutputColor::Rec709QuickTime {
+        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+    };
+    settings.alpha = AlphaOutput::None;
+    settings.audio = true;
+    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    assert!(
+        message.contains("Audio media is missing for “Voiceover”"),
+        "{message}"
+    );
+}
+/// The fixture's first layer with an effect no installed extension provides.
+fn with_uninstalled_effect(on: bool) -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    project["layers"][0]["fx"] = serde_json::json!([
+        {"id":"e1","type":"acme.glow","on":on,"p":{}}
+    ]);
+    project.to_string()
+}
+fn finish(request: ExportRequest) -> pm_protocol::priority::JobStatus {
+    ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+        .unwrap()
+        .wait()
+        .unwrap()
+}
+#[test]
+fn a_still_capture_bypasses_an_uninstalled_effect_and_a_delivery_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let enabled = with_uninstalled_effect(true);
+    let mut capture = request_for(&enabled, dir.path().join("capture"), 1);
+    capture.bypass_missing_effects = true;
+    let done = finish(capture);
+    assert_eq!(done.state, JobState::Done, "{done:?}");
+    let refused = finish(request_for(&enabled, dir.path().join("delivery"), 1));
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(message.contains("acme.glow isn't installed"), "{message}");
+    // Switched off, it never draws, so a delivery doesn't need it.
+    let off = finish(request_for(
+        &with_uninstalled_effect(false),
+        dir.path().join("off"),
+        1,
+    ));
+    assert_eq!(off.state, JobState::Done, "{off:?}");
 }

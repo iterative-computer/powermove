@@ -2047,7 +2047,12 @@ impl Host {
                 self.window.makeFirstResponder(Some(&self.gpui));
             }
             name if name.starts_with("context") => {
-                let responder = self.window.firstResponder();
+                // The field being edited may sit in another window (the
+                // command palette, a popup): the key window's responder decides.
+                let responder = app
+                    .keyWindow()
+                    .and_then(|w| w.firstResponder())
+                    .or_else(|| self.window.firstResponder());
                 if !responder
                     .as_ref()
                     .is_some_and(|r| unsafe { msg_send![&**r,isKindOfClass:NSTextView::class()] })

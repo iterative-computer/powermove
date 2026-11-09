@@ -35,6 +35,16 @@ pub struct ExportRequest {
     /// destination volume has less free space than this.
     #[serde(default = "disk_reserve")]
     pub disk_reserve: u64,
+    /// A look at the project (an agent's still), not a delivery: an effect
+    /// whose provider isn't installed is bypassed, as the viewer does,
+    /// instead of refusing the job.
+    #[serde(default)]
+    pub bypass_missing_effects: bool,
+    /// Offline clips draw nothing instead of refusing the job (the shipped
+    /// app's agent exports never asked). A clip the export would hear still
+    /// refuses it by name.
+    #[serde(default)]
+    pub without_offline: bool,
 }
 /// An export frame's raster override answer from the window that has the
 /// document open.
@@ -226,6 +236,8 @@ impl ExportRequest {
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
             disk_reserve: DISK_RESERVE,
+            bypass_missing_effects: false,
+            without_offline: false,
         })
     }
 }
@@ -560,17 +572,45 @@ pub fn run_child() -> Result<()> {
             request.revision,
         );
         doc.set_saving_app_version(request.saving_app_version);
-        ensure!(
-            // An output without audio doesn't need an offline audio clip.
-            pm_export::render::offline_media_with_audio(
-                &doc,
-                composition.as_str(),
-                &media,
-                settings.audio,
-            )
-            .is_empty(),
-            "export originals are offline; relink originals or explicitly choose draft"
+        // An output without audio doesn't need an offline audio clip.
+        let offline = pm_export::render::offline_media_with_audio(
+            &doc,
+            composition.as_str(),
+            &media,
+            settings.audio,
         );
+        // Going without offline clips never drops sound: a clip the export
+        // would hear still stops it by name, as the shipped app's exports did.
+        let tick = |t: pm_protocol::common::Ticks| {
+            t.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64
+        };
+        if request.without_offline && settings.audio && !settings.format.is_image() {
+            let range = (tick(settings.range.start), tick(settings.range.end));
+            if let Some(clip) =
+                pm_export::render::offline_audible_media(&doc, composition.as_str(), &media, range)
+                    .first()
+            {
+                anyhow::bail!(
+                    "Audio media is missing for “{}”. Relink or import it again before exporting.",
+                    clip.name
+                );
+            }
+        }
+        if !offline.is_empty() && !request.without_offline {
+            let names: Vec<_> = offline.iter().take(3).map(|c| c.name.as_str()).collect();
+            let more = match offline.len().saturating_sub(3) {
+                0 => String::new(),
+                n => format!(" and {n} more"),
+            };
+            let count = match offline.len() {
+                1 => "1 clip is".to_owned(),
+                n => format!("{n} clips are"),
+            };
+            anyhow::bail!(
+                "{count} offline: {}{more}. Relink the originals, or choose Use Proxies (Draft) to export from proxies.",
+                names.join(", ")
+            );
+        }
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
@@ -582,6 +622,24 @@ pub fn run_child() -> Result<()> {
         let failures = renderer
             .set_document_effects(&doc, &request.resources.definitions)
             .map_err(anyhow::Error::msg)?;
+        // Only what this export draws: enabled effects in its composition.
+        let uninstalled = renderer.missing_effects_in(&doc, composition.as_str());
+        if request.bypass_missing_effects {
+            renderer.set_bypass_missing_effects(true);
+        } else if let Some(missing) = uninstalled.first() {
+            let uses = match missing.layers {
+                1 => "1 layer uses it".to_owned(),
+                n => format!("{n} layers use it"),
+            };
+            let others = match uninstalled.len() - 1 {
+                0 => String::new(),
+                n => format!("; {n} more effects are missing too"),
+            };
+            anyhow::bail!(
+                "{} isn't installed ({uses}{others}). Install the extension that provides it, or turn the effect off, then export again.",
+                missing.effect
+            );
+        }
         if let Some(failure) = failures.iter().find(|failure| {
             matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }
                 if request.document.contains(&format!("\"{}\"", definition.as_str())))

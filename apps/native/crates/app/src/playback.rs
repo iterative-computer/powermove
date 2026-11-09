@@ -201,7 +201,14 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 let status=viewer.status();
                 // Run through the audio-start wait too: its vsync phase places the start.
                 link.set_paused(!status.wants_display);
-                let line=status.error.as_ref().map(|e|format!("Viewer: {e}")).or_else(||status.notice());
+                // One readable line; a longer report goes to Window ▸ Error Log.
+                let line=status.error.as_ref().map(|e|{
+                    let (first,rest)=e.split_once('\n').unwrap_or((e,""));
+                    if rest.trim().is_empty() { format!("Viewer: {first}") } else {
+                        crate::error_log::shared(cx).borrow_mut().push("Viewer",e);
+                        format!("Viewer: {first} Details are in Window ▸ Error Log.")
+                    }
+                }).or_else(||status.notice());
                 if line!=shown {
                     match &line {
                         Some(text)=>{v.message=text.clone();cx.notify();}

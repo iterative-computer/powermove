@@ -289,13 +289,20 @@ fn checked_paths(config: &Config) -> Result<(PathBuf, PathBuf)> {
     );
     Ok((source, native))
 }
+/// The engine's compiled-shader cache folder in the native profile.
+pub const SHADER_CACHE: &str = "shader-cache";
 fn fresh_destination(native: &Path) -> Result<()> {
     if native.exists() && !native.join("migration.json").exists() {
         // A kill may occur after creating the process lock or temporary state
         // file, before the first state rename. Those two private artifacts are
-        // safe to resume; any other preexisting destination remains refused.
+        // safe to resume. The engine starts before this gate and keeps its
+        // compiled-shader cache here: derived data, never work. Any other
+        // preexisting destination remains refused.
         for entry in fs::read_dir(native)? {
             let entry = entry?;
+            if entry.file_name() == SHADER_CACHE && entry.file_type()?.is_dir() {
+                continue;
+            }
             ensure!(
                 ["first-launch.lock", "migration.first-launch-part"]
                     .iter()

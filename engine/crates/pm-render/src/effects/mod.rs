@@ -74,6 +74,9 @@ struct Entry {
 pub struct Effects {
     pub(crate) file_app_version: Option<String>,
     pub(crate) versioned_builtins: bool,
+    /// Viewer frames: an effect whose provider isn't installed is bypassed
+    /// (its layer draws without it) instead of refusing the layer.
+    pub(crate) bypass_missing: bool,
     /// Neutral of a layer map: byte projects have a representable 128 of 255.
     pub(crate) map_midpoint: f64,
     set: DefinitionSet,
@@ -249,6 +252,7 @@ impl Effects {
             mips: None,
             file_app_version: None,
             versioned_builtins: false,
+            bypass_missing: false,
             map_midpoint: 0.5,
             set: DefinitionSet::default(),
             configured: false,
@@ -998,7 +1002,28 @@ pub(crate) fn layer_features(effects: &Effects, layer: &pm_model::Node) -> Vec<c
         ) {
             continue;
         }
+        // Switched off for good (not animated): it never draws.
+        let on = node::member(Some(fx), "on");
+        let off = match on.map(pm_model::Node::kind) {
+            Some(pm_model::NodeKind::Bool(false)) => true,
+            _ if node::is_property(on) => {
+                !node::has_kf_array(on)
+                    && matches!(
+                        node::member(on, "v").map(pm_model::Node::kind),
+                        Some(pm_model::NodeKind::Bool(false))
+                    )
+            }
+            _ => false,
+        };
+        if off {
+            continue;
+        }
         let ty = node::to_js_string(node::member(Some(fx), "type")).to_string_lossy();
+        // The planner's bypass ([`Effects::bypass_missing`]): no provider, so
+        // nothing to route; the layer draws without it.
+        if effects.bypass_missing && effects.get(DefinitionKind::Effect, &ty).is_none() {
+            continue;
+        }
         out.extend(definition_feature(effects, DefinitionKind::Effect, &ty));
     }
     out
