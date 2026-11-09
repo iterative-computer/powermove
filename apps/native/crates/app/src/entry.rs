@@ -162,6 +162,13 @@ pub fn editor(window: u64, cx: &App) -> Option<Entity<Controller>> {
         .and_then(|(e, _)| e.upgrade())
 }
 
+/// Every editor window's controller that is still open.
+pub fn editors(cx: &App) -> Vec<Entity<Controller>> {
+    cx.try_global::<Entries>()
+        .map(|e| e.editors.iter().filter_map(|(e, _)| e.upgrade()).collect())
+        .unwrap_or_default()
+}
+
 /// The new window's opening, taken once by the window factory.
 pub fn take_for_new_window(cx: &mut App) -> Option<Pending> {
     cx.default_global::<Entries>().next_window.pop_front()
@@ -190,11 +197,14 @@ struct Hook<'a> {
     cx: &'a mut App,
 }
 impl EntryHook for Hook<'_> {
-    /// No sign-in waits in this app yet; v1.2.0 ignores such a link the same way.
-    fn auth(&mut self, _: &AuthLink) -> pm_services::Result<()> {
-        crate::error_log::shared(self.cx)
-            .borrow_mut()
-            .push("Open", "Ignored a sign-in link: no sign-in is waiting.");
+    /// The Powermove Cloud sign-in waiting in its browser step takes it; a
+    /// link nothing waits for is ignored, as v1.2.0 does, with a log line.
+    fn auth(&mut self, link: &AuthLink) -> pm_services::Result<()> {
+        if !crate::cloud::receive_link(link.state(), link.token(), self.cx) {
+            crate::error_log::shared(self.cx)
+                .borrow_mut()
+                .push("Open", "Ignored a sign-in link: no sign-in is waiting.");
+        }
         Ok(())
     }
     fn open_project(&mut self, path: &std::path::Path) -> pm_services::Result<()> {

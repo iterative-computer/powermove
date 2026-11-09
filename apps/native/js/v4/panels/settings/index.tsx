@@ -97,6 +97,9 @@ function RowControl({
   if (row.control === "action")
     return (
       <Button
+        // A new label (Sign In… → Sign Out) is a new control: the native
+        // button keeps the title it was created with.
+        key={row.actionLabel}
         label={row.actionLabel!}
         disabled={disabled || !model.services}
         onClick={() => {

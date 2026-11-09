@@ -41,9 +41,50 @@ impl Controller {
                 crate::updates::check_now(self.profile.clone(), window, cx)
             }
             "backgroundTasks" => self.open_tasks_window(cx),
+            "cloudSignIn" => {
+                let window = self.account_window(cx);
+                crate::cloud::open_sign_in(window, cx)
+            }
+            "cloudSignOut" => crate::cloud::sign_out(cx),
+            "providerSetUp" => {
+                let window = self.account_window(cx);
+                crate::providers::open(window, cx)
+            }
+            "providerDisconnect" => crate::providers::disconnect(cx),
+            "agentClientsCopy" => crate::agent_clients::copy_setup(cx),
+            command
+                if command.starts_with("agentClientAdd.")
+                    || command.starts_with("agentClientRemove.") =>
+            {
+                let (verb, id) = command.split_once('.').unwrap_or_default();
+                let window = self.account_window(cx);
+                crate::agent_clients::request(id.into(), verb == "agentClientAdd", window, cx)
+            }
+            "cloudRememberOn" => crate::cloud::set_remember(true, cx),
+            "cloudRememberOff" => crate::cloud::set_remember(false, cx),
+            "cloudDeleteAccount" => {
+                let window = self.account_window(cx);
+                crate::cloud::delete_account(window, cx)
+            }
+            "store" => crate::store_window::open(
+                crate::store_window::Services::system(self.kernel.clone(), self.profile.clone()),
+                cx,
+            ),
             _ => return false,
         }
         true
+    }
+    /// Account sheets attach to Settings when it is open, else to this editor.
+    fn account_window(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> objc2::rc::Retained<objc2_app_kit::NSWindow> {
+        self.builtins
+            .windows
+            .get("settings")
+            .and_then(|h| h.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+            .flatten()
+            .unwrap_or_else(|| self.host.borrow().window.clone())
     }
     fn library(&mut self, cx: &mut Context<Self>) -> Option<Entity<ProjectLibrary>> {
         if let Some(library) = &self.library {

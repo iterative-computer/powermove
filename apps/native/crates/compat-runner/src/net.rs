@@ -421,19 +421,22 @@ pub fn download(url: &str, max_bytes: usize, seconds: u64) -> Result<FetchRespon
     request(url, max_bytes, seconds, Reach::Media)
 }
 fn request(url: &str, max_bytes: usize, seconds: u64, reach: Reach) -> Result<FetchResponse> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-    let mut request = fetch(
+    send(
         FetchRequest {
             url: url.to_owned(),
             method: "GET".into(),
             headers: vec![],
             body: vec![],
             max_response_bytes: max_bytes,
-            deadline,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(seconds),
         },
         reach,
-        Cancellation::default(),
-    )?;
+    )
+}
+/// Worker-only: any method, headers and body, waited for until its deadline.
+pub fn send(request: FetchRequest, reach: Reach) -> Result<FetchResponse> {
+    let deadline = request.deadline;
+    let mut request = fetch(request, reach, Cancellation::default())?;
     loop {
         if let Some(result) = request.poll() {
             return result;

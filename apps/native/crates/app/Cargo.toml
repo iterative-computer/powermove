@@ -83,6 +83,21 @@ path = "../../../../engine/crates/pm-proxy"
 features = ["test-hooks"]
 [dev-dependencies.pm-native-migrate]
 path = "../migrate"
+[dev-dependencies.ed25519-dalek]
+version = "2.2"
+
+[dev-dependencies.sha1]
+version = "0.10"
+
+[dev-dependencies.tar]
+version = "0.4"
+
+[dev-dependencies.flate2]
+version = "1"
+
+[dev-dependencies.pm-store-host]
+path = "../store-host"
+
 [dev-dependencies.fs2]
 version = "0.4"
 [dev-dependencies.pm-export]

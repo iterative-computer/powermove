@@ -3143,3 +3143,51 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     let (_, p) = publish(&mut presenter, "a");
     assert!(titles(&p).is_empty());
 }
+
+#[test]
+fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"cloud":{"revision":4,"signedIn":true,"identity":"@maker",
+        "email":"person@example.com","rememberInstalls":false}});
+    let publication = backend.settings_snapshot().unwrap();
+    let rows = publication["rows"].as_array().unwrap();
+    let remember = rows.iter().find(|r| r["id"] == "account.remember").unwrap();
+    // The switch acts through a lease, like every other Settings switch.
+    assert!(remember["binding"].as_str().is_some_and(|b| !b.is_empty()));
+    let revision = publication["revision"].clone();
+    for (action, command) in [
+        (
+            json!({"type":"write","id":"account.remember","value":true}),
+            "cloudRememberOn",
+        ),
+        (
+            json!({"type":"row","id":"account.sign-in","action":"account.sign-out"}),
+            "cloudSignOut",
+        ),
+        (
+            json!({"type":"row","id":"account.delete","action":"account.delete"}),
+            "cloudDeleteAccount",
+        ),
+    ] {
+        backend.native.platform.clear();
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":action}),
+            )
+            .unwrap();
+        assert_eq!(
+            backend.native.platform,
+            [("command".to_owned(), json!({ "name": command }))]
+        );
+    }
+    // A new account state is a new publication.
+    backend.native.facts["cloud"]["revision"] = json!(5);
+    assert_ne!(backend.settings_snapshot().unwrap()["revision"], revision);
+}

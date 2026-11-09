@@ -297,6 +297,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::role("Show Tab Bar", "toggleTabBar:", ""),
                 Item::role("Show All Tabs", "toggleTabOverview:", ""),
                 sep(),
+                Item::command("Store", "store", ""),
                 Item::command("Background Tasks", "backgroundTasks", "cmd+9"),
                 Item::command("Error Log", "errorLog", ""),
                 Item::command("Migration Report", "migrationReport", ""),

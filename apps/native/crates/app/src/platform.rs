@@ -251,6 +251,80 @@ pub fn bundle_id() -> Option<String> {
         .bundleIdentifier()
         .map(|id| id.to_string())
 }
+/// The `UTType` of a file, read from the file itself.
+fn content_type(path: &std::path::Path) -> Option<Retained<objc2::runtime::AnyObject>> {
+    use objc2_foundation::{NSArray, NSURL, NSURLContentTypeKey};
+    let url = NSURL::from_file_path(path)?;
+    let keys = NSArray::from_slice(&[unsafe { NSURLContentTypeKey }]);
+    let values = url.resourceValuesForKeys_error(&keys).ok()?;
+    values.objectForKey(unsafe { NSURLContentTypeKey })
+}
+/// Whether `kind` is an image, movie or sound and nothing that runs.
+fn media_type(kind: &objc2::runtime::AnyObject) -> bool {
+    use objc2::{msg_send, runtime::Bool};
+    let conforms = |identifier: &str| -> bool {
+        let identifier = NSString::from_str(identifier);
+        let other: Option<Retained<objc2::runtime::AnyObject>> =
+            unsafe { msg_send![objc2::class!(UTType), typeWithIdentifier: &*identifier] };
+        other.is_some_and(|other| {
+            let yes: Bool = unsafe { msg_send![kind, conformsToType: &*other] };
+            yes.as_bool()
+        })
+    };
+    ["public.image", "public.movie", "public.audio"]
+        .iter()
+        .any(|t| conforms(t))
+        && ![
+            "public.executable",
+            "com.apple.application",
+            "com.apple.bundle",
+            "public.directory",
+        ]
+        .iter()
+        .any(|t| conforms(t))
+}
+/// A file an agent's reply names, made safe to show: every link resolved, a
+/// regular file with no execute bit, whose own content type (read from the
+/// resolved file, not the name the reply wrote) is an image, movie or sound.
+/// Disk and Launch Services work: never on the main thread.
+pub fn media_document(path: &std::path::Path) -> Result<PathBuf, &'static str> {
+    use std::os::unix::fs::PermissionsExt;
+    const MOVED: &str = "That file couldn’t be found. It may have moved.";
+    const REFUSED: &str = "That file isn’t an image, video or sound, so it wasn’t opened.";
+    let resolved = std::fs::canonicalize(path).map_err(|_| MOVED)?;
+    let metadata = std::fs::symlink_metadata(&resolved).map_err(|_| MOVED)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 != 0 {
+        return Err(REFUSED);
+    }
+    match content_type(&resolved) {
+        Some(kind) if media_type(&kind) => Ok(resolved),
+        _ => Err(REFUSED),
+    }
+}
+/// Opens a checked media file ([`media_document`]) as a document in the
+/// default viewer for its content type, never through a URL Launch Services
+/// could run as an app.
+pub fn open_document(path: &std::path::Path) -> bool {
+    use objc2::msg_send;
+    use objc2_foundation::{NSArray, NSURL};
+    let (Some(url), Some(kind)) = (NSURL::from_file_path(path), content_type(path)) else {
+        return false;
+    };
+    let workspace = NSWorkspace::sharedWorkspace();
+    let viewer: Option<Retained<NSURL>> =
+        unsafe { msg_send![&*workspace, URLForApplicationToOpenContentType: &*kind] };
+    let Some(viewer) = viewer else {
+        return false;
+    };
+    let configuration = NSWorkspaceOpenConfiguration::configuration();
+    workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+        &NSArray::from_retained_slice(&[url]),
+        &viewer,
+        &configuration,
+        None,
+    );
+    true
+}
 /// Selects `path` in Finder.
 pub fn reveal(path: &std::path::Path) {
     use objc2_app_kit::NSWorkspace;
@@ -492,5 +566,59 @@ mod signal_tests {
             .status()
             .unwrap();
         assert!(!status.success(), "the default action ends the child");
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::media_document;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    #[test]
+    fn a_reply_path_opens_only_a_real_media_file_never_what_a_link_points_at_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |name: &str, bytes: &[u8], mode: u32| {
+            let path = root.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let png = write("still.png", b"\x89PNG\r\n\x1a\n", 0o644);
+        let script = write("run.sh", b"#!/bin/sh\necho hi\n", 0o755);
+        let text = write("notes.txt", b"hello", 0o644);
+        write("marked.png", b"\x89PNG\r\n\x1a\n", 0o755);
+        let app = root.join("Fake.app/Contents/MacOS");
+        std::fs::create_dir_all(&app).unwrap();
+        write("Fake.app/Contents/MacOS/Fake", b"#!/bin/sh\n", 0o755);
+        std::fs::create_dir_all(root.join("folder.png")).unwrap();
+        for (name, target) in [
+            ("preview.png", png.clone()),
+            ("app.png", root.join("Fake.app")),
+            ("tool.png", script.clone()),
+            ("words.png", text.clone()),
+            ("chain.png", root.join("preview.png")),
+        ] {
+            symlink(&target, root.join(name)).unwrap();
+        }
+        assert_eq!(media_document(&png), Ok(png.clone()));
+        // A link (or a chain of them) opens the file it resolves to.
+        assert_eq!(media_document(&root.join("preview.png")), Ok(png.clone()));
+        assert_eq!(media_document(&root.join("chain.png")), Ok(png.clone()));
+        // The name says .png; what it resolves to decides.
+        for refused in [
+            "app.png",
+            "tool.png",
+            "words.png",
+            "marked.png",
+            "folder.png",
+            "Fake.app",
+        ] {
+            assert_eq!(
+                media_document(&root.join(refused)),
+                Err("That file isn’t an image, video or sound, so it wasn’t opened."),
+                "{refused}"
+            );
+        }
+        assert!(media_document(&root.join("gone.png")).is_err());
     }
 }

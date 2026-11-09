@@ -142,6 +142,11 @@ function Rows({
   );
 }
 const str = (value: unknown) => (typeof value === "string" ? value : "");
+const MEDIA_KIND: Record<string, string> = {
+  image: "Image",
+  video: "Video",
+  audio: "Sound",
+};
 function Message({
   row,
   n,
@@ -287,7 +292,10 @@ function Message({
     );
   // publish_visual_reply: each reply opens in its own sandboxed viewer.
   const visuals = Array.isArray(v.visualReplies) ? v.visualReplies : [];
-  if (visuals.length)
+  // Images, videos and sounds the reply names (the host lists them); each
+  // opens in its own app, a web address only when the person asks.
+  const media = Array.isArray(v.media) ? v.media : [];
+  if (visuals.length || media.length)
     return (
       <div
         role="listitem"
@@ -316,6 +324,43 @@ function Message({
                 label="Open"
                 onClick={() => send({ type: "openVisual", id: str(r.id) })}
               />
+            </div>
+          );
+        })}
+        {media.map((item, index) => {
+          const m =
+            item && typeof item === "object" && !Array.isArray(item)
+              ? item
+              : {};
+          const path = str(m.path);
+          const remote = m.remote === true;
+          return (
+            <div
+              key={path}
+              role="group"
+              label={str(m.name)}
+              metadata={{ media: path }}
+              style={card(false)}
+            >
+              <text style={title}>{str(m.name)}</text>
+              <text style={muted}>
+                {(MEDIA_KIND[str(m.kind)] ?? "File") +
+                  (remote ? " on the web" : "")}
+              </text>
+              <Push
+                id={`${row.id}-media-${index}`}
+                label={remote ? "Open in Browser" : "Open"}
+                onClick={() => send({ type: "openMedia", path, reveal: false })}
+              />
+              {!remote && (
+                <Push
+                  id={`${row.id}-media-${index}-reveal`}
+                  label="Show in Finder"
+                  onClick={() =>
+                    send({ type: "openMedia", path, reveal: true })
+                  }
+                />
+              )}
             </div>
           );
         })}
