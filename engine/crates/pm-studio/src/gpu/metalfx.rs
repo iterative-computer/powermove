@@ -327,7 +327,7 @@ impl Renderer {
         if self
             .metalfx
             .as_ref()
-            .is_some_and(|f| f.output_size != (ow, oh))
+            .is_some_and(|f| f.output_size != (ow, oh) || f.ray_queries!=self.uses_hardware_rt())
         {
             self.metalfx = None;
         }
@@ -415,6 +415,7 @@ impl Renderer {
                 -dot(f),
                 1.,
             ];
+            let ortho = self.base.opts[3] & 1 != 0;
             let projection = [
                 1. / r[3],
                 0.,
@@ -426,12 +427,20 @@ impl Renderer {
                 0.,
                 0.,
                 0.,
-                far / (far - near),
-                1.,
+                if ortho {
+                    1. / (far - near)
+                } else {
+                    far / (far - near)
+                },
+                if ortho { 0. } else { 1. },
                 0.,
                 0.,
-                -near * far / (far - near),
-                0.,
+                if ortho {
+                    -near / (far - near)
+                } else {
+                    -near * far / (far - near)
+                },
+                if ortho { 1. } else { 0. },
             ];
             // SAFETY: wgpu work has completed. Borrowed Metal textures remain
             // alive in `fx`; this call waits for its own command buffer.

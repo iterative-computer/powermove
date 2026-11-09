@@ -20,9 +20,10 @@ fn fx_guides(@builtin(global_invocation_id) g:vec3u) {
   else if(tf<BIG){point=ray[0]+ray[1]*tf;}
   if(dot(normal,ray[1])>0.){normal=-normal;}
   let viewz=dot(point-P.cam_pos.xyz,P.cam_fwd.xyz);let near=F.misc.x;let far=F.misc.y;
-  depth=clamp(far/(far-near)-near*far/((far-near)*max(viewz,near)),0.,1.);
+  let ortho=(P.opts.w&1u)!=0u;
+  depth=clamp(select(far/(far-near)-near*far/((far-near)*max(viewz,near)),(viewz-near)/(far-near),ortho),0.,1.);
   var motion=vec2f(0.);let v=point-F.previous_pos.xyz;let z=dot(v,F.previous_fwd.xyz);
-  if(z>1e-4){let ndc=vec2f(dot(v,F.previous_right.xyz)/(z*F.previous_right.w),-dot(v,F.previous_up.xyz)/(z*F.previous_up.w));motion=(ndc*.5+.5)*vec2f(P.dims.xy)-px;}
+  if(z>1e-4){let scale=select(z,1.,ortho);let ndc=vec2f(dot(v,F.previous_right.xyz)/(scale*F.previous_right.w),-dot(v,F.previous_up.xyz)/(scale*F.previous_up.w));motion=(ndc*.5+.5)*vec2f(P.dims.xy)-px;}
   let a=accum[i];let b=bgsum[i];let n=max(a.w,1.);let coverage=max(a.w-b.w,0.)/n;
   var shade=1.;if(b.w>0.){shade=dot(b.xyz/b.w,vec3f(1.))/max(dot(P.backdrop.xyz,vec3f(1.)),1e-6);}
   // A complete linear image, with display-referred backdrop converted once.

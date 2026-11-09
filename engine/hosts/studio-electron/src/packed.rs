@@ -187,6 +187,7 @@ impl PackedScene {
                 return Err("prepared triangle has invalid material/object index".into());
             }
         }
+        validate_top(&nodes[..u.top_nodes], u.instance_count)?;
         let lights = sdata[..u.light_count * 4]
             .chunks_exact(4)
             .map(|s| pm_studio::scene::GpuLight {
@@ -266,21 +267,42 @@ impl PackedScene {
         {
             return Err("patch contains non-finite data".into());
         }
+        validate_top(&nodes, self.placements.len())?;
         let mut old_view = self.view.clone();
         old_view.camera = p.view.camera.clone();
-        let content_changed = old_view != p.view
+        let content_changed = self.view.camera.orthographic != p.view.camera.orthographic
+            || old_view != p.view
             || sdata != self.prepared.sdata
             || bytemuck::cast_slice::<GpuMaterial, u8>(&materials)
                 != bytemuck::cast_slice::<GpuMaterial, u8>(&self.prepared.materials);
+        // Camera-only patches retain the complete BLAS/placement cache.
+        if sdata == self.prepared.sdata {
+            self.prepared.nodes[..self.top_nodes].copy_from_slice(&nodes);
+            self.prepared.materials = materials;
+            self.view = p.view;
+            if let Some(policies) = p.instance_policies {
+                self.parts = policies.into_iter().map(|p| p.part).collect();
+            }
+            return Ok(content_changed);
+        }
         let old = std::mem::replace(&mut self.prepared.sdata, sdata);
         let count = self.placements.len();
-        let (_, placements) = match placements(&self.prepared, count) {
+        let (geometries, placements) = match placements(&self.prepared, count) {
             Ok(p) => p,
             Err(e) => {
                 self.prepared.sdata = old;
                 return Err(e);
             }
         };
+        if geometries.len() != self.geometries.len()
+            || geometries
+                .iter()
+                .zip(&self.geometries)
+                .any(|(a, b)| a.first_vertex != b.first_vertex || a.vertex_count != b.vertex_count)
+        {
+            self.prepared.sdata = old;
+            return Err("prepared patch changes resident geometry; upload scene again".into());
+        }
         // Geometry order is sorted by BLAS root, so transforms never reorder Metal BLAS.
         self.placements = placements;
         self.prepared.nodes[..self.top_nodes].copy_from_slice(&nodes);
@@ -472,4 +494,72 @@ fn triangle_range(nodes: &[WideNode], root: u32, triangles: usize) -> Result<(u3
         return Err("empty BLAS".into());
     }
     Ok((lo, hi))
+}
+
+// Reject malformed trees before they can hang a GPU traversal or overflow its
+// fixed stack. Padding nodes are intentionally not visited.
+fn validate_top(nodes: &[WideNode], instances: usize) -> Result<(), String> {
+    if instances == 0 {
+        return Ok(());
+    }
+    let mut stack = vec![(0usize, 0usize)];
+    let mut visited = std::collections::HashSet::new();
+    let mut seen = vec![false; instances];
+    while let Some((i, depth)) = stack.pop() {
+        if depth >= 60 || !visited.insert(i) {
+            return Err("cyclic or excessively deep TLAS".into());
+        }
+        let n = nodes.get(i).ok_or("TLAS child outside top-level buffer")?;
+        if n.lmin
+            .iter()
+            .chain(n.lmax.iter())
+            .chain(n.rmin.iter())
+            .chain(n.rmax.iter())
+            .any(|v| !v.is_finite())
+        {
+            return Err("TLAS contains non-finite bounds".into());
+        }
+        for (child, count) in [(n.left, n.lcount), (n.right, n.rcount)] {
+            if count == u32::MAX {
+                continue;
+            }
+            if count == 0 {
+                stack.push((child as usize, depth + 1));
+                continue;
+            }
+            let end = child.checked_add(count).ok_or("TLAS range overflow")?;
+            let range = seen
+                .get_mut(child as usize..end as usize)
+                .ok_or("TLAS instance range outside scene")?;
+            for flag in range {
+                if *flag {
+                    return Err("duplicate TLAS instance".into());
+                }
+                *flag = true;
+            }
+        }
+    }
+    if seen.iter().any(|v| !*v) {
+        return Err("TLAS omits scene instances".into());
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejects_gpu_traversal_cycles_and_invalid_leaves() {
+        assert!(validate_top(&[WideNode::default()], 1).is_err());
+        let mut n = WideNode {
+            lcount: 1,
+            rcount: u32::MAX,
+            ..Default::default()
+        };
+        assert!(validate_top(&[n], 1).is_ok());
+        n.left = 1;
+        assert!(validate_top(&[n], 1).is_err());
+        n.left = 0;
+        n.rcount = 1;
+        assert!(validate_top(&[n], 1).is_err());
+    }
 }

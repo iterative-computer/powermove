@@ -6,7 +6,7 @@ import { compileSceneDescription, viewFromDescription } from '../studio/scene-de
 import { StudioBinaryWriter } from './buffers';
 
 function geometryKey(scene:StudioScene):string {
-  const text=[scene.geometryKey,scene.positions.byteLength,scene.tris.byteLength,scene.blasNodes.byteLength,scene.tlasNodes.byteLength,scene.sdata.byteLength,scene.materials.byteLength,...scene.objects].join('|');
+  const text=[scene.geometryKey,scene.instanceCount,scene.lightCount,scene.positions.byteLength,scene.tris.byteLength,scene.blasNodes.byteLength,scene.tlasNodes.byteLength,scene.sdata.byteLength,scene.materials.byteLength,...scene.objects].join('|');
   let a=2166136261,b=0x9e3779b9;for(let i=0;i<text.length;i++){const c=text.charCodeAt(i);a=Math.imul(a^c,16777619);b=Math.imul(b^c,2246822519);}
   return `${a>>>0}:${b>>>0}`;
 }

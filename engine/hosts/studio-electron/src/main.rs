@@ -119,6 +119,7 @@ struct Target {
     revision: u64,
     geometry: u64,
     history_revision: u64,
+    scene_revision: u64,
     live: bool,
     denoiser: &'static str,
     quality_denoise: bool,
@@ -401,6 +402,7 @@ impl Host {
                         self.packed.as_ref(),
                         self.revision,
                         self.geometry,
+                        self.history_revision,
                     );
                     if edited {
                         target.time = f64::NAN;
@@ -466,7 +468,22 @@ impl Host {
                 }
                 let is_live = tier == "live";
                 let (w, h) = if is_live {
-                    (width.div_ceil(2), height.div_ceil(2))
+                    // Keep Live within a predictable pixel budget for small worlds.
+                    // Final/Refine always render at the requested output size.
+                    let (instances, lights) = if let Some(p) = &self.packed {
+                        (p.placements.len(), p.prepared.lights.len())
+                    } else {
+                        let r = self.resident.as_ref().ok_or("no scene")?;
+                        (r.placements.len(), r.prepared.lights.len())
+                    };
+                    if instances > 128 || lights > 32 {
+                        (
+                            width.saturating_mul(2).div_ceil(5).max(1),
+                            height.saturating_mul(2).div_ceil(5).max(1),
+                        )
+                    } else {
+                        (width.div_ceil(2), height.div_ceil(2))
+                    }
                 } else {
                     (width, height)
                 };
@@ -494,6 +511,7 @@ impl Host {
                         revision: u64::MAX,
                         geometry: u64::MAX,
                         history_revision: u64::MAX,
+                        scene_revision: u64::MAX,
                         live: is_live,
                         denoiser: "none",
                         quality_denoise: false,
@@ -513,6 +531,7 @@ impl Host {
                     self.packed.as_ref(),
                     self.revision,
                     self.geometry,
+                    self.history_revision,
                 );
                 let renderer = &mut target.renderer;
                 renderer.live = target.live;
@@ -597,7 +616,7 @@ impl Host {
                 target.time = time;
                 target.tier = tier.clone();
                 return Ok((
-                    json!({"width":frame_size.0,"height":frame_size.1,"outputWidth":width,"outputHeight":height,"format":"rgba8","premultiplied":false,"surface":renderer.last_surface,"tier":tier,"samples":renderer.samples,"revision":self.revision,"time":time,"hardwareRt":renderer.uses_hardware_rt(),"adapter":renderer.adapter,"denoiser":denoiser,"timings":{"initMs":init_ms,"traceMs":trace_ms,"postMs":post_ms,"hostMs":begin.elapsed().as_secs_f64()*1000.}}),
+                    json!({"width":frame_size.0,"height":frame_size.1,"outputWidth":width,"outputHeight":height,"inputWidth":w,"inputHeight":h,"format":"rgba8","premultiplied":false,"surface":renderer.last_surface,"tier":tier,"samples":renderer.samples,"revision":self.revision,"time":time,"hardwareRt":renderer.uses_hardware_rt(),"adapter":renderer.adapter,"denoiser":denoiser,"timings":{"initMs":init_ms,"traceMs":trace_ms,"postMs":post_ms,"hostMs":begin.elapsed().as_secs_f64()*1000.}}),
                     pixels,
                 ));
             }
@@ -612,19 +631,25 @@ fn sync_target(
     packed: Option<&packed::PackedScene>,
     revision: u64,
     geometry: u64,
+    scene_revision: u64,
 ) {
     if target.revision == revision {
         return;
     }
+    let content_changed = target.scene_revision != scene_revision || target.geometry != geometry;
     if let Some(r) = resident {
-        target.renderer.set_instanced_scene(
-            &r.scene,
-            &r.prepared,
-            &r.geometries,
-            &r.placements,
-            r.top_nodes,
-            target.geometry != geometry,
-        );
+        if content_changed {
+            target.renderer.set_instanced_scene(
+                &r.scene,
+                &r.prepared,
+                &r.geometries,
+                &r.placements,
+                r.top_nodes,
+                target.geometry != geometry,
+            );
+        } else {
+            target.renderer.set_camera(&r.scene);
+        }
         let (lo, hi) = r.bounds();
         let center = (lo + hi) * 0.5;
         target.renderer.set_scene_bounds([
@@ -634,14 +659,18 @@ fn sync_target(
             (hi - lo).length().max(1e-3) * 0.5,
         ]);
     } else if let Some(p) = packed {
-        target.renderer.set_instanced_scene(
-            &p.view.scene(),
-            &p.prepared,
-            &p.geometries,
-            &p.placements,
-            p.top_nodes,
-            target.geometry != geometry,
-        );
+        if content_changed {
+            target.renderer.set_instanced_scene(
+                &p.view.scene(),
+                &p.prepared,
+                &p.geometries,
+                &p.placements,
+                p.top_nodes,
+                target.geometry != geometry,
+            );
+        } else {
+            target.renderer.set_camera(&p.view.scene());
+        }
         target.renderer.set_view(
             p.view.basis(),
             p.view.ground(),
@@ -660,6 +689,7 @@ fn sync_target(
     }
     target.revision = revision;
     target.geometry = geometry;
+    target.scene_revision = scene_revision;
 }
 fn peak_memory_mib() -> Option<f64> {
     #[cfg(unix)]

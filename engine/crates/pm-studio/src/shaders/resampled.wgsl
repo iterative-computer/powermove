@@ -1,5 +1,5 @@
-// Native Live direct-light reservoirs. Four uniform candidates, one reprojected
-// reservoir and two spatial neighbors; visibility is traced only for the winner.
+// Native Live direct-light reservoirs. Two or four fresh candidates, one reprojected
+// reservoir and one spatial neighbor; visibility is traced only for the winner.
 // Final/Refine retain the ordinary unbiased MIS estimator.
 struct Reservoir { key: vec4u, weights: vec4f, surface: vec4f, normal: vec4f }
 struct Resampling { dims: vec4u, prev_pos: vec4f, prev_fwd: vec4f, prev_right: vec4f, prev_up: vec4f }
@@ -40,7 +40,7 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   // invalidate history in the host; camera drags retain matching world points.
   let to_p = p-R.prev_pos.xyz; let z = dot(to_p,R.prev_fwd.xyz);
   if (R.dims.z != 0u && z > 1e-4) {
-    let ndc=vec2f(dot(to_p,R.prev_right.xyz)/(z*R.prev_right.w),-dot(to_p,R.prev_up.xyz)/(z*R.prev_up.w));
+    let scale=select(z,1.,R.dims.w!=0u);let ndc=vec2f(dot(to_p,R.prev_right.xyz)/(scale*R.prev_right.w),-dot(to_p,R.prev_up.xyz)/(scale*R.prev_up.w));
     let dims=vec2f(f32(R.dims.x),f32(R.dims.y));let center=vec2i(floor((ndc*.5+.5)*dims));
     for(var neighbor=0u;neighbor<2u;neighbor++) {
       var offset=vec2i(0);if(neighbor>0u){let angle=rnd()*2.*PI;offset=vec2i(round(vec2f(cos(angle),sin(angle))*2.));}

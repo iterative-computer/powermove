@@ -87,7 +87,12 @@ impl Renderer {
         let r = self.resampling.as_mut().unwrap();
         r.ensure(&self.device, self.width, self.height);
         let p = Params {
-            dims: [self.width, self.height, u32::from(self.history_valid), 0],
+            dims: [
+                self.width,
+                self.height,
+                u32::from(self.history_valid),
+                self.base.opts[3] & 1,
+            ],
             camera: self.previous_camera,
         };
         self.queue

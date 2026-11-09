@@ -503,6 +503,7 @@ impl Renderer {
             self.set_camera(scene);
         }
         self.instance_count = placements.len() as u32;
+        self.caustics=prepared.materials.iter().any(|m|m.spec[3]*(1.-m.base[3])>0.5 || (m.base[3]>0.5 && m.spec[0]<0.25));
         self.build_instanced_rt(geometries, placements, geometry_changed);
     }
 
@@ -843,7 +844,7 @@ impl Renderer {
     /// reference renderers.
     pub fn radiance(&mut self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
-        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
         self.queue.write_buffer(&self.post_params[0], 0, bytemuck::bytes_of(&params));
         let group = self.post_group(0, 1, 0);
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -887,7 +888,7 @@ impl Renderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut slot = 0;
         let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, src: usize, dst: usize, step: u32, slot: &mut usize| {
-            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1)) as f32], backdrop: self.backdrop, cameras: [self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]] };
+            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2)) as f32], backdrop: self.backdrop, cameras: [self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]] };
             self.queue.write_buffer(&self.post_params[*slot], 0, bytemuck::bytes_of(&params));
             let group = self.post_group(*slot, src, dst);
             *slot += 1;

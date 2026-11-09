@@ -175,14 +175,17 @@ fn temporal(@builtin(global_invocation_id) g: vec3u) {
   let dims = vec2f(f32(Q.dims.x), f32(Q.dims.y));
   let ndc = (vec2f(f32(g.x), f32(g.y)) + 0.5) / dims * 2.0 - 1.0;
   let d = normalize(Q.cur_fwd.xyz + Q.cur_right.xyz * ndc.x * Q.cur_right.w - Q.cur_up.xyz * ndc.y * Q.cur_up.w);
-  let p = Q.cur_pos.xyz + d * geo.w;
+  let ortho=(u32(Q.k.w)&4u)!=0u;
+  var p = Q.cur_pos.xyz + d * geo.w;
+  if(ortho){p=Q.cur_pos.xyz+Q.cur_right.xyz*ndc.x*Q.cur_right.w-Q.cur_up.xyz*ndc.y*Q.cur_up.w+Q.cur_fwd.xyz*geo.w;}
   // Into the previous camera.
   let v = p - Q.prev_pos.xyz;
   let z = dot(v, Q.prev_fwd.xyz);
   var ok = z > 1e-4;
   var prev = vec2i(0);
   if (ok) {
-    let pn = vec2f(dot(v, Q.prev_right.xyz) / (z * Q.prev_right.w), -dot(v, Q.prev_up.xyz) / (z * Q.prev_up.w));
+    let scale=select(z,1.,ortho);
+    let pn = vec2f(dot(v, Q.prev_right.xyz) / (scale * Q.prev_right.w), -dot(v, Q.prev_up.xyz) / (scale * Q.prev_up.w));
     let px = (pn * 0.5 + 0.5) * dims;
     prev = vec2i(floor(px));
     ok = all(prev >= vec2i(0)) && all(prev < vec2i(i32(Q.dims.x), i32(Q.dims.y)));
@@ -190,7 +193,7 @@ fn temporal(@builtin(global_invocation_id) g: vec3u) {
   var out = vec4f(cur.xyz, 1.0);
   if (ok) {
     let h = hist_in[u32(prev.y) * Q.dims.x + u32(prev.x)];
-    let dist = length(v);
+    let dist = select(length(v),z,ortho);
     let same = h.g.w >= 0.0 && abs(h.g.w - dist) < 0.03 * dist + 1e-3 && h.g.z == geo.z && dot(oct_decode(h.g.xy), oct_decode(geo.xy)) > 0.9;
     if (same) {
       let n = min(h.c.w + 1.0, 16.0);
