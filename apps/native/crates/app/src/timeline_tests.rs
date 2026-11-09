@@ -73,8 +73,17 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
     let recorder = Rc::new(Recorder::default());
     let delegate = Rc::new(Recording(recorder.clone()));
     let (kernel, outline) = (rig.kernel.clone(), natives.outline.clone());
-    let surface =
-        cx.new(|cx| TimelineSurface::new(kernel, PROJECT.into(), tokens(), delegate, outline, cx));
+    let surface = cx.new(|cx| {
+        TimelineSurface::new(
+            kernel,
+            PROJECT.into(),
+            tokens(),
+            delegate,
+            outline,
+            Default::default(),
+            cx,
+        )
+    });
     natives
         .views
         .borrow_mut()
@@ -491,6 +500,49 @@ fn the_column_splitter_resizes_and_double_click_resets(cx: &mut TestAppContext) 
         .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
     s.idle(cx);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.layer_column()), column);
+}
+#[gpui::test]
+fn each_timeline_draws_its_own_editors_offline_media(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    let viewport = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport);
+    let offline = |surface: &Entity<TimelineSurface>, vcx: &VisualTestContext| {
+        let scene = surface.read_with(vcx, |t, _| t.scene().unwrap());
+        let frame = scene.prepare(viewport, &tokens()).unwrap();
+        frame
+            .ops
+            .iter()
+            .filter_map(|o| o.id.strip_prefix("clip-offline:").map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.set_offline_media(["source".to_owned()].into(), cx)
+    });
+    s.idle(cx);
+    assert_eq!(offline(&s.surface, &s.vcx), ["a", "b", "c"]);
+    // Another editor on the same project reads its media: its clips stay online.
+    let (kernel, outline) = (s.rig.kernel.clone(), Natives::default().outline);
+    let delegate = Rc::new(Recording(Rc::default()));
+    let other = cx.new(|cx| {
+        TimelineSurface::new(
+            kernel,
+            PROJECT.into(),
+            tokens(),
+            delegate,
+            outline,
+            Default::default(),
+            cx,
+        )
+    });
+    settle(cx, |cx| other.read_with(cx, |t, _| t.idle()));
+    assert!(offline(&other, &s.vcx).is_empty());
+    assert_eq!(offline(&s.surface, &s.vcx), ["a", "b", "c"]);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.set_offline_media(Default::default(), cx)
+    });
+    s.idle(cx);
+    assert!(offline(&s.surface, &s.vcx).is_empty());
 }
 #[gpui::test]
 fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppContext) {

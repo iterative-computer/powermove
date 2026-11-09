@@ -180,7 +180,7 @@ impl Controller {
             self.message = format!("Popout media: {error}");
         }
     }
-    fn retire_media(&mut self, ids: Option<BTreeSet<String>>) {
+    fn retire_media(&mut self, ids: Option<BTreeSet<String>>, cx: &mut Context<Self>) {
         match ids {
             None => self.media_base = Default::default(),
             Some(ids) if ids.is_empty() => return,
@@ -191,7 +191,7 @@ impl Controller {
                 }
             }
         }
-        self.decorate_media();
+        self.decorate_media(cx);
         self.publish_media_catalog();
     }
     pub(crate) fn refresh_media(&mut self, cx: &mut Context<Self>) {
@@ -205,7 +205,7 @@ impl Controller {
             return;
         }
         let plan = self.media_refresh.plan(Inputs::published(&published));
-        self.retire_media(plan.retire);
+        self.retire_media(plan.retire, cx);
         let Some(job) = plan.job else {
             return;
         };
@@ -225,7 +225,7 @@ impl Controller {
                     .finish(job, latest.as_deref().map(Inputs::published))
                 {
                     match result {
-                        Ok(resolution) => v.adopt_media(resolution),
+                        Ok(resolution) => v.adopt_media(resolution, cx),
                         Err(error) => v.message = format!("Media could not be resolved: {error}"),
                     }
                     v.update_builtins(cx);
@@ -236,14 +236,14 @@ impl Controller {
         })
         .detach();
     }
-    fn adopt_media(&mut self, resolution: crate::media::Resolution) {
+    fn adopt_media(&mut self, resolution: crate::media::Resolution, cx: &mut Context<Self>) {
         if !resolution.failed.is_empty() {
             self.message = crate::media::failure_note(resolution.failed.len());
         }
         self.media_base = resolution.catalog;
         self.media_resolved = true;
         let before = std::mem::take(&mut self.media);
-        self.decorate_media();
+        self.decorate_media(cx);
         self.identify_media();
         if self.media != before {
             self.publish_media_catalog();
@@ -257,38 +257,39 @@ impl Controller {
     }
     /// The catalog the viewer reads: the resolver's, with the open
     /// project's proxies, optimized media and Always Play Original.
-    pub(crate) fn decorate_media(&mut self) {
+    pub(crate) fn decorate_media(&mut self, cx: &mut Context<Self>) {
         let mut media = self.media_base.clone();
         if let Some(project) = self.session.as_ref().map(|s| s.project.clone()) {
             self.pro_media
                 .decorate(&project, &mut media, &self.project_assets());
         }
         self.media = media;
-        self.publish_offline_media();
+        self.publish_offline_media(cx);
     }
     /// The assets the viewer cannot read in its media mode, for the timeline's
     /// Media Offline clips (the same catalog the engine draws the card from).
-    pub(crate) fn publish_offline_media(&mut self) {
-        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
-            return;
-        };
-        let offline = if self.media_resolved {
-            let readable = self.media.viewer_paths(self.media_mode);
-            self.project_assets()
-                .into_iter()
-                .filter(|id| !readable.contains_key(id))
-                .collect()
-        } else {
-            Default::default()
-        };
-        self.offline_changed |= crate::timeline_surface::set_offline_media(&project, offline);
+    pub(crate) fn offline_media(&self) -> BTreeSet<String> {
+        if !self.media_resolved {
+            return BTreeSet::new();
+        }
+        let readable = self.media.viewer_paths(self.media_mode);
+        self.project_assets()
+            .into_iter()
+            .filter(|id| !readable.contains_key(id))
+            .collect()
+    }
+    pub(crate) fn publish_offline_media(&self, cx: &mut Context<Self>) {
+        if let Some(timeline) = self.builtins.timeline.clone() {
+            let offline = self.offline_media();
+            timeline.update(cx, |t, cx| t.set_offline_media(offline, cx));
+        }
     }
     /// The pro media worker moved: renditions change the catalog; every
     /// change redraws the Project panel's status and the tasks window.
     pub(crate) fn pro_media_changed(&mut self, renditions: bool, cx: &mut Context<Self>) {
         if renditions {
             let before = self.media.clone();
-            self.decorate_media();
+            self.decorate_media(cx);
             if self.media != before {
                 self.publish_media_catalog();
             }

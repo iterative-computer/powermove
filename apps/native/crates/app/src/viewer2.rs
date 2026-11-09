@@ -722,7 +722,7 @@ impl Controller {
     pub fn set_media_mode(&mut self, mode: MediaMode, cx: &mut Context<Self>) {
         self.media_mode = mode;
         self.apply_viewer_options();
-        self.publish_offline_media();
+        self.publish_offline_media(cx);
         self.update_builtins(cx);
         let label = MEDIA_MODES
             .iter()
