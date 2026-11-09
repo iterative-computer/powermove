@@ -96,7 +96,7 @@ impl GpuMaterial {
         let map = |v: f32| (-1. ..=255.).contains(&v) && v.fract() == 0.;
         if bytemuck::cast_slice::<_, f32>(std::slice::from_ref(self))
             .iter()
-            .any(|v| !v.is_finite())
+            .any(|v| !v.is_finite() || v.abs() > 1e8)
             || self.base[..3]
                 .iter()
                 .chain(self.emit[..3].iter())
@@ -150,7 +150,7 @@ impl GpuLight {
     pub fn validate(&self) -> Result<(), String> {
         if bytemuck::cast_slice::<_, f32>(std::slice::from_ref(self))
             .iter()
-            .any(|v| !v.is_finite())
+            .any(|v| !v.is_finite() || v.abs() > 1e8)
             || !color(v3(self.radiance[0], self.radiance[1], self.radiance[2]))
         {
             return Err("invalid analytic light data".into());
@@ -373,6 +373,17 @@ mod tests {
             GpuLight::sun(Vec3::Y, 0.01, Vec3::splat(1.))
                 .validate()
                 .is_ok()
+        );
+        let mut huge = original;
+        huge.emit[3] = f32::MAX;
+        assert!(
+            huge.validate().is_err(),
+            "finite subsurface overflow must fail"
+        );
+        let huge = GpuLight::sphere(Vec3::splat(f32::MAX), 1., Vec3::splat(1.));
+        assert!(
+            huge.validate().is_err(),
+            "finite light coordinate overflow must fail"
         );
     }
 }
