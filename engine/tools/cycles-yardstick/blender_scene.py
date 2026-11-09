@@ -56,6 +56,11 @@ def build(out, samples):
     scene.cycles.transmission_bounces = 8
     scene.cycles.volume_bounces = 8
     scene.cycles.transparent_max_bounces = 8
+    # Factory startup enables Filter Glossy=1. It changes indirect roughness,
+    # especially caustics; an offline transport yardstick must be explicit.
+    scene.cycles.blur_glossy = 0
+    scene.cycles.caustics_reflective = True
+    scene.cycles.caustics_refractive = True
     scene.cycles.sample_clamp_direct = 0
     scene.cycles.sample_clamp_indirect = 0
     scene.render.threads_mode = 'FIXED'
@@ -69,6 +74,8 @@ def build(out, samples):
     scene.view_settings.exposure = 0
     scene.view_settings.gamma = 1
     warnings = []
+    if meta['scene'] == 'caustics':
+        warnings.append('Caustics use ordinary unfiltered paths with mesh emitters; MNEE is not configured. Use the physical-floor Mitsuba check for focused energy/shape.')
     screen = bpy.data.images.load(str(out / 'screen.png'))
     materials = []
     dispersive = []
@@ -429,6 +436,10 @@ def build(out, samples):
     np.save(out / 'cycles.npy', rgba)
     result = dict(blender=bpy.app.version_string, device=[d.name for d in devices], samples=samples, channel_renders=3 if dispersive else 1,
                   seconds=time.perf_counter()-start, warnings=warnings,
+                  filter_glossy=scene.cycles.blur_glossy,
+                  reflective_caustics=scene.cycles.caustics_reflective,
+                  refractive_caustics=scene.cycles.caustics_refractive,
+                  mnee_configured=False,
                   sky_reference='Studio-baked map; tests transport, not independent sky accuracy')
     (out / 'cycles-meta.json').write_text(json.dumps(result, indent=2))
     print('YARDSTICK_RENDER', json.dumps(result))

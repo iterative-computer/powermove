@@ -87,6 +87,31 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(np.all((normalized>=0)&(normalized<=1)))
         self.assertTrue(np.all((average>=0)&(average<1)))
 
+    def test_reused_reference_can_be_reused_again_and_rejects_stale_mapping(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from run import exporter_script,reuse_reference
+        with tempfile.TemporaryDirectory() as directory:
+            source,first,second = [Path(directory)/name for name in ['source','first','second']]
+            for folder in [source,first,second]:
+                folder.mkdir()
+                (folder/'scene.json').write_text('{}')
+                (folder/'manifest.json').write_text(json.dumps({'size':[2,1]}))
+            (source/'render_cycles.py').write_text(exporter_script())
+            for name in ['cycles.exr','cycles.npy','cycles-meta.json']:
+                (source/name).write_bytes(b'test-only reference fixture')
+            reuse_reference(source,first)
+            reuse_reference(first,second)
+            self.assertEqual((second/'render_cycles.py').read_text(),exporter_script())
+            self.assertEqual((second/'cycles.npy').read_bytes(),(source/'cycles.npy').read_bytes())
+            (first/'render_cycles.py').write_text('# stale material mapping')
+            with self.assertRaisesRegex(ValueError,'exporter'):
+                reuse_reference(first,second)
+            (first/'render_cycles.py').unlink()
+            with self.assertRaisesRegex(ValueError,'replay proof'):
+                reuse_reference(first,second)
+
     def test_absent_blender_skips_without_building(self):
         import run
         with patch('sys.argv',['run.py']), patch.object(run,'blender_path',return_value=None), patch('subprocess.run') as child:

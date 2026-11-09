@@ -38,8 +38,11 @@ material; unsupported features are not hidden from it.
   layering and spectral/Fresnel approximations remain labeled limitations.
   These inferred optical constants are not measured material data.
 - **Sheen and subsurface remain different models.** Energy-layered Charlie sheen and
-  Studio's simple isotropic subsurface walk are not equivalent to Principled's
-  layered microfiber and calibrated BSSRDF. Their regions remain scored.
+  Studio's conservative isotropic subsurface walk are not equivalent to Principled's
+  layered microfiber and calibrated BSSRDF. The current walk applies base tint
+  once at the boundary and does not model path-length-dependent absorption.
+  That is a remaining Studio model gap, not a solvable input conversion; its
+  region remains scored.
 - **Droplets remain unmapped procedural normals.** Their error is labeled.
 
 The replay script embeds the small pure conversions in `mapping.py`, so it can
@@ -101,7 +104,8 @@ intentionally; saved scene parameters and the GPU upload layout are unchanged.
 Analytic absorption tests verify the shared shadow boundary and a local volume
 outside the global radius. The former per-segment implementation was 31% too
 dark in the isolated test. In the room corpus the raw luminance ratio improved
-from .886 to .970, removing most of the exposure discrepancy; stochastic
+from .873 to .956 against the same unfiltered reference, removing most of
+the exposure discrepancy; stochastic
 indirect/volume noise and the diffuse model remain visible.
 
 Narrow coats above rough bases also receive more continuation samples. Only
@@ -141,3 +145,21 @@ directory. The runner rejects destinations inside the repository.
 `studio-reference` also exports `studio-scene.json`, the complete shared scene
 contract, alongside its original Mitsuba description. This lets an older
 `studio-yardstick --input` replay exactly the same physical-floor geometry.
+
+## Cycles caustic settings
+
+The exporter explicitly enables reflective/refractive caustics and sets Filter
+Glossy to zero. Blender factory startup uses Filter Glossy=1, which changes
+indirect roughness; the original yardstick did not override that default.
+`cycles-meta.json` now records these settings. Caustics still use ordinary paths
+under emissive mesh panels. This harness does not configure MNEE, and its
+finite-sample catcher image is a poor isolated caustic reference. Use the
+physical-floor Mitsuba comparison and analytic photon sheet test for focused
+energy and footprint. A 65,536-sample Mitsuba check still finds residual finite
+photon-footprint differences; matching the foreground color score alone does
+not close that gap.
+
+Reference reuse retains the verified replay script along with the float images.
+A result produced by reference reuse can itself be reused safely. Missing or
+stale replay proof fails with a request to rerender Cycles; tests cover chained
+reuse and stale/missing mapping rejection.

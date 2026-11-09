@@ -28,6 +28,21 @@ def exporter_script():
                           '# BEGIN MAPPING HELPERS\n'+(HERE/'mapping.py').read_text()+'\n# END MAPPING HELPERS')
 
 
+def reuse_reference(original, out):
+    files = ['cycles.exr','cycles.npy','cycles-meta.json','render_cycles.py']
+    if any(not (original/name).is_file() for name in files):
+        raise ValueError(f'{out.name}: reference image or replay proof missing; rerender Cycles')
+    previous = json.loads((original/'manifest.json').read_text())
+    if ((original/'scene.json').read_bytes() != (out/'scene.json').read_bytes()
+            or previous['size'] != json.loads((out/'manifest.json').read_text())['size']
+            or (original/'render_cycles.py').read_text() != exporter_script()):
+        raise ValueError(f'{out.name}: reference scene, exporter or size changed; rerender Cycles')
+    # Keep the verified replay proof as well as the images. A derived result
+    # must remain a valid reference source for the next engine-only rerun.
+    for filename in files:
+        shutil.copy2(original/filename,out/filename)
+
+
 def run_logged(command, log, timeout):
     with log.open('w') as stream:
         subprocess.run(['nice', '-n', '10', *map(str, command)], stdout=stream, stderr=subprocess.STDOUT,
@@ -275,13 +290,7 @@ def main():
                 run_logged([studio,'--scene',name,'--out',out,'--size',args.size,'--spp',args.samples],out/'studio.log',175)
             if args.reuse_cycles:
                 original = args.reuse_cycles/name
-                previous = json.loads((original/'manifest.json').read_text())
-                if ((original/'scene.json').read_bytes() != (out/'scene.json').read_bytes()
-                        or previous['size'] != json.loads((out/'manifest.json').read_text())['size']
-                        or (original/'render_cycles.py').read_text() != exporter_script()):
-                    raise ValueError(f'{name}: reference scene, exporter or size changed; rerender Cycles')
-                for filename in ['cycles.exr','cycles.npy','cycles-meta.json']:
-                    shutil.copy2(original/filename,out/filename)
+                reuse_reference(original,out)
             else:
                 script = out/'render_cycles.py'
                 # Concrete replay script alongside each exported scene, with no .blend file.
