@@ -100,51 +100,67 @@ export function bakeSky(input: StudioSky, width = 128, height = 64): StudioEnvir
     ro: V = [0, earth + 2, 0],
     br: V = [5.8e-6, 13.5e-6, 33.1e-6],
     bm = 2e-6 * Math.max(1, s.turbidity);
-  const pixels: StudioVec3[] = [];
-  for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++) {
-      const theta = (pi * (y + 0.5)) / height,
-        phi = (tau * (x + 0.5)) / width,
-        d: V = [Math.sin(theta) * Math.sin(phi), Math.cos(theta), Math.sin(theta) * Math.cos(phi)];
-      if (d[1] < 0) {
-        pixels.push(vec(mul(tuple(s.ground_albedo), (0.06 + 0.24 * Math.max(0, sun[1])) * s.intensity)));
-        continue;
-      }
-      const ds = exit(ro, d) / 24,
-        mu = dot(d, sun),
-        pr = (3 * (1 + mu * mu)) / (16 * pi),
-        g = 0.76,
-        pm = (1 - g * g) / (4 * pi * (1 + g * g - 2 * g * mu) ** 1.5);
-      let odr = 0,
-        odm = 0,
-        out: V = [0, 0, 0];
-      for (let i = 0; i < 24; i++) {
-        const p = add(ro, mul(d, (i + 0.5) * ds)),
-          h = Math.max(0, Math.sqrt(dot(p, p)) - earth),
-          dr = Math.exp(-h / 8000),
-          dm = Math.exp(-h / 1200);
-        odr += dr * ds * 0.5;
-        odm += dm * ds * 0.5;
-        const eye = exp(mul(add(mul(br, odr), mul([1, 1, 1], bm * 1.1 * odm)), -1));
-        out = add(
-          out,
-          mul(
-            product(
-              product(eye, sunTransmittance(p, sun, s.turbidity)),
-              add(mul(br, dr * pr), mul([1, 1, 1], bm * dm * pm)),
-            ),
-            ds * 20,
+  const skyRadiance = (d: V): V => {
+    const ds = exit(ro, d) / 24,
+      mu = dot(d, sun),
+      pr = (3 * (1 + mu * mu)) / (16 * pi),
+      g = 0.76,
+      pm = (1 - g * g) / (4 * pi * (1 + g * g - 2 * g * mu) ** 1.5);
+    let odr = 0,
+      odm = 0,
+      out: V = [0, 0, 0];
+    for (let i = 0; i < 24; i++) {
+      const p = add(ro, mul(d, (i + 0.5) * ds)),
+        h = Math.max(0, Math.sqrt(dot(p, p)) - earth),
+        dr = Math.exp(-h / 8000),
+        dm = Math.exp(-h / 1200);
+      odr += dr * ds * 0.5;
+      odm += dm * ds * 0.5;
+      const eye = exp(mul(add(mul(br, odr), mul([1, 1, 1], bm * 1.1 * odm)), -1));
+      out = add(
+        out,
+        mul(
+          product(
+            product(eye, sunTransmittance(p, sun, s.turbidity)),
+            add(mul(br, dr * pr), mul([1, 1, 1], bm * dm * pm)),
           ),
-        );
-        odr += dr * ds * 0.5;
-        odm += dm * ds * 0.5;
-      }
-      const day = clamp((sun[1] + 0.12) / 0.25, 0, 1),
-        diffuse = mul([0.018, 0.035, 0.075], day * (1 + dot(tuple(s.ground_albedo), [1 / 3, 1 / 3, 1 / 3]))),
-        clear = add(add(out, diffuse), [0.0002, 0.00035, 0.0008]);
-      const cloud = ((0.15 + 0.6 * day) * (1 + 2 * d[1])) / 3;
-      pixels.push(vec(mul(add(mul(clear, 1 - s.overcast), mul([1, 1, 1], cloud * s.overcast)), s.intensity)));
+          ds * 20,
+        ),
+      );
+      odr += dr * ds * 0.5;
+      odm += dm * ds * 0.5;
     }
+    const day = clamp((sun[1] + 0.12) / 0.25, 0, 1),
+      diffuse = mul([0.018, 0.035, 0.075], day * (1 + dot(tuple(s.ground_albedo), [1 / 3, 1 / 3, 1 / 3]))),
+      clear = add(add(out, diffuse), [0.0002, 0.00035, 0.0008]);
+    const cloud = ((0.15 + 0.6 * day) * (1 + 2 * d[1])) / 3;
+    return mul(add(mul(clear, 1 - s.overcast), mul([1, 1, 1], cloud * s.overcast)), s.intensity);
+  };
+  // Cosine-weighted hemisphere mean = sky irradiance / pi; the solar disc
+  // is a separate light in both hosts and must also illuminate the ground.
+  let diffuse: V = [0, 0, 0];
+  for (let i = 0; i < 8; i++) {
+    const y = Math.sqrt((i + 0.5) / 8), r = Math.sqrt(1 - y * y);
+    for (let j = 0; j < 16; j++) {
+      const a = tau * (j + 0.5) / 16;
+      diffuse = add(diffuse, mul(skyRadiance([r * Math.sin(a), y, r * Math.cos(a)]), 1 / 128));
+    }
+  }
+  const solar = worldSun({ sky: s });
+  if (solar.length) diffuse = add(diffuse, mul([solar[12]!, solar[13]!, solar[14]!], Math.sin(s.sun_radius * pi / 180) ** 2 * Math.max(0, sun[1])));
+  const ground = product(tuple(s.ground_albedo), diffuse);
+  const pixels: StudioVec3[] = [];
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const theta = pi * (y + 0.5) / height, phi = tau * (x + 0.5) / width;
+    const d: V = [Math.sin(theta) * Math.sin(phi), Math.cos(theta), Math.sin(theta) * Math.cos(phi)];
+    if (d[1] >= 0) { pixels.push(vec(skyRadiance(d))); continue; }
+    // Same aerial-perspective closure as environment.rs: tangent sky haze,
+    // with increasing optical distance toward a continuous soft horizon.
+    const horizon = skyRadiance([Math.sin(phi), 0, Math.cos(phi)]);
+    const distance = 200 / Math.max(1e-6, -d[1]);
+    const tr = exp(mul([-0.00012, -0.00018, -0.0003], distance * Math.max(1, s.turbidity) / 2));
+    pixels.push(vec(add(product(ground, tr), product(horizon, add([1, 1, 1], mul(tr, -1))))));
+  }
   return { width, height, pixels, visible: s.visible };
 }
 export function worldSun(world: StudioWorld): number[] {

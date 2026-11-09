@@ -11,7 +11,7 @@ export const worldSchema = z.object({
   preset:z.enum(['clear-noon','golden-hour','overcast','blue-hour','night']).default('clear-noon'),
   source:environmentSourceSchema.nullable().default(null),
   p:props({intensity:[n(0,10000),1],rotation:[n(-360000,360000),0],visible:[z.boolean(),true],metersPerUnit:[n(.000001,1000),.1],
-    elevation:[n(-90,90),45],azimuth:[n(-360000,360000),0],haze:[n(1,10),2],sunIntensity:[n(0,10000),1],sunRadius:[n(.05,10),.266],overcast:[n(0,1),0],
+    elevation:[n(-90,90),45],azimuth:[n(-360000,360000),0],haze:[n(1,10),2],sunIntensity:[n(0,10000),1],sunRadius:[n(.05,10),.266],overcast:[n(0,1),0],groundColor:[c,'#7C7C7C'],
     fogDensity:[n(0,100),0],fogColor:[c,'#E6E6E6'],fogAnisotropy:[n(-.95,.95),0],fogBaseHeight:[n(),0],fogHeightFalloff:[n(0,100),0],fogDistance:[n(.001,100000),10000],
     adaptive:[z.boolean(),false],minSamples:[n(1,4096),64],relativeError:[n(.00001,1),.025],absoluteError:[n(.000001,1),.001]}).prefault({})
 }).strict();
@@ -37,7 +37,7 @@ export const isEnvironmentNode=(node:any)=>!!(node?.world || node?.fog || node?.
 /** Timeline names, matching the inspector's rows (After Effects' wording for Material Options). */
 const GROUP_LABELS:Record<string,string>={world:'World',fog:'Fog Volume',terrain:'Terrain',scatter:'Scatter',materialOptions:'Material Options'};
 const CHANNEL_LABELS:Record<string,Record<string,string>>={
-  world:{intensity:'Intensity',rotation:'Rotation',visible:'Visible to Camera',metersPerUnit:'Meters per Unit',elevation:'Sun Height',azimuth:'Sun Direction',haze:'Haze',sunIntensity:'Sun Strength',sunRadius:'Sun Size',overcast:'Clouds',
+  world:{groundColor:'Ground color',intensity:'Intensity',rotation:'Rotation',visible:'Visible to Camera',metersPerUnit:'Meters per Unit',elevation:'Sun Height',azimuth:'Sun Direction',haze:'Haze',sunIntensity:'Sun Strength',sunRadius:'Sun Size',overcast:'Clouds',
     fogDensity:'Fog',fogColor:'Fog Color',fogAnisotropy:'Fog Forward Glow',fogBaseHeight:'Fog Base',fogHeightFalloff:'Fog Falloff',fogDistance:'Fog Distance',adaptive:'Adaptive Sampling',minSamples:'Minimum Samples',relativeError:'Relative Error',absoluteError:'Absolute Error'},
   fog:{shape:'Shape',width:'Width',height:'Height',depth:'Depth',density:'Density',color:'Color',anisotropy:'Forward Glow'},
   terrain:{width:'Width',depth:'Depth',resolution:'Resolution',amplitude:'Height',frequency:'Feature Size',octaves:'Detail',seed:'Variation',ridged:'Ridges'},

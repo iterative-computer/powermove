@@ -142,3 +142,9 @@ describe('environment documents and guarded agent edits',()=>{
     expect(editScene(PM,{operation:'set_material_options',target:'card',patch:{typo:true}}).ok).toBe(false);
   });
 });
+
+it('carries the World ground color as linear render albedo',()=>{
+  const world=worldForNode(worldSchema.parse({p:{groundColor:'#CC3311'}}),null);
+  const expected=new THREE.Color('#CC3311');
+  expect(world.sky!.ground_albedo).toEqual({x:expected.r,y:expected.g,z:expected.b});
+});

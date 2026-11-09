@@ -40,7 +40,8 @@ export const WORLD_SUN_FIELDS: FieldSpec[] = [
   { key: 'azimuth', label: 'Sun direction', kind: 'num', step: 1, unit: '°' },
   { key: 'sunIntensity', label: 'Sun strength', kind: 'num', step: 0.05, min: 0, max: 10 },
   { key: 'haze', label: 'Haze', kind: 'num', step: 0.05, min: 1, max: 10 },
-  { key: 'overcast', label: 'Clouds', kind: 'num', step: 0.01, min: 0, max: 1 }
+  { key: 'overcast', label: 'Clouds', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'groundColor', label: 'Ground color', kind: 'color' }
 ];
 export const WORLD_FOG_FIELDS: FieldSpec[] = [
   { key: 'fogDensity', label: 'Fog', kind: 'num', step: 0.001, min: 0, max: 0.2 },

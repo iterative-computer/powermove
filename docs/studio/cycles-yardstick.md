@@ -154,6 +154,13 @@ between a uniform solid-angle cone and Cycles' disc remains a sampling detail.
 
 HDRI uses the exact linear pixels, intensity and rotation. Generated sky uses
 Studio's actual 128×64 transport map, plus its separately calculated sun.
+The lower sky hemisphere is a matte ground background: World ground albedo
+times cosine-integrated sky irradiance plus the separate sun irradiance, divided
+by π. Native and WebGPU use the same quadrature. An approximate 200 m ground
+view distance (increasing toward the horizon) blends it into tangent-sky haze
+with wavelength-dependent extinction. This is an aerial-perspective closure,
+not terrain geometry or independently validated atmospheric transport. Sky
+preset thumbnails use the same bake.
 The Y-up/longitude conversion is explicit. Legacy studio dome gradients are
 baked at 256×128, including below-horizon darkening. This validates sky-lit
 transport, **not** independent sky-model realism against Cycles' Nishita sky.

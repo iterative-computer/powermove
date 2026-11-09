@@ -99,11 +99,44 @@ impl Sky {
     /// spherical atmosphere. A bounded diffuse closure approximates higher orders;
     /// it is not the full Bruneton multiple-scattering algorithm.
     pub fn radiance(&self, d: Vec3) -> Vec3 {
-        if d.y < 0. {
-            return self.ground_albedo
-                * (0.06 + 0.24 * self.direction().y.max(0.))
-                * self.intensity;
+        if d.y >= 0. {
+            return self.sky_radiance(d);
         }
+        self.with_ground(d, self.ground_radiance())
+    }
+    // Cosine-weighted hemisphere quadrature: mean radiance is irradiance / pi.
+    // The sun is separate from the baked sky, just as it is in path transport.
+    fn ground_radiance(&self) -> Vec3 {
+        let mut diffuse = Vec3::ZERO;
+        for i in 0..8 {
+            let y = ((i as f32 + 0.5) / 8.).sqrt();
+            let r = (1. - y * y).sqrt();
+            for j in 0..16 {
+                let a = TAU * (j as f32 + 0.5) / 16.;
+                diffuse = diffuse + self.sky_radiance(v3(r * a.sin(), y, r * a.cos())) / 128.;
+            }
+        }
+        if let Some(sun) = self.sun() {
+            let radius = self.sun_radius.to_radians();
+            diffuse = diffuse
+                + v3(sun.radiance[0], sun.radiance[1], sun.radiance[2])
+                    * (radius.sin().powi(2) * self.direction().y.max(0.));
+        }
+        mul3(self.ground_albedo, diffuse)
+    }
+    fn with_ground(&self, d: Vec3, ground: Vec3) -> Vec3 {
+        if d.y >= 0. {
+            return self.sky_radiance(d);
+        }
+        // An infinite matte ground is a background, not geometry. Increasing
+        // optical distance toward the horizon gives aerial perspective; the
+        // tangent sky is the haze's in-scattered radiance and joins continuously.
+        let horizon = self.sky_radiance(v3(d.x, 0., d.z).normalize());
+        let distance = 200. / (-d.y).max(1e-6);
+        let tr = exp3(v3(-0.00012, -0.00018, -0.0003) * (distance * self.turbidity.max(1.) / 2.));
+        mul3(ground, tr) + mul3(horizon, Vec3::splat(1.) - tr)
+    }
+    fn sky_radiance(&self, d: Vec3) -> Vec3 {
         let ro = v3(0., EARTH + 2., 0.);
         let sun = self.direction();
         let distance = atmosphere_exit(ro, d);
@@ -144,16 +177,20 @@ impl Sky {
         (clear * (1. - self.overcast) + cloud * self.overcast) * self.intensity
     }
     pub fn bake(&self, width: u32, height: u32) -> EnvironmentMap {
+        let ground = self.ground_radiance();
         let pixels = (0..height)
             .flat_map(|y| {
                 (0..width).map(move |x| {
                     let theta = PI * (y as f32 + 0.5) / height as f32;
                     let phi = TAU * (x as f32 + 0.5) / width as f32;
-                    self.radiance(v3(
-                        theta.sin() * phi.sin(),
-                        theta.cos(),
-                        theta.sin() * phi.cos(),
-                    ))
+                    self.with_ground(
+                        v3(
+                            theta.sin() * phi.sin(),
+                            theta.cos(),
+                            theta.sin() * phi.cos(),
+                        ),
+                        ground,
+                    )
                 })
             })
             .collect();
@@ -555,6 +592,54 @@ mod tests {
         let s = Sky::default();
         let c = s.radiance(Vec3::Y);
         assert!(c.z > c.x, "Rayleigh sky must be blue: {c:?}");
+    }
+    #[test]
+    fn sky_ground_energy_horizon_and_portable_parity() {
+        let s = Sky::default();
+        let p = s.bake(8, 4).pixels[24];
+        // Same texel checked in environment.test.ts, allowing f32 atmosphere math.
+        assert!(
+            (p - v3(0.88669, 0.85869, 0.76560)).length() < 0.005,
+            "{p:?}"
+        );
+        let no_sun = Sky {
+            sun_intensity: 0.,
+            ..s
+        }
+        .bake(8, 4)
+        .pixels[24];
+        assert!(p.x > no_sun.x * 5.);
+        let cloud = Sky {
+            overcast: 1.,
+            sun_intensity: 0.,
+            ..s
+        }
+        .bake(8, 4)
+        .pixels[24];
+        assert!((cloud.x - 0.12032).abs() < 0.0001);
+        let colored = Sky {
+            ground_albedo: v3(0.6, 0.1, 0.02),
+            ..s
+        }
+        .bake(8, 4)
+        .pixels[24];
+        assert!(colored.x / colored.z > 10.);
+        let doubled = Sky { intensity: 2., ..s }.bake(8, 4).pixels[24];
+        assert!((doubled - p * 2.).length() < 1e-5);
+        let above = s.radiance(v3(1., 0.00001, 0.).normalize());
+        let below = s.radiance(v3(1., -0.00001, 0.).normalize());
+        assert!(
+            (above - below).length() < 0.005,
+            "horizon {above:?} {below:?}"
+        );
+        let night = Sky {
+            elevation: -20.,
+            sun_intensity: 0.,
+            ..s
+        }
+        .bake(8, 4)
+        .pixels[24];
+        assert!(night.x < p.x / 100.);
     }
     #[test]
     fn changing_sun_disc_size_keeps_integrated_power() {

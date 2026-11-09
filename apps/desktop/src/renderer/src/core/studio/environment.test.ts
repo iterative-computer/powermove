@@ -156,3 +156,23 @@ it('subdivides shared edges and displaces real geometry', () => {
   expect(mesh.positions.every((p) => p.y === 1)).toBe(true);
   expect(mesh.normals.every((n) => n.y === 1)).toBe(true);
 });
+
+it('lights sky ground with sun and sky and respects its linear albedo', () => {
+  const ground = (sky: any) => bakeSky(sky, 8, 4).pixels[24]!;
+  const noon = ground({}), noSun = ground({ sun_intensity: 0 });
+  expect(noon.x).toBeGreaterThan(noSun.x * 5);
+  const cloud = ground({ overcast: 1, sun_intensity: 0 });
+  // CIE overcast: L(y)=.25+.5y, so a .2 Lambert ground is ~.1167
+  // before the small aerial-perspective contribution at this direction.
+  expect(cloud.x).toBeCloseTo(0.12032, 4);
+  const red = ground({ ground_albedo: { x: 0.6, y: 0.1, z: 0.02 } });
+  expect(red.x / red.z).toBeGreaterThan(10);
+  // Shared native/WebGPU parity anchors; Rust checks the same map texel.
+  expect(noon.x).toBeCloseTo(0.88669, 4);
+  expect(noon.y).toBeCloseTo(0.85869, 4);
+  expect(noon.z).toBeCloseTo(0.76560, 4);
+  const double = ground({ intensity: 2 });
+  expect(double.x).toBeCloseTo(noon.x * 2, 6);
+  const night = ground({ elevation: -20, sun_intensity: 0 });
+  expect(night.x).toBeLessThan(noon.x / 100);
+});

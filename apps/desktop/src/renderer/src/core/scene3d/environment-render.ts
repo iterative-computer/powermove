@@ -32,7 +32,7 @@ export function environmentImage(source:any,id:string,assets:(id:string)=>any,co
 const linear=(v:number)=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4;
 export function worldForNode(node:any,image:ReturnType<typeof environmentImage>):StudioWorld{
   const p=channelValues(node.p),world:StudioWorld={};
-  if(node.mode==='sky')world.sky={elevation:p.elevation,azimuth:p.azimuth+p.rotation,turbidity:p.haze,intensity:p.intensity,sun_intensity:p.sunIntensity,sun_radius:p.sunRadius,overcast:p.overcast,visible:p.visible};
+  if(node.mode==='sky')world.sky={elevation:p.elevation,azimuth:p.azimuth+p.rotation,turbidity:p.haze,ground_albedo:rgb(p.groundColor ?? '#7C7C7C'),intensity:p.intensity,sun_intensity:p.sunIntensity,sun_radius:p.sunRadius,overcast:p.overcast,visible:p.visible};
   if(node.mode==='hdri' && image){
     let mapped=worldPixelCache.get(image.pixels);
     if(!mapped){

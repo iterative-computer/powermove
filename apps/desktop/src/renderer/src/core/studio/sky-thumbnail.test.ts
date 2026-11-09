@@ -19,3 +19,9 @@ describe('sky thumbnails', () => {
     for (let i = 3; i < px.length; i += 4) expect(px[i]).toBe(255);
   });
 });
+
+it('shows the same sunlit ground in the preset thumbnail', () => {
+  const px = skyThumbnailPixels({ elevation: 45, haze: 2, overcast: 0, sunIntensity: 1 }, 24, 24);
+  const ground = [...px.slice((22 * 24 + 12) * 4, (22 * 24 + 12) * 4 + 3)];
+  expect(Math.min(...ground)).toBeGreaterThan(100);
+});

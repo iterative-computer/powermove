@@ -251,3 +251,47 @@ test('With the World selected, dragging the sky in the viewer moves the sun', as
   await page.evaluate(() => (window as any).PM.hist.undo());
   expect(await read()).toEqual({ azimuth: 0, elevation: 45 });
 });
+
+test('a World alone has sunlit ground in native and portable Studio', async ({ session }) => {
+  test.setTimeout(120_000);
+  await session.openEditor();
+  await session.page.evaluate(() => {
+    const PM = (window as any).PM, api = PM.Kernel.api('world-ground-e2e');
+    PM.pause(); PM.AutomaticPreview?.cancel();
+    api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 2, z: 5, targetX: 0, targetY: 2, targetZ: 0 } } });
+    api.scene3d.edit({ operation: 'set_world', world: { mode: 'sky', preset: 'clear-noon' } });
+    PM.invalidate();
+  });
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
+  const result = await session.page.evaluate(async () => {
+    const PM = (window as any).PM, api = PM.Kernel.api('world-ground-e2e');
+    const W = 320, H = 200;
+    const sample = (p: ArrayLike<number>, y: number) => Array.from({ length: 3 }, (_, c) => p[(y * W + W / 2) * 4 + c]!);
+    PM.agentFrameCapture = true;
+    // Synchronous readback exercises WebGPU, prepared capture exercises the host.
+    const portable = PM.GL.renderToPixels(0, W, H, { transparent: false, mblur: false });
+    await PM.prepareFrame(0, { mblur: false, width: W, height: H });
+    let canvas = PM.renderFrameTo(0, W, H, { mblur: false });
+    const native = canvas.getContext('2d').getImageData(0, 0, W, H).data;
+    const backend = PM.Studio.status().backend;
+    const image = canvas.toDataURL('image/png');
+    api.scene3d.edit({ operation: 'set_world', world: { p: { groundColor: '#CC3311' } } });
+    await PM.prepareFrame(0, { mblur: false, width: W, height: H });
+    canvas = PM.renderFrameTo(0, W, H, { mblur: false });
+    const colored = canvas.getContext('2d').getImageData(0, 0, W, H).data;
+    PM.agentFrameCapture = false;
+    // GL readback is bottom-up; the prepared canvas is top-down.
+    return { portable: sample(portable, 10), native: sample(native, H - 11), colored: sample(colored, H - 11), backend, image };
+  });
+  expect(Math.min(...result.portable)).toBeGreaterThan(100);
+  for (let c = 0; c < 3; c++) expect(Math.abs(result.portable[c]! - result.native[c]!)).toBeLessThan(8);
+  if (process.platform === 'darwin') expect(result.backend).toBe('native-studio');
+  expect(result.colored[0]!).toBeGreaterThan(result.colored[1]! + 40);
+  const worldShots = process.env.PM_WORLD_SHOT_DIR ?? shots;
+  if (worldShots) {
+    await mkdir(worldShots, { recursive: true });
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(`${worldShots}/world-only-native.png`, Buffer.from(result.image.split(',')[1]!, 'base64'));
+  }
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

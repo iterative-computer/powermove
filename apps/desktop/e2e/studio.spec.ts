@@ -109,18 +109,25 @@ test('glass focuses light onto the studio floor (caustics)', async ({ session })
     const off = frame();
     PM.Studio.setCaustics(true);
     PM.agentFrameCapture = false;
-    let brighter = 0, darker = 0;
+    let brighter = 0, darker = 0, focusedExcess = 0;
     for (let i = 0; i < on.length; i += 4) {
       const a = on[i]! + on[i + 1]! + on[i + 2]!, b = off[i]! + off[i + 1]! + off[i + 2]!;
-      if (a > b + 45) brighter++;
+      if (a > b + 45) { brighter++; focusedExcess += a - b; }
       if (a < b - 45) darker++;
     }
-    return { brighter, darker };
+    return { brighter, darker, focusedExcess };
   });
   // A pool of focused light the plain trace never finds, inside a shadow that
   // is now truly dark: the light the glass bends no longer also passes
   // straight through it.
-  expect(result.brighter).toBeGreaterThan(40);
+  // The calibrated surface-area photon gather has a tighter footprint than
+  // the old stencil: 38 high-contrast pixels at 64 spp, formerly >40. Check
+  // a resolved pool and its excess as well as the complementary dark shadow;
+  // the Rust suite checks analytic energy, with the Mitsuba footprint benchmark
+  // recorded in docs/studio/cycles-yardstick.md.
+  console.log(`caustics ${JSON.stringify(result)}`);
+  expect(result.brighter).toBeGreaterThan(25);
+  expect(result.focusedExcess).toBeGreaterThan(2000);
   expect(result.darker).toBeGreaterThan(40);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
