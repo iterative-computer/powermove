@@ -221,3 +221,33 @@ test('3D artwork layers have After Effects Material Options', async ({ session }
   await page.locator('[data-scene-channel="materialOptions.castsShadows"]').scrollIntoViewIfNeeded();
   await shot(page, '16-artwork-material-options');
 });
+
+test('With the World selected, dragging the sky in the viewer moves the sun', async ({ session }) => {
+  test.setTimeout(90_000);
+  await session.openEditor();
+  const page = session.page;
+  const world = await page.evaluate(() => {
+    const PM = (window as any).PM; PM.pause();
+    const api = PM.Kernel.api('sun-drag-e2e');
+    api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 1, z: 6, targetY: 1.5 } } });
+    const id = api.scene3d.edit({ operation: 'set_world', world: { mode: 'sky', preset: 'clear-noon', p: { azimuth: 0, elevation: 45 } } }).data.result.id;
+    PM.selectLayers([id]);
+    return id;
+  });
+  const box = await page.evaluate(() => { const r = document.querySelector('#composition-3d-controls')!.closest('.panel')!.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
+  const read = () => page.evaluate((id: string) => { const p = (window as any).PM.L(id).d.data.object.world.p; return { azimuth: p.azimuth.v, elevation: p.elevation.v }; }, world);
+  await page.mouse.move(box.x + box.w * 0.5, box.y + box.h * 0.3);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.w * 0.72, box.y + box.h * 0.38, { steps: 8 });
+  await page.mouse.up();
+  const after = await read();
+  // The camera looks down -Z (azimuth 180); right of centre turns toward +X (below 180).
+  expect(after.azimuth).toBeGreaterThan(90);
+  expect(after.azimuth).toBeLessThan(175);
+  expect(after.elevation).toBeGreaterThan(0);
+  expect(after.elevation).toBeLessThan(45);
+  expect(await page.evaluate(() => (window as any).PM.hist.label())).toBe('Move sun');
+  await shot(page, '17-sun-dragged-in-viewer');
+  await page.evaluate(() => (window as any).PM.hist.undo());
+  expect(await read()).toEqual({ azimuth: 0, elevation: 45 });
+});

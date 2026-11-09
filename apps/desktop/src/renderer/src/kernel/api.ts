@@ -380,6 +380,8 @@ export interface Scene3DAPI {
   lightViewerState(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerState|null;
   /** Convert pointer coordinates into native Position on a camera-facing plane. */
   lightPositionFromViewer(layerId:string,time:number,pointer:Point2D,rect:Scene3DViewerRect,view?:LightViewCamera):Point3D|null;
+  /** Sun direction and height (degrees) that place a World's sun under a viewer point, given as composition fractions. */
+  sunFromViewer(u:number,v:number,time?:number):{azimuth:number;elevation:number}|null;
   /** Projected spot cone rims, aim point and point-light range for viewer drawing. */
   lightViewerGuides(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerGuides|null;
   listMaterials(layerId:string):import('../core/scene3d/material-maps').SourceMaterialInfo[];
