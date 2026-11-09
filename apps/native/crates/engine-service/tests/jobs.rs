@@ -92,7 +92,7 @@ fn child_export_starts_reports_progress_and_completes() {
 fn child_export_cancel_does_not_publish_partial_output() {
     let dir = tempfile::tempdir().unwrap();
     let destination = dir.path().join("cancelled");
-    let mut child = ExportHandle::start(
+    let child = ExportHandle::start(
         Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
         request(destination.clone(), 600),
     )
@@ -104,7 +104,7 @@ fn child_export_cancel_does_not_publish_partial_output() {
         assert!(start.elapsed() < Duration::from_secs(30));
         std::thread::sleep(Duration::from_millis(5));
     }
-    child.cancel().unwrap();
+    child.cancel();
     let status = child.wait().unwrap();
     assert_eq!(status.state, JobState::Cancelled, "{status:?}");
     assert!(!destination.exists());
@@ -135,16 +135,23 @@ fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
     activity.set(false);
     assert_eq!(child.wait().unwrap().state, JobState::Done);
     activity.set(true);
+    let session = JobSession::new(request(dir.path().join("cancel-deferred"), 1));
+    let cancellation = session.cancellation();
     child = ExportHandle::start_scheduled(
         Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
-        request(dir.path().join("cancel-deferred"), 1),
+        session,
         activity,
     )
     .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    child.cancel().unwrap();
+    let start = Instant::now();
+    while child.gpu_requests() == 0 {
+        assert!(start.elapsed() < Duration::from_secs(30), "no GPU request");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    child.cancel();
     assert_eq!(child.wait().unwrap().state, JobState::Cancelled);
     assert!(!dir.path().join("cancel-deferred").exists());
+    assert!(cancellation.load(std::sync::atomic::Ordering::Acquire));
 }
 
 /// A quiet viewer lets an export submit whole frames (one GPU submission per
@@ -398,12 +405,19 @@ fn an_offline_clip_refuses_by_name_unless_the_export_goes_without_it() {
     .wait()
     .unwrap();
     assert_eq!(refused.state, JobState::Failed, "{refused:?}");
-    let message = refused.error.unwrap().message;
-    assert!(message.contains("1 clip is offline: gone.png"), "{message}");
+    let error = refused.error.unwrap();
+    assert_eq!(
+        error.message,
+        "1 clip is offline: gone.png. Relink the originals, or export without them."
+    );
     // The Export sheet offers Export Without Them on exactly this refusal.
-    assert!(
-        pm_engine_service::jobs::is_offline_refusal(&message),
-        "{message}"
+    use pm_protocol::error::{ErrorCode, ErrorDetail};
+    assert_eq!(error.code, ErrorCode::MediaOffline);
+    assert_eq!(
+        error.detail,
+        Some(ErrorDetail::Offline {
+            assets: vec!["Aimage".into()]
+        })
     );
     let mut without = request_for(&project, dir.path().join("without"), 1);
     without.without_offline = true;
@@ -433,33 +447,39 @@ fn with_offline_audio() -> String {
         serde_json::json!({"Avoice":{"name":"voice.wav","type":"audio","format":"wav","dur":3}});
     project.to_string()
 }
+/// A clip the export would hear stops it by name on the first attempt and on
+/// Export Without Them alike: going without it can't succeed, so it is never
+/// offered as a MediaOffline refusal.
 #[test]
 fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
-    let dir = tempfile::tempdir().unwrap();
     let project = with_offline_audio();
-    let mut request = request_for(&project, dir.path().join("talk.mov"), 1);
-    request.without_offline = true;
-    let JobSpec::Export { settings, .. } = &mut request.spec else {
-        unreachable!()
-    };
-    settings.format = ExportFormat::ProRes {
-        profile: pm_protocol::priority::ProResProfile::Hq,
-    };
-    settings.color = OutputColor::Rec709QuickTime {
-        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
-    };
-    settings.alpha = AlphaOutput::None;
-    settings.audio = true;
-    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
-        .unwrap()
-        .wait()
-        .unwrap();
-    assert_eq!(status.state, JobState::Failed, "{status:?}");
-    let message = status.error.unwrap().message;
-    assert!(
-        message.contains("Audio media is missing for “Voiceover”"),
-        "{message}"
-    );
+    for without_offline in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request_for(&project, dir.path().join("talk.mov"), 1);
+        request.without_offline = without_offline;
+        let JobSpec::Export { settings, .. } = &mut request.spec else {
+            unreachable!()
+        };
+        settings.format = ExportFormat::ProRes {
+            profile: pm_protocol::priority::ProResProfile::Hq,
+        };
+        settings.color = OutputColor::Rec709QuickTime {
+            candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+        };
+        settings.alpha = AlphaOutput::None;
+        settings.audio = true;
+        let status = finish(request);
+        assert_eq!(status.state, JobState::Failed, "{status:?}");
+        let error = status.error.unwrap();
+        assert!(
+            error
+                .message
+                .contains("Audio media is missing for “Voiceover”"),
+            "{}",
+            error.message
+        );
+        assert_eq!(error.code, pm_protocol::error::ErrorCode::ExportFailed);
+    }
 }
 /// The fixture's first layer with an effect no installed extension provides.
 fn with_uninstalled_effect(on: bool) -> String {
@@ -521,35 +541,163 @@ fn a_preview_still_draws_offline_media_and_an_export_refuses_it() {
     assert_eq!(std::fs::read_dir(preview).unwrap().count(), 30);
 }
 
-/// A delivery's override answerer starts (pinning the extensions' code and
-/// storage) when the export starts; a one-frame look does not.
+/// The fixture with one text layer: a layer a `raster` override draws.
+fn text_request(destination: std::path::PathBuf) -> ExportRequest {
+    let mut request = request(destination, 1);
+    let mut doc: serde_json::Value = serde_json::from_str(&request.document).unwrap();
+    let comp = doc["compId"].as_str().unwrap().to_owned();
+    doc["comps"][&comp]["layers"] = serde_json::json!([{
+        "id":"title","type":"text","name":"Title","from":0,"dur":1,"on":true,
+        "d":{"text":"Overridden","font":"Helvetica","size":32,"color":"#FFFFFF"},
+        "p":{"position.x":{"v":160,"kf":[],"expr":null},"position.y":{"v":90,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[],"expr":null},"scale.y":{"v":100,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null}},"fx":[],"masks":[]
+    }]);
+    request.document = doc.to_string();
+    request
+}
+/// A job's overrides are answered by what its session was given: every
+/// frame asks, and the answers draw.
 #[test]
-fn deliveries_begin_their_override_answerer_at_start_and_looks_do_not() {
-    use std::sync::{Arc, Mutex};
-    let session = 987_654;
-    let begun: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
-    let seen = begun.clone();
-    set_compat_answerer(
-        session,
-        Some((
-            Arc::new(|| Some(1)),
-            Arc::new(|_, _| Ok(vec![])),
-            Arc::new(move |pin: &CompatPin| {
-                seen.lock().unwrap().push((pin.job.clone(), pin.look));
-            }),
-        )),
-    );
+fn an_export_draws_its_overrides_from_its_session() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     let dir = tempfile::tempdir().unwrap();
-    for (job, look) in [("delivery", false), ("look", true)] {
-        let mut request = request(dir.path().join(format!("{job}.mp4")), 1);
-        request.job = job.into();
-        request.look = look;
-        if let JobSpec::Export { session: s, .. } = &mut request.spec {
-            *s = SessionId::new(session).unwrap();
+    let destination = dir.path().join("overridden");
+    let mut session = JobSession::new(text_request(destination.clone()));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    session.answer_overrides(Box::new(move |needs| {
+        counted.fetch_add(needs.len(), Ordering::Relaxed);
+        Ok(needs.iter().map(|_| CompatReply::Hidden).collect())
+    }));
+    let cancellation = session.cancellation();
+    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), session)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.state, JobState::Done, "{status:?}");
+    assert_eq!(asked.load(Ordering::Relaxed), 30, "one answer per frame");
+    assert!(
+        cancellation.load(Ordering::Acquire),
+        "the finished job's pin is let go"
+    );
+}
+/// Cancelled while an extension is drawing a layer for it: the export
+/// stops, nothing is published, and its pin is let go.
+#[test]
+fn cancelling_while_an_extension_draws_stops_the_export_and_lets_go_of_its_pin() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("cancelled.png");
+    let mut session = JobSession::new(text_request(destination.clone()));
+    let cancellation = session.cancellation();
+    let pinned = cancellation.clone();
+    let (asking, asked) = std::sync::mpsc::channel();
+    session.answer_overrides(Box::new(move |_| {
+        let _ = asking.send(());
+        while !pinned.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(5));
         }
-        // No such executable: the job never runs, but it has started.
-        let _ = ExportHandle::start(Path::new("/nonexistent/pm-engine-job"), request);
+        Err("cancelled".into())
+    }));
+    let child =
+        ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), session).unwrap();
+    asked
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the export asked for its override layer");
+    child.cancel();
+    let status = child.wait().unwrap();
+    assert_eq!(status.state, JobState::Cancelled, "{status:?}");
+    assert!(cancellation.load(Ordering::Acquire));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+/// The window answering an export's overrides closes (or reloads its
+/// extensions) mid-export: the export fails with the reason and publishes
+/// nothing.
+#[test]
+fn an_export_whose_extensions_stop_fails_with_the_reason() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = JobSession::new(text_request(dir.path().join("closed")));
+    let frames = AtomicUsize::new(0);
+    session.answer_overrides(Box::new(move |needs| {
+        if frames.fetch_add(1, Ordering::Relaxed) < 3 {
+            return Ok(needs.iter().map(|_| CompatReply::Native).collect());
+        }
+        Err("The project's extensions stopped during the export".into())
+    }));
+    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), session)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    assert_eq!(
+        message,
+        "An extension could not draw a layer: The project's extensions stopped during the export"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+/// A job that never starts, or whose child ends without saying how the
+/// export went, lets go of what its session pinned.
+#[test]
+fn a_job_that_fails_to_start_or_loses_its_child_lets_go_of_its_pin() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let session = JobSession::new(request(dir.path().join("never"), 1));
+    let unstarted = session.cancellation();
+    assert!(ExportHandle::start(Path::new("/nonexistent/pm-engine-job"), session).is_err());
+    assert!(unstarted.load(Ordering::Acquire));
+    let session = JobSession::new(request(dir.path().join("lost"), 1));
+    let lost = session.cancellation();
+    let child = ExportHandle::start(&fake_child(dir.path(), "exit 0"), session).unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    assert!(lost.load(Ordering::Acquire));
+}
+/// A stand-in child: reads its request, then runs `script`.
+fn fake_child(dir: &Path, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("child.sh");
+    std::fs::write(&path, format!("#!/bin/sh\nread request\n{script}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+/// A child line the parent can't use (unknown, malformed, or about another
+/// job) fails the export now, with the reason, and the child is stopped:
+/// nothing waits for a timeout.
+#[test]
+fn a_child_message_the_parent_cannot_use_fails_the_export_at_once() {
+    let mut another = serde_json::to_value(pm_protocol::priority::JobStatus {
+        job: "another".into(),
+        class: pm_protocol::priority::PriorityClass::UserJob,
+        state: JobState::Running,
+        progress: 0.5,
+        path: None,
+        error: None,
+        preview: None,
+    })
+    .unwrap();
+    another["type"] = "status".into();
+    let another = another.to_string();
+    for (line, reason) in [
+        (r#"{"compat":{"id":1,"needs":[]}}"#, "invalid message"),
+        (r#"{"type":"compat","id":1}"#, "invalid message"),
+        ("not json", "invalid message"),
+        (another.as_str(), "another job"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let child = ExportHandle::start(
+            &fake_child(dir.path(), &format!("echo '{line}'\nexec sleep 60")),
+            request(dir.path().join("out"), 1),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let status = child.wait().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "{line}");
+        assert_eq!(status.state, JobState::Failed, "{line}: {status:?}");
+        let message = status.error.unwrap().message;
+        assert!(message.contains(reason), "{line}: {message}");
     }
-    set_compat_answerer(session, None);
-    assert_eq!(*begun.lock().unwrap(), vec![("delivery".to_owned(), false)]);
 }

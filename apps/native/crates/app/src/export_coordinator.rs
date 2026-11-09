@@ -225,7 +225,8 @@ impl Controller {
                 destination,
                 without_offline,
             };
-            let current = this
+            // The window's extensions as the job starts answer its overrides.
+            let (current, overrides) = this
                 .update(cx, |v, _| {
                     let current = v
                         .builtins
@@ -235,9 +236,9 @@ impl Controller {
                     if current {
                         v.builtins.export_retry = Some(frozen.clone());
                     }
-                    current
+                    (current, v.extensions.overrides.as_ref().map(|o| o.jobs()))
                 })
-                .unwrap_or(false);
+                .unwrap_or((false, None));
             if !current {
                 job.cancel.store(true, Ordering::Release);
             }
@@ -247,7 +248,10 @@ impl Controller {
                 execute(
                     frozen,
                     worker_job,
-                    activity,
+                    EngineJob {
+                        activity,
+                        overrides,
+                    },
                     runtime.clone(),
                     executor,
                     tasks,
@@ -286,7 +290,7 @@ async fn observe(runtime: &pm_builtins::Builtins, run: Value) {
 async fn execute(
     frozen: Frozen,
     job: Job,
-    activity: pm_engine_service::jobs::Activity,
+    engine: EngineJob,
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
@@ -297,8 +301,8 @@ async fn execute(
         frozen.playhead,
     );
     let mut ticket = None;
-    let mut result = match planned {
-        Err(error) => Err(error),
+    let mut result: Result<String, Failure> = match planned {
+        Err(error) => Err(error.into()),
         Ok(planned) => {
             let title = frozen
                 .publication
@@ -329,7 +333,7 @@ async fn execute(
                     .and_then(|_| tasks.start_next().ok_or("Export task did not start".into()))
             };
             match queued {
-                Err(error) => Err(error),
+                Err(error) => Err(error.into()),
                 Ok(started) => {
                     ticket = Some(started);
                     cancellers()
@@ -339,7 +343,7 @@ async fn execute(
                     execute_inner(
                         &frozen,
                         &job,
-                        activity,
+                        engine,
                         &runtime,
                         &executor,
                         TaskAdmission {
@@ -355,50 +359,92 @@ async fn execute(
     };
     // Always release/reap on this worker before publishing a terminal task/run.
     let cleanup = job.handle.lock().unwrap().take();
-    if let Some(mut handle) = cleanup {
-        let cancelled = handle.cancel().map_err(|e| e.to_string());
-        let reaped = handle.wait().map_err(|e| e.to_string());
-        if let Err(error) = cancelled.and(reaped.map(|_| ())) {
-            result = Err(format!(
-                "{}; export cleanup failed: {error}",
-                result.err().unwrap_or_default()
-            ));
+    if let Some(handle) = cleanup {
+        handle.cancel();
+        if let Err(error) = handle.wait() {
+            let failed = result.err().map(|f| f.message).unwrap_or_default();
+            result = Err(format!("{failed}; export cleanup failed: {error}").into());
         }
     }
     if let Some(ticket) = ticket {
         cancellers().lock().unwrap().remove(&ticket.id.0);
         let settled = {
             let mut tasks = tasks.lock().unwrap();
-            if result.as_ref().is_err_and(|e| e == "cancelled") {
+            if result.as_ref().is_err_and(|e| e.message == "cancelled") {
                 tasks
                     .cancel(ticket.id)
                     .and_then(|_| tasks.settle_control(ticket))
             } else {
                 tasks.finish(
                     ticket,
-                    result.as_ref().map(|_| ()).map_err(|e| e.clone().into()),
+                    result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|e| e.message.clone().into()),
                 )
             }
         };
         if let Err(error) = settled {
-            result = Err(format!("Export task could not settle: {error:?}"));
+            result = Err(format!("Export task could not settle: {error:?}").into());
         }
     }
     match &result {
-        Err(error) if job.cancel.load(Ordering::Acquire) && error == "cancelled" => {
+        Err(error) if job.cancel.load(Ordering::Acquire) && error.message == "cancelled" => {
             observe(&runtime, json!({"phase":"cancelled"})).await
         }
         Err(error) => {
-            let offline = pm_engine_service::jobs::is_offline_refusal(error);
+            let offline = !error.offline.is_empty();
             observe(
                 &runtime,
-                json!({"phase":"failed","message":error,"offline":offline}),
+                json!({"phase":"failed","message":error.message,"offline":offline}),
             )
             .await
         }
         Ok(path) => observe(&runtime, json!({"phase":"done","path":path})).await,
     }
-    result.map(|_| ())
+    result.map(|_| ()).map_err(|f| f.message)
+}
+/// Why an export ended without a file: what the sheet says, and the offline
+/// media it refused to export without (the sheet then offers Export Without
+/// Them).
+struct Failure {
+    message: String,
+    offline: Vec<pm_protocol::common::AssetId>,
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            offline: vec![],
+        }
+    }
+}
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl From<pm_protocol::error::EngineError> for Failure {
+    fn from(error: pm_protocol::error::EngineError) -> Self {
+        use pm_protocol::error::{ErrorCode, ErrorDetail};
+        let offline = match error.detail {
+            Some(ErrorDetail::Offline { assets }) if error.code == ErrorCode::MediaOffline => {
+                assets
+            }
+            _ => vec![],
+        };
+        Self {
+            message: error.message,
+            offline,
+        }
+    }
+}
+/// What the window lends its export's job: the viewer's activity, which
+/// keeps precedence on the GPU, and its extensions, which answer the job's
+/// raster overrides.
+struct EngineJob {
+    activity: pm_engine_service::jobs::Activity,
+    overrides: Option<crate::raster_overrides::JobOverrides>,
 }
 struct TaskAdmission<'a> {
     tasks: &'a Arc<Mutex<BackgroundTasks>>,
@@ -408,12 +454,12 @@ struct TaskAdmission<'a> {
 async fn execute_inner(
     frozen: &Frozen,
     job: &Job,
-    activity: pm_engine_service::jobs::Activity,
+    engine: EngineJob,
     runtime: &pm_builtins::Builtins,
     executor: &gpui::BackgroundExecutor,
     task: TaskAdmission<'_>,
     planned: &pm_builtins::delivery::Plan,
-) -> Result<String, String> {
+) -> Result<String, Failure> {
     let TaskAdmission { tasks, ticket } = task;
     if job.cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -447,12 +493,15 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    let mut session = pm_engine_service::jobs::JobSession::new(request);
     // Its raster overrides answer from this publication, whatever is edited meanwhile.
-    request.frozen = Some(frozen.publication.clone());
+    if let Some(overrides) = engine.overrides {
+        overrides.pin(&mut session, &frozen.publication, false);
+    }
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
         &std::env::current_exe().map_err(|e| e.to_string())?,
-        request,
-        activity,
+        session,
+        engine.activity,
     )
     .map_err(|e| e.to_string())?;
     *job.handle.lock().unwrap() = Some(handle);
@@ -461,12 +510,12 @@ async fn execute_inner(
     loop {
         if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
             cancellation_sent = true;
-            let mut guard = job.handle.lock().unwrap();
-            guard
-                .as_mut()
+            job.handle
+                .lock()
+                .unwrap()
+                .as_ref()
                 .ok_or("Export worker lost")?
-                .cancel()
-                .map_err(|e| e.to_string())?;
+                .cancel();
         }
         let status = job
             .handle
@@ -491,12 +540,10 @@ async fn execute_inner(
                     .path
                     .ok_or("Export completed without an output path".into()),
                 JobState::Cancelled => Err("cancelled".into()),
-                _ => {
-                    let error = final_status.error.map(|e| e.message).unwrap_or_else(|| {
-                        "Powermove lost contact with the export engine. Try again.".into()
-                    });
-                    Err(error)
-                }
+                _ => Err(final_status.error.map_or_else(
+                    || "Powermove lost contact with the export engine. Try again.".into(),
+                    Failure::from,
+                )),
             };
         }
         let frame = (status.progress * planned.frames as f64).round() as u64;
@@ -572,6 +619,25 @@ mod agent_tests {
             "a finished job"
         );
         cancellers().lock().unwrap().retain(|id, _| *id < 9_000);
+    }
+    /// Export Without Them follows the job's typed refusal, never its words.
+    #[test]
+    fn only_an_offline_refusal_offers_export_without_them() {
+        use pm_protocol::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope};
+        let job = ErrorScope::Job { job: "j".into() };
+        let refused = EngineError::new(ErrorCode::MediaOffline, job.clone(), "Any words")
+            .with_detail(ErrorDetail::Offline {
+                assets: vec!["gone".into()],
+            });
+        let failure = Failure::from(refused);
+        assert_eq!(failure.message, "Any words");
+        assert_eq!(failure.offline, vec!["gone".into()]);
+        let worded = EngineError::new(
+            ErrorCode::ExportFailed,
+            job,
+            "1 clip is offline: a.mov. Relink the originals, or export without them.",
+        );
+        assert!(Failure::from(worded).offline.is_empty());
     }
     #[test]
     fn an_agent_export_settles_as_done_or_failed() {

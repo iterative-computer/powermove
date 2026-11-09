@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -180,7 +180,8 @@ struct State {
 }
 
 struct Running {
-    cancel: Arc<AtomicBool>,
+    /// The fill's child, if it started.
+    job: Option<crate::jobs::JobControl>,
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -464,15 +465,15 @@ impl DiskFrames {
 
     /// Render Selection: the composition's frames in `[from, to)` seconds that
     /// are not on disk render in an `--engine-job` child (`executable`),
-    /// admitted around viewer `activity` as exports are. Returns the frames
-    /// queued.
+    /// admitted around viewer `activity` as exports are, its raster overrides
+    /// answered as `overrides` sets up. Returns the frames queued.
     pub fn start_fill(
         &self,
         from: f64,
         to: f64,
         executable: &Path,
         activity: crate::jobs::Activity,
-        frozen: Option<(u64, Arc<dyn std::any::Any + Send + Sync>)>,
+        overrides: impl FnOnce(&mut crate::jobs::JobSession),
     ) -> Result<u64, String> {
         let mut running = self.inner.running.lock().unwrap();
         if running.as_ref().is_some_and(|r| !r.thread.is_finished()) {
@@ -530,27 +531,23 @@ impl DiskFrames {
             height: size.height,
             frames: missing.into_iter().map(|m| m.1).collect(),
         };
-        // The window's publication at the fill's revision: its overrides
-        // answer from it whatever is edited meanwhile.
-        let request = fill_request(&source, rate, fill)
-            .map(|mut request| {
-                request.frozen = frozen
-                    .filter(|(revision, _)| *revision == request.revision)
-                    .map(|(_, frozen)| frozen);
-                request
+        let started = fill_request(&source, rate, fill)
+            .and_then(|request| {
+                let mut session = crate::jobs::JobSession::new(request);
+                overrides(&mut session);
+                crate::jobs::ExportHandle::start_scheduled(executable, session, activity)
             })
             .map_err(|e| e.to_string());
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (stop, weak, exe) = (
-            cancel.clone(),
-            Arc::downgrade(&self.inner),
-            executable.to_owned(),
-        );
+        let job = started
+            .as_ref()
+            .ok()
+            .map(crate::jobs::ExportHandle::control);
+        let weak = Arc::downgrade(&self.inner);
         let thread = std::thread::Builder::new()
             .name("pm-render-fill".into())
-            .spawn(move || run_fill(weak, generation, order, request, &exe, activity, &stop))
+            .spawn(move || run_fill(weak, generation, order, started))
             .map_err(|e| e.to_string())?;
-        *running = Some(Running { cancel, thread });
+        *running = Some(Running { job, thread });
         Ok(self.inner.published.lock().unwrap().queued)
     }
 
@@ -559,7 +556,9 @@ impl DiskFrames {
     pub fn cancel_fill(&self) {
         let running = self.inner.running.lock().unwrap().take();
         if let Some(running) = running {
-            running.cancel.store(true, Ordering::Release);
+            if let Some(job) = running.job {
+                job.cancel();
+            }
             let _ = running.thread.join();
         }
     }
@@ -725,8 +724,6 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
-        frozen: None,
-        look: false,
     })
 }
 
@@ -741,16 +738,13 @@ fn pm_kernel_free_id() -> pm_protocol::common::JobId {
     .into()
 }
 
-/// The fill thread: runs the child, lands its progress while the generation
-/// it started at is current, and records how it ended.
+/// The fill thread: follows the child, lands its progress while the
+/// generation it started at is current, and records how it ended.
 fn run_fill(
     inner: Weak<Inner>,
     generation: u64,
     order: Vec<i64>,
-    request: Result<crate::jobs::ExportRequest, String>,
-    executable: &Path,
-    activity: crate::jobs::Activity,
-    cancel: &AtomicBool,
+    started: Result<crate::jobs::ExportHandle, String>,
 ) {
     use pm_protocol::priority::JobState;
     let land = |done: usize, end: Option<(Option<String>, bool)>| {
@@ -774,41 +768,26 @@ fn run_fill(
         }
         bump(&mut state, &inner.published);
     };
-    let started = request.and_then(|request| {
-        crate::jobs::ExportHandle::start_scheduled(executable, request, activity)
-            .map_err(|e| e.to_string())
-    });
-    let mut handle = match started {
+    let handle = match started {
         Ok(handle) => handle,
         Err(error) => return land(0, Some((Some(error), false))),
     };
     let total = order.len() as f64;
-    let mut cancelled = false;
-    let status = loop {
-        if cancel.load(Ordering::Acquire) && !cancelled {
-            cancelled = true;
-            let _ = handle.cancel();
-        }
-        let status = handle.status();
-        if status.state.is_terminal() {
-            break status;
-        }
+    let mut status = handle.status();
+    while !status.state.is_terminal() {
         land((status.progress * total).round() as usize, None);
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    let _ = handle.wait();
-    let end = match status.state {
-        JobState::Done => (order.len(), None, false),
-        JobState::Cancelled => ((status.progress * total).floor() as usize, None, false),
-        _ => {
+        status = handle.next_status(&status);
+    }
+    let landed = (status.progress * total).floor() as usize;
+    let end = match handle.wait().map(|status| status.state) {
+        Err(error) => (landed, Some(error.to_string()), false),
+        Ok(JobState::Done) => (order.len(), None, false),
+        Ok(JobState::Cancelled) => (landed, None, false),
+        Ok(_) => {
             let message = status.error.map(|e| e.message).unwrap_or_default();
             let full =
                 message == DISK_FULL || message == LIMIT_FULL || message == crate::jobs::LOW_DISK;
-            (
-                (status.progress * total).floor() as usize,
-                Some(message),
-                full,
-            )
+            (landed, Some(message), full)
         }
     };
     land(end.0, Some((end.1, end.2)));
@@ -1253,7 +1232,7 @@ mod tests {
         disk.observe(&scene, &[], None, None, 1);
         ready(&disk);
         let queued = disk
-            .start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), None)
+            .start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
         assert_eq!(queued, 6);
         let bars = settle(&disk, |b| !b.running);
@@ -1267,7 +1246,7 @@ mod tests {
             "the frame has drawn pixels"
         );
         // Nothing is left to render.
-        let again = disk.start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), None);
+        let again = disk.start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), |_| {});
         assert_eq!(again, Ok(0));
     }
 
@@ -1286,7 +1265,7 @@ mod tests {
             .unwrap();
         disk.observe(scene, &[], None, None, 1);
         ready(&disk);
-        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), None)
+        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
         let bars = settle(&disk, |b| !b.running);
         assert_eq!(bars.error.as_deref(), None, "{bars:?}");
@@ -1334,7 +1313,7 @@ mod tests {
         let scene = scene();
         disk.observe(&scene, &[], None, None, 1);
         ready(&disk);
-        disk.start_fill(0., 3., &exe, crate::jobs::Activity::default(), None)
+        disk.start_fill(0., 3., &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
         settle(&disk, |b| b.done >= 1);
         disk.delete_all().unwrap();

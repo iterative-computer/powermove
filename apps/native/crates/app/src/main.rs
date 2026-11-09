@@ -194,6 +194,8 @@ fn main() -> Result<()> {
     let worker_profile = profile.clone();
     let (bridge, bridge_calls) = panel_bridge::channel();
     let bridge_windows = panel_bridge::Shared::default();
+    let job_overrides = raster_overrides::OverrideWindows::default();
+    let agent_overrides = job_overrides.clone();
     let (actor, engine, mcp_host, tools) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
@@ -209,7 +211,7 @@ fn main() -> Result<()> {
             Some(worker_profile.join("shader-cache")),
         )?);
         let tools = mcp::Tools::new(mcp_host.clone(), exports);
-        mcp_services::connect_engine(&tools, engine.export_activity())?;
+        mcp_services::connect_engine(&tools, engine.export_activity(), agent_overrides)?;
         {
             let mut automation = tools.automation.lock().unwrap();
             automation.surfaces = Some(Arc::new(bridge));
@@ -271,7 +273,10 @@ fn main() -> Result<()> {
                     )
                 });
                 let font_broker = broker.clone();
-                entity.update(cx, |v, _| v.font_broker = Some(font_broker));
+                entity.update(cx, |v, _| {
+                    v.font_broker = Some(font_broker);
+                    v.job_overrides = job_overrides.clone();
+                });
                 panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);

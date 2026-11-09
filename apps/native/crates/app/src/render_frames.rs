@@ -88,6 +88,7 @@ impl Controller {
         };
         let disk = self.engine.render_cache();
         let activity = self.engine.export_activity();
+        let overrides = self.extensions.overrides.as_ref().map(|o| o.jobs());
         let tasks = self.builtins.export_tasks.clone();
         let title = p
             .snapshot
@@ -99,11 +100,13 @@ impl Controller {
         let fill = disk.clone();
         let started = cx.background_executor().spawn(async move {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let frozen = (
-                p.revision(),
-                p.clone() as std::sync::Arc<dyn std::any::Any + Send + Sync>,
-            );
-            let queued = fill.start_fill(from, to, &exe, activity, Some(frozen))?;
+            // Its overrides answer from the window's publication, whatever is
+            // edited meanwhile.
+            let queued = fill.start_fill(from, to, &exe, activity, |session| {
+                if let Some(overrides) = overrides {
+                    overrides.pin(session, &p, false);
+                }
+            })?;
             if queued > 0 {
                 follow(fill, tasks, p.project.clone(), title, queued);
             }

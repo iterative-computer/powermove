@@ -145,7 +145,7 @@ pub struct Extensions {
     pub contributed: Vec<(String, String)>,
     pub host: Option<ExtensionHost>,
     /// This window's raster overrides; dropped with its host.
-    overrides: Option<crate::raster_overrides::Overrides>,
+    pub(crate) overrides: Option<crate::raster_overrides::Overrides>,
     /// The document whose captures carry this window's definitions.
     doc_id: Option<u64>,
     /// One WebKit document per trust domain: the trusted realm's under the empty
@@ -333,11 +333,13 @@ impl Controller {
             &self.engine,
             self.kernel.clone(),
             project.clone(),
+            self.job_overrides.clone(),
         );
         let frames = crate::mcp_services::frame_renderer(
             self.kernel.clone(),
             project.clone(),
             self.profile.clone(),
+            self.job_overrides.clone(),
         )
         .ok();
         let host = ExtensionHost::start(HostConfig {

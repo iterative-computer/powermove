@@ -1,8 +1,9 @@
 //! Production hosts behind MCP's service traits. Everything here runs on MCP or
 //! export workers. Exports and frames use the same child job as the Export panel.
 use crate::mcp::Tools;
+use crate::raster_overrides::OverrideWindows;
 use anyhow::{Context, Result as AnyResult};
-use pm_engine_service::jobs::{ExportHandle, ExportRequest};
+use pm_engine_service::jobs::{ExportHandle, ExportRequest, JobSession};
 use pm_kernel::media_archive::Archive;
 use pm_kernel::{KernelHandle, Published};
 use pm_mcp::{
@@ -50,12 +51,17 @@ fn resources_of(doc_id: u64) -> Option<Resources> {
     RESOURCES.lock().unwrap().as_ref()?.get(&doc_id).cloned()
 }
 /// Install the production engine hosts. Call on a worker before serving.
-pub fn connect_engine(tools: &Tools, activity: pm_engine_service::jobs::Activity) -> AnyResult<()> {
+pub fn connect_engine(
+    tools: &Tools,
+    activity: pm_engine_service::jobs::Activity,
+    overrides: OverrideWindows,
+) -> AnyResult<()> {
     let jobs = EngineJobs::new(
         tools.host.kernel.clone(),
         std::env::current_exe()?,
         activity,
         tools.host.profile.clone(),
+        overrides,
     );
     let mut automation = tools.automation.lock().unwrap();
     automation.export_child = jobs.clone();
@@ -133,7 +139,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             )?;
         }
         let tools = Tools::new(host, exports);
-        connect_engine(&tools, Default::default())?;
+        connect_engine(&tools, Default::default(), Default::default())?;
         let shared = tools.clone();
         let server =
             pm_mcp::transport::LoopbackServer::start_with(&profile, move || shared.connect())?;
@@ -158,6 +164,8 @@ pub struct EngineJobs {
     profile: PathBuf,
     cache: PathBuf,
     progress: Mutex<HashMap<u64, Progress>>,
+    /// Whose extensions answer a project's raster overrides.
+    overrides: OverrideWindows,
 }
 impl EngineJobs {
     pub fn new(
@@ -165,6 +173,7 @@ impl EngineJobs {
         executable: PathBuf,
         activity: pm_engine_service::jobs::Activity,
         profile: PathBuf,
+        overrides: OverrideWindows,
     ) -> Arc<Self> {
         Arc::new(Self {
             kernel,
@@ -173,6 +182,7 @@ impl EngineJobs {
             cache: profile.join("cache/mcp"),
             profile,
             progress: Mutex::default(),
+            overrides,
         })
     }
     fn published(&self, frozen: &FrozenProject) -> Result<Arc<Published>> {
@@ -208,14 +218,6 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
-        request.frozen = Some(published.clone());
-        // A look at the window's project now may ask its realm; a frame of a
-        // frozen publication (an export realm's capture) is that realm's.
-        request.look = look
-            && self
-                .kernel
-                .published(&published.project)
-                .is_some_and(|now| Arc::ptr_eq(&now, published));
         // An agent's capture draws the effects its project's window defines.
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
@@ -226,7 +228,17 @@ impl EngineJobs {
         // out, not asked about; missing audio still fails by name. Captures
         // refuse offline media unless they draw the card (agent stills).
         request.without_offline = !look;
-        ExportHandle::start_scheduled(&self.executable, request, self.activity.clone())
+        let mut session = JobSession::new(request);
+        if let Some(overrides) = self.overrides.of(published.snapshot.doc_id) {
+            // A look at the window's project now may ask its realm; a frame of
+            // a frozen publication (an export realm's capture) is that realm's.
+            let current = self
+                .kernel
+                .published(&published.project)
+                .is_some_and(|now| Arc::ptr_eq(&now, published));
+            overrides.pin(&mut session, published, look && current);
+        }
+        ExportHandle::start_scheduled(&self.executable, session, self.activity.clone())
     }
 }
 fn failed(error: impl std::fmt::Display) -> Error {
@@ -305,7 +317,7 @@ impl ExportChild for EngineJobs {
         let task =
             crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
                 .map_err(failed)?;
-        let mut handle = match self.start(&published, settings, destination, false, false) {
+        let handle = match self.start(&published, settings, destination, false, false) {
             Ok(handle) => handle,
             Err(error) => {
                 task.finish(Err(error.to_string()));
@@ -318,7 +330,7 @@ impl ExportChild for EngineJobs {
             JobState::Done | JobState::Failed | JobState::Cancelled
         ) {
             if task.cancelled() {
-                let _ = handle.cancel();
+                handle.cancel();
                 break;
             }
             let frames = (handle.status().progress * plan.frames as f64).round() as u64;
@@ -361,12 +373,14 @@ pub(crate) fn frame_renderer(
     kernel: KernelHandle,
     project: String,
     profile: PathBuf,
+    overrides: OverrideWindows,
 ) -> AnyResult<pm_compat_runner::FrameRenderer> {
     let jobs = EngineJobs::new(
         kernel.clone(),
         std::env::current_exe()?,
         Default::default(),
         profile,
+        overrides,
     );
     // The last few frames by document revision: a panel that asks for the same
     // frame again (thumbnails, a check on every redraw) gets it without a render.
@@ -381,7 +395,9 @@ pub(crate) fn frame_renderer(
             "{}:{}:{:?}:{}:{}x{}:{}",
             published.snapshot.doc_id,
             published.revision(),
-            pm_engine_service::jobs::compat_epoch(published.snapshot.doc_id),
+            jobs.overrides
+                .of(published.snapshot.doc_id)
+                .and_then(|o| o.epoch()),
             request.time.to_bits(),
             request.width,
             request.height,
@@ -494,7 +510,7 @@ fn frame(
         draft_from_proxies: true,
         delivery: Default::default(),
     };
-    let mut handle = jobs.start(
+    let handle = jobs.start(
         published,
         settings,
         destination,
@@ -506,7 +522,7 @@ fn frame(
         JobState::Queued | JobState::Running | JobState::WaitingForMedia
     ) {
         if stop() {
-            let _ = handle.cancel();
+            handle.cancel();
             let _ = handle.wait();
             anyhow::bail!("The frame capture was stopped");
         }

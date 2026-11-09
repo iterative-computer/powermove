@@ -1,9 +1,10 @@
-//! Same-executable --engine-job child. Payloads stay on inherited pipes.
-//! JobSpec, ExportSettings and JobStatus are the existing engine protocol.
+//! Same-executable --engine-job child. The parent and child talk in
+//! [`ParentMessage`] and [`ChildMessage`] lines on inherited pipes; pixels go
+//! through private files. A line either end cannot read fails the job.
 use anyhow::{Result, ensure};
 use pm_protocol::{
-    common::JobId,
-    error::{EngineError, ErrorCode, ErrorScope},
+    common::{AssetId, JobId},
+    error::{EngineError, ErrorCode, ErrorDetail, ErrorScope, Retry},
     priority::{JobSpec, JobState, JobStatus, PriorityClass},
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -55,16 +56,6 @@ pub struct ExportRequest {
     /// a file (`crate::render_cache`).
     #[serde(default)]
     pub cache: Option<crate::render_cache::CacheFill>,
-    /// The publication the request was frozen from (the app's
-    /// `pm_kernel::Published`), for the extensions that answer the export's
-    /// raster overrides. Never sent to the child.
-    #[serde(skip)]
-    pub frozen: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// A one-frame look at the project (an agent's still), not a delivery:
-    /// its raster overrides may be answered by the window's realm while it is
-    /// at the frame's revision. Exports and render cache fills are deliveries.
-    #[serde(skip)]
-    pub look: bool,
 }
 
 /// The viewer's activity, as exports and cache fills see it: whether it is
@@ -74,6 +65,8 @@ pub struct ExportRequest {
 pub struct Activity {
     busy: Arc<AtomicBool>,
     epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Wakes the jobs waiting for the viewer to go quiet or to be cancelled.
+    quiet: Arc<(Mutex<()>, Condvar)>,
 }
 impl Activity {
     pub fn set(&self, busy: bool) {
@@ -81,6 +74,24 @@ impl Activity {
             self.epoch.fetch_add(1, Ordering::AcqRel);
         }
         self.busy.store(busy, Ordering::Release);
+        if !busy {
+            self.wake();
+        }
+    }
+    fn wake(&self) {
+        let _quiet = self.quiet.0.lock().unwrap();
+        self.quiet.1.notify_all();
+    }
+    /// Waits while the viewer is busy, unless `cancel` is set (whoever sets
+    /// it wakes the wait). Whether it waited.
+    fn wait_quiet(&self, cancel: &AtomicBool) -> bool {
+        let mut quiet = self.quiet.0.lock().unwrap();
+        let mut waited = false;
+        while self.busy() && !cancel.load(Ordering::Acquire) {
+            waited = true;
+            quiet = self.quiet.1.wait(quiet).unwrap();
+        }
+        waited
     }
     pub fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
@@ -112,21 +123,6 @@ pub enum CompatReply {
         uv: [f64; 4],
     },
 }
-/// What an export's overrides answer for: its frozen project and the
-/// wrappers registered when it started. Edits and reloads made while it runs
-/// never reach it.
-pub struct CompatPin {
-    pub job: String,
-    pub revision: u64,
-    /// The generation of `raster` wrappers the export started with.
-    pub epoch: u64,
-    /// The publication the export froze (see [`ExportRequest::frozen`]).
-    pub frozen: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// A look at the project (an agent's still), not a delivery.
-    pub look: bool,
-    /// Set when the export is cancelled or its handle dropped.
-    pub cancel: Arc<AtomicBool>,
-}
 /// One layer an export frame needs an override answer for.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompatJobNeed {
@@ -135,95 +131,168 @@ pub struct CompatJobNeed {
     pub seconds: f64,
     pub scale: f64,
 }
-/// Answers a batch of export needs, in order, on the job's reader thread.
-/// An error fails the frame (and the export).
-pub type CompatAnswerer = Arc<
-    dyn Fn(&CompatPin, &[CompatJobNeed]) -> std::result::Result<Vec<CompatReply>, String>
-        + Send
-        + Sync,
->;
-/// The wrappers' generation while an override is registered (none: no override).
-pub type CompatState = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
-/// Called as a delivery starts: whatever answers its overrides pins the
-/// extensions' code and storage now, not at the first frame that asks.
-pub type CompatBegin = Arc<dyn Fn(&CompatPin) + Send + Sync>;
-struct CompatProducer {
-    state: CompatState,
-    answer: CompatAnswerer,
-    begin: CompatBegin,
+/// Answers a frame's override needs, in order, on the job's reader thread,
+/// for the window that has the project open. What it pinned (the frozen
+/// project, an export's realm) it lets go once the job's
+/// [`JobSession::cancellation`] is set. An error fails the frame (and the
+/// job).
+pub type OverrideAnswers =
+    Box<dyn Fn(&[CompatJobNeed]) -> std::result::Result<Vec<CompatReply>, String> + Send>;
+/// A job before it starts: its frozen input, what answers its raster
+/// overrides, and its cancellation. Dropped unstarted, or started and then
+/// ended, cancelled or dropped, the job's cancellation is set.
+pub struct JobSession {
+    pub request: ExportRequest,
+    overrides: Option<OverrideAnswers>,
+    cancel: Cancel,
 }
-/// Each open document's producer, by kernel `doc_id` (the job's session).
-static COMPAT: Mutex<Option<std::collections::HashMap<u64, CompatProducer>>> = Mutex::new(None);
-/// Whose extensions wrap `raster` for document `doc_id` (none: its exports
-/// draw natively).
-pub fn set_compat_answerer(
-    doc_id: u64,
-    producer: Option<(CompatState, CompatAnswerer, CompatBegin)>,
-) {
-    let mut all = COMPAT.lock().unwrap();
-    let all = all.get_or_insert_with(Default::default);
-    match producer {
-        Some((state, answer, begin)) => {
-            all.insert(
-                doc_id,
-                CompatProducer {
-                    state,
-                    answer,
-                    begin,
-                },
-            );
-        }
-        None => {
-            all.remove(&doc_id);
-        }
+/// Set when dropped: whatever a job pinned is let go when it ends, however
+/// it ends.
+struct Cancel(Arc<AtomicBool>);
+impl Drop for Cancel {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
     }
 }
-/// The generation of override wrappers drawing document `doc_id` now (none:
-/// no override).
-pub fn compat_epoch(doc_id: u64) -> Option<u64> {
-    let state = COMPAT.lock().unwrap().as_ref()?.get(&doc_id)?.state.clone();
-    state()
+impl JobSession {
+    pub fn new(request: ExportRequest) -> Self {
+        Self {
+            request,
+            overrides: None,
+            cancel: Cancel(Arc::default()),
+        }
+    }
+    /// Set when the job is cancelled or over.
+    pub fn cancellation(&self) -> Arc<AtomicBool> {
+        self.cancel.0.clone()
+    }
+    /// The job draws its raster override layers with `answers`' answers.
+    pub fn answer_overrides(&mut self, answers: OverrideAnswers) {
+        let override_source = pm_protocol::snapshot::CompatSource::RasterOverride;
+        if let JobSpec::Export { settings, .. } = &mut self.request.spec
+            && !settings.delivery.compat.contains(&override_source)
+        {
+            settings.delivery.compat.push(override_source);
+        }
+        self.overrides = Some(answers);
+    }
 }
-/// A compat need's reply on the child's stdin. Pixels go through a private
-/// file the child reads and removes, never through the pipe; its name is the
-/// job's own, so simultaneous exports never share one.
-fn compat_reply(
+impl From<ExportRequest> for JobSession {
+    fn from(request: ExportRequest) -> Self {
+        Self::new(request)
+    }
+}
+/// What the parent sends the child, one line each on its stdin.
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum ParentMessage {
+    /// The job. First, and only once.
+    Start(Box<ExportRequest>),
+    /// The GPU submission the child asked for: the rest of its frame, or one
+    /// bounded by [`Costs::bounded`].
+    Grant {
+        whole_frame: bool,
+    },
+    /// The answers to compat request `id`, one per need, or why there are none.
+    Compat {
+        id: u64,
+        answers: std::result::Result<Vec<WireAnswer>, String>,
+    },
+    Cancel,
+}
+/// What the child sends the parent, one line each on its stdout.
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum ChildMessage {
+    Status(Box<JobStatus>),
+    /// Asks for a GPU submission; the child waits for a [`ParentMessage::Grant`].
+    Gpu,
+    /// A frame's raster override needs, answered by a
+    /// [`ParentMessage::Compat`] with the same `id`.
+    Compat {
+        id: u64,
+        needs: Vec<CompatJobNeed>,
+    },
+}
+/// One need's answer on the child's stdin.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WireAnswer {
+    Native,
+    Hidden,
+    /// See [`CompatReply::Raster`]; the rows are in `file`, which the child
+    /// reads and removes.
+    Raster {
+        width: u32,
+        height: u32,
+        size: [f64; 2],
+        anchor: [f64; 2],
+        uv: [f64; 4],
+        file: PathBuf,
+    },
+}
+fn send(out: &mut impl Write, message: &impl Serialize) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *out, message)?;
+    out.write_all(b"\n")?;
+    out.flush()
+}
+/// A compat request's answers as they cross to the child. Pixels go through
+/// private files, never the pipe; their names are the job's own, so
+/// simultaneous exports never share one.
+fn wire_answers(
     job: &str,
     id: u64,
     answered: std::result::Result<Vec<CompatReply>, String>,
-) -> String {
+) -> std::result::Result<Vec<WireAnswer>, String> {
     let job: String = job
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let answer = |(i, reply): (usize, CompatReply)| match reply {
-        CompatReply::Native => serde_json::json!({"native": true}),
-        CompatReply::Hidden => serde_json::json!({"hidden": true}),
-        CompatReply::Raster {
-            width,
-            height,
-            rgba,
-            size,
-            anchor,
-            uv,
-        } => {
-            let path = std::env::temp_dir().join(format!(
-                "powermove-compat-{}-{job}-{id}-{i}.rgba",
-                std::process::id()
-            ));
-            match std::fs::write(&path, &rgba) {
-                Ok(()) => serde_json::json!({"width": width, "height": height,
-                    "size": size, "anchor": anchor, "uv": uv, "file": path}),
-                Err(e) => serde_json::json!({"error": e.to_string()}),
+    let mut written = vec![];
+    let mut wire = vec![];
+    for (i, reply) in answered?.into_iter().enumerate() {
+        wire.push(match reply {
+            CompatReply::Native => WireAnswer::Native,
+            CompatReply::Hidden => WireAnswer::Hidden,
+            CompatReply::Raster {
+                width,
+                height,
+                rgba,
+                size,
+                anchor,
+                uv,
+            } => {
+                let file = std::env::temp_dir().join(format!(
+                    "powermove-compat-{}-{job}-{id}-{i}.rgba",
+                    std::process::id()
+                ));
+                if let Err(e) = std::fs::write(&file, &rgba) {
+                    for file in written {
+                        let _ = std::fs::remove_file(file);
+                    }
+                    return Err(e.to_string());
+                }
+                written.push(file.clone());
+                WireAnswer::Raster {
+                    width,
+                    height,
+                    size,
+                    anchor,
+                    uv,
+                    file,
+                }
             }
-        }
-    };
-    let body = match answered {
-        Ok(replies) => serde_json::json!({"id": id,
-            "answers": replies.into_iter().enumerate().map(answer).collect::<Vec<_>>()}),
-        Err(error) => serde_json::json!({"id": id, "error": error}),
-    };
-    format!("{}\n", serde_json::json!({ "compatAnswer": body }))
+        });
+    }
+    Ok(wire)
 }
 /// Room left for macOS and a project save when a long export fills a disk.
 pub const DISK_RESERVE: u64 = 2 << 30;
@@ -303,8 +372,6 @@ impl ExportRequest {
             without_offline: false,
             preview: false,
             cache: None,
-            frozen: None,
-            look: false,
         })
     }
 }
@@ -331,27 +398,81 @@ fn status(
         preview: None,
     }
 }
-/// Ends the refusal of an export with offline clips; the Export sheet offers
-/// Export Without Them on it.
-pub const OFFLINE_ADVICE: &str = "Relink the originals, or export without them.";
-/// An export refused because clips are offline (not silent audio, which still fails).
-pub fn is_offline_refusal(message: &str) -> bool {
-    message.ends_with(OFFLINE_ADVICE)
+/// An export refused because clips it draws are offline (audio it would
+/// hear still fails by name, even without offline clips). Its status error
+/// is [`ErrorCode::MediaOffline`] with the clips' assets, on which the Export
+/// sheet offers Export Without Them.
+#[derive(Debug)]
+struct OfflineRefusal(Vec<pm_export::render::OfflineClip>);
+impl std::fmt::Display for OfflineRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<_> = self.0.iter().take(3).map(|c| c.name.as_str()).collect();
+        match self.0.len() {
+            1 => write!(f, "1 clip is offline: ")?,
+            n => write!(f, "{n} clips are offline: ")?,
+        }
+        write!(f, "{}", names.join(", "))?;
+        if let n @ 1.. = self.0.len().saturating_sub(3) {
+            write!(f, " and {n} more")?;
+        }
+        write!(f, ". Relink the originals, or export without them.")
+    }
+}
+impl std::error::Error for OfflineRefusal {}
+impl OfflineRefusal {
+    fn error(&self, job: &JobId) -> EngineError {
+        let assets = self.0.iter().map(|c| AssetId::new(&c.asset)).collect();
+        EngineError::new(
+            ErrorCode::MediaOffline,
+            ErrorScope::Job { job: job.clone() },
+            self.to_string(),
+        )
+        .with_retry(Retry::AfterUserAction)
+        .with_detail(ErrorDetail::Offline { assets })
+    }
+}
+/// Stops a running job from any thread: its cancellation is set, a wait for
+/// the viewer wakes, and the child is told.
+#[derive(Clone)]
+pub struct JobControl {
+    cancel: Arc<AtomicBool>,
+    input: Arc<Mutex<ChildStdin>>,
+    interactive: Activity,
+}
+impl JobControl {
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
+        self.interactive.wake();
+        // A child that no longer reads its stdin has stopped already.
+        let _ = send(&mut *self.input.lock().unwrap(), &ParentMessage::Cancel);
+    }
+}
+/// A job's latest status; waiters wake when it changes.
+struct Reported {
+    now: Mutex<JobStatus>,
+    changed: Condvar,
+}
+impl Reported {
+    fn set(&self, status: JobStatus) {
+        *self.now.lock().unwrap() = status;
+        self.changed.notify_all();
+    }
 }
 pub struct ExportHandle {
     child: Option<Child>,
-    input: Arc<Mutex<ChildStdin>>,
-    cancel: Arc<AtomicBool>,
-    status: Arc<Mutex<JobStatus>>,
-    reader: Option<std::thread::JoinHandle<()>>,
+    control: JobControl,
+    status: Arc<Reported>,
+    /// Ends with the child's output; true if it stopped at a line it could
+    /// not use, with the child still running.
+    reader: Option<std::thread::JoinHandle<bool>>,
     submissions: Arc<std::sync::atomic::AtomicU64>,
     asks: Arc<std::sync::atomic::AtomicU64>,
 }
 impl ExportHandle {
     /// Call from a job worker: process spawn and snapshot serialization are
     /// deliberately excluded from the UI event path.
-    pub fn start(executable: &Path, request: ExportRequest) -> Result<Self> {
-        Self::start_scheduled(executable, request, Activity::default())
+    pub fn start(executable: &Path, session: impl Into<JobSession>) -> Result<Self> {
+        Self::start_scheduled(executable, session, Activity::default())
     }
     /// Interactive service activity takes precedence at every submission:
     /// none is granted while the viewer is busy; within [`QUIET`] of its
@@ -360,53 +481,14 @@ impl ExportHandle {
     /// submission cannot be preempted by Metal.
     pub fn start_scheduled(
         executable: &Path,
-        mut request: ExportRequest,
+        session: impl Into<JobSession>,
         interactive: Activity,
     ) -> Result<Self> {
-        // An export draws what the viewer draws: a raster override's layers too.
-        let session = match &request.spec {
-            JobSpec::Export { session, .. } => Some(session.get()),
-            _ => None,
-        };
-        let cancel = Arc::new(AtomicBool::new(false));
-        // Pinned now: the frozen project and the wrappers registered at start.
-        let producer = COMPAT.lock().unwrap().as_ref().and_then(|all| {
-            let c = all.get(&session?)?;
-            Some((c.state.clone(), c.answer.clone(), c.begin.clone()))
-        });
-        let answerer = producer.and_then(|(state, answer, begin)| {
-            let epoch = state()?;
-            Some((
-                answer,
-                begin,
-                CompatPin {
-                    job: request.job.as_str().to_owned(),
-                    revision: request.revision,
-                    epoch,
-                    frozen: request.frozen.clone(),
-                    look: request.look,
-                    cancel: cancel.clone(),
-                },
-            ))
-        });
-        let answerer = answerer.map(|(answer, begin, pin)| {
-            if !pin.look {
-                begin(&pin);
-            }
-            (answer, pin)
-        });
-        if answerer.is_some()
-            && let JobSpec::Export { settings, .. } = &mut request.spec
-            && !settings
-                .delivery
-                .compat
-                .contains(&pm_protocol::snapshot::CompatSource::RasterOverride)
-        {
-            settings
-                .delivery
-                .compat
-                .push(pm_protocol::snapshot::CompatSource::RasterOverride);
-        }
+        let JobSession {
+            request,
+            overrides,
+            cancel: release,
+        } = session.into();
         request.resources.validate()?;
         ensure!(
             matches!(request.spec, JobSpec::Export { .. }),
@@ -419,114 +501,119 @@ impl ExportHandle {
             .stderr(Stdio::inherit())
             .spawn()?;
         let mut input = child.stdin.take().unwrap();
-        if let Err(e) = serde_json::to_writer(&mut input, &request)
-            .and_then(|_| input.write_all(b"\n").map_err(serde_json::Error::io))
-        {
+        let id = request.job.clone();
+        if let Err(e) = send(&mut input, &ParentMessage::Start(Box::new(request))) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(e.into());
         }
-        input.flush()?;
-        let input = Arc::new(Mutex::new(input));
-        let gate_input = input.clone();
-        let gate_cancel = cancel.clone();
+        let control = JobControl {
+            cancel: release.0.clone(),
+            input: Arc::new(Mutex::new(input)),
+            interactive: interactive.clone(),
+        };
+        let (child_input, cancel) = (control.input.clone(), control.cancel.clone());
         let output = child.stdout.take().unwrap();
-        let state = Arc::new(Mutex::new(status(
-            &request.job,
-            JobState::Queued,
-            0.,
-            None,
-            None,
-        )));
-        let events = state.clone();
-        let id = request.job;
-        let compat_input = input.clone();
+        let reported = Arc::new(Reported {
+            now: Mutex::new(status(&id, JobState::Queued, 0., None, None)),
+            changed: Condvar::new(),
+        });
+        let events = reported.clone();
         let submissions = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let granted = submissions.clone();
         let asks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let asked = asks.clone();
         let reader = std::thread::spawn(move || {
+            // Dropped with the reader: the job is over, and what its
+            // overrides pinned goes.
+            let _release = release;
             // The viewer's activity epoch at the last grant, and when it was
             // last seen to move (an epoch moved since counts as now).
             let mut seen = interactive.epoch();
             let mut active_at: Option<std::time::Instant> = None;
-            for line in std::io::BufReader::new(output).lines() {
-                if let Ok(text) = line.as_deref()
-                    && text.starts_with("{\"compat\"")
-                {
-                    let asked: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
-                    let id = asked["compat"]["id"].as_u64().unwrap_or(0);
-                    let needs: Vec<CompatJobNeed> =
-                        serde_json::from_value(asked["compat"]["needs"].clone())
-                            .unwrap_or_default();
-                    let answered = match &answerer {
-                        Some((answer, pin)) => answer(pin, &needs),
-                        None => Err("No window has this project's extensions open".into()),
-                    };
-                    let job = answerer.as_ref().map_or("", |(_, pin)| pin.job.as_str());
-                    let mut input = compat_input.lock().unwrap();
-                    if input
-                        .write_all(compat_reply(job, id, answered).as_bytes())
-                        .and_then(|_| input.flush())
-                        .is_err()
-                    {
-                        break;
+            // A child that stopped reading its stdin has exited or is
+            // exiting: its last lines still say how it ended.
+            let reply = |message: &ParentMessage| {
+                let _ = send(&mut *child_input.lock().unwrap(), message);
+            };
+            let mut lines = std::io::BufReader::new(output).lines();
+            let broken = loop {
+                let message = match lines.next() {
+                    None => break None,
+                    Some(Err(e)) => break Some(format!("Powermove lost the export engine: {e}")),
+                    Some(Ok(line)) => serde_json::from_str::<ChildMessage>(&line),
+                };
+                match message {
+                    Err(e) => {
+                        break Some(format!("The export engine sent an invalid message: {e}"));
                     }
-                    continue;
-                }
-                if matches!(line.as_deref(), Ok("\"gpu\"")) {
-                    asked.fetch_add(1, Ordering::Release);
-                    while interactive.busy() && !gate_cancel.load(Ordering::Acquire) {
-                        active_at = Some(std::time::Instant::now());
-                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    Ok(ChildMessage::Status(s)) if s.job != id => {
+                        break Some(format!(
+                            "The export engine reported on another job, {}",
+                            s.job.as_str()
+                        ));
                     }
-                    if !gate_cancel.load(Ordering::Acquire) {
-                        let epoch = interactive.epoch();
-                        if epoch != seen {
-                            seen = epoch;
+                    Ok(ChildMessage::Status(s)) => events.set(*s),
+                    Ok(ChildMessage::Compat { id: ask, needs }) => {
+                        let answered = match &overrides {
+                            Some(answer) => answer(&needs),
+                            None => Err("No window has this project's extensions open".into()),
+                        };
+                        let answers = wire_answers(id.as_str(), ask, answered);
+                        reply(&ParentMessage::Compat { id: ask, answers });
+                    }
+                    Ok(ChildMessage::Gpu) => {
+                        asked.fetch_add(1, Ordering::Release);
+                        if interactive.wait_quiet(&cancel) {
                             active_at = Some(std::time::Instant::now());
                         }
-                        let quiet = active_at.is_none_or(|t| t.elapsed() >= QUIET);
-                        let grant: &[u8] = if !quiet { b"grant\n" } else { b"grant frame\n" };
-                        let mut input = gate_input.lock().unwrap();
-                        if input.write_all(grant).and_then(|_| input.flush()).is_err() {
-                            break;
+                        if !cancel.load(Ordering::Acquire) {
+                            let epoch = interactive.epoch();
+                            if epoch != seen {
+                                seen = epoch;
+                                active_at = Some(std::time::Instant::now());
+                            }
+                            let whole_frame = active_at.is_none_or(|t| t.elapsed() >= QUIET);
+                            reply(&ParentMessage::Grant { whole_frame });
+                            granted.fetch_add(1, Ordering::Relaxed);
                         }
-                        granted.fetch_add(1, Ordering::Relaxed);
                     }
-                    continue;
                 }
-                match line
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<JobStatus>(&s).ok())
-                {
-                    Some(s) if s.job == id => *events.lock().unwrap() = s,
-                    _ => break,
-                }
-            }
-            let mut last = events.lock().unwrap();
+            };
+            let last = events.now.lock().unwrap().clone();
             if !last.state.is_terminal() {
-                *last = status(
+                let error = broken
+                    .clone()
+                    .unwrap_or_else(|| "engine job child exited without a terminal status".into());
+                events.set(status(
                     &id,
                     JobState::Failed,
                     last.progress,
                     None,
-                    Some("engine job child exited without a terminal status".into()),
-                );
+                    Some(error),
+                ));
             }
+            broken.is_some()
         });
         Ok(Self {
             child: Some(child),
-            input,
-            cancel,
-            status: state,
+            control,
+            status: reported,
             reader: Some(reader),
             submissions,
             asks,
         })
     }
     pub fn status(&self) -> JobStatus {
-        self.status.lock().unwrap().clone()
+        self.status.now.lock().unwrap().clone()
+    }
+    /// The first status that differs from `seen`, waited for.
+    pub fn next_status(&self, seen: &JobStatus) -> JobStatus {
+        let mut now = self.status.now.lock().unwrap();
+        while *now == *seen {
+            now = self.status.changed.wait(now).unwrap();
+        }
+        now.clone()
     }
     /// GPU submissions granted so far: one per frame while the viewer is
     /// quiet, one per band of a frame after viewer activity.
@@ -537,27 +624,33 @@ impl ExportHandle {
     pub fn gpu_requests(&self) -> u64 {
         self.asks.load(Ordering::Acquire)
     }
-    pub fn cancel(&mut self) -> Result<()> {
-        self.cancel.store(true, Ordering::Release);
-        let mut input = self.input.lock().unwrap();
-        input.write_all(b"cancel\n")?;
-        input.flush()?;
-        Ok(())
+    pub fn cancel(&self) {
+        self.control.cancel();
+    }
+    /// Cancels this job from another thread.
+    pub fn control(&self) -> JobControl {
+        self.control.clone()
     }
     /// Worker-only wait. Drop also reaps the child (never a detached export).
     pub fn wait(mut self) -> Result<JobStatus> {
+        let broken = match self.reader.take() {
+            Some(reader) => reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("export status reader panicked"))?,
+            None => false,
+        };
         if let Some(mut child) = self.child.take() {
+            if broken {
+                child.kill()?;
+            }
             child.wait()?;
-        }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
         }
         Ok(self.status())
     }
 }
 impl Drop for ExportHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Release);
+        self.control.cancel();
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -571,11 +664,13 @@ impl Drop for ExportHandle {
 /// No window, Node, file transport or mutable kernel authority is created.
 pub fn run_child() -> Result<()> {
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
-    let request: ExportRequest = serde_json::from_str(
-        &lines
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing export request"))??,
-    )?;
+    let first = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing export request"))??;
+    let ParentMessage::Start(request) = serde_json::from_str(&first)? else {
+        anyhow::bail!("the export request did not come first");
+    };
+    let request = *request;
     let cancel = Arc::new(AtomicBool::new(false));
     request.resources.validate()?;
     let (grant, permits) = std::sync::mpsc::channel();
@@ -586,30 +681,35 @@ pub fn run_child() -> Result<()> {
     });
     let replies = rasters.clone();
     let override_error = rasters.clone();
+    // Why the parent's messages stopped making sense, if they did.
+    let broken: Arc<Mutex<Option<String>>> = Arc::default();
+    let unreadable = broken.clone();
     std::thread::spawn(move || {
-        for line in lines {
-            if let Ok(text) = line.as_deref()
-                && text.starts_with("{\"compatAnswer\"")
-            {
-                replies.reply(text);
-                continue;
-            }
-            if let Ok(text @ ("grant" | "grant frame")) = line.as_deref() {
-                let _ = grant.send(text == "grant frame");
-                continue;
-            }
-            if matches!(line.as_deref(), Ok("cancel")) {
-                stopped.store(true, Ordering::Release);
-                return;
-            }
+        // A read error is the parent's end, as its EOF is.
+        for line in lines.map_while(Result::ok) {
+            let failure = match serde_json::from_str(&line) {
+                Ok(ParentMessage::Grant { whole_frame }) => {
+                    let _ = grant.send(whole_frame);
+                    continue;
+                }
+                Ok(ParentMessage::Compat { id, answers }) => match replies.reply(id, answers) {
+                    Ok(()) => continue,
+                    Err(e) => e,
+                },
+                Ok(ParentMessage::Cancel) => break,
+                Ok(ParentMessage::Start(_)) => "a second export request".to_owned(),
+                Err(e) => e.to_string(),
+            };
+            *unreadable.lock().unwrap() = Some(failure);
+            break;
         }
-        stopped.store(true, Ordering::Release); // Parent died/closed the pipe.
+        stopped.store(true, Ordering::Release);
     });
     let emit = |s: JobStatus| -> Result<()> {
-        let mut out = std::io::stdout().lock();
-        serde_json::to_writer(&mut out, &s)?;
-        out.write_all(b"\n")?;
-        out.flush()?;
+        send(
+            &mut std::io::stdout().lock(),
+            &ChildMessage::Status(Box::new(s)),
+        )?;
         Ok(())
     };
     emit(status(&request.job, JobState::Running, 0., None, None))?;
@@ -617,9 +717,14 @@ pub fn run_child() -> Result<()> {
     // broker, never on GPUI or a Node event loop.
     let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
     let broker = pm_text::host::FontBroker::new();
-    // This windowless host pumps the broker below. A registered wake admits
-    // requests; without it layout fails immediately and can lose text glyphs.
-    broker.set_wake(Arc::new(|| {}));
+    // This windowless host serves the broker below when an ask wakes it. A
+    // registered wake admits requests; without it layout fails immediately
+    // and can lose text glyphs.
+    let (wake, woken) = std::sync::mpsc::sync_channel(1);
+    let asked = wake.clone();
+    broker.set_wake(Arc::new(move || {
+        let _ = asked.try_send(());
+    }));
     broker.set_generation(font_service.generation());
     let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();
@@ -652,7 +757,9 @@ pub fn run_child() -> Result<()> {
         });
     }
     let worker_cancel = cancel.clone();
+    let done = Finished(finished.clone(), wake);
     let worker = std::thread::spawn(move || -> Result<PathBuf> {
+        let _done = done;
         let cancel = worker_cancel;
         let gate = ChildGate::new(permits);
         let fill = request.cache;
@@ -694,11 +801,13 @@ pub fn run_child() -> Result<()> {
             settings.audio,
         );
         // Going without offline clips never drops sound: a clip the export
-        // would hear still stops it by name, as the shipped app's exports did.
+        // would hear stops it by name, as the shipped app's exports did. It is
+        // checked before the offline refusal so Export Without Them is never
+        // offered for a retry that can't succeed.
         let tick = |t: pm_protocol::common::Ticks| {
             t.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64
         };
-        if request.without_offline && settings.audio && !settings.format.is_image() {
+        if !request.preview && settings.audio && !settings.format.is_image() {
             let range = (tick(settings.range.start), tick(settings.range.end));
             if let Some(clip) =
                 pm_export::render::offline_audible_media(&doc, composition.as_str(), &media, range)
@@ -713,19 +822,7 @@ pub fn run_child() -> Result<()> {
         // A preview (an agent's still) draws offline media as the Media
         // Offline card instead.
         if !offline.is_empty() && !request.without_offline && !request.preview {
-            let names: Vec<_> = offline.iter().take(3).map(|c| c.name.as_str()).collect();
-            let more = match offline.len().saturating_sub(3) {
-                0 => String::new(),
-                n => format!(" and {n} more"),
-            };
-            let count = match offline.len() {
-                1 => "1 clip is".to_owned(),
-                n => format!("{n} clips are"),
-            };
-            anyhow::bail!(
-                "{count} offline: {}{more}. {OFFLINE_ADVICE}",
-                names.join(", ")
-            );
+            return Err(OfflineRefusal(offline).into());
         }
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
@@ -813,14 +910,12 @@ pub fn run_child() -> Result<()> {
         )?;
         Ok(delivered.path)
     });
-    while !worker.is_finished() {
+    while !finished.load(Ordering::Acquire) && woken.recv().is_ok() {
         pm_text::host::serve(&mut font_service, broker.take_asks());
-        std::thread::sleep(std::time::Duration::from_millis(2));
     }
     let result = worker
         .join()
         .unwrap_or_else(|_| Err(anyhow::anyhow!("export worker panicked")));
-    finished.store(true, Ordering::Release);
     match result {
         // The worker's output was dropped unpublished: its temporary is gone.
         Err(_) if low_disk.load(Ordering::Acquire) => emit(status(
@@ -837,9 +932,20 @@ pub fn run_child() -> Result<()> {
             Some(path.to_string_lossy().into()),
             None,
         ))?,
+        Err(_) if let Some(error) = broken.lock().unwrap().take() => emit(status(
+            &job_id,
+            JobState::Failed,
+            0.,
+            None,
+            Some(format!("The export engine got an invalid message: {error}")),
+        ))?,
         Err(_) if cancel.load(Ordering::Acquire) => {
             emit(status(&job_id, JobState::Cancelled, 0., None, None))?
         }
+        Err(ref e) if let Some(refusal) = e.downcast_ref::<OfflineRefusal>() => emit(JobStatus {
+            error: Some(refusal.error(&job_id)),
+            ..status(&job_id, JobState::Failed, 0., None, None)
+        })?,
         Err(e) => {
             // A layer an extension draws failed the frame: say why.
             let message = match override_error.error.lock().unwrap().take() {
@@ -852,6 +958,15 @@ pub fn run_child() -> Result<()> {
     Ok(())
 }
 
+/// Set when the export worker ends, however it ends: the disk watch stops,
+/// and the font service's thread wakes to see it.
+struct Finished(Arc<AtomicBool>, std::sync::mpsc::SyncSender<()>);
+impl Drop for Finished {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+        let _ = self.1.try_send(());
+    }
+}
 /// An export's raster override layers, asked of the parent (which asks the
 /// window's extensions) as the frame reaches each one; the frame waits (an
 /// export has no per-frame deadline). A need with no answer fails the frame.
@@ -864,9 +979,10 @@ struct JobRasters {
     /// Why the last need went unanswered, for the export's failure.
     error: Mutex<Option<String>>,
     next: std::sync::atomic::AtomicU64,
-    waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>,
+    waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Answers>>>,
     answered: Mutex<JobAnswers>,
 }
+type Answers = std::result::Result<Vec<WireAnswer>, String>;
 type JobKey = (String, String, u64, u64);
 #[derive(Default)]
 struct JobAnswers {
@@ -874,57 +990,58 @@ struct JobAnswers {
     time: u64,
 }
 impl JobRasters {
-    fn reply(&self, text: &str) {
-        let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
-        let body = value["compatAnswer"].clone();
-        if let Some(id) = body["id"].as_u64()
-            && let Some(tx) = self.waiting.lock().unwrap().remove(&id)
-        {
-            let _ = tx.send(body);
+    /// The parent's answers to request `id`. One for a request whose frame
+    /// stopped waiting is dropped; one for a request never made is an error.
+    fn reply(&self, id: u64, answers: Answers) -> std::result::Result<(), String> {
+        if id >= self.next.load(Ordering::Acquire) {
+            return Err(format!(
+                "an answer to compat request {id}, which was never made"
+            ));
         }
+        if let Some(tx) = self.waiting.lock().unwrap().remove(&id) {
+            let _ = tx.send(answers);
+        }
+        Ok(())
     }
-    fn raster(
-        item: &serde_json::Value,
-    ) -> std::result::Result<pm_render::compat::CompatAnswer, String> {
+    fn raster(answer: WireAnswer) -> std::result::Result<pm_render::compat::CompatAnswer, String> {
         use pm_render::compat::CompatAnswer;
-        if item["native"] == true {
-            return Ok(CompatAnswer::Native);
-        }
-        if item["hidden"] == true {
-            return Ok(crate::compat::hidden_raster());
-        }
-        let Some(file) = item["file"].as_str() else {
-            return Err(item["error"]
-                .as_str()
-                .unwrap_or("The extension did not draw the layer")
-                .to_owned());
+        let WireAnswer::Raster {
+            width,
+            height,
+            size,
+            anchor,
+            uv,
+            file,
+        } = answer
+        else {
+            return Ok(match answer {
+                WireAnswer::Hidden => crate::compat::hidden_raster(),
+                _ => CompatAnswer::Native,
+            });
         };
-        let data = std::fs::read(file);
-        let _ = std::fs::remove_file(file);
-        let number = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.);
+        let data = std::fs::read(&file);
+        let _ = std::fs::remove_file(&file);
         let data = data.map_err(|e| e.to_string())?;
+        if data.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+            return Err(format!(
+                "The extension's {width}×{height} layer arrived with {} bytes",
+                data.len()
+            ));
+        }
         Ok(crate::compat::override_raster(
-            item["width"].as_u64().unwrap_or(0) as u32,
-            item["height"].as_u64().unwrap_or(0) as u32,
-            data,
-            [number(&item["size"], 0), number(&item["size"], 1)],
-            [number(&item["anchor"], 0), number(&item["anchor"], 1)],
-            match item["uv"].as_array().map(Vec::as_slice) {
-                Some([a, b, c, d]) => [a, b, c, d].map(|v| v.as_f64().unwrap_or(0.)),
-                _ => [0., 0., 1., 1.],
-            },
+            width, height, data, size, anchor, uv,
         ))
     }
     /// The parent's reply, waited for until it comes, the export is
     /// cancelled or the parent ends.
-    fn wait(&self, rx: &std::sync::mpsc::Receiver<serde_json::Value>) -> Option<serde_json::Value> {
+    fn wait(&self, rx: &std::sync::mpsc::Receiver<Answers>) -> Option<Answers> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while std::time::Instant::now() < deadline {
             if self.stop.load(Ordering::Acquire) {
                 return None;
             }
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                Ok(body) => return Some(body),
+                Ok(answers) => return Some(answers),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
             }
@@ -974,29 +1091,41 @@ impl pm_render::compat::CompatRasters for JobRasters {
             }];
             needs
         };
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.waiting.lock().unwrap().insert(id, tx);
-        let line = serde_json::json!({"compat": {"id": id, "needs": needs}});
-        {
-            let mut out = std::io::stdout().lock();
-            if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
+        let id = {
+            let mut waiting = self.waiting.lock().unwrap();
+            let id = self.next.fetch_add(1, Ordering::AcqRel);
+            waiting.insert(id, tx);
+            id
+        };
+        let asked = send(
+            &mut std::io::stdout().lock(),
+            &ChildMessage::Compat {
+                id,
+                needs: needs.clone(),
+            },
+        );
+        let answers = asked.ok().and_then(|()| self.wait(&rx));
+        self.waiting.lock().unwrap().remove(&id);
+        let items = match answers {
+            None => return CompatAnswer::Missing,
+            Some(Err(error)) => {
+                *self.error.lock().unwrap() = Some(error);
                 return CompatAnswer::Missing;
             }
-        }
-        let body = self.wait(&rx);
-        self.waiting.lock().unwrap().remove(&id);
-        let Some(body) = body else {
-            return CompatAnswer::Missing;
+            Some(Ok(items)) if items.len() != needs.len() => {
+                *self.error.lock().unwrap() = Some(format!(
+                    "The app answered {} layers for {}",
+                    items.len(),
+                    needs.len()
+                ));
+                return CompatAnswer::Missing;
+            }
+            Some(Ok(items)) => items,
         };
-        if let Some(error) = body["error"].as_str() {
-            *self.error.lock().unwrap() = Some(error.to_owned());
-            return CompatAnswer::Missing;
-        }
-        let items = body["answers"].as_array().cloned().unwrap_or_default();
         let mut answered = self.answered.lock().unwrap();
         let mut mine = CompatAnswer::Missing;
-        for (need, item) in needs.iter().zip(&items) {
+        for (need, item) in needs.iter().zip(items) {
             let answer = match Self::raster(item) {
                 Ok(answer) => answer,
                 Err(error) => {
@@ -1139,9 +1268,9 @@ impl Costs {
     }
 }
 
-/// Inherited-pipe admission: `grant frame` admits the rest of the frame (the
-/// viewer has been quiet for [`QUIET`]), `grant` a submission bounded by
-/// [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
+/// Inherited-pipe admission: a whole-frame grant admits the rest of the frame
+/// (the viewer has been quiet for [`QUIET`]), any other a submission bounded
+/// by [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
 struct ChildGate {
     permits: Mutex<std::sync::mpsc::Receiver<bool>>,
     costs: Mutex<Costs>,
@@ -1160,16 +1289,7 @@ impl pm_export::render::GpuGate for ChildGate {
             let mut costs = self.costs.lock().unwrap();
             costs.frame_units = costs.frame_units.max(units);
         }
-        {
-            let mut out = std::io::stdout().lock();
-            if out
-                .write_all(b"\"gpu\"\n")
-                .and_then(|_| out.flush())
-                .is_err()
-            {
-                return None;
-            }
-        }
+        send(&mut std::io::stdout().lock(), &ChildMessage::Gpu).ok()?;
         let permits = self.permits.lock().unwrap();
         while !cancel.load(Ordering::Acquire) {
             match permits.recv_timeout(std::time::Duration::from_millis(5)) {
@@ -1216,6 +1336,52 @@ mod tests {
         cheap.record(12, 1_200.);
         assert_eq!(cheap.bounded(12), 12, "a cheap frame fits whole");
     }
+    /// A job waiting for the viewer wakes when it goes quiet, or when the job
+    /// is cancelled while it is still busy.
+    #[test]
+    fn a_waiting_job_wakes_when_the_viewer_goes_quiet_or_it_is_cancelled() {
+        let activity = Activity::default();
+        activity.set(true);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiting = |activity: &Activity, cancel: &Arc<AtomicBool>| {
+            let (activity, cancel) = (activity.clone(), cancel.clone());
+            std::thread::spawn(move || activity.wait_quiet(&cancel))
+        };
+        let quiet = waiting(&activity, &cancel);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        activity.set(false);
+        assert!(quiet.join().unwrap(), "it waited for the viewer");
+        activity.set(true);
+        let cancelled = waiting(&activity, &cancel);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cancel.store(true, Ordering::Release);
+        activity.wake();
+        assert!(cancelled.join().unwrap());
+        assert!(activity.busy());
+    }
+    /// An offline refusal names the first three clips and counts the rest.
+    #[test]
+    fn an_offline_refusal_names_three_clips_and_counts_the_rest() {
+        let clips = |n: usize| {
+            OfflineRefusal(
+                (0..n)
+                    .map(|i| pm_export::render::OfflineClip {
+                        asset: format!("A{i}"),
+                        name: format!("take {i}.mov"),
+                    })
+                    .collect(),
+            )
+        };
+        assert_eq!(
+            clips(5).to_string(),
+            "5 clips are offline: take 0.mov, take 1.mov, take 2.mov and 2 more. \
+             Relink the originals, or export without them."
+        );
+        assert_eq!(
+            clips(2).to_string(),
+            "2 clips are offline: take 0.mov, take 1.mov. Relink the originals, or export without them."
+        );
+    }
     /// A disk that fills during an export stops it; a finished export is
     /// left alone.
     #[test]
@@ -1252,28 +1418,26 @@ mod tests {
     }
     #[test]
     fn simultaneous_exports_never_share_a_pixel_file() {
-        let reply = |job: &str| {
-            let line = compat_reply(
-                job,
-                0,
-                Ok(vec![CompatReply::Raster {
-                    width: 1,
-                    height: 1,
-                    rgba: job.as_bytes()[..4].to_vec(),
-                    size: [1., 1.],
-                    anchor: [0., 0.],
-                    uv: [0., 0., 1., 1.],
-                }]),
-            );
-            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-            value["compatAnswer"]["answers"][0].clone()
+        let answer = |job: &str| {
+            let raster = CompatReply::Raster {
+                width: 1,
+                height: 1,
+                rgba: job.as_bytes()[..4].to_vec(),
+                size: [1., 1.],
+                anchor: [0., 0.],
+                uv: [0., 0., 1., 1.],
+            };
+            wire_answers(job, 0, Ok(vec![raster])).unwrap().remove(0)
         };
-        let (a, b) = (reply("export-aaaa"), reply("export-bbbb"));
-        assert_ne!(a["file"], b["file"]);
-        assert_eq!(a["uv"], serde_json::json!([0., 0., 1., 1.]));
-        for (item, bytes) in [(&a, b"expo"), (&b, b"expo")] {
+        let (a, b) = (answer("export-aaaa"), answer("export-bbbb"));
+        let file = |a: &WireAnswer| match a {
+            WireAnswer::Raster { file, .. } => file.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(file(&a), file(&b));
+        for item in [a, b] {
             match JobRasters::raster(item).unwrap() {
-                pm_render::compat::CompatAnswer::Raster(r) => assert_eq!(&r.data[..], bytes),
+                pm_render::compat::CompatAnswer::Raster(r) => assert_eq!(&r.data[..], b"expo"),
                 other => panic!("{other:?}"),
             }
         }
@@ -1286,12 +1450,50 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(rasters.wait(&rx).is_none());
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        // An extension's failure is the export's message.
-        let item = serde_json::json!({"error": "broken wrapper"});
-        assert_eq!(JobRasters::raster(&item).unwrap_err(), "broken wrapper");
         assert!(matches!(
-            JobRasters::raster(&serde_json::json!({"hidden": true})),
+            JobRasters::raster(WireAnswer::Hidden),
             Ok(pm_render::compat::CompatAnswer::Raster(_))
         ));
+    }
+    /// An answer to a request the child never made is the parent's mistake;
+    /// one to a request whose frame stopped waiting is late, and dropped.
+    #[test]
+    fn an_answer_to_a_request_never_made_fails_the_job() {
+        let rasters = JobRasters::default();
+        assert!(rasters.reply(0, Ok(vec![])).is_err());
+        rasters.next.store(1, Ordering::Release);
+        assert_eq!(rasters.reply(0, Ok(vec![])), Ok(()));
+        assert!(rasters.reply(7, Ok(vec![])).is_err());
+    }
+    /// A layer answered with the wrong number of answers, or pixels that
+    /// don't fill it, fails with the reason instead of drawing.
+    #[test]
+    fn a_short_answer_fails_the_layer() {
+        use pm_protocol::snapshot::CompatSource;
+        use pm_render::compat::{CompatAnswer, CompatRasters};
+        let rasters = Arc::new(JobRasters::default());
+        let parent = rasters.clone();
+        let replied = std::thread::spawn(move || {
+            while parent.waiting.lock().unwrap().is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            parent.reply(0, Ok(vec![])).unwrap();
+        });
+        let answer = rasters.answer("c", "l", 1., 1., CompatSource::RasterOverride, None);
+        replied.join().unwrap();
+        assert!(matches!(answer, CompatAnswer::Missing));
+        let error = rasters.error.lock().unwrap().take();
+        assert_eq!(error.as_deref(), Some("The app answered 0 layers for 1"));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), [0; 3]).unwrap();
+        let short = WireAnswer::Raster {
+            width: 1,
+            height: 1,
+            size: [1., 1.],
+            anchor: [0., 0.],
+            uv: [0., 0., 1., 1.],
+            file: file.path().to_owned(),
+        };
+        assert!(JobRasters::raster(short).is_err());
     }
 }
