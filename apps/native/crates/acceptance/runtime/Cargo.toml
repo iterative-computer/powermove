@@ -23,7 +23,7 @@ pm-promedia = { path = "../../promedia" }
 pm-remote-dom = { path = "../../remote-dom" }
 pm-surface = { path = "../../surface" }
 pm-store-host = { path = "../../store-host" }
-pm-recorder-raster = { path = "../../recorder-raster" }
+pm-recorder = { path = "../../recorder" }
 serde_json = "=1.0.150"
 
 [profile.dev]

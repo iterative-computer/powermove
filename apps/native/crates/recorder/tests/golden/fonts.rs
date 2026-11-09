@@ -1,11 +1,11 @@
 //! Linux font-provider double using only the recorder's generated geometric font.
-use pm_recorder_raster::recorder::TextEngine;
+use pm_recorder::TextEngine;
 use pm_text::font::{FaceFacts, FaceInfo, FontBytes, FontDesc, FontResolver};
 pub struct Fonts {
     info: FaceInfo,
 }
 pub fn engine() -> TextEngine<Fonts> {
-    let data = include_bytes!("../../recorder/tests/fixtures/recorder-test.ttf").to_vec();
+    let data = include_bytes!("../fixtures/recorder-test.ttf").to_vec();
     let facts = FaceFacts::of(&data, 0);
     TextEngine::new(Fonts {
         info: FaceInfo {

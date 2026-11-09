@@ -315,27 +315,18 @@ fn cache() -> Check {
     Ok(())
 }
 fn raster() -> Check {
-    use pm_recorder_raster::{recorder::*, *};
+    use pm_recorder::*;
     let mut canvas = checked(Canvas::new(17, 2, 1))?;
     checked(canvas.set_fill_color("#ff0000"))?;
     checked(canvas.fill_rect(0., 0., 1., 1.))?;
-    let commands = canvas.commands().to_vec();
-    let source = canvas.key();
-    drop(canvas);
-    let mut raster = checked(Rasterizer::new(17, 2, 1))?;
-    let initial = raster.key();
-    let next = checked(raster.replay(initial, &commands))?;
-    assert_eq!(next, source);
     assert_eq!(
-        checked(raster.image_data())?.bytes(),
+        checked(canvas.get_image_data(0, 0, 2, 1))?.bytes(),
         &[255, 0, 0, 255, 0, 0, 0, 0]
     );
-    assert!(raster.replay(initial, &commands).is_err());
     assert_eq!(
-        checked(raster.get_image_data(-1, 0, 2, 1))?.bytes(),
+        checked(canvas.get_image_data(-1, 0, 2, 1))?.bytes(),
         &[0, 0, 0, 0, 255, 0, 0, 255]
     );
-    assert_eq!(raster.key(), next);
     let mut sources = Sources::default();
     let source = checked(sources.insert(
         SourceKey { id: 99, version: 1 },
@@ -343,13 +334,12 @@ fn raster() -> Check {
     ))?;
     let mut target = checked(Canvas::new(18, 1, 1))?;
     checked(target.draw_image(source, Rect::new(0., 0., 1., 1.), Rect::new(0., 0., 1., 1.)))?;
-    let retained = target.commands().to_vec();
     sources.retire(SourceKey { id: 99, version: 1 });
-    drop(target);
     drop(sources);
-    let mut raster = checked(Rasterizer::new(18, 1, 1))?;
-    checked(raster.replay(raster.key(), &retained))?;
-    assert_eq!(checked(raster.image_data())?.bytes(), &[0, 255, 0, 255]);
+    assert_eq!(
+        checked(target.get_image_data(0, 0, 1, 1))?.bytes(),
+        &[0, 255, 0, 255]
+    );
     Ok(())
 }
 fn remote() -> Check {

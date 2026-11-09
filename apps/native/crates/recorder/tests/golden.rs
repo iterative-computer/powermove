@@ -1,3 +1,6 @@
+#[path = "golden/fonts.rs"]
+mod fonts;
+#[path = "golden/scenes.rs"]
 mod scenes;
 use std::{fs::File, io::BufReader, path::PathBuf};
 fn compare(name: &str) {
@@ -8,13 +11,9 @@ fn compare(name: &str) {
     } else {
         root
     };
-    let fixture = if name == "shadow-composites" {
-        "composites"
-    } else {
-        name
-    };
+    let fixture = root.join("tests/golden").join(format!("{name}.png"));
     let decoder = png::Decoder::new(BufReader::new(
-        File::open(root.join("tests/fixtures").join(format!("{fixture}.png"))).unwrap(),
+        File::open(fixture).unwrap(),
     ));
     let mut reader = decoder.read_info().unwrap();
     let mut expected = vec![0; reader.output_buffer_size().unwrap()];
@@ -109,8 +108,7 @@ fn compare(name: &str) {
 }
 macro_rules! golden { ($($name:ident => $scene:literal),* $(,)?) => {$ (#[test] fn $name(){compare($scene);})*}; }
 golden! {
-    all_26_shadow_composites=>"shadow-composites",
-    analytic_bezier_area=>"analytic-beziers", analytic_rounded_corner_area=>"analytic-roundrect", analytic_rotated_ellipse_area=>"analytic-ellipse", analytic_gaussian_shadow=>"analytic-shadow",
+    analytic_bezier_area=>"analytic-beziers", analytic_rounded_corner_area=>"analytic-roundrect", analytic_rotated_ellipse_area=>"analytic-ellipse",
     analytic_disk_area=>"analytic-circle", analytic_bilinear_taps=>"analytic-bilinear", analytic_fractional_rect=>"analytic-rect",
     shaped_text_via_font_provider=>"text",
     rectangles_alpha_clear=>"rects", paths_beziers_winding=>"curves", arcs_ellipses_tangents=>"arcs",

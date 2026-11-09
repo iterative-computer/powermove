@@ -642,6 +642,7 @@ dependencies = [
  "libm",
  "pm-text",
  "pm-vector",
+ "png",
  "read-fonts 0.45.0",
  "unicode-bidi",
 ]

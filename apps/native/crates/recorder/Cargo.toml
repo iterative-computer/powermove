@@ -13,3 +13,6 @@ i_overlay = "9.1"
 libm = "0.2"
 read-fonts = "0.45"
 unicode-bidi = "0.3.18"
+
+[dev-dependencies]
+png = "0.18"

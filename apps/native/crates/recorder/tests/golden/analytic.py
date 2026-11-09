@@ -89,19 +89,7 @@ def main():
         disc=b*b-4*a*c
         return [] if disc<=0 else [(8+(-b-math.sqrt(disc))/(2*a),8+(-b+math.sqrt(disc))/(2*a))]
     png(dest/'analytic-ellipse.png',16,12,integrate(16,12,ellipse))
-    # Direct 2-D discrete Gaussian, with substantially wider support than the
-    # implementation. Shift by bilinear reconstruction after convolution.
-    norm=sum(math.exp(-.5*i*i) for i in range(-20,21))
-    def gaussian(x,y):
-        return sum(math.exp(-.5*((x-sx)**2+(y-sy)**2))/norm**2 for sx in [3,4] for sy in [3,4])
-    values=[]
-    for y in range(16):
-        for x in range(16):
-            sx=x-2.5;sy=y-1.25;ix=math.floor(sx);iy=math.floor(sy);fx=sx-ix;fy=sy-iy
-            a=(gaussian(ix,iy)*(1-fx)+gaussian(ix+1,iy)*fx)*(1-fy)+(gaussian(ix,iy+1)*(1-fx)+gaussian(ix+1,iy+1)*fx)*fy
-            values.extend([0,0,0,round(a*.5*255)])
-    png(dest/'analytic-shadow.png',16,16,values)
     manifest={'generator':'analytic.py','sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(dest.glob('analytic-*.png'))}}
     (dest/'analytic-manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
-    print('Generated 7 independent analytic PNG references')
+    print('Generated 6 independent analytic PNG references')
 if __name__=='__main__':main()

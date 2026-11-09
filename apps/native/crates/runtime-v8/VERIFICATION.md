@@ -11,13 +11,12 @@ From the repository root, after the session's tool activation:
 
 ```sh
 cargo test --locked --manifest-path apps/native/Cargo.toml \
-  -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster
+  -p pm-runtime-v8 -p pm-recorder
 cargo clippy --locked --manifest-path apps/native/Cargo.toml \
-  -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster \
+  -p pm-runtime-v8 -p pm-recorder \
   --all-targets --no-deps -- -D warnings
 cargo fmt --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --check
 cargo fmt --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --check
-cargo fmt --manifest-path apps/native/crates/recorder-raster/isolated/Cargo.toml --check
 bash -n apps/native/crates/runtime-v8/scripts/verify-macos.sh
 ```
 
@@ -126,7 +125,7 @@ workspace replays each pass **199 / 0 / 0** (pass/fail/ignored). Release command
 
 ```sh
 cargo test --locked --release --manifest-path apps/native/Cargo.toml \
-  -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster
+  -p pm-runtime-v8 -p pm-recorder
 ```
 
 The debug command, three-package strict all-target Clippy and package formatting
@@ -182,11 +181,10 @@ export RUSTY_V8_SRC_BINDING_PATH="$HOME/Developer/pm-v8-s1/src_binding.rs"
 unset V8_FROM_SOURCE
 nice -n 20 flock /tmp/pm-build.lock bash apps/native/crates/runtime-v8/scripts/verify-macos.sh
 nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 test --locked --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --features macos-sandbox -- --test-threads=1 --nocapture
-nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 test --locked --no-fail-fast --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster --features pm-runtime-v8/macos-sandbox -- --test-threads=1
-nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster --features pm-runtime-v8/macos-sandbox --all-targets --no-deps -- -D warnings
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 test --locked --no-fail-fast --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder --features pm-runtime-v8/macos-sandbox -- --test-threads=1
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder --features pm-runtime-v8/macos-sandbox --all-targets --no-deps -- -D warnings
 nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --check
 nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --check
-nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/recorder-raster/isolated/Cargo.toml --check
 nice -n 20 flock /tmp/pm-build.lock bash -n apps/native/crates/runtime-v8/scripts/verify-macos.sh
 ```
 
