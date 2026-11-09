@@ -196,13 +196,19 @@ function SpeechRow({
   model: SettingsModel;
   key?: string;
 }) {
-  const act = (action: "download" | "cancel" | "remove" | "retry") => {
+  const act = (
+    action: "download" | "cancel" | "remove" | "retry" | "use",
+  ) => {
     void model.perform({ type: "speech", id: item.id, action });
   };
   const disabled = !model.services || model.pending.has(item.id);
   return (
     <div role="group" label={item.name}>
-      <Copy>{item.name}</Copy>
+      <Copy>
+        {item.recommended && item.state !== "installed"
+          ? `${item.name} · Recommended`
+          : item.name}
+      </Copy>
       <Copy secondary>{item.size}</Copy>
       {item.state === "available" && (
         <Button
@@ -223,9 +229,17 @@ function SpeechRow({
       )}
       {item.state === "installed" && (
         <>
-          <Copy>Installed</Copy>
+          {item.inUse ? (
+            <Copy>In Use</Copy>
+          ) : (
+            <Button
+              label="Use"
+              disabled={disabled}
+              onClick={() => act("use")}
+            />
+          )}
           <Button
-            label="Remove…"
+            label="Delete…"
             disabled={disabled}
             onClick={() => act("remove")}
           />

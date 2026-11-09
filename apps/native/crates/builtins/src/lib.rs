@@ -18,6 +18,7 @@ pub mod media_import;
 mod models;
 mod properties;
 mod settings;
+pub mod speech;
 mod timeline_easing;
 pub mod virtualization;
 use data::Backend;
@@ -806,6 +807,9 @@ impl Builtins {
         wake: impl Fn() + Send + Sync + 'static,
         carry: Option<AgentCarry>,
     ) -> Result<Self> {
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        // Speech model downloads publish Settings › Transcription again.
+        crate::speech::watch(&wake);
         let (agent, carried) = match carry.map(AgentCarry::adopt) {
             Some((link, state)) => (link, Some(state)),
             None => Default::default(),
@@ -823,7 +827,7 @@ impl Builtins {
             platform_replies: Default::default(),
             timeline_requests: Default::default(),
             platform_ids: std::sync::atomic::AtomicU64::new(1),
-            wake: Arc::new(wake),
+            wake,
             agent,
             carried: Mutex::new(carried),
             agent_released: Default::default(),

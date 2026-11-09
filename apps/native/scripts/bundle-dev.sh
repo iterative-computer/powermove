@@ -25,6 +25,16 @@ for helper in pm-glsl-compiler pm-store-helper; do
     esac
   fi
 done
+# Speech to text (Captions, Transcription): the transcribe.cpp runtime folder
+# (contract.json, libtranscribe and ggml). A release ships it in
+# Resources/transcribe; a dev bundle copies it from PM_TRANSCRIBE_RUNTIME.
+if [ -n "${PM_TRANSCRIBE_RUNTIME:-}" ] && [ -f "$PM_TRANSCRIBE_RUNTIME/contract.json" ]; then
+  mkdir -p "$app/Contents/Resources/transcribe"
+  cp -c "$PM_TRANSCRIBE_RUNTIME"/contract.json "$PM_TRANSCRIBE_RUNTIME"/*.dylib "$app/Contents/Resources/transcribe/" 2>/dev/null \
+    || cp "$PM_TRANSCRIBE_RUNTIME"/contract.json "$PM_TRANSCRIBE_RUNTIME"/*.dylib "$app/Contents/Resources/transcribe/"
+else
+  echo "warning: PM_TRANSCRIBE_RUNTIME is unset; Generate Captions will say its runtime is missing." >&2
+fi
 # Agent runtimes (docs/native/AGENTS.md, launch order step 4): a release bundles
 # the pinned Codex and Claude under Resources/<name>/bin/<name>. A dev bundle uses
 # the ones installed on this Mac, cloned, not linked (launch refuses symlinks).

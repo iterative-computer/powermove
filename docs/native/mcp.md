@@ -61,7 +61,6 @@ the running binary in both directions.
 | Tools | What is missing |
 |---|---|
 | `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A window: only the headless `--powermove-mcp` host refuses these. The running app answers them on its main thread (`app/src/panel_bridge.rs`). |
-| `generate_captions`, `transcribe_media` | Their bodies: `crates/transcribe` has the native runtime, catalog and model store, but no audio staging, chunking, transcript formatting, model UI or caption job yet. |
 | `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | Install and update: the Store serves no release signature yet (`GET /v1/store/releases/<id>/signature`, [store-host.md](store-host.md)), and public hashes come over the same channel as the bytes, so nothing can be verified. Library, uninstall and publish: main's provenance, update checks and publish confirmation aren't ported. |
 | `thread_launch`, `thread_send`, `thread_cancel` | A window: only the headless host refuses these. The app runs them on the window's Agent panel (`Builtins::agent_thread_control`). |
 | `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_watch`, `thread_unwatch`, `publish_visual_reply` | A window: only the headless host refuses these. The app runs them for the calling provider run (`--agent-run`) on its window's Agent panel (`builtins/src/agent_tasks.rs`). |
@@ -741,7 +740,7 @@ provisional UI was made.
 | `import_media_to_timeline`, `import_media`, `replace_media` | Durable original-byte/fingerprint/probe admission, retained runtime versions and native media Undo coordinated with the kernel. File-open ingress does not implement media import. |
 | `edit_3d` | Complete scene edit/validation admission: `kernel/src/commands/scene3d.rs` still returns `NotImplemented`. |
 | `set_panel_layout`, `open_panel`, `get_panel_state`, `interact_panel`, `capture_panel`, `computer_use_panel`, `get_workspace_state` | Workspace editing + external history continuations; registered live native/remote-DOM panel/input/capture/semantic-reference and renderer/workspace diagnostics hosts. Saved layout facts are insufficient. |
-| `transcribe_media`, `generate_captions` | Speech model/download/job/cache/original-PCM service and caption command admission; `kernel/src/commands/captions.rs` still returns `NotImplemented`. |
+| `transcribe_media`, `generate_captions` | Implemented in the app (wave 21) through the `Speech` host hook: `app/src/agent_speech.rs` over `app/src/transcription.rs`. |
 | `store_library`, `store_install`, `store_update`, `store_uninstall`, `store_publish_prepare`, `store_publish` | Durable StoreKernel + permission/trust/provenance/local-tree/activation/publish-confirmation coordinator. `store-host/src/install.rs` supplies an in-memory StoreKernel test implementation and primitives, not this production coordinator. |
 
 `fixtures/unavailable-wave4.json` and its regression exercise all 34 names with

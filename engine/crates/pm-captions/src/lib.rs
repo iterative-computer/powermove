@@ -3,6 +3,7 @@
 //! supply new cue IDs, so headless edits are deterministic and retryable (N7).
 
 pub mod formats;
+pub mod generate;
 pub mod model;
 pub mod style;
 pub mod text;

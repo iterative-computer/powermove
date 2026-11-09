@@ -72,20 +72,23 @@ pub struct AgentExport {
 }
 impl AgentExport {
     pub fn start(title: &str, project: &str, frames: u64) -> Result<Self, String> {
+        Self::begin(
+            TaskSpec {
+                title: format!("{title} (Agent)"),
+                kind: TaskKind::Export,
+                unit: ProgressUnit::Frames,
+                priority: 0,
+                total: frames,
+            },
+            project,
+        )
+    }
+    /// Any cancellable row run off main (Generate Captions too).
+    pub fn begin(spec: TaskSpec, project: &str) -> Result<Self, String> {
         let tasks = tasks();
         let mut tasks = tasks.lock().unwrap();
         let id = tasks
-            .enqueue(
-                project.into(),
-                project.into(),
-                TaskSpec {
-                    title: format!("{title} (Agent)"),
-                    kind: TaskKind::Export,
-                    unit: ProgressUnit::Frames,
-                    priority: 0,
-                    total: frames,
-                },
-            )
+            .enqueue(project.into(), project.into(), spec)
             .map_err(|e| format!("{e:?}"))?;
         // Enqueued and started under one lock: no other export waits queued.
         let ticket = tasks
@@ -458,6 +461,41 @@ struct TaskAdmission<'a> {
     ticket: pm_promedia::tasks::Ticket,
 }
 
+/// Caption files beside the exported video (today's delivery sidecars):
+/// "Film.mp4" gets "Film.srt", or "Film.en.srt", "Film.fr.srt" with several
+/// captions layers, in times from the start of the exported range.
+fn write_sidecars(
+    frozen: &Frozen,
+    format: pm_captions::CaptionFormat,
+    video: &std::path::Path,
+) -> Result<(), Failure> {
+    let Some(doc) = crate::captions_panel::read(&frozen.publication) else {
+        return Ok(());
+    };
+    let range = match doc.work.filter(|_| frozen.options.range == "work") {
+        Some(work) => work,
+        None => [0., doc.duration],
+    };
+    let extension = if format == pm_captions::CaptionFormat::Vtt {
+        "vtt"
+    } else {
+        "srt"
+    };
+    let base = video
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for (suffix, text) in crate::captions_panel::sidecars(&doc, format, range) {
+        let name = match suffix {
+            Some(tag) => format!("{base}.{tag}.{extension}"),
+            None => format!("{base}.{extension}"),
+        };
+        crate::captions_panel::write_file(&video.with_file_name(name), text.as_bytes()).map_err(
+            |_| "The video was exported, but its caption file couldn’t be written.".to_owned(),
+        )?;
+    }
+    Ok(())
+}
 async fn execute_inner(
     frozen: &Frozen,
     job: &Job,
@@ -472,9 +510,11 @@ async fn execute_inner(
         return Err("cancelled".into());
     }
     let intent = frozen.options.intent(planned.has_audio, planned.captions)?;
-    if intent.sidecar != "none" {
-        return Err("Caption sidecar delivery is not connected".into());
-    }
+    let sidecar = match intent.sidecar.as_str() {
+        "srt" => Some(pm_captions::CaptionFormat::Srt),
+        "vtt" => Some(pm_captions::CaptionFormat::Vtt),
+        _ => None,
+    };
     observe(runtime, json!({"phase":"preparing"})).await;
     if frozen.options.format == Format::Json {
         let path = pm_builtins::delivery::portable(
@@ -543,9 +583,15 @@ async fn execute_inner(
                 .ok_or("Export worker lost")?;
             let final_status = handle.wait().map_err(|e| e.to_string())?;
             return match final_status.state {
-                JobState::Done => final_status
-                    .path
-                    .ok_or("Export completed without an output path".into()),
+                JobState::Done => {
+                    let path = final_status
+                        .path
+                        .ok_or("Export completed without an output path")?;
+                    if let Some(format) = sidecar {
+                        write_sidecars(frozen, format, std::path::Path::new(&path))?;
+                    }
+                    Ok(path)
+                }
                 JobState::Cancelled => Err("cancelled".into()),
                 _ => Err(final_status.error.map_or_else(
                     || "Powermove lost contact with the export engine. Try again.".into(),

@@ -515,6 +515,11 @@ impl Backend {
                     .push(("command".into(), json!({ "name": name })));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            Some("write") if action["id"] == "speech.language" => {
+                let store = crate::speech::store().ok_or("Transcription isn’t available here")?;
+                store.set_language(action["value"].as_str().ok_or("Choose a language.")?)?;
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             Some("write") => {
                 let value = &action["value"];
                 if action["id"] == "memory.enabled" {
@@ -629,6 +634,22 @@ impl Backend {
                 ))
             }
             Some("extensions.retry") => Ok(NativeCommand::Value(self.settings_snapshot()?)),
+            Some("speech") => {
+                let store = crate::speech::store().ok_or("Transcription isn’t available here")?;
+                let id = action["id"].as_str().ok_or("Speech model")?;
+                match action["action"].as_str() {
+                    Some("download" | "retry") => store.download(id)?,
+                    Some("cancel") => store.cancel(id),
+                    Some("use") => store.set_active(id)?,
+                    // Deleting asks first (S092): the app's alert, then the store.
+                    Some("remove") => self
+                        .native
+                        .platform
+                        .push(("command".into(), json!({"name":"speechDelete","args":[id]}))),
+                    _ => return Err("Unknown speech model action".into()),
+                }
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             Some("row") if action["action"] == "notifications.open-settings" => {
                 self.native.platform.push((
                     "command".into(),

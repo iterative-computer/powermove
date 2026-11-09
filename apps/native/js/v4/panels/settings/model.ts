@@ -32,6 +32,9 @@ export interface SpeechModel {
   state: "available" | "downloading" | "installed" | "error";
   progress?: number;
   error?: string;
+  /** The model transcription runs on now. */
+  inUse?: boolean;
+  recommended?: boolean;
 }
 export interface MemoryNote {
   id: string;
@@ -63,7 +66,7 @@ export type Action =
   | {
       type: "speech";
       id: string;
-      action: "download" | "cancel" | "remove" | "retry";
+      action: "download" | "cancel" | "remove" | "retry" | "use";
     };
 /** Implemented by pm-services/host, not a second preferences or document store.
  * Resolves only after kernel/service acknowledgement; publishes the next snapshot.
@@ -519,8 +522,10 @@ export class SettingsModel {
         cancel: "downloading",
         remove: "installed",
         retry: "error",
+        use: "installed",
       };
       if (!item || item.state !== states[action.action]) return false;
+      if (action.action === "use" && item.inUse) return false;
     }
     if (action.type === "row") {
       const row = this.rows.find((r) => r.id === id);

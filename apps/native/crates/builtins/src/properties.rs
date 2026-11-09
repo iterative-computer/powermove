@@ -284,6 +284,9 @@ impl Properties {
             if let Some(section) = self.type_settings(model, &layer, time)? {
                 sections.push(section);
             }
+            if model.selected_layers().len() == 1 {
+                sections.extend(self.caption_sections(model, &layer)?);
+            }
             // One 3D section after content, single selection only.
             if model.selected_layers().len() == 1 {
                 let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
@@ -764,6 +767,195 @@ impl Properties {
     /// Type Settings (v1): one row per variation axis of the text layer's
     /// font, plus axes the layer saved from a font this Mac doesn't have. A
     /// static font shows nothing; a missing one says so and offers Refresh Fonts.
+    /// S088: a captions layer's style in the inspector's row grammar, each
+    /// change one `Caption Style` step through `edit_captions` (op style).
+    fn caption_sections(&mut self, model: &Inspector, layer: &str) -> Result<Vec<Value>, String> {
+        let record = super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?);
+        if record["type"] != "captions" {
+            return Ok(vec![]);
+        }
+        let style =
+            serde_json::to_value(pm_captions::normalize_caption_style(&record["d"]["style"]))
+                .unwrap_or_default();
+        let locked = !model.editable(layer);
+        let mut groups: Vec<(&str, &str, Vec<Value>)> = vec![
+            ("captions", "Captions", vec![]),
+            ("captions-background", "Background", vec![]),
+            ("captions-placement", "Placement", vec![]),
+            ("captions-words", "Words", vec![]),
+        ];
+        let row = |this: &mut Self, key: &str, label: &str, control: Value| {
+            let mut control = control;
+            control["binding"] = this.control_lease(&format!("captions.{key}"));
+            if control.get("value").is_none() {
+                control["value"] = style[key].clone();
+            }
+            control["mixed"] = json!(false);
+            json!({"id":format!("captions.{key}"),"label":label,"locked":locked,"animation":null,"control":control})
+        };
+        let number = |this: &mut Self,
+                      key: &str,
+                      unit: &str,
+                      min: f64,
+                      max: Option<f64>,
+                      step: f64| {
+            let mut axis = json!({"binding":this.control_lease(&format!("captions.{key}")),"value":style[key],
+                "unit":unit,"step":step,"precision":2,"mixed":false,"min":min});
+            if let Some(max) = max {
+                axis["max"] = json!(max);
+            }
+            json!({"kind":"number","axes":[axis]})
+        };
+        let choice = |pairs: &[(&str, &str)]| json!({"kind":"choice","options":pairs.iter().map(|(v, l)| json!({"v":v,"label":l})).collect::<Vec<_>>()});
+        let mut presets: Vec<(String, String)> = pm_captions::caption_presets()
+            .iter()
+            .map(|p| (p.id.clone(), p.label.clone()))
+            .collect();
+        if style["preset"] == "custom" {
+            presets.push(("custom".into(), "Custom".into()));
+        }
+        let presets: Vec<(&str, &str)> = presets
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        groups[0]
+            .2
+            .push(row(self, "preset", "Style", choice(&presets)));
+        groups[0].2.push(row(
+            self,
+            "font",
+            "Font",
+            json!({"kind":"font","options":[]}),
+        ));
+        let mut weights: Vec<Value> = [
+            (300, "Light"),
+            (400, "Regular"),
+            (500, "Medium"),
+            (600, "Semibold"),
+            (700, "Bold"),
+            (800, "Heavy"),
+            (900, "Black"),
+        ]
+        .iter()
+        .map(|(v, l)| json!({"v":v,"label":l}))
+        .collect();
+        if !weights
+            .iter()
+            .any(|o| o["v"].as_f64() == style["weight"].as_f64())
+        {
+            weights.push(json!({"v":style["weight"],"label":style["weight"].to_string()}));
+        }
+        groups[0].2.push(row(
+            self,
+            "weight",
+            "Weight",
+            json!({"kind":"choice","options":weights}),
+        ));
+        let size = number(self, "size", "px", 4., None, 1.);
+        groups[0].2.push(row(self, "size", "Size", size));
+        groups[0]
+            .2
+            .push(row(self, "fill", "Color", json!({"kind":"colour"})));
+        let stroke = number(self, "stroke", "px", 0., None, 0.5);
+        groups[0].2.push(row(self, "stroke", "Outline", stroke));
+        if style["stroke"].as_f64().is_some_and(|s| s > 0.) {
+            groups[0].2.push(row(
+                self,
+                "strokeColor",
+                "Outline Color",
+                json!({"kind":"colour"}),
+            ));
+        }
+        groups[0].2.push(row(
+            self,
+            "textCase",
+            "Case",
+            choice(&[
+                ("original", "As Typed"),
+                ("upper", "Uppercase"),
+                ("lower", "Lowercase"),
+            ]),
+        ));
+        groups[1]
+            .2
+            .push(row(self, "box", "Background", json!({"kind":"toggle"})));
+        if style["box"] == true {
+            groups[1]
+                .2
+                .push(row(self, "boxColor", "Color", json!({"kind":"colour"})));
+            let opacity = number(self, "boxOpacity", "%", 0., Some(100.), 1.);
+            groups[1]
+                .2
+                .push(row(self, "boxOpacity", "Opacity", opacity));
+            let padding = number(self, "boxPadding", "px", 0., None, 1.);
+            groups[1]
+                .2
+                .push(row(self, "boxPadding", "Padding", padding));
+            let radius = number(self, "boxRadius", "px", 0., None, 1.);
+            groups[1]
+                .2
+                .push(row(self, "boxRadius", "Corner Radius", radius));
+        }
+        groups[2].2.push(row(
+            self,
+            "placement",
+            "Position",
+            choice(&[("bottom", "Bottom"), ("middle", "Middle"), ("top", "Top")]),
+        ));
+        groups[2].2.push(row(
+            self,
+            "align",
+            "Align",
+            json!({"kind":"segmented","options":[
+            {"id":"left","label":"Align Left","symbol":"text.alignleft"},
+            {"id":"center","label":"Align Center","symbol":"text.aligncenter"},
+            {"id":"right","label":"Align Right","symbol":"text.alignright"}]}),
+        ));
+        let x = self.control_lease("captions.offsetX");
+        let y = self.control_lease("captions.offsetY");
+        groups[2].2.push(json!({"id":"captions.offset","label":"Offset","locked":locked,"animation":null,
+            "control":{"kind":"number","axes":[
+                {"binding":x,"value":style["offsetX"],"unit":"px","step":1,"precision":2,"mixed":false,"label":"Horizontal offset"},
+                {"binding":y,"value":style["offsetY"],"unit":"px","step":1,"precision":2,"mixed":false,"label":"Vertical offset"}]}}));
+        let margin = number(self, "safeMargin", "%", 0., Some(45.), 0.5);
+        groups[2]
+            .2
+            .push(row(self, "safeMargin", "Safe Margin", margin));
+        let width = number(self, "maxWidth", "%", 10., Some(100.), 1.);
+        groups[2].2.push(row(self, "maxWidth", "Max Width", width));
+        let lines = number(self, "maxLines", "", 1., Some(6.), 1.);
+        groups[2].2.push(row(self, "maxLines", "Max Lines", lines));
+        groups[3].2.push(row(
+            self,
+            "highlight",
+            "Highlight",
+            json!({"kind":"toggle"}),
+        ));
+        if style["highlight"] == true {
+            groups[3].2.push(row(
+                self,
+                "highlightColor",
+                "Color",
+                json!({"kind":"colour"}),
+            ));
+            let scale = number(self, "highlightScale", "%", 50., Some(300.), 1.);
+            groups[3].2.push(row(self, "highlightScale", "Size", scale));
+        }
+        groups[3].2.push(row(
+            self,
+            "wordAnimation",
+            "Animation",
+            choice(&[("none", "None"), ("pop", "Pop In"), ("fade", "Fade In")]),
+        ));
+        Ok(groups
+            .into_iter()
+            .filter(|(_, _, rows)| !rows.is_empty())
+            .map(|(id, title, rows)| {
+                json!({"id":id,"title":title,
+                "collapsed":self.collapsed.get(id).copied().unwrap_or(false),"rows":rows})
+            })
+            .collect())
+    }
     fn type_settings(
         &mut self,
         model: &mut Inspector,
@@ -873,6 +1065,37 @@ impl Properties {
                     time,
                 )
                 .map_err(|e| e.to_string());
+        }
+        if let Some(key) = self
+            .handles
+            .iter()
+            .find(|(_, h)| *h == handle)
+            .and_then(|(path, _)| path.strip_prefix("captions."))
+        {
+            let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
+            let published = model.published().clone();
+            if model.selected_layers().len() != 1
+                || published.selection.layers() != model.selected_layers()
+            {
+                return Err("The selection changed".into());
+            }
+            let value = super::data::wire(&value);
+            let patch = pm_model::json::parse(&json!({ key: value }).to_string())
+                .map_err(|e| e.to_string())?;
+            let edit = pm_kernel::commands::captions::CaptionEdit::Style {
+                style: patch,
+                language: None,
+            };
+            return Ok(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Caption Style".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CaptionCommand::Edit { layer_id, edit }.into(),
+                    ]),
+                },
+            ));
         }
         if let Some(control) = self
             .handles

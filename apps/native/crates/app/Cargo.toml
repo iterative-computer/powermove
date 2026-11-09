@@ -58,6 +58,8 @@ gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gp
 pm-panel-media = { path = "../panel-media" }
 pm-first-launch = { path = "../first-launch" }
 pm-services = { path = "../services" }
+pm-captions = { path = "../../../../engine/crates/pm-captions" }
+pm-transcribe = { path = "../transcribe" }
 pm-update-policy = { path = "../update-policy" }
 pm-panel-agentpanel = { path = "../panel-agentpanel" }
 objc2-user-notifications = "0.3"

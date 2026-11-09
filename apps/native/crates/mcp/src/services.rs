@@ -140,6 +140,16 @@ pub struct ImportedMedia {
 pub trait MediaImporter: Send + Sync {
     fn import(&self, request: &MediaImport) -> Result<ImportedMedia>;
 }
+/// Speech to text on this Mac, as the app's transcription service.
+pub trait Speech: Send + Sync {
+    /// `transcribe_media`'s answer: the transcript page, `transcribing` with
+    /// progress while a job runs, or `model-required`.
+    fn transcribe(&self, snapshot: &FrozenProject, args: &Value) -> Result<Value>;
+    /// `generate_captions`: `{status:"running", jobId, progress}` while it
+    /// transcribes, then `{status:"done", command}` with the `add_captions`
+    /// command the session applies in its own transaction.
+    fn captions(&self, snapshot: &FrozenProject, args: &Value, owner: u32) -> Result<Value>;
+}
 /// Reads the durable agent thread archive, whose format the app owns.
 pub trait ThreadArchive: Send + Sync {
     fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
