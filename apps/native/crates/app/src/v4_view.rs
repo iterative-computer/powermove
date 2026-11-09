@@ -136,7 +136,9 @@ pub struct SurfaceView {
     /// so a panel's opening state is not read out.
     statuses: Option<HashMap<Id, String>>,
     queued_move: Option<(Id, EventDetail)>,
+    /// Publications received, and the newest one compiled and shown.
     latest: u64,
+    shown: u64,
     requested: Option<(usize, usize)>,
     #[cfg(test)]
     pub renders: usize,
@@ -185,6 +187,7 @@ impl SurfaceView {
             statuses: None,
             queued_move: None,
             latest: 0,
+            shown: 0,
             requested: None,
             #[cfg(test)]
             renders: 0,
@@ -201,6 +204,15 @@ impl SurfaceView {
     }
     pub fn tokens(&self) -> &pm_design::Tokens {
         &self.table.tokens
+    }
+    /// How many publications this view has shown; it grows when the panel's
+    /// tree changes.
+    pub fn shown(&self) -> u64 {
+        self.shown
+    }
+    /// A newer publication is still compiling.
+    pub fn compiling(&self) -> bool {
+        self.shown != self.latest
     }
     /// Compile off the main thread; only the newest publication installs.
     pub fn publish(&mut self, publication: Publication, cx: &mut Context<Self>) {
@@ -229,6 +241,7 @@ impl SurfaceView {
             let _ = cx.update_window(window, |_, window, cx| {
                 this.update(cx, |v, cx| {
                     if v.latest == ticket {
+                        v.shown = ticket;
                         if v.publication.generation != publication.generation {
                             v.restart();
                         }
