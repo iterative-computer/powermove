@@ -173,6 +173,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         revision: 2,
         extensions: Array.from({ length: 60_000 }, (_, i) => extension(i)),
       });
+      model.select("extensions");
       model.viewport(30_000, 20);
     },
   ],
@@ -307,6 +308,7 @@ test("leased native preference control writes through the model and v4 host, not
 test("extension row enters details, back returns without clearing search, Delete routes archive", async () => {
   const f = fixture({ extensions: [extension()] });
   f.model.show();
+  f.model.select("extensions");
   f.model.viewport(0, 10);
   const { root, commits } = recorder();
   const render = () =>
@@ -375,6 +377,7 @@ for (const state of ["available", "downloading", "installed", "error"] as const)
       ],
     });
     f.model.show();
+    f.model.select("transcription");
     const { root, commits } = recorder();
     await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
     expect(opTree(replay(commits))).toMatchSnapshot();
@@ -453,6 +456,7 @@ test("AX help/count requirements remain declared for the native projection", asy
     ],
   });
   f.model.show();
+  f.model.select("accounts");
   f.model.viewport(0, 1);
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
@@ -467,9 +471,13 @@ test("AX help/count requirements remain declared for the native projection", asy
   expect(input).toBeDefined();
   if (input.help !== null)
     expect(input.help).toBe("Base URL of the API, ending in /v1.");
+  // Settings shows one section per page: the extension list is on its own.
+  f.model.select("extensions");
+  await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+  const extensionsAx = accessibility(commits).ax;
   const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
   expect(list.props.metadata).toHaveProperty("rowCount", 1);
-  const projectedList = ax.find((n) => n.id === list.id)!;
+  const projectedList = extensionsAx.find((n) => n.id === list.id)!;
   expect(projectedList).toBeDefined();
   if (projectedList.role === "List") expect(projectedList.rowCount).toBe(1);
   root.dispose();

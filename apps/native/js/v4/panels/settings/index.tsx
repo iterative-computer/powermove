@@ -144,43 +144,44 @@ function SettingRow({
       role="group"
       label={row.label}
       style={{
-        ...column,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: t("metrics.inset"),
         minHeight: t("metrics.form_row"),
-        padding: t("metrics.inset"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+        paddingTop: t("metrics.gap"),
+        paddingBottom: t("metrics.gap"),
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <Copy>{row.label}</Copy>
-        {/* Controls share one trailing value column (Settings-sheet anatomy). */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            justifyContent: "end",
-            width: t("metrics.sheet_value_column"),
-            flexShrink: 0,
-          }}
-        >
-          <RowControl row={row} model={model} />
-        </div>
+      {/* Title over its description; the control trails, centred on them. */}
+      <div style={{ ...column, flexGrow: 1, gap: t("metrics.border") }}>
+        <text style={{ ...text, fontSize: t("typography.title") }}>
+          {row.label}
+        </text>
+        {row.detail && (
+          <text style={{ ...help, fontSize: t("typography.label") }}>
+            {row.detail}
+          </text>
+        )}
+        {row.error && (
+          <div
+            role="status"
+            label={row.error}
+            metadata={{ symbol: "exclamationmark.triangle.fill" }}
+            style={{
+              color: t("colors.danger"),
+              fontSize: t("typography.label"),
+            }}
+          >
+            {row.error}
+          </div>
+        )}
       </div>
-      {row.detail && <Copy secondary>{row.detail}</Copy>}
-      {row.error && (
-        <div
-          role="status"
-          label={row.error}
-          metadata={{ symbol: "exclamationmark.triangle.fill" }}
-          style={{ color: t("colors.danger"), fontSize: t("typography.body") }}
-        >
-          {row.error}
-        </div>
-      )}
+      <div style={{ display: "flex", flexShrink: 0, alignItems: "center" }}>
+        <RowControl row={row} model={model} />
+      </div>
     </div>
   );
 }
@@ -531,24 +532,40 @@ function SectionContent({
       id={`settings.section.${section}`}
       role="group"
       label={copy.title}
-      style={{ padding: t("metrics.sheet_inset"), gap: t("metrics.inset") }}
+      style={{
+        ...column,
+        padding: t("metrics.sheet_inset"),
+        gap: t("metrics.section_gap"),
+      }}
     >
-      <text
-        role="heading"
-        style={{ fontSize: t("typography.heading"), color: t("colors.text") }}
-      >
-        {copy.title}
-      </text>
-      <text
+      <div
         style={{
-          fontSize: t("typography.reading"),
-          color: t("colors.secondary"),
+          ...column,
+          gap: t("metrics.border"),
+          paddingLeft: t("metrics.inset"),
         }}
       >
-        {section === "project"
-          ? `Settings for “${model.publication.project!.name}”.`
-          : copy.description}
-      </text>
+        <text
+          role="heading"
+          style={{
+            fontSize: t("typography.display"),
+            fontWeight: t("typography.semibold_weight"),
+            color: t("colors.text"),
+          }}
+        >
+          {copy.title}
+        </text>
+        <text
+          style={{
+            fontSize: t("typography.reading"),
+            color: t("colors.muted"),
+          }}
+        >
+          {section === "project"
+            ? `Settings for “${model.publication.project!.name}”.`
+            : copy.description}
+        </text>
+      </div>
       {groups.map((group) => (
         <UI.FormGroup key={group} title={group}>
           {rows
@@ -694,7 +711,14 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
             </text>
           </div>
         ) : (
-          model.visibleSections.map((section) => (
+          // One section per page, as v1 and System Settings; a search lists
+          // every section with a match.
+          (model.query.trim()
+            ? model.visibleSections
+            : model.visibleSections.filter(
+                (section) => section === model.active,
+              )
+          ).map((section) => (
             <SectionContent
               key={section}
               section={section}
