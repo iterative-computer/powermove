@@ -3,7 +3,7 @@
 import argparse, json, os, pathlib, statistics, struct, subprocess, time
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--host',default=os.path.expanduser('~/Developer/pm-target/release/pm-studio-host'));p.add_argument('--out',default='/tmp/pm-shots/studio3d/laneB');p.add_argument('--size',default='1920x1080');p.add_argument('--frames',type=int,default=30);p.add_argument('--scenes',default='hero,edge,macro,back,chrome,materials,caustics,wet');args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--host',default=str(pathlib.Path(__file__).resolve().parent.parent/'resources/studio/pm-studio-host'));p.add_argument('--out',default='/tmp/pm-shots/studio3d/laneB');p.add_argument('--size',default='1920x1080');p.add_argument('--frames',type=int,default=30);p.add_argument('--scenes',default='hero,edge,macro,back,chrome,materials,caustics,wet');args=p.parse_args()
     out=pathlib.Path(args.out);out.mkdir(parents=True,exist_ok=True)
     host=subprocess.Popen([args.host],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=open(out/'host-stderr.log','w'))
     seq=0

@@ -18,12 +18,12 @@ Unset `ELECTRON_RUN_AS_NODE`; set `CARGO_TARGET_DIR=$HOME/Developer/pm-target`.
 
 | Gate | Status | Evidence / required command |
 | --- | --- | --- |
-| All desktop unit tests | PASS | Final full run: **7,352 passed, 7 skipped**, 714 files passed / 3 skipped (370.81 s). One additional compatibility-gate regression passes in the targeted follow-up.  `nice -n 10 npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
-| Entire desktop e2e suite, including 2D/editor/media | FAIL (running) | Full 1,022-test discovery, no filter: `nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000`. Failures listed below.  `nice -n 10 npx playwright test`; report full discovery, completion and skips. A global timeout is a failure, not a pass. |
+| All desktop unit tests | PASS | Final full run: **7,353 passed, 7 skipped**, 714 files passed / 3 skipped (293.04 s). The 35 targeted host/bridge/packaging tests also pass.  `nice -n 10 npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
+| Entire desktop e2e suite, including 2D/editor/media | FAIL | Full run: **979 passed, 19 failed, 24 skipped** (42.1 min). Retry: **5 passed, 14 still failing** (2.9 min), including all four native failures now cleared. Full 1,022-test discovery, no filter: `nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000`. Failures listed below.  `nice -n 10 npx playwright test`; report full discovery, completion and skips. A global timeout is a failure, not a pass. |
 | Svelte and renderer types | PASS | 0 errors, 1 existing accessibility warning in `IconCropper.svelte`.  `npx svelte-check --tsconfig ./tsconfig.web.json` |
 | Main/preload types | PASS | Generate cloud bindings/types first: `bun run --cwd ../cloud types && bun run --cwd ../cloud types:emit`.  `npx tsc --noEmit -p tsconfig.node.json` |
-| Rust workspace, host and GPU tests | OPEN | `nice -n 10 cargo test --release --locked --workspace --features pm-studio-host/oidn --target-dir "$(node ../apps/desktop/scripts/studio-cargo-target.mjs)" -- --test-threads=1`; optional Cycles/reference checks separately, see [yardstick](cycles-yardstick.md). |
-| Public-repository secret scan | OPEN | Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Also scan final branch with `gitleaks git --redact --ignore-gitleaks-allow`. Keep `.githooks` active. |
+| Rust workspace, host and GPU tests | PASS | **83 tests passed**, including 20 host tests, Metal/GPU tests and the optional 11-scene Cycles regression. Initial optional reference run correctly stopped below its 8 GB disk floor; the complete run passed after removing the packaged build.  `nice -n 10 cargo test --release --locked --workspace --no-fail-fast --features pm-studio-host/oidn,pm-studio/yardstick --target-dir "$(node ../apps/desktop/scripts/studio-cargo-target.mjs)" -- --test-threads=1`; the higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
+| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans this branch's complete ancestry (1,219 non-merge commits at the tested code revision) with no leaks. No ignore entries changed.  Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
 
 ## Real packaged app
 
@@ -46,7 +46,7 @@ The acceptance app must come from `electron-builder --dir`, not dev mode or an
 | Kill host during unsaved editing and recover | PASS | SIGKILL of the disposable app's native child; complete scene/layer data unchanged, subsequent edit succeeds; valid WebGPU fallback frame.  Kill only the child PID of this disposable app. Compare full scene data before/after, create another edit and capture a valid frame. WebGPU fallback after a crash is permitted and must be reported. No stale host remains. |
 | Save, quit and reopen identical scene | PASS | All persisted layers/comps and scene dimensions/timing compare equal (absent `solo` normalized to `false`); reopened scene uses a fresh native host.  Save a synthetic `.pmv`, quit, reopen the same profile/project and compare normalized persistent scene/layer data. Render again; never compare only layer counts. |
 | Short Final MP4 export | PASS | 640×360 H.264, 24 fps, 12 frames / 0.5 s; native Final at 16 samples/OIDN. ffprobe and decoded frame inspected. This small acceptance export does not pass the 1080p/64-sample performance gate.  Export through `PM.Export.run`, verify native Final sample/tier evidence, `ffprobe` codec/dimensions/duration/frame count and inspect a decoded frame. Export must occur before intentional fallback or after a native restart. |
-| Quit, renderer reload, two windows/projects and resize lifecycle | PARTIAL | [Manager tests](../../apps/desktop/src/main/studio-native/manager.test.ts), [IPC tests](../../apps/desktop/src/main/studio-native/ipc.test.ts), [adapter tests](../../apps/desktop/src/renderer/src/core/studio-native/backend.test.ts); packaged process/resize stress still required. |
+| Quit, renderer reload, two windows/projects and resize lifecycle | PASS functional / OPEN stress | Packaged app passes six output-size changes, renderer reload with old host released, two independent native windows, closing one window without changing the other, and quit with no orphan native PID. Long-run/200-cycle memory stress is still open.  [Manager tests](../../apps/desktop/src/main/studio-native/manager.test.ts), [IPC tests](../../apps/desktop/src/main/studio-native/ipc.test.ts), [adapter tests](../../apps/desktop/src/renderer/src/core/studio-native/backend.test.ts); long-run stress remains required. |
 
 Local screenshots, `captions.md`, ffprobe results and acceptance logs belong in
 `/tmp/pm-shots/studio3d/laneP1/`, **never committed**. Keep only synthetic evidence;
@@ -100,9 +100,9 @@ scene blocks the bar; report it individually and retain raw samples.
 
 | Gate | Status | Evidence / acceptance |
 | --- | --- | --- |
-| Host crash, GPU/device loss, hung response | PARTIAL | Timeout rejects all pending requests and portable backend replays scene/view/time: [recovery tests](../../apps/desktop/src/renderer/src/core/studio-native/recovery.test.ts). Manager tests cover crash generations and forced reaping. Physical device-loss injection and packaged recovery remain required. |
+| Host crash, GPU/device loss, hung response | PARTIAL | Timeout rejects all pending requests and portable backend replays scene/view/time: [recovery tests](../../apps/desktop/src/renderer/src/core/studio-native/recovery.test.ts). Manager tests cover crash generations and forced reaping. Packaged crash/replay passes; physical device-loss injection remains required. |
 | IPC framing and back-pressure | PARTIAL | JSON ≤4 MiB, binary ≤256 MiB, bounded request count and aggregate pending bytes; partial-read and bad-header tests in [protocol](../../engine/hosts/studio-electron/src/protocol.rs) and manager tests. No network command listener; inherited child pipes only. |
-| Shared-texture peer and lifetime | PARTIAL | Main authenticates kernel Mach audit PID against its spawned host; addon tests reject another process. Managed VideoFrame/reference release and three-slot host pool; packaged resize/reload stress remains open. |
+| Shared-texture peer and lifetime | PARTIAL | Main authenticates kernel Mach audit PID against its spawned host; addon tests reject another process. Managed VideoFrame/reference release and three-slot host pool; packaged resize/reload/two-window checks pass. Long stress remains open. |
 | File access confined to referenced assets | PARTIAL | Host accepts geometry/texture/FBX **bytes**, never a renderer-supplied filesystem path. FBX external-file loading is disabled in [importer](../../engine/hosts/studio-electron/src/fbx.rs). Main owns executable/addon resolution. Continue review when adding any path-based host operation. |
 | GPU memory budget for large scenes | OPEN | Packet/frame/instance/texture limits exist; prove aggregate GPU/CPU allocation behavior and controlled errors against the memory stress gate above. Packet size alone is not a GPU-memory guarantee. |
 | Broken model, font or texture isolated to one layer | OPEN | Corrupt/missing model/font/texture fixtures must leave healthy layers visible and editable, with a clear per-layer error; Lane K owns import/font fixes. |
@@ -152,16 +152,56 @@ scene blocks the bar; report it individually and retain raw samples.
 
 ## Full-suite failures awaiting follow-up
 
-The full suite is still running. Current failures include agent extension
-recovery (timeout), authenticated visual replies (missing iframe), large agent
-attachments, idle effect GPU accounting, durable OBJ import, sandbox clipboard,
-reference graph editing, group Properties keyboard reveal, 2.5D group switch
-expectations, multi-layer value dragging and property reveal. These need their
+The complete 1,022-test run finished with 979 passes, 19 failures and 24 skips.
+An isolated rerun of those 19 cases passed five and reproduced fourteen failures.
+Remaining failures cover agent extension recovery (timeout), authenticated visual
+replies (missing iframe), large agent attachments, idle effect GPU accounting,
+durable OBJ import, reference graph editing, group Properties keyboard reveal,
+2.5D group switch expectations, multi-layer value dragging/property reveal,
+keyframe dragging/navigation and track-value editing. Sandbox clipboard passed
+on retry; its first-run failure still warrants a flakiness review. These need their
 own reproduction/review; P1 has not labeled them pre-existing or waived them.
 
 Several native World/environment/iris assertions also failed because the
 initial full-suite build picked the incompatible shared-cache helper described
-above. The isolated build and targeted native rerun must resolve these failures
-before treating them as cleared. Do not count WebGPU-rendered successes as
+above. All four native assertions pass on the corrected isolated build and targeted
+rerun (World ground, room/landscape, HDR sources and iris bokeh). Do not count WebGPU-rendered successes as
 native verification. Extended film exports are part of the full suite and can
 take substantially longer than the default 10-minute global test timeout.
+
+
+## Verified code and retained evidence
+
+Packaged acceptance tested code commit `13f69c6f2ae4bad388f6a7f4971f7e359df1ed42`
+from a clean working tree. `packaged-results.json` outside Git records that SHA,
+app.asar/host hashes, source cleanliness, the unmodified-fuse smoke run and the
+separate inspector-copy assertions. Evidence includes eight scene/window PNGs,
+`captions.md`, animated `final.mp4` (12 distinct decoded frames), `ffprobe.json`
+and local suite summaries. The final frame was visually inspected: model,
+extruded “Studio”, seeded terrain/scatter, sky and lighting are present.
+Temporary profiles/app copies and the packaged `dist/` build were removed.
+
+The final packaged rerun caught and corrected an over-broad finite-data check:
+`GpuTri.n[*].w` holds packed RGBA8 **bits**, including values that look like NaN
+as floats. Validation now permits those words while still rejecting non-finite
+normal xyz, UVs and tangents. A regression test reproduces the valid-white-colour
+case and invalid shading coordinates. A successful native smoke run also
+confirms the corrected 128-byte material / 96-byte triangle layout and OIDN.
+
+The Python host smoke and FBX measurement defaults now use this checkout's
+verified `resources/studio` helper rather than an unrelated shared Cargo binary.
+
+
+Repeatable e2e blockers (relative to `apps/desktop/e2e`; run the named files
+with `npx playwright test <file>`):
+
+| Area | Failing files / cases |
+| --- | --- |
+| Agent | `agent-extension-recovery.spec.ts`, authenticated MCP case in `agent-visual-replies.spec.ts`, large-attachment case in `chatgpt-connection.spec.ts` |
+| Effects/import | `effects-idle-cost.spec.ts`, durable OBJ case in `extension-layers.spec.ts` |
+| Groups/graph | `graph-reference.spec.ts`, first case in `group-transforms.spec.ts`, `groups-25d.spec.ts` |
+| Property editing | multi-layer drag in `property-animation.spec.ts`, `property-reveal.spec.ts` |
+| Timeline | `timeline-keyframe-drag.spec.ts`, both failing cases in `timeline-keyframe-navigation.spec.ts`, `timeline-track-values.spec.ts` |
+
+These fourteen failures block the full-suite gate. A retry passing five cases
+is not a clean full-suite run. No production release readiness is claimed.

@@ -1,6 +1,6 @@
 /** Reproducible CPU skin + BVH preparation measurement; outputs stay outside Git. */
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import * as THREE from 'three';
 import { StudioHostManager } from '../src/main/studio-native/manager';
@@ -9,7 +9,7 @@ import { gather } from '../src/renderer/src/core/studio/gather';
 import { finishBlas } from '../src/renderer/src/core/studio/blas';
 
 const directory='/tmp/pm-shots/studio3d/laneK';
-const host=new StudioHostManager({executable:path.join(process.env.CARGO_TARGET_DIR ?? path.join(homedir(),'Developer/pm-target'),'release/pm-studio-host')});
+const host=new StudioHostManager({executable:process.env.POWERMOVE_STUDIO_HOST ?? fileURLToPath(new URL('../resources/studio/pm-studio-host',import.meta.url))});
 try {
   const bytes=await readFile(new URL('../../../engine/hosts/studio-electron/fixtures/tiny-animated.fbx',import.meta.url));
   const reply=await host.request({op:'importFbx'},new Uint8Array(bytes));

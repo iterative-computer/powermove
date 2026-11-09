@@ -197,7 +197,7 @@ From the repository root:
 ```sh
 bun install --frozen-lockfile
 bun run --cwd apps/desktop build
-CARGO_TARGET_DIR=~/Developer/pm-target CARGO_BUILD_JOBS=2 nice -n 10 ~/.cargo/bin/cargo test --manifest-path engine/Cargo.toml --target-dir "$(node apps/desktop/scripts/studio-cargo-target.mjs)" -p pm-studio -p pm-studio-host --features oidn,metalfx
+CARGO_TARGET_DIR=~/Developer/pm-target CARGO_BUILD_JOBS=2 nice -n 10 ~/.cargo/bin/cargo test --manifest-path engine/Cargo.toml --target-dir "$(node apps/desktop/scripts/studio-cargo-target.mjs)" -p pm-studio -p pm-studio-host --features oidn,metalfx,yardstick
 bun run --cwd apps/desktop test -- src/main/studio-native/manager.test.ts src/renderer/src/core/studio-native/backend.test.ts src/renderer/src/core/studio-native/recovery.test.ts
 python3 apps/desktop/scripts/studio-native-smoke.py
 node apps/desktop/scripts/studio-native-electron.mjs
@@ -262,7 +262,8 @@ The editor integration test verifies native pixels, actual Electron shared
 texture transfers and repeated layer additions. The Final-quality regression
 checks a 3D shot nested in a 2D composition against its configured sample goal.
 Development launches resolve the built runtime beside the desktop project so
-its surface addon is found before the shared Cargo binary fallback.
+its surface addon and verified helper come from this checkout; no shared-cache
+binary is used implicitly.
 
 ## Local packaged acceptance
 
