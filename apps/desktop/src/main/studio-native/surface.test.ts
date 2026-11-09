@@ -34,6 +34,13 @@ describe('Studio shared-texture lifetime', () => {
     s.receiver.close();expect(s.addon.close).toHaveBeenCalledOnce();
     finish();finish();expect(s.addon.release).toHaveBeenCalledOnce();expect(s.released).toHaveBeenCalledOnce();
   });
+  it('never throws from a late Electron release callback and still acknowledges the host once',async()=>{
+    const s=setup();let finish!:()=>void;const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+    texture.import.mockImplementation(options=>{finish=options.allReferencesReleased;return {release:vi.fn()};});
+    s.addon.release.mockImplementation(()=>{throw new Error('Unknown Studio surface handle');});
+    try{await s.present();expect(()=>{finish();finish();}).not.toThrow();expect(s.released).toHaveBeenCalledOnce();expect(log).toHaveBeenCalledOnce();}
+    finally{log.mockRestore();s.receiver.close();}
+  });
   it('releases the imported reference on a failed transfer', async () => {
     const s=setup();const imported={release:vi.fn(()=>texture.import.mock.calls[0]![0].allReferencesReleased())};
     texture.import.mockReturnValue(imported);texture.send.mockRejectedValue(new Error('frame gone'));

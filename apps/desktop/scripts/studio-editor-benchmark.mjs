@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {_electron} from 'playwright';
-import {distribution,presentationMetrics,memoryTrend} from './studio-editor-metrics.mjs';
+import {distribution,presentationMetrics,memoryTrend,overlappingTasks} from './studio-editor-metrics.mjs';
 import {corpusGlb} from './studio-corpus-glb.mjs';
 import {studioCargoTarget} from './studio-cargo-target.mjs';
 import {flipFuses,FuseVersion,FuseV1Options} from '@electron/fuses';
@@ -43,7 +43,7 @@ const swapMiB=text=>Number(text.match(/used =\s*([\d.]+)M/)?.[1]??NaN);
 function options() {
  const value=(key,fallback)=>{const i=process.argv.indexOf(key);return i<0?fallback:process.argv[i+1];};
  return {dev:process.argv.includes('--dev'),seconds:Number(value('--seconds','30')),runs:Number(value('--runs','3')),finalFrames:Number(value('--final-frames','30')),
-  stressMinutes:Number(value('--stress-minutes','0')),stressWarmupMinutes:Number(value('--stress-warmup-minutes','5')),diagnostic:process.argv.includes('--diagnostic'),profile:process.argv.includes('--cpu-profile'),scenes:value('--scenes','hero,edge,macro,back,chrome,materials,caustics,wet,landscape,room,street,4view').split(',').filter(Boolean),
+  stressMinutes:Number(value('--stress-minutes','0')),stressWarmupMinutes:Number(value('--stress-warmup-minutes','5')),stressFixedProjects:process.argv.includes('--stress-fixed-projects'),diagnostic:process.argv.includes('--diagnostic'),profile:process.argv.includes('--cpu-profile'),scenes:value('--scenes','hero,edge,macro,back,chrome,materials,caustics,wet,landscape,room,street,4view').split(',').filter(Boolean),
   evidence:path.resolve(process.env.PM_STUDIO_SHOTS??'/tmp/pm-shots/studio3d/laneP4'),fixtures:value('--fixtures',path.join(studioCargoTarget(),'release/studio-environments'))};
 }
 async function installProbe(page) {
@@ -65,8 +65,7 @@ async function installProbe(page) {
 }
 async function resetScene(page,name) {
  await page.evaluate(name=>{
-  const PM=window.PM;PM.pause();PM.AutomaticPreview?.cancel();PM.assets.clear();PM.replaceProject(PM.mkProject({name:`Studio acceptance: ${name}`,w:1920,h:1080,fps:60,dur:90}));PM.setTime(0);PM.ProjectsScreen.hide();PM.Studio?.setPreview('quality');PM.perf.auto=false;PM.quality=1;PM.selectLayers([]);PM.Kernel.api('studio-perf').scene3d.views.setLayout(1);
-  window.__studioPerf.tasks=[];
+  const PM=window.PM;window.__studioPerf.tasks=[];window.__studioPerf.sceneStarted=performance.now();PM.pause();PM.AutomaticPreview?.cancel();PM.assets.clear();PM.replaceProject(PM.mkProject({name:`Studio acceptance: ${name}`,w:1920,h:1080,fps:60,dur:90}));PM.setTime(0);PM.ProjectsScreen.hide();PM.Studio?.setPreview('quality');PM.perf.auto=false;PM.quality=1;PM.selectLayers([]);PM.Kernel.api('studio-perf').scene3d.views.setLayout(1);
  },name);
 }
 async function author(page,name,config) {
@@ -115,7 +114,16 @@ async function author(page,name,config) {
  await page.evaluate(({name})=>{
   const PM=window.PM,api=PM.Kernel.api('studio-perf').scene3d;
   if(name==='landscape-2x'||name==='forest-100k')for(const layer of PM.proj.layers){const scatter=layer.d?.data?.object?.scatter;if(!scatter)continue;const count=name==='landscape-2x'?scatter.p.count.v*2:layer.name==='Meadow'?50000:layer.name==='Pines'?70000:layer.name==='Birches'?20000:layer.name==='Oaks'?10000:2000;const r=api.edit({operation:'update_scatter',target:layer.id,patch:{p:{count}}});if(!r.ok)throw new Error(r.message);}
-  if(name==='4view')api.views.setLayout(4);
+  window.__studioPerf.allPanesDynamic=name==='4view';
+  if(name==='4view'){
+   api.views.setLayout(4);
+   // Camera motion leaves the other three orthographic views unchanged. Move
+   // the product too, so every pane must produce genuinely new native images.
+   const model=PM.proj.layers.find(l=>l.d?.data?.object?.source?.assetId);
+   if(!model)throw new Error('Four-view workload needs a moving product');
+   const y=model.p['position.y'].v;
+   PM.Edit.apply({type:'replace_keyframes',target:model.id,path:'position.y',keyframes:[{time:0,value:y,ease:'linear'},{time:90,value:y+.5,ease:'linear'}]});
+  }
   const camera=PM.proj.layers.find(l=>l.d?.data?.camera);if(camera){const x=camera.p['position.x'].v,z=camera.p['position.z'].v;PM.Edit.apply({type:'replace_keyframes',target:camera.id,path:'position.x',keyframes:[{time:0,value:x,ease:'linear'},{time:90,value:x+Math.max(1,Math.abs(z)*.15),ease:'linear'}]});}
   api.edit({operation:'set_environment',patch:{samples:64}});
   PM.selectLayers([]);PM.invalidate();
@@ -131,7 +139,7 @@ async function nativeReady(page) {
 }
 
 async function interval(page,kind,seconds) {
- const start=await page.evaluate(kind=>{const p=window.__studioPerf;p.active=kind;p.presentations=[];p.inputs=[];p.tasks=[];p.lastTime=null;const start=performance.now();if(kind==='drag'){window.PM.Kernel.api('studio-perf').scene3d.setView('editor');window.PM.Kernel.api('studio-perf').scene3d.setNavigationMode('orbit');}if(kind==='playback'){window.PM.Kernel.api('studio-perf').scene3d.setView('camera');window.PM.setTime(0);window.PM.play();}return start;},kind);
+ const start=await page.evaluate(kind=>{const p=window.__studioPerf;p.active=kind;p.presentations=[];p.inputs=[];p.tasks=[];p.lastTime=null;const start=performance.now();if(kind==='drag'){window.PM.Kernel.api('studio-perf').scene3d.setView('editor');window.PM.Kernel.api('studio-perf').scene3d.setNavigationMode('orbit');if(p.allPanesDynamic){window.PM.setTime(0);window.PM.play();}}if(kind==='playback'){window.PM.Kernel.api('studio-perf').scene3d.setView('camera');window.PM.setTime(0);window.PM.play();}return start;},kind);
  if(kind==='drag'){
   const stage=await page.locator('#stage').boundingBox();assert(stage,'Visible editor stage required');
   await page.keyboard.down('Alt');await page.mouse.move(stage.x+stage.width*.5,stage.y+stage.height*.5);await page.mouse.down();
@@ -141,7 +149,8 @@ async function interval(page,kind,seconds) {
  }else await page.waitForTimeout(seconds*1000);
  const end=await page.evaluate(()=>{const p=window.__studioPerf;p.active=null;const end=performance.now();window.PM.pause();window.PM.Kernel.api('studio-perf').scene3d.setNavigationMode('select');return end;});
  await page.waitForFunction(()=>window.__studioPerf.pending.length===0,undefined,{timeout:10000});
- return page.evaluate(({start,end})=>{const p=window.__studioPerf;return {start,end,presentations:p.presentations,inputs:p.inputs,tasks:p.tasks.filter(t=>t.at>=start&&t.at<end)};},{start,end});
+ const raw=await page.evaluate(({start,end})=>{const p=window.__studioPerf;return {start,end,presentations:p.presentations,inputs:p.inputs,tasks:p.tasks};},{start,end});
+ raw.tasks=overlappingTasks(raw.tasks,start,end);return raw;
 }
 function summarize(raw,hz) {
  const metrics=presentationMetrics(raw.presentations,raw.start,raw.end,hz);
@@ -162,11 +171,12 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
  assert(config.seconds>0&&Number.isFinite(config.seconds)&&Number.isInteger(config.runs)&&config.runs>0&&Number.isInteger(config.finalFrames)&&config.finalFrames>=0&&Number.isFinite(config.stressMinutes)&&config.stressMinutes>=0&&Number.isFinite(config.stressWarmupMinutes)&&config.stressWarmupMinutes>=0,'Invalid benchmark duration/count');
  if(config.fixtures===path.join(studioCargoTarget(),'release/studio-environments'))execFileSync(process.env.CARGO??path.join(os.homedir(),'.cargo/bin/cargo'),['build','--manifest-path',path.resolve(desktop,'../../engine/Cargo.toml'),'--target-dir',studioCargoTarget(),'--release','--locked','-p','pm-studio','--features','oidn,metalfx,yardstick','--bin','studio-environments'],{env:{...process.env,CARGO_BUILD_JOBS:'2',CARGO_INCREMENTAL:'0',CARGO_PROFILE_RELEASE_DEBUG:'0'},stdio:['ignore','ignore','pipe']});
  assert(config.evidence.startsWith('/tmp/')||config.evidence.startsWith('/private/tmp/'),'Evidence must stay in a temporary directory');
- const initial=machine(new Set([process.pid])),report={date:initial.date,commit:command('git',['rev-parse','HEAD']),dirty:!!command('git',['status','--porcelain']),config,machine:initial,rows:[],errors:[]};
+ const sourceState=command('git',['status','--porcelain']);
+ const initial=machine(new Set([process.pid])),report={date:initial.date,commit:command('git',['rev-parse','HEAD']),dirty:!!sourceState,changedFiles:sourceState.split('\n').filter(Boolean),harnessSha256:createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex'),acceptanceEligible:!config.diagnostic&&initial.quiet,config,machine:initial,rows:[],errors:[]};
  if(!config.diagnostic)assert(initial.quiet,`Quiet-machine gate blocked by ${initial.active.map(p=>`${p.pid} ${p.name}`).join(', ')}`);
  const temporary=await mkdtemp(path.join(os.tmpdir(),'pm-p4-editor-')),profile=path.join(temporary,'profile');await mkdir(profile);await writeFile(path.join(profile,'onboarding-v1.json'),'{"version":1}\n');
  const env={...process.env,POWERMOVE_USER_DATA:profile,POWERMOVE_BACKGROUND_TEST:'0',POWERMOVE_DEVTOOLS:'0'};for(const k of ['ELECTRON_RUN_AS_NODE','POWERMOVE_STUDIO_HOST','PM_STUDIO_TEST_WEBGPU','STUDIO_LIVE_SCALE','STUDIO_ADAPTIVE_LIVE','STUDIO_NO_RT','STUDIO_NO_RIS','STUDIO_NO_METALFX','STUDIO_NO_SHARED_TEXTURE'])delete env[k];
- let app,memoryTimer,memoryPending;const save=()=>writeFile(path.join(config.evidence,'editor-results.json'),JSON.stringify(report,null,2)+'\n');
+ let app,memoryTimer,memoryPending,watchdog,lastProgress=Date.now();const save=()=>{lastProgress=Date.now();return writeFile(path.join(config.evidence,'editor-results.json'),JSON.stringify(report,null,2)+'\n');};
  try {
   let launchSource=source;
   if(!config.dev){
@@ -176,8 +186,12 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
     report.inspectorEnabledInDisposableCopy=true;
   }
   app=await _electron.launch({...(config.dev?{args:[path.join(desktop,'out/main/index.js')],cwd:desktop}:{executablePath:path.join(launchSource,'Contents/MacOS/Powermove')}),env,timeout:60000});
+  watchdog=setInterval(()=>{if(Date.now()-lastProgress>180000){report.errors.push('Editor benchmark made no progress for three minutes');app.process().kill('SIGTERM');}},1000);
+  app.process().stderr?.on('data',data=>{const message=String(data);void writeFile(path.join(config.evidence,'main-stderr.log'),message,{flag:'a'});if(/PM_STUDIO_BENCHMARK_FATAL|Could not release Studio surface/.test(message))report.errors.push(message.trim());});
   const pid=app.process().pid;report.hostSha256=createHash('sha256').update(await readFile(path.join(config.dev?path.join(desktop,'resources'):path.join(launchSource,'Contents/Resources'),'studio/pm-studio-host'))).digest('hex');
-  await app.evaluate(({BrowserWindow,Menu,sharedTexture,dialog})=>{
+  report.addonSha256=createHash('sha256').update(await readFile(path.join(config.dev?path.join(desktop,'resources'):path.join(launchSource,'Contents/Resources'),'studio/studio-surface.node'))).digest('hex');
+  await app.evaluate(({BrowserWindow,Menu,sharedTexture,dialog,app})=>{
+   process.prependListener('uncaughtException',error=>{process.stderr.write(`PM_STUDIO_BENCHMARK_FATAL ${String(error)}\n`);app.exit(1);});
    globalThis.__perfTransfers=0;const send=sharedTexture.sendSharedTexture;sharedTexture.sendSharedTexture=(...args)=>{globalThis.__perfTransfers++;return Reflect.apply(send,sharedTexture,args);};
    dialog.showMessageBox=async()=>({response:2,checkboxChecked:false});
   });
@@ -193,7 +207,8 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
    if(!config.diagnostic)assert(state.quiet,'Another lane became active before measurement');
    try {
     const cold=Date.now();await author(page,name,config);row.native=await nativeReady(page);row.coldSeconds=(Date.now()-cold)/1000;
-    row.scene=await page.evaluate(()=>({layers:window.PM.proj.layers.map(l=>({name:l.name,scatter:l.d?.data?.object?.scatter?.p?.count?.v})),motionBlur:window.PM.proj.layers.some(l=>!!(typeof l.mblur==='object'?l.mblur?.v:l.mblur)),shutter:window.PM.proj.shutter,viewer:{width:document.querySelector('#gl').width,height:document.querySelector('#gl').height,pixelRatio:devicePixelRatio}}));
+    const coldTasks=await page.evaluate(()=>window.__studioPerf.tasks.filter(t=>t.at+t.ms>window.__studioPerf.sceneStarted));row.coldLongTasks=distribution(coldTasks.map(t=>t.ms));await writeFile(path.join(config.evidence,`${name}-cold-long-tasks.json`),JSON.stringify(coldTasks));
+    row.scene=await page.evaluate(()=>({layers:window.PM.proj.layers.map(l=>({name:l.name,scatter:l.d?.data?.object?.scatter?.p?.count?.v})),allPanesDynamic:!!window.__studioPerf.allPanesDynamic,motionBlur:window.PM.proj.layers.some(l=>!!(typeof l.mblur==='object'?l.mblur?.v:l.mblur)),shutter:window.PM.proj.shutter,viewer:{width:document.querySelector('#gl').width,height:document.querySelector('#gl').height,pixelRatio:devicePixelRatio}}));
     await page.waitForTimeout(1500);
     for(let run=0;run<config.runs;run++){
      // Warmup through real camera navigation, then retain at least 30 completions.
@@ -211,7 +226,7 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
     }
     const release=await page.evaluate(()=>{const PM=window.PM;PM.pause();PM.Kernel.api('studio-perf').scene3d.setView('camera');const start=performance.now();PM.setTime(0);PM.invalidate('render');return start;});
     await page.waitForFunction(release=>(window.PM.Studio.diagnostics?.()??[]).some(j=>!j.slot&&j.version&&j.inputAt>=release&&j.native?.host?.tier==='refine'&&j.native.host.samples>=32),release,{timeout:120000});
-    row.refineViewer=await page.evaluate(release=>({seconds:(performance.now()-release)/1000,frames:window.PM.Studio.diagnostics(),longTasks:window.__studioPerf.tasks.filter(t=>t.at>=release)}),release);
+    row.refineViewer=await page.evaluate(release=>({seconds:(performance.now()-release)/1000,frames:window.PM.Studio.diagnostics(),longTasks:window.__studioPerf.tasks.filter(t=>t.at+t.ms>release)}),release);
     await page.screenshot({path:path.join(config.evidence,`${name}-refine-editor.png`)});
     row.refineMachine=measurementState(pid);if(!config.diagnostic)assert(row.refineMachine.quiet,'Another lane became active before Refine');
     row.refine=await page.evaluate(async()=>{const PM=window.PM;PM.pause();PM.Kernel.api('studio-perf').scene3d.setView('camera');PM.Studio.setPreview('quality');PM.agentFrameCapture=true;const start=performance.now();try{
@@ -237,23 +252,30 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   }
   if(config.stressMinutes>0){
    try{
-   report.stress={started:Date.now(),samples:[],warmupSamples:[],cycles:0,warmupCycles:0,minutes:config.stressMinutes,warmupMinutes:config.stressWarmupMinutes,operations:'Save/reopen real synthetic .pmv files; import/delete the tiny animated FBX; regenerate default landscape scatter; resize; GC and idle samples'};
+   report.stress={started:Date.now(),samples:[],warmupSamples:[],cycles:0,warmupCycles:0,minutes:config.stressMinutes,warmupMinutes:config.stressWarmupMinutes,workingSet:config.stressFixedProjects?'two saved projects with retained Undo history':'fresh file identities, growing saved-project catalog',operations:'Save/reopen real synthetic projects; import/delete the tiny animated FBX; regenerate default landscape scatter; resize; GC and idle samples'};
    const projects=[];
    for(const name of ['hero','landscape']){
      await author(page,name,config);await nativeReady(page);const file=path.join(temporary,`${name}.pmv`);
      await app.evaluate(({dialog},file)=>{dialog.showSaveDialog=async()=>({canceled:false,filePath:file});},file);
-     assert(await page.evaluate(()=>window.PM.saveProject({saveAs:true})),'Synthetic stress project must save');projects.push(file);
+     assert(await page.evaluate(()=>window.PM.saveProject({saveAs:true})),'Synthetic stress project must save');projects.push({file,id:await page.evaluate(()=>window.PM.proj.id)});
    }
    await page.evaluate(async()=>{const PM=window.PM;for(const id of [...PM.Tabs.list()])if(!await PM.Tabs.close(id))throw new Error('Could not close a saved stress template');});
+   report.stress.projectCountStart=await page.evaluate(()=>window.PM.Projects.list().length);
    const importedBytes=(await readFile(path.resolve(desktop,'../../engine/hosts/studio-electron/fixtures/tiny-animated.fbx'))).toString('base64');
    const workingFiles=[];
    report.stress.started=Date.now();report.stress.rendererStart=await page.evaluate(()=>{window.__studioPerf.tasks=[];return performance.now();});await save();
    const warmupEnd=Date.now()+config.stressWarmupMinutes*60000;let end=Infinity;
    while(Date.now()<end){
     if(!report.stress.measurementStarted&&Date.now()>=warmupEnd){report.stress.measurementStarted=Date.now();report.stress.warmupCycles=report.stress.cycles;end=Date.now()+config.stressMinutes*60000;report.stress.rendererStart=await page.evaluate(()=>{window.__studioPerf.tasks=[];return performance.now();});console.log('stress measurement started',JSON.stringify({warmupCycles:report.stress.warmupCycles,warmupMinutes:(Date.now()-report.stress.started)/60000}));await save();}
-    const file=path.join(temporary,`cycle-${report.stress.cycles}.pmv`);await cp(projects[report.stress.cycles%2],file,{mode:constants.COPYFILE_FICLONE});workingFiles.push(file);
-    await app.evaluate(({dialog},file)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[file]});},file);
-    await page.evaluate(async()=>{const PM=window.PM;PM.pause();await PM.openProject();PM.AutomaticPreview?.cancel();PM.Studio.setPreview('quality');PM.invalidate('render');});console.log('stress opened',report.stress.cycles);await nativeReady(page);
+    const project=projects[report.stress.cycles%2];
+    if(config.stressFixedProjects){
+     await page.evaluate(async id=>{const PM=window.PM;PM.pause();if(!await PM.openProjectHere(id))throw new Error('Could not reopen saved stress project');PM.ProjectsScreen.hide();PM.AutomaticPreview?.cancel();PM.Studio.setPreview('quality');PM.invalidate('render');},project.id);
+    }else{
+     const file=path.join(temporary,`cycle-${report.stress.cycles}.pmv`);await cp(project.file,file,{mode:constants.COPYFILE_FICLONE});workingFiles.push(file);
+     await app.evaluate(({dialog},file)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[file]});},file);
+     await page.evaluate(async()=>{const PM=window.PM;PM.pause();await PM.openProject();PM.AutomaticPreview?.cancel();PM.Studio.setPreview('quality');PM.invalidate('render');});
+    }
+    console.log('stress opened',report.stress.cycles);await nativeReady(page);
     while(workingFiles.length>2)await rm(workingFiles.shift(),{force:true});
     await page.evaluate(async base64=>{
       const PM=window.PM,api=PM.Kernel.api('studio-perf').scene3d,before=new Set(PM.proj.layers.map(l=>l.id));
@@ -261,10 +283,14 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
       const added=PM.proj.layers.filter(l=>!before.has(l.id));PM.GL.render(PM.time,{mblur:false});await PM.Studio.idle();
       for(const layer of added){const removed=api.edit({operation:'remove',target:layer.id});if(!removed.ok)throw new Error(removed.message);}
       const scatter=PM.proj.layers.find(l=>l.d?.data?.object?.scatter);if(scatter){const r=api.edit({operation:'update_scatter',target:scatter.id,patch:{p:{seed:scatter.d.data.object.scatter.p.seed.v+1}}});if(!r.ok)throw new Error(r.message);}
-      PM.selectLayers([]);PM.GL.render(PM.time,{mblur:false});await PM.Studio.idle();if(!await PM.saveProject())throw new Error('Stress save failed');if(!await PM.Tabs.close(PM.proj.id))throw new Error('Stress project close failed');
+      PM.selectLayers([]);PM.GL.render(PM.time,{mblur:false});await PM.Studio.idle();if(!await PM.saveProject())throw new Error('Stress save failed');
     },importedBytes);
+    const edited=await nativeReady(page),hostStats=edited.jobs.map(j=>j.native?.host).filter(Boolean);
+    report.stress.peakHostMiB=Math.max(report.stress.peakHostMiB??0,...hostStats.map(h=>h.peakRssMiB??0));
+    report.stress.peakGpuMiB=Math.max(report.stress.peakGpuMiB??0,...hostStats.map(h=>h.peakGpuMiB??0));
+    await page.evaluate(async()=>{const PM=window.PM;if(!await PM.Tabs.close(PM.proj.id))throw new Error('Stress project close failed');});
     await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows()[0],b=w.getBounds();w.setSize(b.width===1400?1380:1400,b.height);});
-    report.stress.cycles++;console.log('stress cycle',report.stress.cycles);if(report.stress.cycles%10===0){await page.requestGC();await page.waitForTimeout(2000);const sample=memorySample(pid);sample.machine=measurementState(pid);if(!config.diagnostic)assert(sample.machine.quiet,'Another lane became active during stress');(report.stress.measurementStarted?report.stress.samples:report.stress.warmupSamples).push(sample);await save();console.log('stress',report.stress.cycles,JSON.stringify({rssMiB:sample.rssMiB,hostMiB:sample.hostMiB}));}
+    report.stress.cycles++;console.log('stress cycle',report.stress.cycles);if(report.stress.cycles%10===0){await page.requestGC();await page.waitForTimeout(2000);const sample=memorySample(pid);sample.editor=await page.evaluate(()=>({projects:window.PM.Projects.list().length,tabs:window.PM.Tabs.list().length,attachedNodes:document.querySelectorAll('*').length}));assert.equal(sample.editor.tabs,0,'Stress samples require closed project tabs');if(config.stressFixedProjects)assert.equal(sample.editor.projects,report.stress.projectCountStart,'Fixed-project stress must not grow the project catalog');sample.machine=measurementState(pid);if(!config.diagnostic)assert(sample.machine.quiet,'Another lane became active during stress');(report.stress.measurementStarted?report.stress.samples:report.stress.warmupSamples).push(sample);await save();console.log('stress',report.stress.cycles,JSON.stringify({rssMiB:sample.rssMiB,hostMiB:sample.hostMiB,projects:sample.editor.projects}));}
    }
    report.stress.totalElapsedMinutes=(Date.now()-report.stress.started)/60000;report.stress.elapsedMinutes=(Date.now()-report.stress.measurementStarted)/60000;report.stress.measuredCycles=report.stress.cycles-report.stress.warmupCycles;
    report.stress.trend=memoryTrend(report.stress.samples);
@@ -275,16 +301,18 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   report.sharedTextureTransfers=await app.evaluate(()=>globalThis.__perfTransfers);assert(report.sharedTextureTransfers>0,'Shared textures must reach the real editor');
   clearInterval(memoryTimer);await memoryPending;report.peakRssMiB=Math.max(0,...report.memory.map(s=>s.rssMiB));report.peakHostMiB=Math.max(0,...report.memory.map(s=>s.maxHostMiB));
   const hosts=report.rows.flatMap(r=>[...(r.native?.jobs??[]),...(r.refine?.frames??[]),...(r.final??[]).flatMap(f=>f.frames)]).map(f=>f.native?.host).filter(Boolean);
-  report.peakGpuMiB=Math.max(0,...report.memory.map(s=>s.gpuMiB??0),...hosts.map(h=>h.peakGpuMiB??0),...report.rows.flatMap(r=>r.runs.flatMap(run=>[run.drag.peakGpuMiB,run.playback.peakGpuMiB])));report.gpuMemory='Metal currentAllocatedSize high-water per host; overlaps unified RSS and is not added to it';
+  report.peakHostMiB=Math.max(report.peakHostMiB,report.stress?.peakHostMiB??0,...hosts.map(h=>h.peakRssMiB??0));
+  report.peakGpuMiB=Math.max(0,report.stress?.peakGpuMiB??0,...report.memory.map(s=>s.gpuMiB??0),...hosts.map(h=>h.peakGpuMiB??0),...report.rows.flatMap(r=>r.runs.flatMap(run=>[run.drag.peakGpuMiB,run.playback.peakGpuMiB])));report.gpuMemory='Metal currentAllocatedSize high-water per host; overlaps unified RSS and is not added to it';
   report.swapGrowthMiB=swapMiB(safeCommand('/usr/sbin/sysctl',['vm.swapusage']))-swapMiB(initial.swap);
-  report.gates={memory:report.peakRssMiB<=6144&&report.peakHostMiB<=3072&&report.swapGrowthMiB<=256,stress:!!report.stress&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend.pass&&report.orphanedHostPids?.length===0};
-  for(const row of report.rows){const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]);row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&intervals.length>0&&intervals.every(r=>r.pass),input:!row.error&&intervals.length>0&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&intervals.length>0&&intervals.every(r=>(r.longTasks.max??0)<=50),refine:limit?!row.error&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?!row.error&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
+  report.gates={memory:report.peakRssMiB<=6144&&report.peakHostMiB<=3072&&report.swapGrowthMiB<=256,stress:report.acceptanceEligible&&config.stressWarmupMinutes>=5&&report.errors.length===0&&!!report.stress&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend.pass&&report.orphanedHostPids?.length===0};
+  for(const row of report.rows){const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]),complete=report.acceptanceEligible&&row.runs.length>=3&&row.runs.every(r=>r.warmupPresentations>=30)&&intervals.every(r=>r.seconds>=30);row.protocol={liveComplete:complete,finalWarmFramesComplete:row.finalSeconds?.count>=30};row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&complete&&intervals.every(r=>r.pass),input:!row.error&&complete&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&complete&&intervals.every(r=>(r.longTasks.max??0)<=50)&&(row.coldLongTasks?.max??0)<=50&&(row.refineViewer?.longTasks??[]).every(t=>t.ms<=50),refine:limit?report.acceptanceEligible&&!row.error&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?report.acceptanceEligible&&!row.error&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
   await save();
  }finally{
+  clearInterval(watchdog);
   clearInterval(memoryTimer);
   const hostPids=new Set((report.memory??[]).flatMap(s=>s.processes.filter(p=>p.name.endsWith('/pm-studio-host')).map(p=>p.pid)));
   if(app){await app.evaluate(async({BrowserWindow})=>{for(const w of BrowserWindow.getAllWindows())await w.webContents.executeJavaScript('window.PM?.prepareToClose?.({flush:true})');}).catch(()=>{});const p=app.process(),timer=setTimeout(()=>p.kill('SIGKILL'),6000);try{await app.close({timeout:10000});}catch{p.kill('SIGKILL');}clearTimeout(timer);}
-  report.orphanedHostPids=processes().filter(p=>hostPids.has(p.pid)).map(p=>p.pid);if(report.gates&&report.stress)report.gates.stress=!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend?.pass&&report.orphanedHostPids.length===0;report.finished=Date.now();await save();await rm(temporary,{recursive:true,force:true});
+  report.orphanedHostPids=processes().filter(p=>hostPids.has(p.pid)).map(p=>p.pid);if(report.gates&&report.stress)report.gates.stress=report.acceptanceEligible&&config.stressWarmupMinutes>=5&&report.errors.length===0&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend?.pass&&report.orphanedHostPids.length===0;report.finished=Date.now();await save();await rm(temporary,{recursive:true,force:true});
  }
  console.log(`Evidence: ${path.join(config.evidence,'editor-results.json')}`);
  return report;

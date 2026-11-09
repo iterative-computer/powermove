@@ -37,4 +37,13 @@ describe.skipIf(process.platform !== 'darwin')('native Studio surface authentica
       expect(addon.take(receiver.port, 42, peer.pid)).toBeNull();
     } finally { addon.close(receiver.port, receiver.service); }
   });
+  it('rejects a different Buffer view over an owned handle',()=>{
+    const receiver=addon.create();
+    try{
+      const peer=spawnSync(sender,[receiver.service]);expect(peer.status).toBe(0);
+      const surface=addon.take(receiver.port,42,peer.pid);
+      expect(()=>addon.release(surface.handle.subarray(0))).toThrow('Unknown Studio surface handle');
+      addon.release(surface.handle);addon.release(surface.handle);
+    }finally{addon.close(receiver.port,receiver.service);}
+  });
 });

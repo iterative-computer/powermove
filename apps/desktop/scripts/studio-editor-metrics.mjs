@@ -4,6 +4,10 @@ export function distribution(values) {
   const at=p=>sorted.length?sorted[Math.max(0,Math.ceil(sorted.length*p)-1)]:null;
   return {count:sorted.length,p50:at(.5),p95:at(.95),p99:at(.99),max:sorted.at(-1)??null};
 }
+/** Include a task that began just before the measured action in the same turn. */
+export function overlappingTasks(tasks,start,end) {
+  return tasks.filter(task=>task.at+task.ms>start&&task.at<end);
+}
 export function presentationMetrics(presentations,start,end,hz=60) {
   const rows=presentations.filter(p=>p.at>=start&&p.at<=end);
   // A compositor repaint of the same native image is not a new Studio frame.

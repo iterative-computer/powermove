@@ -31,13 +31,18 @@ export class StudioSurfaceReceiver {
     let surface: ReturnType<Addon['take']>;
     try { surface = this.addon.take(this.receiver.port, meta.surface, expectedPid); }
     catch (error) { released(); throw error; }
-    if (!surface || surface.width !== meta.width || surface.height !== meta.height) {if(surface)this.addon.release(surface.handle);released();throw new Error('Studio surface frame is missing');}
+    if (!surface) { released(); throw new Error('Studio surface frame is missing'); }
     let finished = false;
     const release = () => {
       if (finished) return;
       finished = true;
-      try { this.addon.release(surface.handle); } finally { released(); }
+      // Electron invokes this after the transfer promise has settled. Throwing
+      // here opens its fatal native alert and blocks all editor IPC.
+      try { this.addon.release(surface.handle); }
+      catch (error) { console.error('Could not release Studio surface', error); }
+      finally { released(); }
     };
+    if (surface.width !== meta.width || surface.height !== meta.height) { release(); throw new Error('Studio surface frame is missing'); }
     let imported: Electron.SharedTextureImported | null = null;
     try {
       imported = sharedTexture.importSharedTexture({ textureInfo: { pixelFormat: 'rgba', codedSize: { width: surface.width, height: surface.height }, colorSpace: { primaries: 'bt709', transfer: 'srgb', matrix: 'rgb', range: 'full' }, timestamp: Math.round(meta.time * 1_000_000), handle: { ioSurface: surface.handle } }, allReferencesReleased: release });

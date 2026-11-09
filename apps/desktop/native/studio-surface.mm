@@ -10,7 +10,6 @@
 #include "surface-message.h"
 #include <string>
 #include <cstdio>
-#include <unordered_map>
 
 static napi_value fail(napi_env env,const char*message){napi_throw_error(env,nullptr,message);return nullptr;}
 static napi_value number(napi_env env,uint32_t n){napi_value v;napi_create_uint32(env,n,&v);return v;}
@@ -25,9 +24,11 @@ static napi_value create(napi_env env,napi_callback_info info){
     if(result!=KERN_SUCCESS){mach_port_destroy(mach_task_self(),port);return fail(env,"Could not register Studio surface receiver");}
     napi_value value;napi_create_object(env,&value);prop(env,value,"port",number(env,port));prop(env,value,"service",str(env,service));return value;
 }
-struct SurfaceHandle {IOSurfaceRef surface;void*bytes;};
-static std::unordered_map<void*,SurfaceHandle*> handles;
-static void finalize(napi_env env,void*data,void*hint){auto*h=static_cast<SurfaceHandle*>(data);handles.erase(h->bytes);if(h->surface)CFRelease(h->surface);delete h;}
+struct SurfaceHandle {IOSurfaceRef surface;};
+// Ownership belongs to this Buffer object, not its pooled backing-store
+// address. Views can alias that address and GC can recycle it independently.
+static const napi_type_tag surfaceTag={0xe6d1475da8904f13ULL,0xb7cf5b9d6028ac44ULL};
+static void finalize(napi_env env,void*data,void*hint){auto*h=static_cast<SurfaceHandle*>(data);if(h->surface)CFRelease(h->surface);delete h;}
 static napi_value take(napi_env env,napi_callback_info info){
     size_t argc=3;napi_value args[3];napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);uint32_t port=0,expectedPid=0;double wanted=0.;
     if(argc!=3||napi_get_value_uint32(env,args[0],&port)!=napi_ok||napi_get_value_double(env,args[1],&wanted)!=napi_ok||napi_get_value_uint32(env,args[2],&expectedPid)!=napi_ok||!expectedPid||!std::isfinite(wanted)||wanted<0.||wanted>9007199254740991.||std::floor(wanted)!=wanted)return fail(env,"Invalid Studio surface request");
@@ -45,9 +46,8 @@ static napi_value take(napi_env env,napi_callback_info info){
         IOSurfaceRef surface=IOSurfaceLookupFromMachPort(m.surface.name);mach_port_deallocate(mach_task_self(),m.surface.name);
         if(!surface)continue;
         if(m.frame!=(uint64_t)wanted||IOSurfaceGetWidth(surface)!=m.width||IOSurfaceGetHeight(surface)!=m.height){CFRelease(surface);continue;}
-        auto*handle=new SurfaceHandle{surface,nullptr};napi_value buffer;
-        if(napi_create_buffer_copy(env,sizeof(IOSurfaceRef),&surface,&handle->bytes,&buffer)!=napi_ok){CFRelease(surface);delete handle;return fail(env,"Could not retain Studio surface");}
-        handles.emplace(handle->bytes,handle);napi_add_finalizer(env,buffer,handle,finalize,nullptr,nullptr);
+        auto*handle=new SurfaceHandle{surface};napi_value buffer;void*bytes=nullptr;
+        if(napi_create_buffer_copy(env,sizeof(IOSurfaceRef),&surface,&bytes,&buffer)!=napi_ok||napi_type_tag_object(env,buffer,&surfaceTag)!=napi_ok||napi_wrap(env,buffer,handle,finalize,nullptr,nullptr)!=napi_ok){CFRelease(surface);delete handle;return fail(env,"Could not retain Studio surface");}
         napi_value value;napi_create_object(env,&value);prop(env,value,"handle",buffer);prop(env,value,"width",number(env,m.width));prop(env,value,"height",number(env,m.height));return value;
     }
     return fail(env,"Studio surface frame is missing");
@@ -55,8 +55,9 @@ static napi_value take(napi_env env,napi_callback_info info){
 static napi_value release(napi_env env,napi_callback_info info){
     size_t argc=1;napi_value arg;napi_get_cb_info(env,info,&argc,&arg,nullptr,nullptr);void*data=nullptr;size_t size=0;
     if(argc!=1||napi_get_buffer_info(env,arg,&data,&size)!=napi_ok||size!=sizeof(IOSurfaceRef))return fail(env,"Invalid Studio surface handle");
-    auto it=handles.find(data);if(it==handles.end())return fail(env,"Unknown Studio surface handle");
-    auto*h=it->second;if(h->surface){CFRelease(h->surface);h->surface=nullptr;*static_cast<IOSurfaceRef*>(data)=nullptr;}
+    bool owned=false;SurfaceHandle*h=nullptr;
+    if(napi_check_object_type_tag(env,arg,&surfaceTag,&owned)!=napi_ok||!owned||napi_unwrap(env,arg,reinterpret_cast<void**>(&h))!=napi_ok||!h)return fail(env,"Unknown Studio surface handle");
+    if(h->surface){CFRelease(h->surface);h->surface=nullptr;*static_cast<IOSurfaceRef*>(data)=nullptr;}
     napi_value v;napi_get_undefined(env,&v);return v;
 }
 static napi_value closeReceiver(napi_env env,napi_callback_info info){
