@@ -73,7 +73,6 @@ pub fn flag(layer: &Node, key: &str) -> bool {
     node::truthy(node::member(Some(layer), key))
 }
 
-/// The layer's `type`.
 pub fn layer_type(layer: &Node) -> String {
     member_string(layer, "type").unwrap_or_default()
 }

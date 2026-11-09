@@ -241,15 +241,16 @@ cargo test -p pm-eval --test color_ink
 cargo test -p pm-render
 cargo test -p pm-reference
 cargo run -p pm-protocol --bin pm-protocol-gen -- --check
-cargo run -p pm-perfbench --example perfbench -- text_cold typing_60
 ```
 
-`text_cold` and `typing_60` retain downward-only counter ratchets. Engine
-wall-clock numbers under shared machine load are diagnostic. Paired app
+Engine wall-clock numbers under shared machine load are diagnostic. Paired app
 latency is qualified only in the orchestrator's quiet window, without
-loosening the existing threshold.
+loosening the existing threshold; the native app's harness is
+[tools/perf-gate](../../tools/perf-gate/README.md).
 
-Before the app gates, build the addons and renderer in `apps/desktop`.
+The Electron app gates below are historical: `apps/desktop`, its addons and
+`pm-perfbench` (with the `text_cold` and `typing_60` ratchets) were removed.
+They ran from a v1 checkout. Before them, build the addons and renderer in `apps/desktop`.
 The bridge must exist at `engine/target/pm-bridge/pm_bridge.node`; removing
 `engine/target` removes the development bridge too.
 

@@ -1,16 +1,17 @@
 //! Renders the bridge test source through the display transform into real
-//! IOSurface-backed pool surfaces and checks the bytes Chromium will import
-//! (plan section 18; the S1 quality lines).
+//! IOSurface-backed viewer surfaces and checks their bytes (plan section 18;
+//! the S1 quality lines).
 #![cfg(target_os = "macos")]
 
+mod test_source;
+
 use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
-use pm_gpu::bridge_out::pool::SurfacePool;
-use pm_gpu::bridge_out::test_source::{TestFrame, TestSource, orbit_view, view_projection};
 use pm_gpu::bridge_out::{metal_device, surface::ExportedSurface};
 use pm_protocol::color::{ViewerColorSpace, WorkingEncoding, display_decode, display_encode};
 use pm_protocol::common::Size;
 use pm_protocol::frame::{EditorCamera, Projection};
-use pm_protocol::interop::{PlatformSurface, SurfaceFormat};
+use pm_protocol::interop::{SurfaceFormat, SurfaceRequest};
+use test_source::{TestFrame, TestSource, orbit_view, view_projection};
 
 const W: u32 = 3840;
 const H: u32 = 2160;
@@ -27,7 +28,7 @@ fn gpu() -> Gpu {
     let (device, queue, _) = metal_device("bridge-out test").unwrap();
     let transform = DisplayTransform::new(&device, &queue);
     let size = Size::new(W, H);
-    let source = TestSource::new(&device, size, 0);
+    let source = TestSource::new(&device, size);
     let working = WorkingTexture::new(&device, size);
     Gpu {
         device,
@@ -47,6 +48,10 @@ fn frame(seq: u64, view_seq: u64) -> TestFrame {
         marker: [3000.0, 1500.0, 96.0, 96.0],
         camera: None,
     }
+}
+
+fn surface(gpu: &Gpu, size: Size, format: SurfaceFormat) -> ExportedSurface {
+    ExportedSurface::create(&gpu.device, &SurfaceRequest { size, format }).unwrap()
 }
 
 fn render(gpu: &Gpu, target: &ExportedSurface, frame: &TestFrame, params: DisplayParams) {
@@ -138,54 +143,11 @@ const STANDARD_SRGB: DisplayParams = DisplayParams {
 };
 
 #[test]
-fn a_pool_has_the_requested_surfaces_and_describes_itself() {
-    let (device, _queue, _) = metal_device("pool test").unwrap();
-    let pool = SurfacePool::new(
-        &device,
-        3,
-        Size::new(640, 360),
-        SurfaceFormat::Bgra8Unorm,
-        6,
-    )
-    .unwrap();
-    assert_eq!(pool.len(), 6);
-    assert!(pool.bytes() >= 640 * 360 * 4 * 6);
-    for surface in &pool.surfaces {
-        assert!(surface.iosurface.mach_port().is_some());
-        assert!(surface.iosurface.bytes_per_row() >= 640 * 4);
-    }
-    let descriptor = pool.descriptor();
-    assert_eq!(descriptor.generation.get(), 3);
-    assert_eq!(descriptor.surfaces.len(), 6);
-    assert_eq!(
-        descriptor.surfaces[5].platform,
-        PlatformSurface::IoSurface { bridge_index: 5 }
-    );
-    assert!(pm_protocol::validate::Validate::validate(&descriptor).is_ok());
-    assert!(SurfacePool::new(&device, 4, Size::new(64, 64), SurfaceFormat::Bgra8Unorm, 3).is_err());
-    assert!(
-        SurfacePool::new(&device, 4, Size::new(64, 64), SurfaceFormat::Rgba32Float, 4).is_err()
-    );
-}
-
-#[test]
 fn rgbaf16_keeps_ten_bit_ramps_and_values_above_one() {
     let gpu = gpu();
-    let pool = SurfacePool::new(
-        &gpu.device,
-        1,
-        Size::new(W, H),
-        SurfaceFormat::Rgba16Float,
-        4,
-    )
-    .unwrap();
-    render(
-        &gpu,
-        &pool.surfaces[0],
-        &frame(0xA5A5_1234, 77),
-        STANDARD_SRGB,
-    );
-    let px = Pixels::of(&pool.surfaces[0]);
+    let target = surface(&gpu, Size::new(W, H), SurfaceFormat::Rgba16Float);
+    render(&gpu, &target, &frame(0xA5A5_1234, 77), STANDARD_SRGB);
+    let px = Pixels::of(&target);
     assert_eq!(px.code(), (0xA5A5_1234, 77));
     let mut codes = std::collections::BTreeSet::new();
     let mut max_err = 0f32;
@@ -218,24 +180,17 @@ fn rgbaf16_keeps_ten_bit_ramps_and_values_above_one() {
 #[test]
 fn rgbaf16_on_a_display_p3_canvas_keeps_ten_bit_grey_ramps() {
     let gpu = gpu();
-    let pool = SurfacePool::new(
-        &gpu.device,
-        1,
-        Size::new(W, H),
-        SurfaceFormat::Rgba16Float,
-        4,
-    )
-    .unwrap();
+    let target = surface(&gpu, Size::new(W, H), SurfaceFormat::Rgba16Float);
     render(
         &gpu,
-        &pool.surfaces[0],
+        &target,
         &frame(3, 1),
         DisplayParams {
             canvas: ViewerColorSpace::DisplayP3,
             ..STANDARD_SRGB
         },
     );
-    let px = Pixels::of(&pool.surfaces[0]);
+    let px = Pixels::of(&target);
     let mut codes = std::collections::BTreeSet::new();
     let mut max_err = 0f32;
     let mut previous = -1.0;
@@ -263,16 +218,9 @@ fn rgbaf16_on_a_display_p3_canvas_keeps_ten_bit_grey_ramps() {
 #[test]
 fn bgra_dither_keeps_the_ten_bit_mean_and_eight_bit_values_exact() {
     let gpu = gpu();
-    let pool = SurfacePool::new(
-        &gpu.device,
-        1,
-        Size::new(W, H),
-        SurfaceFormat::Bgra8Unorm,
-        4,
-    )
-    .unwrap();
-    render(&gpu, &pool.surfaces[0], &frame(5, 1), STANDARD_SRGB);
-    let px = Pixels::of(&pool.surfaces[0]);
+    let target = surface(&gpu, Size::new(W, H), SurfaceFormat::Bgra8Unorm);
+    render(&gpu, &target, &frame(5, 1), STANDARD_SRGB);
+    let px = Pixels::of(&target);
     assert_eq!(px.code(), (5, 1));
     // The 8-bit grid ramp passes the dither untouched (what capturePage reads).
     for x in 0..W {
@@ -305,7 +253,7 @@ fn bgra_dither_keeps_the_ten_bit_mean_and_eight_bit_values_exact() {
 fn srgb8_maps_straight_color_then_quantizes_premultiplied_alpha() {
     let gpu = gpu();
     let size = Size::new(1, 1);
-    let pool = SurfacePool::new(&gpu.device, 1, size, SurfaceFormat::Bgra8Unorm, 4).unwrap();
+    let target = surface(&gpu, size, SurfaceFormat::Bgra8Unorm);
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("translucent display boundary"),
         size: wgpu::Extent3d {
@@ -345,7 +293,7 @@ fn srgb8_maps_straight_color_then_quantizes_premultiplied_alpha() {
             &gpu.queue,
             &mut encoder,
             &source,
-            &pool.surfaces[0],
+            &target,
             STANDARD_SRGB,
         )
         .unwrap();
@@ -356,32 +304,25 @@ fn srgb8_maps_straight_color_then_quantizes_premultiplied_alpha() {
             timeout: Some(std::time::Duration::from_secs(5)),
         })
         .unwrap();
-    let pixels = Pixels::of(&pool.surfaces[0]);
+    let pixels = Pixels::of(&target);
     assert_eq!(&pixels.bytes[..4], &[0, 0, 128, 128]);
 }
 
 #[test]
 fn the_dither_moves_with_the_noise_offset_but_keeps_its_mean() {
     let gpu = gpu();
-    let pool = SurfacePool::new(
-        &gpu.device,
-        1,
-        Size::new(W, H),
-        SurfaceFormat::Bgra8Unorm,
-        4,
-    )
-    .unwrap();
+    let target = surface(&gpu, Size::new(W, H), SurfaceFormat::Bgra8Unorm);
     let mean_and_row = |offset: [u32; 2]| {
         render(
             &gpu,
-            &pool.surfaces[0],
+            &target,
             &frame(1, 1),
             DisplayParams {
                 noise_offset: offset,
                 ..STANDARD_SRGB
             },
         );
-        let px = Pixels::of(&pool.surfaces[0]);
+        let px = Pixels::of(&target);
         let row: Vec<f32> = (0..W).map(|x| px.r(x, 100)).collect();
         (row.iter().sum::<f32>() / W as f32, row)
     };
@@ -397,14 +338,7 @@ fn the_dither_moves_with_the_noise_offset_but_keeps_its_mean() {
 #[test]
 fn a_display_p3_canvas_gets_p3_values_and_linear_input_gets_encoded() {
     let gpu = gpu();
-    let pool = SurfacePool::new(
-        &gpu.device,
-        1,
-        Size::new(W, H),
-        SurfaceFormat::Rgba16Float,
-        4,
-    )
-    .unwrap();
+    let target = surface(&gpu, Size::new(W, H), SurfaceFormat::Rgba16Float);
     // The marker is (1, 0.5, 0) in E, BT.709.
     let m = [
         [0.822_462_1, 0.177_538_0, 0.0],
@@ -421,14 +355,14 @@ fn a_display_p3_canvas_gets_p3_values_and_linear_input_gets_encoded() {
         .collect();
     render(
         &gpu,
-        &pool.surfaces[0],
+        &target,
         &frame(1, 1),
         DisplayParams {
             canvas: ViewerColorSpace::DisplayP3,
             ..STANDARD_SRGB
         },
     );
-    let got = Pixels::of(&pool.surfaces[0]).rgb(3040, 1540);
+    let got = Pixels::of(&target).rgb(3040, 1540);
     for c in 0..3 {
         assert!(
             (f64::from(got[c]) - want[c]).abs() < 2e-3,
@@ -438,14 +372,14 @@ fn a_display_p3_canvas_gets_p3_values_and_linear_input_gets_encoded() {
     // Linear-light working values are encoded with E on the way out.
     render(
         &gpu,
-        &pool.surfaces[0],
+        &target,
         &frame(1, 1),
         DisplayParams {
             working: WorkingEncoding::LinearLight,
             ..STANDARD_SRGB
         },
     );
-    let px = Pixels::of(&pool.surfaces[0]);
+    let px = Pixels::of(&target);
     let x = 1900;
     let v = (x as f64 + 0.5) / f64::from(W);
     assert!((f64::from(px.r(x, 100)) - display_encode(v)).abs() < 2e-3);
@@ -454,14 +388,7 @@ fn a_display_p3_canvas_gets_p3_values_and_linear_input_gets_encoded() {
 #[test]
 fn the_cube_field_draws_under_the_frame_code() {
     let gpu = gpu();
-    let pool = SurfacePool::new(
-        &gpu.device,
-        1,
-        Size::new(W, H),
-        SurfaceFormat::Bgra8Unorm,
-        4,
-    )
-    .unwrap();
+    let target = surface(&gpu, Size::new(W, H), SurfaceFormat::Bgra8Unorm);
     let camera = EditorCamera {
         view: orbit_view(0.6, 0.35, 26.0, 0.0),
         projection: Projection::Perspective {
@@ -474,8 +401,8 @@ fn the_cube_field_draws_under_the_frame_code() {
         camera: Some(view_projection(&camera, f64::from(W) / f64::from(H))),
         ..frame(42, 9)
     };
-    render(&gpu, &pool.surfaces[0], &test, STANDARD_SRGB);
-    let px = Pixels::of(&pool.surfaces[0]);
+    render(&gpu, &target, &test, STANDARD_SRGB);
+    let px = Pixels::of(&target);
     assert_eq!(px.code(), (42, 9));
     // Lit cubes: many distinct shades in the middle of the frame.
     let shades: std::collections::BTreeSet<u32> = (0..W)

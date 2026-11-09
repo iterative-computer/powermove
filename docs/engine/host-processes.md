@@ -1,5 +1,11 @@
 # Engine processes and host services (Phase 2 infrastructure)
 
+> **Historical (Electron app).** These engine processes and Electron/CLI host
+> services were removed. The native app runs the engine in process
+> ([engine-service.md](../native/engine-service.md)); agents, documents and
+> the CLI are in [mcp.md](../native/mcp.md), [kernel.md](../native/kernel.md)
+> and [cli.md](../native/cli.md).
+
 Design notes for the engine processes, their protocol connections, and host
 services in Electron main and in the CLI host. Plan sections 4 and 19,
 contracts 7, 8, 9, 12, 13, and 14, and Phase 0 amendments 4, 5, and 12.

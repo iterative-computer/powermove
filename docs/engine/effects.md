@@ -236,8 +236,8 @@ effects are routed as before (`Feature::Effects`, `Feature::Transition`,
 
 `capability::unsupported_with_definitions` gives the same answer statically for routing
 consumers; `unsupported` and `unsupported_with_media` are unchanged (they list effects,
-transitions, and adjustment layers with effects). The interactive engine's presenter
-(pm-node `present/document.rs`) routes with `unsupported_with_media` and, once the
+transitions, and adjustment layers with effects). The Electron app's presenter
+(pm-node `present/document.rs`, removed with that app) routes with `unsupported_with_media` and, once the
 session has definitions, ignores those three features; a definition it cannot draw
 fails the frame as unsupported and routes then; a definition only the runner draws does
 not: the presenter sends its request (and textures) to the window's runner and presents
@@ -279,9 +279,9 @@ runs at the start of later frames), and a deterministic test hook.
   embedded set that repeats an unchanged definition (session start, after a
   refused push, another view's set) keeps it off. `Effects::apply` forgets
   the records of a delta's upserts; the interactive engine loads full sets
-  per view, so pm-engine passes a delta's upserted ids to
+  per view, so the Electron app's pm-engine passed a delta's upserted ids to
   `FramePresenter::definitions` and pm-node's `Composer::use_definitions`
-  forgets them.
+  forgot them (both removed with that app).
 - **The hang guard** (every renderer, every frame, not only the one frame
   timed on the GPU), in two steps (review fix, 2026-10-18):
   1. *Suspicion.* Every frame drawing a user program is followed from when

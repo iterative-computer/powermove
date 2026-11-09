@@ -18,12 +18,13 @@ Code:
   `builtins.json` (the app's shader-layer runtime, embedded).
 - `engine/crates/pm-protocol/src/shader_fallback.rs`: the runner's messages
   (`Event::ShaderFallback`, contract 10).
-- `engine/crates/pm-node/src/present/` (`render.rs`, `mod.rs`, `document.rs`)
-  and `pm-engine/src/{engine,present}.rs`: the interactive presenter's side;
-  `pm-node/src/present/layer_reports.rs` and `shader_layers/reports.rs`: the
-  Shader panel's layer reports.
-- `apps/desktop/src/renderer/src/engine-connection/shader-fallback.ts` (the
-  runner), `session.ts`, `install.ts`.
+- Removed with the Electron app: `engine/crates/pm-node/src/present/`
+  (`render.rs`, `mod.rs`, `document.rs`) and `pm-engine/src/{engine,present}.rs`,
+  the interactive presenter's side; `pm-node/src/present/layer_reports.rs` and
+  `shader_layers/reports.rs`, the Shader panel's layer reports;
+  `apps/desktop/src/renderer/src/engine-connection/shader-fallback.ts` (the
+  runner), `session.ts`, `install.ts`. The headless CLI's runner is
+  `pm-cli` `angle.rs`.
 - `engine/crates/pm-render/tools/shaders/`: the gate corpus and its tools;
   `tests/shader_gate.rs`, `tests/shader_layers.rs`.
 
@@ -97,7 +98,8 @@ The interactive presenter used to route every composition with an extension
 layer that was not a 3D role (`unsupported_with_media` lists
 `ExtensionDefinition`); with the session's definitions it now skips that
 feature, as it skips effects, and a layer the renderer cannot draw fails the
-frame as unsupported and routes then (`pm-node/src/present/document.rs`).
+frame as unsupported and routes then (`pm-node/src/present/document.rs`,
+removed with the Electron app).
 
 ## Extension mesh layers
 
@@ -121,8 +123,8 @@ SPIR-V rewrite, the bind check (amendment 9: samplers other than a float
 
 | Host | What happens |
 |---|---|
-| Interactive engine with a viewer (`set_shader_fallback_runner(true)`, the presenter's composer) | The layer plans as a `FallbackRequest` (vertex, wrapped fragment, target, uniform calls, the failing stage). The frame fails with `RenderError::ShaderFallbackPending`; the presenter sends `Event::ShaderFallback(Requests)` to the view's renderer once per request and redraws when the pixels arrive. A program the device refuses at pipeline creation, on first contact (not known when the frame was planned), asks for the same request from that frame instead of routing. The layer is reported (below) and logged once per layer and session. A runner failure is reported and the layer draws nothing (`compile`: WebGL refuses it too, as today) or is turned off by the watchdog (`watchdog`); the composition is never routed (amendment 21, review fix 2026-10-18) |
-| Job engine (desktop exports, agent stills) | The lane's `FallbackHost` (pm-node `jobs/fallback.rs`, contract 14) asks main to run the request in a window's runner (the job's owner, else any window with the new engine), with the textures and the result as files in the session's scratch area; the job waits for it and renders the frame again. `compile` skips the program as today's exporter does; `watchdogTimeout` stops the job; no window fails the job naming the layer |
+| Interactive engine with a viewer (`set_shader_fallback_runner(true)`, the Electron presenter's composer, removed) | The layer plans as a `FallbackRequest` (vertex, wrapped fragment, target, uniform calls, the failing stage). The frame fails with `RenderError::ShaderFallbackPending`; the presenter sends `Event::ShaderFallback(Requests)` to the view's renderer once per request and redraws when the pixels arrive. A program the device refuses at pipeline creation, on first contact (not known when the frame was planned), asks for the same request from that frame instead of routing. The layer is reported (below) and logged once per layer and session. A runner failure is reported and the layer draws nothing (`compile`: WebGL refuses it too, as today) or is turned off by the watchdog (`watchdog`); the composition is never routed (amendment 21, review fix 2026-10-18) |
+| Job engine (desktop exports, agent stills; Electron app, removed) | The lane's `FallbackHost` (pm-node `jobs/fallback.rs`, contract 14) asks main to run the request in a window's runner (the job's owner, else any window with the new engine), with the textures and the result as files in the session's scratch area; the job waits for it and renders the frame again. `compile` skips the program as today's exporter does; `watchdogTimeout` stops the job; no window fails the job naming the layer |
 | A host with no window open (the hidden host) | The relay has no runner to ask: the job fails naming the program (`shader-fallback-relay.test.ts`, "fails named when none is open"; `tests/effects_fallback.rs` `a_job_without_a_runner_fails_naming_the_program_instead_of_skipping_it`) |
 | `pm-cli render` | No runner: exits 4, "not headless-renderable", naming each layer and definition, before anything is written; the same on every run (`pm-cli/tests/definitions.rs`) |
 

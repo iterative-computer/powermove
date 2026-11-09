@@ -363,8 +363,8 @@ time, so a file replaced at the same path is reopened.
 
 Two caches serve the viewer's frames of one paused time (gestures, inspector
 edits while paused); both are off unless the caller turns them on
-(`Renderer::set_draw_reuse`), and `pm-node`'s composer turns them on only around
-its own frames. Details and measurements: `perf.md`, "Draw reuse" and "Frame
+(`Renderer::set_draw_reuse`), and the native viewer (`pm-engine-service`
+`render.rs`) turns them on only around its own frames. Details and measurements: `perf.md`, "Draw reuse" and "Frame
 prefix".
 
 - `reuse.rs`: a layer's draws are given back from the last frame while its node,

@@ -2,22 +2,19 @@
  * Capture an independent Three.js r180 RGBA32F, 8x linear scene reference.
  * Run under pm-electron-lock because this opens Chromium:
  *   bun engine/crates/pm-render/examples/scene3d_float_reference.ts \
- *     --bundle <prebuilt-browser-bundle> \
  *     --capture <existing-scene3d-capture> --out /tmp/ne-w5/l4/float-reference
- * Build the browser bundle outside the lock with `bun build` first.
  * The capture supplies authored fixture textures. Output stays outside Git.
  */
 import path from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { v1Resolve, v1Root } from '../tools/three-ref/v1-resolve';
 
 const crate = path.resolve(import.meta.dir, '..');
 const repo = path.resolve(crate, '../../..');
-// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
-const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 const argv = process.argv.slice(2);
 const flag = (key: string) => { const n = argv.indexOf(key); return n < 0 ? undefined : argv[n + 1]; };
-const capture = flag('--capture'), output = flag('--out'), bundlePath = flag('--bundle');
-if (!capture || !output || !bundlePath) throw new Error('--capture, --out and --bundle are required');
+const capture = flag('--capture'), output = flag('--out');
+if (!capture || !output) throw new Error('--capture and --out are required');
 const out = path.resolve(output), source = path.resolve(capture);
 if (out.startsWith(repo + path.sep)) throw new Error('reference evidence must stay outside Git');
 mkdirSync(out, { recursive: true });
@@ -26,7 +23,9 @@ const fixtureName = argv.includes('--gltf') ? 'scene3d-gltf-cases.json' : 'scene
 const fixture = JSON.parse(readFileSync(path.join(crate, 'tests/fixtures', fixtureName), 'utf8'));
 const only = flag('--only');
 const cases = fixture.cases.filter((c: any) => !only || c.id.startsWith(only));
-const bundle = readFileSync(path.resolve(bundlePath), 'utf8');
+const build = await Bun.build({ entrypoints: [path.join(import.meta.dir, 'scene3d_float_page.ts')], target: 'browser', plugins: [v1Resolve] });
+if (!build.success) throw new AggregateError(build.logs, 'scene3d_float_page.ts did not bundle');
+const bundle = await build.outputs[0]!.text();
 const server = Bun.serve({ port: 0, async fetch(request) {
   const url = new URL(request.url);
   if (url.pathname === '/') return new Response('<!doctype html><script src="/bundle.js"></script>',

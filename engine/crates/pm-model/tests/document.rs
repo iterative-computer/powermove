@@ -546,7 +546,6 @@ fn every_new_value_and_change_takes_a_new_edition() {
     let revision = d.revision() + 1;
     d.resync(value, revision);
     fresh(d.edition());
-    // Reading never changes it.
     let e = d.edition();
     let _ = (d.root(), d.to_value(), d.canonical_hash());
     assert_eq!(d.edition(), e);

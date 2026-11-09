@@ -1,5 +1,10 @@
 # Export through the job engine
 
+> **Implementation map partly historical.** `pm-export`'s pipeline below is
+> current; pm-node's job service, pm-engine and Electron main's job and agent
+> wiring were removed. Native exports run as a same-binary child through
+> `pm-engine-service` `jobs` ([engine-service.md](../native/engine-service.md)).
+
 Design notes for the Phase 2 export lane: plan section 17 (pipeline, encoder
 input, dither, muxers, agent delivery, presets), section 20 (agents and MCP:
 `export_video`, snapshots, `render_frames`), section 22 (the CLI), section 25

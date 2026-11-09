@@ -137,33 +137,29 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
             [0., 0., 1., 1.],
         )));
     }
-    let painted = pm_export::raster::encode_rgba8_f32(
-        &raster.pixels.pixels,
-        SnapshotPixels::Straight,
-    );
+    let painted =
+        pm_export::raster::encode_rgba8_f32(&raster.pixels.pixels, SnapshotPixels::Straight);
     let window = if raster.crops { request.crop } else { None };
-    Ok(pm_export::raster::place_raster(
-        &painted,
-        raster.pixels.crop,
-        raster.canvas,
-        window,
+    Ok(
+        pm_export::raster::place_raster(&painted, raster.pixels.crop, raster.canvas, window).map(
+            |(pixels, w, h)| {
+                // A crop window's canvas: the quad still spans the whole raster.
+                let uv = match window {
+                    Some(c) if w > 0 && h > 0 => {
+                        let (cw, ch) = (f64::from(w), f64::from(h));
+                        [
+                            -f64::from(c.x) / cw,
+                            -f64::from(c.y) / ch,
+                            f64::from(raster.canvas.0) / cw,
+                            f64::from(raster.canvas.1) / ch,
+                        ]
+                    }
+                    _ => [0., 0., 1., 1.],
+                };
+                geometry(w, h, pixels, uv)
+            },
+        ),
     )
-    .map(|(pixels, w, h)| {
-        // A crop window's canvas: the quad still spans the whole raster.
-        let uv = match window {
-            Some(c) if w > 0 && h > 0 => {
-                let (cw, ch) = (f64::from(w), f64::from(h));
-                [
-                    -f64::from(c.x) / cw,
-                    -f64::from(c.y) / ch,
-                    f64::from(raster.canvas.0) / cw,
-                    f64::from(raster.canvas.1) / ch,
-                ]
-            }
-            _ => [0., 0., 1., 1.],
-        };
-        geometry(w, h, pixels, uv)
-    }))
 }
 
 /// What one need is: the layer at one frame, scale and crop.

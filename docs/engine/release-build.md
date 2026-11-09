@@ -1,5 +1,11 @@
 # The shipping release build
 
+> **Historical (Electron app).** The two `.node` addons, `apps/desktop`'s
+> build scripts and the release workflow described here were removed with
+> the Electron app; the native app's packaging is in
+> [distribution.md](../native/distribution.md). The LTO findings and the
+> `pm-wasm-module` build (still used by the wasm identity workflow) hold.
+
 How the native engine's shipped artifacts are built, why the release
 profile's thin LTO used to fail or silently not apply, and what was verified
 on 2026-10-19 (M4 Max, macOS 27, Rust 1.96.1, Electron 44, no compile-cache

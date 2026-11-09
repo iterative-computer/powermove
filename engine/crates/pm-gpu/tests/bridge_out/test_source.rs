@@ -1,16 +1,12 @@
-//! The bridge test source: what the frame bridge presents until pm-render
-//! draws real frames. It is the S1 test pattern (frame code, ramps, HDR
+//! The bridge test source: the S1 test pattern (frame code, ramps, HDR
 //! patches, moving bar, marker) and, under an editor camera, S1's field of
-//! 2,304 lit cubes with MSAA and depth, so the bridge's tests and the S1
-//! harness measure the production path end to end.
-//!
-//! The engine uses it only when `POWERMOVE_ENGINE_FRAME_SOURCE=test-pattern`
-//! is set (tests, the harness); otherwise no viewer frames are produced.
+//! 2,304 lit cubes with MSAA and depth, drawn into a working texture for the
+//! display-transform tests.
 
 use pm_protocol::common::{Mat4, Size};
 use pm_protocol::frame::{EditorCamera, Projection};
 
-use super::display::{WORKING_FORMAT, WorkingTexture};
+use pm_gpu::bridge_out::display::{WORKING_FORMAT, WorkingTexture};
 
 /// Instances in the cube field (24 × 24 × 4).
 pub const CUBES: u32 = 24 * 24 * 4;
@@ -70,7 +66,6 @@ pub struct TestSource {
     size: Size,
     pattern: wgpu::RenderPipeline,
     overlay: wgpu::RenderPipeline,
-    load: wgpu::RenderPipeline,
     cubes: wgpu::RenderPipeline,
     pattern_uniforms: wgpu::Buffer,
     camera_uniforms: wgpu::Buffer,
@@ -78,14 +73,10 @@ pub struct TestSource {
     camera_group: wgpu::BindGroup,
     msaa: wgpu::TextureView,
     depth: wgpu::TextureView,
-    scratch: wgpu::TextureView,
-    /// Extra full-screen ALU passes per frame (the S1 harness's synthetic
-    /// engine load; 0 in tests).
-    pub extra_passes: u32,
 }
 
 impl TestSource {
-    pub fn new(device: &wgpu::Device, size: Size, extra_passes: u32) -> Self {
+    pub fn new(device: &wgpu::Device, size: Size) -> Self {
         let pattern_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bridge test pattern"),
             source: wgpu::ShaderSource::Wgsl(include_str!("pattern.wgsl").into()),
@@ -149,7 +140,6 @@ impl TestSource {
         };
         let pattern = fullscreen("bridge test pattern", "fs");
         let overlay = fullscreen("bridge test overlay", "fs");
-        let load = fullscreen("bridge test load", "fs_load");
         let cubes = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("bridge test cubes"),
             layout: Some(&camera_pipeline_layout),
@@ -233,21 +223,14 @@ impl TestSource {
             size,
             msaa: target("bridge test msaa", WORKING_FORMAT, 4),
             depth: target("bridge test depth", wgpu::TextureFormat::Depth32Float, 4),
-            scratch: target("bridge test load scratch", WORKING_FORMAT, 1),
             pattern,
             overlay,
-            load,
             cubes,
             pattern_uniforms,
             camera_uniforms,
             pattern_group,
             camera_group,
-            extra_passes,
         }
-    }
-
-    pub fn size(&self) -> Size {
-        self.size
     }
 
     /// Records one frame into `target` (the working texture of the same size).
@@ -271,24 +254,6 @@ impl TestSource {
             _pad: 0,
         };
         queue.write_buffer(&self.pattern_uniforms, 0, bytes_of(&uniforms));
-        for _ in 0..self.extra_passes {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("bridge test load"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scratch,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.load);
-            pass.set_bind_group(0, &self.pattern_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
         match frame.camera {
             None => {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

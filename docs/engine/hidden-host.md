@@ -1,5 +1,11 @@
 # Native hidden MCP host
 
+> **Historical (Electron app).** This TypeScript host and `powermove mcp`
+> were removed. The native app's agent server is in
+> [mcp.md](../native/mcp.md), document authority in
+> [kernel.md](../native/kernel.md), and the headless CLI in
+> [cli.md](../native/cli.md).
+
 On macOS, `powermove mcp` reads the launch-time Use New Engine setting from the
 profile and selects `server/native/mcp.ts` when enabled. Host services run inside
 the CLI process. `server/native/host.ts` embeds the production `DocumentHostPool`,

@@ -128,7 +128,7 @@ if (writeFixture) {
 }
 
 // 4. The Rust side.
-sh('nice', ['-n', '15', 'cargo', 'test', '-p', 'pm-expr', '--release', '--test', 'parity', '--', '--nocapture', '--test-threads=4'],
+sh('nice', ['-n', '15', 'cargo', 'test', '-p', 'pm-expr', '--release', '--test', 'parity', '--', '--include-ignored', '--nocapture', '--test-threads=4'],
   { PM_EXPR_PARITY_DIR: out }, engineDir);
 
 // 5. The same cases and sweep through the wasm32 build: with `js-pow` under V8

@@ -1,7 +1,7 @@
 //! Reuse the existing presenter policy without its bridge transport.
+use crate::audio::{AudioCtl, AudioLink};
 use crate::clock::TransportClock;
 use crate::media::MediaMap;
-use crate::audio::{AudioCtl, AudioLink};
 use pm_protocol::{
     clock::{ClockSample, TransportCommand, TransportState},
     common::PlaybackRate,
@@ -85,18 +85,20 @@ impl Transport {
         media: MediaMap,
         levels: crate::audio::LevelsSink,
     ) -> anyhow::Result<()> {
-        self.audible =
-            pm_audio::graph::audible(doc, &comp, &mut pm_eval::Evaluator::new()).unwrap_or(false);
+        let audible = self.refresh_audible(doc, &comp);
         let link =
             AudioLink::start(doc.clone(), comp, media, levels).map_err(anyhow::Error::msg)?;
         link.send(AudioCtl::Warm);
         self.audio = Some(link);
-        Ok(())
+        Ok(audible?)
     }
-    pub fn update(&mut self, snapshot: &crate::Snapshot, media: MediaMap, comp: &str) {
-        self.audible =
-            pm_audio::graph::audible(&snapshot.document, comp, &mut pm_eval::Evaluator::new())
-                .unwrap_or(false);
+    pub fn update(
+        &mut self,
+        snapshot: &crate::Snapshot,
+        media: MediaMap,
+        comp: &str,
+    ) -> pm_audio::Result<()> {
+        let audible = self.refresh_audible(&snapshot.document, comp);
         if let Some(audio) = &self.audio {
             // Composition identity is fixed for a viewer.
             audio.send(AudioCtl::Document {
@@ -106,6 +108,14 @@ impl Transport {
             });
             audio.send(AudioCtl::Media(media));
         }
+        audible
+    }
+    /// An empty document or an unresolved composition is an error, not
+    /// silence. It leaves nothing to hear, so playback follows the host clock.
+    fn refresh_audible(&mut self, doc: &pm_model::Document, comp: &str) -> pm_audio::Result<()> {
+        let audible = pm_audio::graph::audible(doc, comp, &mut pm_eval::Evaluator::new());
+        self.audible = matches!(audible, Ok(true));
+        audible.map(drop)
     }
     pub fn command(&mut self, cmd: TransportCommand, now: i64) {
         let before = self
@@ -143,11 +153,8 @@ impl Transport {
                         at: start,
                     });
                     self.clock.hold(from, now);
-                    self.awaiting = Some((
-                        now + crate::clock::AUDIO_START_TIMEOUT_US,
-                        before,
-                        rate,
-                    ));
+                    self.awaiting =
+                        Some((now + crate::clock::AUDIO_START_TIMEOUT_US, before, rate));
                 }
             }
             TransportCommand::PlayAround {
@@ -178,11 +185,8 @@ impl Transport {
                     if running && (self.audible || self.clock.following()) {
                         a.send(AudioCtl::Seek(time.get()));
                         self.clock.hold(time.get(), now);
-                        self.awaiting = Some((
-                            now + crate::clock::AUDIO_START_TIMEOUT_US,
-                            before,
-                            rate,
-                        ));
+                        self.awaiting =
+                            Some((now + crate::clock::AUDIO_START_TIMEOUT_US, before, rate));
                     } else {
                         a.send(if mode == pm_protocol::clock::SeekMode::Scrub {
                             AudioCtl::Scrub(time.get())
@@ -315,5 +319,39 @@ mod grid_tests {
         assert!((k - k.round()).abs() < 1e-3, "extrapolated phase: {k}");
         assert_eq!(align_to_grid(5, None), 5);
         assert_eq!(align_to_grid(5, Some((f64::NAN, 0.01))), 5);
+    }
+}
+
+#[cfg(test)]
+mod audible_tests {
+    use super::Transport;
+    use pm_model::{Document, json::parse};
+
+    fn project(layers: &str) -> Document {
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":1,"layers":[{layers}],"comps":{{}},"assets":{{}},"params":{{}}}}"#
+        );
+        Document::new(Some(parse(&text).unwrap()), 1)
+    }
+
+    #[test]
+    fn an_invalid_graph_is_an_error_and_silence_is_not() {
+        let audio = r#"{"id":"a","type":"audio","name":"a","from":0,"dur":1,"on":true,"solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],"d":{"asset":"x","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}"#;
+        let mut transport = Transport::new(1);
+        transport.refresh_audible(&project(audio), "C").unwrap();
+        assert!(transport.audible);
+        assert!(
+            transport
+                .refresh_audible(&project(audio), "missing")
+                .is_err()
+        );
+        assert!(!transport.audible);
+        assert!(
+            transport
+                .refresh_audible(&Document::new(None, 1), "C")
+                .is_err()
+        );
+        transport.refresh_audible(&project(""), "C").unwrap();
+        assert!(!transport.audible);
     }
 }
