@@ -247,7 +247,7 @@ impl Controller {
         let pro_media = Arc::new(crate::pro_media::ProMedia::new(
             profile.clone(),
             crate::media::objects_dir(&profile),
-            engine.export_activity(),
+            engine.export_activity().flag(),
         ));
         pro_media.refresh_usage();
         crate::render_frames::install(engine.render_cache());

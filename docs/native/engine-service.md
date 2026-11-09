@@ -220,17 +220,14 @@ Opus review remain outstanding. No P1/colour/performance gate is declared passed
 - `ResourceSnapshot` pins a generation with future extension/font requirements.
   Viewer changes retire content/cache identity; export serializes the snapshot.
   Unsupported nonempty requirements fail visibly until P2 activation exists.
-- `ExportHandle::start_scheduled` checks service activity over inherited pipes
-  before each export submission. Playback, pending input, dirty content and
-  viewer flights defer export. Within 1 s of viewer activity each grant admits
-  one renderer band (a scrub or play waits behind one band at most); once the
-  viewer is quiet a grant admits the whole frame. Cancellation and parent EOF
-  interrupt the wait. The app passes `engine.export_activity()`. Bands cost a
-  whole composition render each where a pass renders whole for any region
-  (precomps, multi-pass effects): banding every frame made Paper's agent
-  export 0.37 fps against 11.6 fps in whole frames. A submission already on
-  the GPU cannot be preempted; physical interactive-latency protection under
-  export load remains **UNVERIFIED**, including expensive indivisible passes.
+- `ExportHandle::start_scheduled` takes the service's `Activity` (busy now, and
+  an epoch that rises with every activity, so no pulse is missed). Nothing is
+  granted while the viewer is busy. Within 1 s of its last activity a grant
+  admits a submission bounded to 8 ms of measured GPU time (one band probes an
+  unmeasured job; when bands cost about a whole frame, as precomps and
+  multi-pass effects do, the rest of the frame); after 1 s, whole frames.
+  Banding every frame made Paper's agent export 0.37 fps against 11.6 fps in
+  whole frames. A submission already on the GPU cannot be preempted.
 - `scrub_at` preserves NSEvent input origin. Frame reports expose optional
   worker-to-completion cost, input origin and the audio presentation host time
   matching that exact video media time. `PM_ENGINE_TRACE=/tmp/report.trace.json`
@@ -480,18 +477,23 @@ a standalone probe found no latency difference across those settings.
 ## Disk render cache
 
 - View › Render Selection queues the selected layer's span (or the work area)
-  of the open composition; the engine renders one frame at a time once the
-  viewer has rested 0.5 s, as the paused viewer draws it (RGBA16F at the
-  composition's size), and writes it to Storage › Renders off the engine
-  thread. A Background Tasks row shows frame progress; Cancel stops the queue.
-- Frames are keyed by a fingerprint of the whole composition (canonical
-  document, contributed definitions, media files' path/size/mtime, renderer
-  version; with raster overrides also the session's wrappers). Any edit misses
-  every frame; older frames stay until the quota or Clear… removes them.
-- Playing and scrubbing read a frame on disk instead of rendering it and the
-  present pass samples it as the whole canvas (never upscaled past the
-  composition's size). Paused frames always render.
-- The timeline's render bar shows Rendering, Rendered and Kept stretches.
-  Keep Rendered pins the selection's rendered frames against the quota and
-  Clear…; Delete Rendered Frames removes the composition's frames, kept too.
-
+  of the open composition. The frames render in an `--engine-job` child with
+  the viewer's own scene (document, media paths of its media mode,
+  definitions), its paused request at the composition's size (RGBA16F), the
+  export's admission gate and exact override answers, and are written to the
+  Storage › Renders folder captured at its start. A Background Tasks row shows
+  frame progress; Cancel stops the child; a full disk or Render Files Limit
+  fails the task by name.
+- Frames are keyed by a fingerprint of the whole composition: canonical
+  document, contributed definitions, media content (sampled) and stamps
+  (rechecked every 2 s), installed fonts, the viewer's output tone, a digest
+  of the running binary, and with raster overrides the session's wrappers.
+  Every asynchronous result (fingerprint, fill progress, read) is fenced by the
+  observation generation; storage changes and deletions raise it.
+- Playing and scrubbing show frames a reader thread has loaded ahead of the
+  playhead (never waiting on disk); the present pass samples them as the
+  whole canvas, never upscaled. Paused frames always render.
+- The timeline's render bar reads a snapshot published on every change. Keep
+  Rendered pins frames against the limit and Clear…; Delete Rendered Frames
+  stops a running fill first, then removes the composition's frames, kept too.
+  No disk work runs under the cache's lock.

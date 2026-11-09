@@ -356,7 +356,7 @@ type ScopeTap = (
 struct Shared {
     state: Mutex<State>,
     wake: std::sync::mpsc::SyncSender<()>,
-    interactive: Arc<std::sync::atomic::AtomicBool>,
+    interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
     device: Mutex<metal::Device>,
     /// The viewer the Scopes panel analyzes, and where results go.
@@ -390,9 +390,7 @@ impl Viewer {
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
         f(v)?;
-        self.shared
-            .interactive
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.shared.interactive.set(true);
         self.shared.wake.try_send(()).ok();
         Ok(())
     }
@@ -641,9 +639,7 @@ impl Viewer {
             v.stamp.generation += 1;
             v.stamp.sequence += 1;
             v.dirty = true;
-            self.shared
-                .interactive
-                .store(true, std::sync::atomic::Ordering::Release);
+            self.shared.interactive.set(true);
             self.shared.wake.try_send(()).ok();
         }
         Ok(())
@@ -760,7 +756,7 @@ impl EngineService {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             wake,
-            interactive: Arc::default(),
+            interactive: jobs::Activity::default(),
             device: Mutex::new(device),
             scopes: Mutex::new(None),
             disk: render_cache::DiskFrames::default(),
@@ -811,7 +807,7 @@ impl EngineService {
         self.shared.disk.clone()
     }
     /// Share with ExportHandle::start_scheduled; true defers new export bands.
-    pub fn export_activity(&self) -> Arc<std::sync::atomic::AtomicBool> {
+    pub fn export_activity(&self) -> jobs::Activity {
         self.shared.interactive.clone()
     }
     /// Coalesced status edges. Read status() after every wake; idle is silent.
@@ -905,9 +901,7 @@ impl EngineService {
 impl Drop for EngineService {
     fn drop(&mut self) {
         self.shared.state.lock().unwrap().stop = true;
-        self.shared
-            .interactive
-            .store(false, std::sync::atomic::Ordering::Release);
+        self.shared.interactive.set(false);
         self.shared.wake.try_send(()).ok();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -1070,8 +1064,6 @@ const RETRY_SECONDS: f64 = 0.016;
 fn drawable_retry(misses: u32) -> f64 {
     (RETRY_SECONDS * f64::from(1u32 << misses.min(6))).min(1.)
 }
-/// The viewer rests this long before Render Selection's frames render.
-const RENDER_CACHE_REST_SECONDS: f64 = 0.5;
 /// A frame refused as transient this long is reported while it is retried.
 const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
@@ -1087,18 +1079,23 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
     engine.set_waker(Some(shared.wake.clone()));
     engine.disk = Some(shared.disk.clone());
     shared.disk.set_wake(shared.wake.clone());
-    // The scene the viewer drew last, which Render Selection's frames are
-    // rendered from while the viewer rests, and when it last drew.
-    let mut last_scene: Option<(render::Scene, u64)> = None;
-    let mut last_work = 0.;
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
-    // `PM_ENGINE_TRACE`, or the app's `PMEngineTrace` default (`defaults
-    // write <bundle id> PMEngineTrace <file>`) for an app launched without
-    // a custom environment.
+    // `PM_ENGINE_TRACE`, or for a development bundle launched without a
+    // custom environment (`com.powermove.native.dev.*`) its own
+    // `PMEngineTrace` default; a shipped app never reads the default.
     let trace_path = std::env::var_os("PM_ENGINE_TRACE").or_else(|| {
+        let bundle = objc2_foundation::NSBundle::mainBundle().bundleIdentifier()?;
+        if !bundle.to_string().starts_with("com.powermove.native.dev.") {
+            return None;
+        }
+        let key = objc2_foundation::NSString::from_str("PMEngineTrace");
+        // The app's own domain only, never an inherited (global) default.
         objc2_foundation::NSUserDefaults::standardUserDefaults()
-            .stringForKey(&objc2_foundation::NSString::from_str("PMEngineTrace"))
+            .persistentDomainForName(&bundle)?
+            .objectForKey(&key)?
+            .downcast::<objc2_foundation::NSString>()
+            .ok()
             .map(|path| path.to_string().into())
     });
     let recorder = trace_path.and_then(|path| match trace::Recorder::open(path) {
@@ -1586,7 +1583,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         }
         // A view waiting out a missing drawable can't draw: exports go ahead.
         let now = trace::now();
-        shared.interactive.store(
+        shared.interactive.set(
             !flights.is_empty()
                 || work.is_some()
                 || state.views.iter().any(|(id, v)| {
@@ -1594,7 +1591,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         || !v.commands.is_empty()
                 })
                 || runtime.values().any(|r| r.transport.running()),
-            std::sync::atomic::Ordering::Release,
         );
         if changed {
             state.notify();
@@ -1634,13 +1630,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 .compat()
                 .filter(|store| store.producing_now())
                 .map(|store| store.epoch());
-            if shared.disk.observe(&scene, engine.definitions(), overrides)
-                && let Some(recorder) = &recorder
+            if shared.disk.observe(
+                &scene,
+                engine.definitions(),
+                overrides,
+                engine.tone_identity(),
+                stamp.doc_id,
+            ) && let Some(recorder) = &recorder
             {
                 recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
             }
-            last_scene = Some((scene.clone(), stamp.doc_id));
-            last_work = now;
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes
@@ -1770,7 +1769,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         }
                         if let Some(recorder) = &recorder {
                             recorder.record(serde_json::json!({
-                                "refused": e.to_string(),
+                                "refused": refusal_kind(&e),
                                 "time": spec.time.get(),
                                 "at": trace::now(),
                             }));
@@ -1819,40 +1818,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
-            // Render Selection: one frame at a time once the viewer has
-            // rested a moment, so a gesture or play never waits behind it.
-            if !busy
-                && now - last_work >= RENDER_CACHE_REST_SECONDS
-                && let Some((scene, doc_id)) = &last_scene
-                && let Some((n, time, size)) = shared.disk.next(scene)
-            {
-                drop(state);
-                engine.use_compat_document(*doc_id);
-                let result = engine.cache_frame(scene, time, size);
-                if let Some(recorder) = &recorder {
-                    recorder.record(serde_json::json!({
-                        "cache_frame": n,
-                        "result": match &result {
-                            Ok(Some(_)) => "rendered".to_owned(),
-                            Ok(None) => "pending".to_owned(),
-                            Err(e) => e.to_string(),
-                        },
-                        "at": trace::now(),
-                    }));
-                }
-                match result {
-                    Ok(Some(rgba)) => shared.disk.rendered(scene, n, &rgba),
-                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                    Err(_) => shared.disk.skip(n),
-                }
-                continue;
-            }
-            // Queued frames wait out the rest; then the loop comes back.
-            let fill_due = (!busy
-                && last_scene
-                    .as_ref()
-                    .is_some_and(|(scene, _)| shared.disk.next(scene).is_some()))
-            .then(|| (RENDER_CACHE_REST_SECONDS - (now - last_work)).max(0.001));
             // Only back-offs pending, nothing playing: sleep until the first is due.
             let backoff = (flights.is_empty()
                 && runtime
@@ -1895,7 +1860,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let timeout = engine
                 .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
                 .map_or(timeout, |retry| timeout.min(retry));
-            let timeout = fill_due.map_or(timeout, |due| timeout.min(Duration::from_secs_f64(due)));
             let _ = wakes.recv_timeout(timeout);
         }
     }
@@ -2305,5 +2269,17 @@ mod worker_tests {
         v.scrub(Ticks::ZERO).unwrap();
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().pixels.unwrap(), good);
+    }
+}
+
+/// What kind of transient refusal a frame met, for the diagnostic trace
+/// (never its message: messages can name documents, media or paths).
+fn refusal_kind(error: &anyhow::Error) -> &'static str {
+    match error.downcast_ref::<pm_render::RenderError>() {
+        Some(pm_render::RenderError::CompatPending(_)) => "raster-override",
+        Some(pm_render::RenderError::WatchdogPending) => "watchdog",
+        Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
+        _ if error.is::<render::CompilerBusy>() => "shader-compiler",
+        _ => "fonts",
     }
 }

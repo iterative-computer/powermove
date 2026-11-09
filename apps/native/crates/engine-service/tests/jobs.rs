@@ -100,12 +100,9 @@ fn child_export_cancel_does_not_publish_partial_output() {
 
 #[test]
 fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
     let dir = tempfile::tempdir().unwrap();
-    let activity = Arc::new(AtomicBool::new(true));
+    let activity = Activity::default();
+    activity.set(true);
     let mut child = ExportHandle::start_scheduled(
         Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
         request(dir.path().join("deferred"), 1),
@@ -118,9 +115,9 @@ fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
         0.,
         "export submitted while interactive"
     );
-    activity.store(false, Ordering::Release);
+    activity.set(false);
     assert_eq!(child.wait().unwrap().state, JobState::Done);
-    activity.store(true, Ordering::Release);
+    activity.set(true);
     child = ExportHandle::start_scheduled(
         Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
         request(dir.path().join("cancel-deferred"), 1),
@@ -134,24 +131,33 @@ fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
 }
 
 /// A quiet viewer lets an export submit whole frames (one GPU submission per
-/// frame); right after the viewer drew, it submits bands, so the viewer
-/// waits behind one band at most.
+/// frame); right after viewer activity its submissions are bounded, so the
+/// first frame is split (the job is not measured yet: one band probes it).
 #[test]
 fn quiet_viewer_exports_whole_frames_and_activity_bands_them() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
     let dir = tempfile::tempdir().unwrap();
-    let run = |name: &str, activity: Arc<AtomicBool>, quiet_after: Duration| {
+    let run = |name: &str, busy: bool| {
+        let activity = Activity::default();
+        activity.set(busy);
         let child = ExportHandle::start_scheduled(
             Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
             request(dir.path().join(name), 1),
             activity.clone(),
         )
         .unwrap();
-        std::thread::sleep(quiet_after);
-        activity.store(false, Ordering::Release);
+        // Activity ends only once the child is waiting for its first
+        // submission: it is admitted right after activity, never before.
+        let start = Instant::now();
+        while busy && child.gpu_requests() == 0 {
+            assert!(start.elapsed() < Duration::from_secs(30), "no GPU request");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            child.submissions(),
+            0,
+            "submitted while the viewer was busy"
+        );
+        activity.set(false);
         while !child.status().state.is_terminal() {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -160,13 +166,9 @@ fn quiet_viewer_exports_whole_frames_and_activity_bands_them() {
         submissions
     };
     // 30 frames of 180 rows: 12 bands each.
-    let quiet = run("quiet", Arc::new(AtomicBool::new(false)), Duration::ZERO);
+    let quiet = run("quiet", false);
     assert_eq!(quiet, 30, "a quiet viewer still banded the export");
-    let active = run(
-        "active",
-        Arc::new(AtomicBool::new(true)),
-        Duration::from_millis(200),
-    );
+    let active = run("active", true);
     assert!(
         active > 30,
         "frames right after viewer activity were not banded ({active} submissions)"

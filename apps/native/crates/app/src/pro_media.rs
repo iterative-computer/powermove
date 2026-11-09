@@ -57,6 +57,9 @@ pub struct Preferences {
     pub size: ProxySize,
     pub format: ProxyFormat,
     pub location: Option<PathBuf>,
+    /// Settings › Media › Render Files Limit, in GB: rendered frames past it
+    /// go oldest first (kept frames never).
+    pub render_limit_gb: u32,
 }
 
 impl Default for Preferences {
@@ -66,6 +69,7 @@ impl Default for Preferences {
             size: ProxySize::Automatic,
             format: ProxyFormat::ProResProxy,
             location: None,
+            render_limit_gb: 25,
         }
     }
 }
@@ -78,6 +82,10 @@ pub type Row = (
     serde_json::Value,
     Vec<(serde_json::Value, &'static str)>,
 );
+
+/// Settings › Media › Render Files Limit's choices, in GB.
+const RENDER_LIMITS: [(u32, &str); 4] =
+    [(10, "10 GB"), (25, "25 GB"), (50, "50 GB"), (100, "100 GB")];
 
 impl Preferences {
     /// Settings › Media's rows: id, label, detail, and choices (value,
@@ -121,6 +129,16 @@ impl Preferences {
                     (serde_json::json!("hevc10"), "HEVC (Smaller Files)"),
                 ],
             ),
+            (
+                "media.renderLimit",
+                "Render Files Limit",
+                "Rendered frames past this go oldest first; kept frames stay.",
+                serde_json::json!(self.render_limit_gb),
+                RENDER_LIMITS
+                    .iter()
+                    .map(|(gb, label)| (serde_json::json!(gb), *label))
+                    .collect(),
+            ),
         ]
     }
 
@@ -138,6 +156,13 @@ impl Preferences {
                     return Err("Invalid setting value".into());
                 }
                 self.format = format;
+            }
+            "media.renderLimit" => {
+                let gb: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
+                if !RENDER_LIMITS.iter().any(|(choice, _)| *choice == gb) {
+                    return Err("Invalid setting value".into());
+                }
+                self.render_limit_gb = gb;
             }
             _ => return Err("Settings service is unavailable for this row".into()),
         }
@@ -1134,8 +1159,10 @@ impl ProMedia {
     /// Storage › Renders' folder for the disk render cache, opened (and
     /// checked) at the current location. Disk work: call off the main thread.
     pub fn render_frames(&self) -> Option<(PathBuf, u64)> {
-        self.inner.storage(&self.preferences()).ok()?;
-        Some((self.location().join("Renders").join("frames"), u64::MAX))
+        let prefs = self.preferences();
+        self.inner.storage(&prefs).ok()?;
+        let limit = u64::from(prefs.render_limit_gb) * 1_000_000_000;
+        Some((self.location().join("Renders").join("frames"), limit))
     }
 
     /// Writes Settings › Media's row `id`: checked and applied now, saved on

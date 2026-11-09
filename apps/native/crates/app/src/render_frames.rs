@@ -41,8 +41,8 @@ pub(crate) fn bars(composition: Option<&str>) -> Vec<pm_panel_timeline::render::
         return vec![];
     }
     bars.bars
-        .into_iter()
-        .map(|(from, to, state)| Bar {
+        .iter()
+        .map(|&(from, to, state)| Bar {
             from,
             to,
             state: match state {
@@ -83,70 +83,39 @@ impl Controller {
             cx.notify();
             return;
         };
-        let disk = self.engine.render_cache();
-        let added = disk.render_range(from, to);
-        if added == 0 {
-            self.message = "Already rendered".into();
-            cx.notify();
-            return;
-        }
         let Some(p) = self.published.clone() else {
             return;
         };
+        let disk = self.engine.render_cache();
+        let activity = self.engine.export_activity();
+        let tasks = self.builtins.export_tasks.clone();
         let title = p
             .snapshot
             .root()
             .and_then(|r| r.get("name"))
             .and_then(crate::node_string)
             .map_or("Render".to_owned(), |name| format!("Render {name}"));
-        let tasks = self.builtins.export_tasks.clone();
-        let ticket = {
-            let mut tasks = tasks.lock().unwrap();
-            tasks
-                .enqueue(
-                    p.project.clone(),
-                    p.project.clone(),
-                    TaskSpec {
-                        title,
-                        kind: TaskKind::Render,
-                        unit: ProgressUnit::Frames,
-                        priority: 0,
-                        total: 0,
-                    },
-                )
-                .ok()
-                .and_then(|id| tasks.start_next().filter(|t| t.id == id))
-        };
-        // The task row follows the engine's queue; Cancel in Background
-        // Tasks stops it (frames already on disk stay).
-        if let Some(ticket) = ticket {
-            std::thread::Builder::new()
-                .name("pm-render-task".into())
-                .spawn(move || {
-                    loop {
-                        std::thread::sleep(Duration::from_millis(250));
-                        let bars = disk.bars();
-                        let mut tasks = tasks.lock().unwrap();
-                        match tasks.worker_state(ticket) {
-                            Ok(TaskState::CancelRequested | TaskState::PauseRequested) => {
-                                disk.cancel();
-                                let _ = tasks.settle_control(ticket);
-                                return;
-                            }
-                            Ok(TaskState::Running) => {}
-                            _ => return,
-                        }
-                        let _ = tasks.progress(ticket, bars.done.min(bars.queued), bars.queued);
-                        if bars.done >= bars.queued {
-                            let _ = tasks.finish(ticket, Ok(()));
-                            return;
-                        }
-                    }
-                })
-                .ok();
-        }
-        self.message = format!("Rendering {added} frames");
-        cx.notify();
+        // Spawning the child serializes the document: off the main thread.
+        let started = cx.background_executor().spawn(async move {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let queued = disk.start_fill(from, to, &exe, activity)?;
+            if queued > 0 {
+                follow(disk, tasks, p.project.clone(), title, queued);
+            }
+            Ok::<u64, String>(queued)
+        });
+        cx.spawn(async move |this, cx| {
+            let message = match started.await {
+                Ok(0) => "Already rendered".to_owned(),
+                Ok(n) => format!("Rendering {n} frames"),
+                Err(e) => e,
+            };
+            let _ = this.update(cx, |v, cx| {
+                v.message = message;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn keep_rendered(&mut self, cx: &mut Context<Self>) {
@@ -190,4 +159,76 @@ impl Controller {
         })
         .detach();
     }
+}
+
+/// A Render Selection's Background Tasks row: frame progress from the
+/// render cache, Cancel stopping its child, and a failure (a full disk or
+/// limit, a frame that could not render) reported as one.
+fn follow(
+    disk: pm_engine_service::render_cache::DiskFrames,
+    tasks: std::sync::Arc<Mutex<pm_promedia::tasks::BackgroundTasks>>,
+    project: String,
+    title: String,
+    total: u64,
+) {
+    use pm_promedia::tasks::{TaskFailure, TaskFailureCode};
+    let ticket = {
+        let mut tasks = tasks.lock().unwrap();
+        tasks
+            .enqueue(
+                project.clone(),
+                project,
+                TaskSpec {
+                    title,
+                    kind: TaskKind::Render,
+                    unit: ProgressUnit::Frames,
+                    priority: 0,
+                    total,
+                },
+            )
+            .ok()
+            .and_then(|id| tasks.start_next().filter(|t| t.id == id))
+    };
+    let Some(ticket) = ticket else { return };
+    std::thread::Builder::new()
+        .name("pm-render-task".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                let state = tasks.lock().unwrap().worker_state(ticket);
+                match state {
+                    Ok(TaskState::CancelRequested | TaskState::PauseRequested) => {
+                        disk.cancel_fill();
+                        let _ = tasks.lock().unwrap().settle_control(ticket);
+                        return;
+                    }
+                    Ok(TaskState::Running) => {}
+                    _ => return,
+                }
+                let bars = disk.bars();
+                let mut tasks = tasks.lock().unwrap();
+                let _ = tasks.progress(ticket, bars.done.min(total), total);
+                if bars.running {
+                    continue;
+                }
+                let result = match &bars.error {
+                    None if bars.done >= total => Ok(()),
+                    None => Err(TaskFailure {
+                        code: TaskFailureCode::Unknown,
+                        diagnostic: "The render stopped before every frame was rendered".into(),
+                    }),
+                    Some(error) => Err(TaskFailure {
+                        code: if bars.disk_full {
+                            TaskFailureCode::DiskFull
+                        } else {
+                            TaskFailureCode::Unknown
+                        },
+                        diagnostic: error.clone(),
+                    }),
+                };
+                let _ = tasks.finish(ticket, result);
+                return;
+            }
+        })
+        .ok();
 }

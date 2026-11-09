@@ -50,7 +50,7 @@ fn resources_of(doc_id: u64) -> Option<Resources> {
     RESOURCES.lock().unwrap().as_ref()?.get(&doc_id).cloned()
 }
 /// Install the production engine hosts. Call on a worker before serving.
-pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()> {
+pub fn connect_engine(tools: &Tools, activity: pm_engine_service::jobs::Activity) -> AnyResult<()> {
     let jobs = EngineJobs::new(
         tools.host.kernel.clone(),
         std::env::current_exe()?,
@@ -87,7 +87,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             )?;
         }
         let tools = Tools::new(host, exports);
-        connect_engine(&tools, Arc::default())?;
+        connect_engine(&tools, Default::default())?;
         let shared = tools.clone();
         let server =
             pm_mcp::transport::LoopbackServer::start_with(&profile, move || shared.connect())?;
@@ -108,7 +108,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
 pub struct EngineJobs {
     kernel: KernelHandle,
     executable: PathBuf,
-    activity: Arc<AtomicBool>,
+    activity: pm_engine_service::jobs::Activity,
     profile: PathBuf,
     cache: PathBuf,
     progress: Mutex<HashMap<u64, Progress>>,
@@ -117,7 +117,7 @@ impl EngineJobs {
     pub fn new(
         kernel: KernelHandle,
         executable: PathBuf,
-        activity: Arc<AtomicBool>,
+        activity: pm_engine_service::jobs::Activity,
         profile: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -284,7 +284,7 @@ pub(crate) fn frame_renderer(
     let jobs = EngineJobs::new(
         kernel.clone(),
         std::env::current_exe()?,
-        Arc::new(AtomicBool::new(false)),
+        Default::default(),
         profile,
     );
     // The last few frames by document revision: a panel that asks for the same

@@ -51,7 +51,7 @@ impl FrameSpec {
         let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
         Size::new(px(self.output.width), px(self.output.height))
     }
-    fn request(&self, scene: &Scene) -> Result<pm_render::RenderRequest> {
+    pub(crate) fn request(&self, scene: &Scene) -> Result<pm_render::RenderRequest> {
         use pm_protocol::frame::MotionBlurKind;
         let playing = self.moment == Moment::Playing;
         let mut request = pm_render::RenderRequest::sized(self.render_size(), Precision::Float16);
@@ -97,7 +97,7 @@ impl std::error::Error for FontsPending {}
 /// Every compiler slot was taken while definitions were installing. Nothing is
 /// wrong with the shader; a sticky error here would stick to a healthy project.
 #[derive(Debug)]
-struct CompilerBusy;
+pub(crate) struct CompilerBusy;
 impl std::fmt::Display for CompilerBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("every shader compiler slot is busy")
@@ -496,68 +496,9 @@ impl Engine {
         }
         Ok(f.rgba)
     }
-    /// The paused viewer's frame of the whole composition at `size`, read
-    /// back (premultiplied working values in RGBA16F, top-down): what a
-    /// disk render cache keeps. `Ok(None)`: the frame is not its exact
-    /// picture yet (an override, font or shader is pending), try later.
-    pub fn cache_frame(
-        &mut self,
-        scene: &Scene,
-        time: Ticks,
-        size: Size,
-    ) -> Result<Option<Vec<f32>>> {
-        self.sync_studio(scene)?;
-        self.sync_fonts();
-        let output = Output {
-            width: size.width,
-            height: size.height,
-            display: 0,
-            headroom: 1.,
-            crop: None,
-        };
-        let mut request = FrameSpec::exact(time, output).request(scene)?;
-        request.output_tone = self.output_tone;
-        self.renderer.set_isolate_layers(true);
-        let rendered = self.renderer.render(
-            &scene.doc,
-            &scene.comp,
-            time,
-            &request,
-            scene.media.as_ref(),
-        );
-        self.renderer.set_isolate_layers(false);
-        let frame = match rendered {
-            Ok(frame) => frame,
-            Err(RenderError::CompatPending(needs)) => {
-                // Asked ahead as playback asks: the next frames to render
-                // find their answers waiting.
-                if let Some(store) = &self.compat_document {
-                    store.request(needs, true);
-                }
-                return Ok(None);
-            }
-            Err(RenderError::WatchdogPending | RenderError::ShaderFallbackPending(_)) => {
-                return Ok(None);
-            }
-            Err(e) => return Err(e.into()),
-        };
-        self.renderer.wait_idle();
-        let pending_fonts = self.fonts.as_ref().and_then(|f| f.after_render()).is_some();
-        if let Some(error) = self.failed.lock().unwrap().take() {
-            self.renderer.recycle(frame);
-            bail!("The GPU refused this frame: {error}");
-        }
-        if pending_fonts || !frame.failures.is_empty() {
-            let failed = !frame.failures.is_empty();
-            self.renderer.recycle(frame);
-            if failed {
-                bail!("layers failed to draw");
-            }
-            return Ok(None);
-        }
-        let rgba = self.renderer.read_rgba(&frame)?;
-        self.renderer.recycle(frame);
-        Ok(Some(rgba))
+    /// The viewer's output tone, as the render cache's identity takes it.
+    pub(crate) fn tone_identity(&self) -> Option<String> {
+        self.output_tone.map(|tone| format!("{tone:?}"))
     }
     pub fn frame(
         &mut self,

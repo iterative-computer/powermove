@@ -71,13 +71,25 @@ pub fn detail(task: &Task) -> String {
 impl TasksWindow {
     /// Media tasks act through the service. An export can only be
     /// cancelled, through its job: it has no pause, and one runs at a time.
+    /// A Render Selection row asks its task to stop (its follower stops the
+    /// child); an export row cancels the export job.
     fn act(&self, media: bool, id: pm_promedia::tasks::TaskId, action: TaskAction, cx: &mut App) {
         if media {
             let _ = self.pro.act(id, action);
         } else if action == TaskAction::Cancel {
             let _ = self.controller.update(cx, |v, _| {
-                if let Some(job) = &v.builtins.export_job {
-                    job.cancel.store(true, std::sync::atomic::Ordering::Release);
+                let mut tasks = v.builtins.export_tasks.lock().unwrap();
+                match tasks.get(id).map(|t| t.kind.clone()) {
+                    Some(pm_promedia::tasks::TaskKind::Render) => {
+                        let _ = tasks.cancel(id);
+                    }
+                    Some(pm_promedia::tasks::TaskKind::Export) => {
+                        drop(tasks);
+                        if let Some(job) = &v.builtins.export_job {
+                            job.cancel.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    }
+                    _ => {}
                 }
             });
         }
