@@ -59,7 +59,11 @@ test('1, 2 and 4 views: choose each pane’s view, select and move in another pa
   await expect(page.locator('.viewer-pane')).toHaveCount(3);
   expect((await views(page)).panes.map((p: any) => p.view)).toEqual(['top', 'front', 'right', 'camera']);
   expect((await views(page)).active).toBe(3);
+  // The selection reads in every pane: an outline around the box in the Top view.
+  await page.evaluate((id: string) => (window as any).PM.selectLayers([id]), box);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.api('multi-view-e2e').scene3d.views.selection(0, 400, 225).length)).toBe(12);
   await shot(page, '22-four-views', 4000);
+  await page.evaluate(() => (window as any).PM.selectLayers([]));
 
   // Each pane chooses its view from its corner label.
   const frontLabel = page.locator('.viewer-pane[data-pane="1"] .viewer-pane-label');

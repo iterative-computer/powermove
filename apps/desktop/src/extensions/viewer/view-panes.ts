@@ -198,17 +198,30 @@ export function mountViewPanes(api: PowermoveAPI, body: HTMLElement, runtime: an
     const index = indices[next++ % indices.length]!;
     const pane = panes.get(index)!;
     const start = performance.now();
-    let picture: { canvas: CanvasImageSource; version: string } | null = null;
-    try { picture = scene.views.render(index, pane.canvas.width, pane.canvas.height); } catch { picture = null; }
+    let picture: { canvas: CanvasImageSource; version: string } | null = null, outline: number[][] = [];
+    try {
+      picture = scene.views.render(index, pane.canvas.width, pane.canvas.height);
+      outline = scene.views.selection(index, pane.canvas.width, pane.canvas.height);
+    } catch { picture = null; }
     lastDraw = now;
-    if (!picture || picture.version === pane.version) return;
+    // Redraw when the picture or the selection outline changed.
+    const version = picture ? `${picture.version}|${outline.map(l => l.map(v => Math.round(v)).join(',')).join(';')}` : '';
+    if (!picture || version === pane.version) return;
     const c = pane.canvas.getContext('2d');
     if (!c) return;
     const bg = String((api.project.get() as any).bg ?? '#000000');
     c.fillStyle = /^#[0-9a-f]{3,8}$/i.test(bg) ? bg : '#000';
     c.fillRect(0, 0, pane.canvas.width, pane.canvas.height);
     c.drawImage(picture.canvas, 0, 0, pane.canvas.width, pane.canvas.height);
-    pane.version = picture.version;
+    if (outline.length) {
+      c.save();
+      c.strokeStyle = getComputedStyle(container).getPropertyValue('--accent').trim() || '#FF6B1A';
+      c.lineWidth = Math.max(1, Math.round(pane.canvas.width / Math.max(1, pane.canvas.clientWidth)));
+      c.beginPath();
+      for (const [x1, y1, x2, y2] of outline) { c.moveTo(x1!, y1!); c.lineTo(x2!, y2!); }
+      c.stroke(); c.restore();
+    }
+    pane.version = version;
     stats.renders++; stats.ms = performance.now() - start;
   };
   raf = requestAnimationFrame(loop);

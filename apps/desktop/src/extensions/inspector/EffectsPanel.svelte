@@ -13,6 +13,7 @@
   let { panelId, api }: PanelProps & { api: PowermoveAPI } = $props();
   const { doc, sel } = provideInspectorContext(untrack(() => api));
   const meta = untrack(() => api.model.TYPE_META) as Record<string, { label?: string; effects?: boolean }>;
+  const pixelless = (layer: any) => !!layer?.d?.data?.object?.world || ['powermove.3d.light', 'powermove.3d.camera'].includes(String(layer?.d?.definition ?? ''));
 
   const selectedLayers = $derived<any[]>(
     (inspectorRefresh.version, doc.tick.structure, doc.proj,
@@ -37,6 +38,9 @@
     <div class="empty">Select a layer to see its effects.</div>
   {:else if meta[firstLayer.type]?.effects === false}
     <div class="empty">{meta[firstLayer.type]?.label ?? 'This'} layers don’t take effects.</div>
+  {:else if pixelless(firstLayer)}
+    <!-- Lights, cameras and a World draw no pixels of their own. -->
+    <div class="empty">{api.model.layerKind?.(firstLayer)?.label ?? 'This'} layers don’t take effects.</div>
   {:else}
     {#if selectedLayers.length > 1}
       <div class="effects-selection-note" role="status">

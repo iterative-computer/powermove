@@ -141,3 +141,27 @@ export function renderPane(PM: any, index: number, width: number, height: number
   const camera = paneCamera(PM, pane, width, height);
   return studioLayer(PM, world, width, height, '', ids, true, camera, undefined, time, { slot: `pane-${index}` });
 }
+
+/** The selected 3D layers' boxes as line segments in a pane's pixels, so the
+    selection reads in every view, as in After Effects. Empty when nothing
+    3D is selected or it is behind the pane's camera. */
+export function paneSelection(PM: any, index: number, width: number, height: number): number[][] {
+  const pane = viewsState(PM).panes[index]; if (!pane) return [];
+  const ids: string[] = PM.sel?.layers || []; if (!ids.length) return [];
+  const world = compositionRuntime(PM), camera = paneCamera(PM, pane, width, height);
+  const lines: number[][] = [];
+  for (const id of ids) {
+    const object = (world.objects as Map<string, THREE.Object3D>).get(id), layer = PM.L?.(id);
+    if (!object || !layer || layer.d?.data?.object?.world) continue;
+    const box = new THREE.Box3().setFromObject(object); if (box.isEmpty()) continue;
+    const corners = [0, 1, 2, 3, 4, 5, 6, 7].map(i => new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z));
+    const view = corners.map(c => c.clone().applyMatrix4(camera.matrixWorldInverse));
+    if (view.every(v => v.z > -((camera as THREE.PerspectiveCamera).near ?? 0.01))) continue;
+    const screen = corners.map(c => { const p = c.clone().project(camera); return [(p.x + 1) / 2 * width, (1 - p.y) / 2 * height]; });
+    for (const [a, b] of [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]] as const) {
+      if (view[a]!.z > 0 || view[b]!.z > 0) continue;
+      lines.push([...screen[a]!, ...screen[b]!]);
+    }
+  }
+  return lines;
+}

@@ -13,7 +13,7 @@ import { studioProgress, studioPreview, setStudioPreview, onStudioPreview } from
 import { studioSwatch } from '../studio/swatch';
 import { skyThumbnail } from '../studio/sky-thumbnail';
 import {getViewportMode,setViewportMode,onViewportChange,lookFrom} from './viewport';
-import {viewsState,setViewLayout,setActivePane,setPaneView,renderPane,onViewsChange,PANE_VIEWS} from './views';
+import {viewsState,setViewLayout,setActivePane,setPaneView,renderPane,paneSelection,onViewsChange,PANE_VIEWS} from './views';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
 import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } from './schema';
@@ -88,6 +88,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
       setActive:index=>{navigation?.cancel();setActivePane(PM,index);},
       setPaneView:(index,view)=>{navigation?.cancel();setPaneView(PM,index,view);},
       render:(index,width,height)=>renderPane(PM,index,width,height),
+      selection:(index,width,height)=>paneSelection(PM,index,width,height),
       options:PANE_VIEWS,
       onChange:listener=>({dispose:onViewsChange(PM,listener)}),
     },

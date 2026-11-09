@@ -425,6 +425,8 @@ export interface Scene3DAPI {
     setPaneView(index:number,view:import('../core/scene3d/views').PaneView):void;
     /** A non-selected pane's picture (Studio Live, its own session). */
     render(index:number,width:number,height:number):{canvas:CanvasImageSource;version:string}|null;
+    /** The selection's outline in a pane, as line segments [x1,y1,x2,y2] in its pixels. */
+    selection(index:number,width:number,height:number):number[][];
     readonly options:ReadonlyArray<{id:import('../core/scene3d/views').PaneView;label:string}>;
     onChange(listener:()=>void):Disposable;
   };

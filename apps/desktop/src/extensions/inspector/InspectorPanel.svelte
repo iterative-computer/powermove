@@ -37,7 +37,9 @@
   const placedIn3D = (layer: any) => layer?.threeD === true || String(layer?.d?.definition ?? '').startsWith('powermove.3d.');
   /* A World, Ambient or Environment light surrounds the scene: no place, so no Transform. */
   const surrounds = (layer: any) => !!layer?.d?.data?.object?.world || ['ambient', 'environment'].includes(layer?.d?.data?.light?.type);
-  const takesEffects = $derived(!!firstLayer && meta[firstLayer.type]?.effects !== false);
+  /* Lights, cameras and a World draw no pixels of their own: no Effects or Masks, as in After Effects. */
+  const pixelless = (layer: any) => surrounds(layer) || ['powermove.3d.light', 'powermove.3d.camera'].includes(String(layer?.d?.definition ?? ''));
+  const takesEffects = $derived(!!firstLayer && meta[firstLayer.type]?.effects !== false && !pixelless(firstLayer));
 
   $effect(() => {
     const subscription = api.events.on('fonts', () => { fontsVersion++; });
@@ -84,7 +86,7 @@
           {#key firstLayer.id}<EffectsSection layer={firstLayer} />{/key}
         {/if}
         <ContributedSections {api} after="effects" layerIds={selectedLayers.map(layer => layer.id)} />
-        <MasksSection layer={firstLayer} />
+        {#if !pixelless(firstLayer)}<MasksSection layer={firstLayer} />{/if}
       {/if}
       {#if firstLayer.type === 'video' || firstLayer.type === 'precomp'}<RetimingSection layer={firstLayer} />{/if}
       <LayerOptions layer={firstLayer} />

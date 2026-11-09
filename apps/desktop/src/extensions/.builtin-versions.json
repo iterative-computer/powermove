@@ -4,16 +4,16 @@
     "treeSha": "2af198379a682ecd6c6ef5b956e415f39e748d86"
   },
   "inspector": {
-    "version": "1.7.10",
-    "treeSha": "edbc1cc38bd31b514150953024102de253e9fb4a"
+    "version": "1.7.11",
+    "treeSha": "74686b5b6d6d3e215e94b1fb9023306e758da118"
   },
   "keymap-default": {
     "version": "1.0.5",
     "treeSha": "13e9463deeffa872159a6f7d42a4566890712eda"
   },
   "layers-3d": {
-    "version": "1.8.1",
-    "treeSha": "58213fd8184062512d55613ccc58fc240dcc9258"
+    "version": "1.8.2",
+    "treeSha": "6e8e73fadd5e26c30222fb02223f8d923d9b13e6"
   },
   "mods": {
     "version": "1.0.1",
@@ -36,7 +36,7 @@
     "treeSha": "5c9bb6ea0faddf0d8c66006789c120adebb18802"
   },
   "viewer": {
-    "version": "1.4.1",
-    "treeSha": "3d0dff499c141d2934184e8ec1eb0e076fb5d356"
+    "version": "1.4.2",
+    "treeSha": "f557380403f23fb83a30a6f22622e1e49badb592"
   }
 }
