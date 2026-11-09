@@ -3,8 +3,8 @@
 //! through private files. A line either end cannot read fails the job.
 use anyhow::{Result, ensure};
 use pm_protocol::{
-    common::JobId,
-    error::{EngineError, ErrorCode, ErrorScope},
+    common::{AssetId, JobId},
+    error::{EngineError, ErrorCode, ErrorDetail, ErrorScope, Retry},
     priority::{JobSpec, JobState, JobStatus, PriorityClass},
 };
 use serde::{Deserialize, Serialize};
@@ -398,12 +398,38 @@ fn status(
         preview: None,
     }
 }
-/// Ends the refusal of an export with offline clips; the Export sheet offers
-/// Export Without Them on it.
-pub const OFFLINE_ADVICE: &str = "Relink the originals, or export without them.";
-/// An export refused because clips are offline (not silent audio, which still fails).
-pub fn is_offline_refusal(message: &str) -> bool {
-    message.ends_with(OFFLINE_ADVICE)
+/// An export refused because clips it draws are offline (audio it would
+/// hear still fails by name, even without offline clips). Its status error
+/// is [`ErrorCode::MediaOffline`] with the clips' assets, on which the Export
+/// sheet offers Export Without Them.
+#[derive(Debug)]
+struct OfflineRefusal(Vec<pm_export::render::OfflineClip>);
+impl std::fmt::Display for OfflineRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<_> = self.0.iter().take(3).map(|c| c.name.as_str()).collect();
+        match self.0.len() {
+            1 => write!(f, "1 clip is offline: ")?,
+            n => write!(f, "{n} clips are offline: ")?,
+        }
+        write!(f, "{}", names.join(", "))?;
+        if let n @ 1.. = self.0.len().saturating_sub(3) {
+            write!(f, " and {n} more")?;
+        }
+        write!(f, ". Relink the originals, or export without them.")
+    }
+}
+impl std::error::Error for OfflineRefusal {}
+impl OfflineRefusal {
+    fn error(&self, job: &JobId) -> EngineError {
+        let assets = self.0.iter().map(|c| AssetId::new(&c.asset)).collect();
+        EngineError::new(
+            ErrorCode::MediaOffline,
+            ErrorScope::Job { job: job.clone() },
+            self.to_string(),
+        )
+        .with_retry(Retry::AfterUserAction)
+        .with_detail(ErrorDetail::Offline { assets })
+    }
 }
 /// Stops a running job from any thread: its cancellation is set, a wait for
 /// the viewer wakes, and the child is told.
@@ -794,19 +820,7 @@ pub fn run_child() -> Result<()> {
         // A preview (an agent's still) draws offline media as the Media
         // Offline card instead.
         if !offline.is_empty() && !request.without_offline && !request.preview {
-            let names: Vec<_> = offline.iter().take(3).map(|c| c.name.as_str()).collect();
-            let more = match offline.len().saturating_sub(3) {
-                0 => String::new(),
-                n => format!(" and {n} more"),
-            };
-            let count = match offline.len() {
-                1 => "1 clip is".to_owned(),
-                n => format!("{n} clips are"),
-            };
-            anyhow::bail!(
-                "{count} offline: {}{more}. {OFFLINE_ADVICE}",
-                names.join(", ")
-            );
+            return Err(OfflineRefusal(offline).into());
         }
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
@@ -926,6 +940,10 @@ pub fn run_child() -> Result<()> {
         Err(_) if cancel.load(Ordering::Acquire) => {
             emit(status(&job_id, JobState::Cancelled, 0., None, None))?
         }
+        Err(ref e) if let Some(refusal) = e.downcast_ref::<OfflineRefusal>() => emit(JobStatus {
+            error: Some(refusal.error(&job_id)),
+            ..status(&job_id, JobState::Failed, 0., None, None)
+        })?,
         Err(e) => {
             // A layer an extension draws failed the frame: say why.
             let message = match override_error.error.lock().unwrap().take() {
@@ -1338,6 +1356,29 @@ mod tests {
         activity.wake();
         assert!(cancelled.join().unwrap());
         assert!(activity.busy());
+    }
+    /// An offline refusal names the first three clips and counts the rest.
+    #[test]
+    fn an_offline_refusal_names_three_clips_and_counts_the_rest() {
+        let clips = |n: usize| {
+            OfflineRefusal(
+                (0..n)
+                    .map(|i| pm_export::render::OfflineClip {
+                        asset: format!("A{i}"),
+                        name: format!("take {i}.mov"),
+                    })
+                    .collect(),
+            )
+        };
+        assert_eq!(
+            clips(5).to_string(),
+            "5 clips are offline: take 0.mov, take 1.mov, take 2.mov and 2 more. \
+             Relink the originals, or export without them."
+        );
+        assert_eq!(
+            clips(2).to_string(),
+            "2 clips are offline: take 0.mov, take 1.mov. Relink the originals, or export without them."
+        );
     }
     /// A disk that fills during an export stops it; a finished export is
     /// left alone.

@@ -405,12 +405,19 @@ fn an_offline_clip_refuses_by_name_unless_the_export_goes_without_it() {
     .wait()
     .unwrap();
     assert_eq!(refused.state, JobState::Failed, "{refused:?}");
-    let message = refused.error.unwrap().message;
-    assert!(message.contains("1 clip is offline: gone.png"), "{message}");
+    let error = refused.error.unwrap();
+    assert_eq!(
+        error.message,
+        "1 clip is offline: gone.png. Relink the originals, or export without them."
+    );
     // The Export sheet offers Export Without Them on exactly this refusal.
-    assert!(
-        pm_engine_service::jobs::is_offline_refusal(&message),
-        "{message}"
+    use pm_protocol::error::{ErrorCode, ErrorDetail};
+    assert_eq!(error.code, ErrorCode::MediaOffline);
+    assert_eq!(
+        error.detail,
+        Some(ErrorDetail::Offline {
+            assets: vec!["Aimage".into()]
+        })
     );
     let mut without = request_for(&project, dir.path().join("without"), 1);
     without.without_offline = true;
@@ -462,11 +469,16 @@ fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
         .wait()
         .unwrap();
     assert_eq!(status.state, JobState::Failed, "{status:?}");
-    let message = status.error.unwrap().message;
+    let error = status.error.unwrap();
     assert!(
-        message.contains("Audio media is missing for “Voiceover”"),
-        "{message}"
+        error
+            .message
+            .contains("Audio media is missing for “Voiceover”"),
+        "{}",
+        error.message
     );
+    // Not a refusal Export Without Them can answer: it went without already.
+    assert_eq!(error.code, pm_protocol::error::ErrorCode::ExportFailed);
 }
 /// The fixture's first layer with an effect no installed extension provides.
 fn with_uninstalled_effect(on: bool) -> String {
