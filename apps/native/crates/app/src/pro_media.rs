@@ -1577,6 +1577,11 @@ impl crate::session::Controller {
         serde_json::json!({
             "rows": rows,
             "location": self.pro_media.location().to_string_lossy(),
+            "folders": self.waiting_folders.iter().map(|f| serde_json::json!({
+                "name": f.name,
+                "files": f.files,
+                "refused": f.outcome == pm_first_launch::source_access::Outcome::Denied,
+            })).collect::<Vec<_>>(),
             "used": usage.map(|u| serde_json::json!({
                 "proxies": bytes(u.proxies),
                 "optimized": bytes(u.optimized),
@@ -1585,6 +1590,83 @@ impl crate::session::Controller {
         })
     }
 
+    fn first_launch_config(&self) -> Option<pm_first_launch::Config> {
+        Some(pm_first_launch::Config {
+            electron_profile: self.electron.clone()?,
+            native_profile: self.profile.clone(),
+        })
+    }
+    /// Reads which guarded folders kept originals out (metadata only, off the
+    /// main thread), for Settings › Media.
+    pub(crate) fn refresh_waiting_folders(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(config) = self.first_launch_config() else {
+            return;
+        };
+        let read = cx
+            .background_executor()
+            .spawn(async move { pm_first_launch::waiting_folders(&config) });
+        cx.spawn(async move |this, cx| {
+            let folders = read.await.unwrap_or_default();
+            let _ = this.update(cx, |v, cx| {
+                if v.waiting_folders != folders {
+                    v.waiting_folders = folders;
+                    v.update_builtins(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Settings › Media › Allow Access…: explains macOS's prompt first, then
+    /// opens the folders macOS can still ask about and brings their originals in.
+    fn allow_waiting_folders(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(config) = self.first_launch_config() else {
+            return;
+        };
+        let folders: Vec<_> = self
+            .waiting_folders
+            .iter()
+            .filter(|f| f.outcome != pm_first_launch::source_access::Outcome::Denied)
+            .cloned()
+            .collect();
+        if folders.is_empty() {
+            return;
+        }
+        let window = self.host.borrow().window.clone();
+        let rx = crate::platform::choice(
+            &window,
+            "Allow Access to Your Media",
+            &crate::panels::folder_access_prompt(&folders),
+            &["Continue", "Not Now"],
+        );
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await != Ok(0) {
+                return;
+            }
+            let paths: Vec<_> = folders.iter().map(|f| f.path.clone()).collect();
+            let result = cx
+                .background_executor()
+                .spawn(async move { pm_first_launch::allow_folders(&config, &paths, |_| Ok(())) })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(pm_first_launch::Outcome::Complete { not_reached: 0, .. }) => {
+                        "Your media from those folders came across.".into()
+                    }
+                    Ok(pm_first_launch::Outcome::Complete { not_reached, .. }) => format!(
+                        "{} still couldn’t be opened.",
+                        crate::panels::file_count(not_reached)
+                    ),
+                    Ok(_) => "Quit the original app, then try again.".into(),
+                    Err(_) => "Your media couldn’t be brought in. Try again.".into(),
+                };
+                v.media_refresh.reset();
+                v.refresh_media(cx);
+                v.refresh_waiting_folders(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     /// A Settings › Media write or action (`media.settings`).
     pub(crate) fn media_settings(
         &mut self,
@@ -1624,6 +1706,7 @@ impl crate::session::Controller {
                 .detach();
             }
             Some("media.reveal") => crate::platform::reveal(&self.pro_media.location()),
+            Some("media.folders") => self.allow_waiting_folders(cx),
             Some("media.clear") => {
                 let rx = crate::platform::choice(
                     &window,

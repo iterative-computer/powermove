@@ -33,6 +33,9 @@ pub struct Controller {
     /// The original app's profile, when this Mac has one. A file it might hold
     /// opens as a copy while it runs. The native library is never affected.
     pub electron: Option<PathBuf>,
+    /// Guarded folders whose originals the migration couldn't open
+    /// (Settings › Media › Media in Protected Folders), read off the main thread.
+    pub(crate) waiting_folders: Vec<pm_first_launch::WaitingFolder>,
     pub session: Option<SessionHandle>,
     pub published: Option<Arc<Published>>,
     pub mirror: Option<QueryMirror>,
@@ -263,6 +266,10 @@ impl Controller {
             engine.export_activity().flag(),
         ));
         pro_media.refresh_usage();
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |v, cx| v.refresh_waiting_folders(cx));
+        })
+        .detach();
         crate::render_frames::install(engine.render_cache());
         sync_render_storage(&pro_media, &engine);
         let pro_events = pro_media.event_receiver.clone();
@@ -358,6 +365,7 @@ impl Controller {
             engine,
             profile,
             electron,
+            waiting_folders: vec![],
             host,
             session: None,
             published: None,

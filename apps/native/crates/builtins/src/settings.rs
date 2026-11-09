@@ -233,6 +233,7 @@ impl Backend {
                 "label":"Storage Folder","control":"action","action":"media.reveal",
                 "actionLabel":"Show in Finder"}),
         ]);
+        rows.extend(protected_folders_row(&media["folders"]));
         rows
     }
     pub(crate) fn settings_rows(&mut self) -> Result<Vec<Value>, String> {
@@ -498,7 +499,7 @@ impl Backend {
             Some("row")
                 if matches!(
                     action["action"].as_str(),
-                    Some("media.location" | "media.clear" | "media.reveal")
+                    Some("media.location" | "media.clear" | "media.reveal" | "media.folders")
                 ) =>
             {
                 self.native
@@ -697,5 +698,79 @@ pub(crate) fn validate_profile(key: &str, value: &Value) -> Result<(), String> {
         Ok(())
     } else {
         Err("Invalid profile setting".into())
+    }
+}
+
+/// Settings › Media › Original Media: guarded folders whose originals the
+/// migration couldn't open, with their files; Allow Access asks macOS for the
+/// ones it still can. None when every original came across.
+fn protected_folders_row(folders: &Value) -> Option<Value> {
+    let folders = folders.as_array().filter(|f| !f.is_empty())?;
+    let named = |refused: bool| {
+        let names: Vec<String> = folders
+            .iter()
+            .filter(|f| f["refused"].as_bool() == Some(refused))
+            .map(|f| {
+                let files = f["files"].as_u64().unwrap_or(0);
+                let unit = if files == 1 { "file" } else { "files" };
+                format!("{} ({files} {unit})", f["name"].as_str().unwrap_or(""))
+            })
+            .collect();
+        match names.as_slice() {
+            [] => None,
+            [one] => Some(one.clone()),
+            [rest @ .., last] => Some(format!("{} and {last}", rest.join(", "))),
+        }
+    };
+    let askable = named(false);
+    let refused = named(true);
+    let mut detail = Vec::new();
+    if let Some(names) = &askable {
+        detail.push(format!(
+            "Originals in {names} weren’t opened, so they’re offline. Allow Access asks macOS once for each folder, then brings them in."
+        ));
+    }
+    if let Some(names) = &refused {
+        detail.push(format!(
+            "macOS refused {names}: allow Powermove in System Settings › Privacy & Security › Files and Folders, then quit and reopen it."
+        ));
+    }
+    Some(
+        json!({"id":"media.folders","section":"media","group":"Original Media",
+        "label":"Media in Protected Folders","control":"action","action":"media.folders",
+        "actionLabel":"Allow Access…","disabled":askable.is_none(),
+        "detail":detail.join(" ")}),
+    )
+}
+#[cfg(test)]
+mod protected_folders_tests {
+    use super::protected_folders_row;
+    use serde_json::json;
+    #[test]
+    fn the_row_names_each_folder_with_its_files_and_what_macos_still_asks() {
+        assert_eq!(protected_folders_row(&json!([])), None);
+        let row = protected_folders_row(&json!([
+            {"name":"Downloads","files":3,"refused":false},
+            {"name":"Desktop","files":1,"refused":false},
+            {"name":"Documents","files":2,"refused":true},
+        ]))
+        .unwrap();
+        assert_eq!(row["disabled"], false);
+        assert_eq!(row["actionLabel"], "Allow Access…");
+        let detail = row["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with(
+                "Originals in Downloads (3 files) and Desktop (1 file) weren’t opened"
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("macOS refused Documents (2 files)"),
+            "{detail}"
+        );
+        // Only refused folders: nothing macOS can ask about, so no action.
+        let row =
+            protected_folders_row(&json!([{"name":"Desktop","files":1,"refused":true}])).unwrap();
+        assert_eq!(row["disabled"], true);
     }
 }
