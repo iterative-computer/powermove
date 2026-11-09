@@ -1,5 +1,6 @@
-//! A provider run's tool server names its run (`--agent-run`): orchestration
-//! calls reach the app's surfaces as that run, over the real loopback bridge.
+//! A provider run's tool server carries its run's grant token (`--agent-run`):
+//! orchestration calls reach the app's surfaces as that run, over the real
+//! loopback bridge; a token the host didn't issue acts as no run.
 use pm_mcp::{Automation, McpSession, automation::SurfaceHook, transport::LoopbackServer};
 use serde_json::{Value, json};
 use std::{
@@ -11,6 +12,10 @@ fn scratch() -> std::path::PathBuf {
     let root = std::env::temp_dir().join(pm_kernel::new_id("mcp-agent-run"));
     std::fs::create_dir_all(&root).unwrap();
     root.canonicalize().unwrap()
+}
+/// What the app's resolver answers: one issued token, for a planning run.
+fn grants() -> pm_mcp::automation::AgentGrants {
+    Arc::new(|token: &str| (token == "token-7").then(|| ("run-7".to_owned(), "editor".to_owned())))
 }
 #[derive(Default)]
 struct Recorded(Mutex<Vec<(String, Value)>>);
@@ -28,6 +33,7 @@ fn orchestration_calls_carry_the_launching_run() {
         .unwrap();
     let recorded = Arc::new(Recorded::default());
     host.surfaces = Some(recorded.clone());
+    host.agent_grants = Some(grants());
     let host = Arc::new(Mutex::new(host));
     let mut server = LoopbackServer::start_with(&profile, {
         let host = host.clone();
@@ -37,7 +43,7 @@ fn orchestration_calls_carry_the_launching_run() {
     let mut process = Command::new(env!("CARGO_BIN_EXE_powermove-mcp"))
         .args(["--powermove-mcp", "--profile"])
         .arg(&profile)
-        .args(["--agent-run", "run-7"])
+        .args(["--agent-run", "token-7"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -55,7 +61,22 @@ fn orchestration_calls_carry_the_launching_run() {
         serde_json::from_str(&line).unwrap()
     };
     call(1, "", json!({}));
-    call(2, "start_session", json!({"prompt":"Synthetic"}));
+    // The run has planning access: its session can't take more.
+    let wider = call(
+        2,
+        "start_session",
+        json!({"prompt":"Synthetic","access":"project"}),
+    );
+    assert_eq!(wider["result"]["isError"], true, "{wider}");
+    let started = call(2, "start_session", json!({"prompt":"Synthetic"}));
+    assert_eq!(started["result"]["isError"], false, "{started}");
+    assert!(
+        started["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"access\":\"editor\""),
+        "{started}"
+    );
     let delegated = call(3, "delegate_task", json!({"task":"Child brief"}));
     assert_eq!(delegated["result"]["isError"], false, "{delegated}");
     // Schema validation precedes the window: an unknown key never reaches it.
@@ -75,13 +96,16 @@ fn orchestration_calls_carry_the_launching_run() {
     assert!(!seen.iter().any(|(tool, _)| tool == "task_status"));
 }
 #[test]
-fn a_session_without_a_run_explains_where_subagents_come_from() {
+fn a_session_without_its_runs_token_acts_as_no_run() {
     let profile = scratch();
     let mut host = Automation::new(profile.clone(), profile.join("exports")).unwrap();
     host.create_project(&json!({"name":"Synthetic orchestration"}))
         .unwrap();
-    host.surfaces = Some(Arc::new(Recorded::default()));
-    let mut session = McpSession::new(Arc::new(Mutex::new(host)));
+    let recorded = Arc::new(Recorded::default());
+    host.surfaces = Some(recorded.clone());
+    host.agent_grants = Some(grants());
+    let host = Arc::new(Mutex::new(host));
+    let mut session = McpSession::new(host.clone());
     session
         .dispatch("start_session", &json!({"prompt":"x"}))
         .unwrap();
@@ -93,4 +117,15 @@ fn a_session_without_a_run_explains_where_subagents_come_from() {
         "{}",
         refused.message
     );
+    // Claiming a run by its id (not its token) gets nothing.
+    let mut forged = McpSession::new(host);
+    forged.set_agent_run("run-7");
+    assert_eq!(
+        forged
+            .dispatch("start_session", &json!({"prompt":"x"}))
+            .unwrap_err()
+            .message,
+        "This agent run is no longer active."
+    );
+    assert!(recorded.0.lock().unwrap().is_empty());
 }

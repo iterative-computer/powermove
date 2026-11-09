@@ -97,8 +97,8 @@ fn recover_descriptor(file: &Path) -> Result<()> {
 }
 
 pub trait ToolConnection {
-    /// The provider run that launched this connection's tool server, if any.
-    fn bind_agent_run(&mut self, _run: &str) {}
+    /// The grant token of the provider run whose tool server this is, if any.
+    fn bind_agent_run(&mut self, _token: &str) {}
     fn list(&mut self) -> Result<Value>;
     fn invoke(&mut self, name: &str, args: Value) -> Result<Value>;
     fn disconnect(&mut self) -> Result<()>;
@@ -452,7 +452,8 @@ impl Drop for LoopbackServer {
 }
 /// Client mode for --powermove-mcp, matching the shipped proxy. Native profiles
 /// are explicit. Never discover or start the Electron host implicitly.
-/// `agent_run`: the provider run whose tool server this is (`--agent-run`).
+/// `agent_run`: the grant token of the provider run whose tool server this is
+/// (`--agent-run`); only that run's process is given it.
 pub fn proxy_stdio(profile: &Path, agent_run: Option<String>) -> Result<()> {
     serve_stdio(
         std::io::stdin().lock(),

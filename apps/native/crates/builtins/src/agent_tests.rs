@@ -579,6 +579,32 @@ fn composition_run_gets_session_and_edit_tools_and_the_chosen_model() {
         !allowed.contains("mcp__powermove__export_video"),
         "{allowed}"
     );
+    // The tool server gets the run's grant token, never its id; the token
+    // names this run while it lives.
+    let config: Value = serde_json::from_str(&value("--mcp-config")).unwrap();
+    let server = config["mcpServers"]["powermove"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let token = server[server.iter().position(|a| *a == "--agent-run").unwrap() + 1];
+    let run = agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .run
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    assert_ne!(token, run);
+    assert_eq!(
+        pm_agents::launch::grants::resolve(token).map(|(r, _)| r),
+        Some(run)
+    );
     panel.panels.close();
 }
 fn pm_mcp_tools() -> Vec<String> {

@@ -43,6 +43,10 @@ fn live_layout(mut saved: Value, live: &Value) -> Value {
     saved["registeredPanels"] = json!(panels);
     saved
 }
+/// The run (and its MCP access, "editor" or "project") a grant token names.
+fn agent(token: Option<&str>, host: &Automation) -> Option<(String, String)> {
+    (host.agent_grants.as_ref()?)(token?)
+}
 /// Main's orchestrator tools, answered by the window that runs the caller.
 const ORCHESTRATION_TOOLS: &[&str] = &[
     "orchestrator_capabilities",
@@ -84,9 +88,10 @@ struct Active {
 pub struct McpSession {
     host: Arc<Mutex<Automation>>,
     active: Option<Active>,
-    /// The provider run that launched this connection (`--agent-run`):
-    /// orchestration tools act as that run.
-    agent_run: Option<String>,
+    /// The grant token of the provider run that launched this connection
+    /// (`--agent-run`), resolved through the host on every use: a token that
+    /// doesn't resolve (forged, or its run ended) acts as no run.
+    agent_token: Option<String>,
     writer: u32,
     closed: bool,
 }
@@ -96,7 +101,7 @@ impl McpSession {
         Self {
             host,
             active: None,
-            agent_run: None,
+            agent_token: None,
             writer: NEXT.fetch_add(1, Ordering::Relaxed),
             closed: false,
         }
@@ -104,8 +109,8 @@ impl McpSession {
     pub fn tools(&self) -> Value {
         json!(catalog::tools())
     }
-    pub fn set_agent_run(&mut self, run: &str) {
-        self.agent_run = Some(run.to_owned());
+    pub fn set_agent_run(&mut self, token: &str) {
+        self.agent_token = Some(token.to_owned());
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
         if name == "project_memory" {
@@ -391,9 +396,11 @@ impl McpSession {
                 .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
             catalog::validate(name, args)?;
-            let run = self.agent_run.clone().ok_or_else(|| {
-                Error::invalid("The visualization’s agent run is no longer active.")
-            })?;
+            let run = agent(self.agent_token.as_deref(), &host)
+                .map(|(run, _)| run)
+                .ok_or_else(|| {
+                    Error::invalid("The visualization’s agent run is no longer active.")
+                })?;
             let project = session.project.clone();
             drop(host);
             let mut call = args.clone();
@@ -410,11 +417,13 @@ impl McpSession {
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
             }
-            let run = self.agent_run.clone().ok_or_else(|| {
-                Error::invalid(
-                    "Subagents and thread watches belong to a Powermove agent run. Ask in Powermove's Agent panel, or use thread_launch and thread_read.",
-                )
-            })?;
+            let run = agent(self.agent_token.as_deref(), &host)
+                .map(|(run, _)| run)
+                .ok_or_else(|| {
+                    Error::invalid(
+                        "Subagents and thread watches belong to a Powermove agent run. Ask in Powermove's Agent panel, or use thread_launch and thread_read.",
+                    )
+                })?;
             let project = session.project.clone();
             drop(host);
             let mut call = args.clone();
@@ -432,11 +441,12 @@ impl McpSession {
                 assert_project(session, &host, id)?;
             }
             let project = session.project.clone();
+            let caller = agent(self.agent_token.as_deref(), &host);
             drop(host);
             let mut call = args.clone();
             call["callerAccess"] = json!(session.access);
             call["callerRunId"] = json!(session.run);
-            if let Some(run) = &self.agent_run {
+            if let Some((run, _)) = caller {
                 call["agentRunId"] = json!(run);
             }
             return surfaces.call(name, project.as_deref(), &call);
@@ -451,12 +461,13 @@ impl McpSession {
                 .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
             let surfaces = host.surfaces.clone();
+            let caller = agent(self.agent_token.as_deref(), &host);
             drop(host);
             let project = session.project.clone();
             let mut read = threads.read(name, project.as_deref(), args)?;
             // Reading a finished run acknowledges this run's watch on it.
             if name == "thread_read"
-                && let (Some(surfaces), Some(run)) = (&surfaces, &self.agent_run)
+                && let (Some(surfaces), Some((run, _))) = (&surfaces, caller)
             {
                 let mut call = args.clone();
                 call["agentRunId"] = json!(run);
@@ -880,15 +891,32 @@ impl McpSession {
             return Err(Error::invalid("Finish the current MCP session first."));
         }
         crate::validation::session("start_session", args)?;
-        let access = args["access"].as_str().unwrap_or("project");
-        let context = args["context"].as_str().unwrap_or("project");
-        if context == "app" && access == "editor" {
-            return Err(Error::invalid("App sessions require project access."));
-        }
         let host = self
             .host
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
+        // A provider run's session never exceeds that run's access.
+        let granted = match self.agent_token.as_deref() {
+            Some(token) => Some(
+                agent(Some(token), &host)
+                    .map(|(_, access)| access)
+                    .ok_or_else(|| Error::invalid("This agent run is no longer active."))?,
+            ),
+            None => None,
+        };
+        let access = args["access"]
+            .as_str()
+            .or(granted.as_deref())
+            .unwrap_or("project");
+        if granted.as_deref() == Some("editor") && access != "editor" {
+            return Err(Error::invalid(
+                "This run has planning access: start the session with access \"editor\".",
+            ));
+        }
+        let context = args["context"].as_str().unwrap_or("project");
+        if context == "app" && access == "editor" {
+            return Err(Error::invalid("App sessions require project access."));
+        }
         let project = if context == "project" {
             Some(host.active_project().ok_or_else(|| {
                 Error::invalid("Create or open a project before starting a project session.")

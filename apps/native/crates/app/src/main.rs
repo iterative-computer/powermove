@@ -212,7 +212,21 @@ fn main() -> Result<()> {
         )?);
         let tools = mcp::Tools::new(mcp_host.clone(), exports);
         mcp_services::connect_engine(&tools, engine.export_activity())?;
-        tools.automation.lock().unwrap().surfaces = Some(Arc::new(bridge));
+        {
+            let mut automation = tools.automation.lock().unwrap();
+            automation.surfaces = Some(Arc::new(bridge));
+            // Only tokens this process issued to its provider runs resolve.
+            automation.agent_grants = Some(Arc::new(|token: &str| {
+                pm_agents::launch::grants::resolve(token).map(|(run, access)| {
+                    let access = if access == pm_agents::Access::Editor {
+                        "editor"
+                    } else {
+                        "project"
+                    };
+                    (run, access.to_owned())
+                })
+            }));
+        }
         // The server itself starts once the library is attached (first_run).
         Ok((actor, engine, mcp_host, tools))
     })
