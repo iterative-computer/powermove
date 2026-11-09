@@ -17,6 +17,7 @@ mod first_run;
 mod gizmo;
 mod keyframe_sheets;
 
+mod agent_speech;
 mod captions_generate;
 mod captions_panel;
 #[cfg(test)]

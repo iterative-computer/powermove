@@ -26,7 +26,6 @@ use std::{
 /// One clip to caption, read from the open composition.
 #[derive(Clone, Debug)]
 pub struct Target {
-    pub id: String,
     pub name: String,
     pub index: usize,
     pub asset: String,
@@ -64,7 +63,6 @@ pub fn targets(comp: &Value, ids: &[String]) -> Vec<Target> {
             let varying = animated(&d["speed"]) || remapped;
             let speed = number(&d["speed"], 1.);
             Target {
-                id: l["id"].as_str().unwrap_or_default().into(),
                 name: l["name"].as_str().unwrap_or("Clip").into(),
                 index,
                 asset: d["asset"].as_str().unwrap_or_default().into(),
@@ -86,7 +84,11 @@ pub fn open_comp(published: &Published) -> Option<(String, Value)> {
 }
 /// The clip's composition → source map: two samples when constant, else the
 /// kernel's `sourceTime` at 120 per second (today's sampling rate).
-fn timing(published: &Published, comp: &str, target: &Target) -> Result<ClipTiming, Failure> {
+pub fn clip_timing(published: &Published, target: &Target) -> Result<ClipTiming, Failure> {
+    let comp = published
+        .snapshot
+        .open_comp()
+        .unwrap_or_else(|| published.snapshot.render_comp());
     if let Some((trim, speed)) = target.linear {
         return Ok(ClipTiming::linear(target.from, target.dur, trim, speed));
     }
@@ -139,6 +141,7 @@ fn words(transcript: &transcription::Transcript) -> Vec<CaptionWord> {
         .filter(|w| !w.text.is_empty())
         .collect()
 }
+#[derive(Clone)]
 pub enum Outcome {
     /// Cues in composition seconds, the transcript language and a layer name.
     Captions {
@@ -173,10 +176,6 @@ pub fn generate(
     cancel: &Arc<AtomicBool>,
     progress: Arc<dyn Fn(f64) + Send + Sync>,
 ) -> Result<Outcome, Failure> {
-    let comp = published
-        .snapshot
-        .open_comp()
-        .unwrap_or_else(|| published.snapshot.render_comp());
     let originals = originals(published, profile);
     let mut heard = vec![];
     let mut language = None;
@@ -184,7 +183,7 @@ pub fn generate(
         if cancel.load(Ordering::Acquire) {
             return Err(Failure::Cancelled);
         }
-        let clip = timing(published, &comp, target)?;
+        let clip = clip_timing(published, target)?;
         let [start, end] = clip.visible_source_range();
         let path = originals.get(&target.asset).cloned().ok_or_else(|| {
             Failure::Failed(format!(
@@ -547,8 +546,8 @@ mod tests {
         let ids: Vec<String> = ["a", "b", "c", "d"].map(String::from).into();
         let found = targets(&comp, &ids);
         assert_eq!(
-            found.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
-            ["a", "c"]
+            found.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["Interview", "VO"]
         );
         assert_eq!(found[0].linear, Some((3., 2.)));
         assert_eq!(found[0].index, 0);

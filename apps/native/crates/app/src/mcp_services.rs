@@ -66,6 +66,10 @@ pub fn connect_engine(
     let mut automation = tools.automation.lock().unwrap();
     automation.export_child = jobs.clone();
     automation.media_importer = Some(jobs.clone());
+    automation.speech = Some(crate::agent_speech::AgentSpeech::new(
+        tools.host.kernel.clone(),
+        tools.host.profile.clone(),
+    ));
     automation.media_registry = Some(jobs.clone());
     automation.threads = Some(jobs.clone());
     automation.engine = Some(jobs);
