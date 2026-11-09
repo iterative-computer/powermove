@@ -100,7 +100,7 @@ impl FrameEngine for Native {
         let scene = Scene {
             doc: p.snapshot.document.clone(),
             comp,
-            media: media.export_paths(false),
+            media: std::sync::Arc::new(media.export_paths(false)),
             content: p.revision(),
         };
         let rgba = self

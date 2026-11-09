@@ -182,13 +182,18 @@ pub fn dry_run(options: &Options) -> Result<Value> {
             blocked_owners,
             proxy_only,
             already_offline,
+            not_reached,
         } => (
             "complete",
-            json!({"projects":projects,"historyRefusals":history_refusals,"missingProjects":missing_projects,"blockedOwners":blocked_owners,"proxyOnly":proxy_only,"alreadyOffline":already_offline}),
+            json!({"projects":projects,"historyRefusals":history_refusals,"missingProjects":missing_projects,"blockedOwners":blocked_owners,"proxyOnly":proxy_only,"alreadyOffline":already_offline,"notReached":not_reached}),
         ),
         pm_first_launch::Outcome::NeedsSecretConsent { interrupted } => {
             ("needs_secret_consent", json!({"interrupted":interrupted}))
         }
+        pm_first_launch::Outcome::NeedsFolderAccess { folders } => (
+            "needs_folder_access",
+            json!({"folders":folders.len(),"originals":folders.iter().map(|f| f.1).sum::<usize>()}),
+        ),
         pm_first_launch::Outcome::WaitingForElectron => ("waiting_for_electron", json!({})),
     };
     let result = json!({"dryRun":true,"status":status,"sourceUnchanged":true,"copiedProfile":copied,"nativeProfile":native,"sourceFiles":before.len(),"sourceBytes":bytes,"published":published,"counts":counts,"keychainAccessed":false});

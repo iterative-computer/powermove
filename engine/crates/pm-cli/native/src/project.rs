@@ -209,6 +209,7 @@ impl Project {
             .shell(ShellCall::SaveAs {
                 session,
                 path: output,
+                replace: false,
             })
             .wait()
             .ok_or_else(|| error("kernel_error", "Actor stopped during save"))?
