@@ -351,7 +351,13 @@ fn fill_range(
         pm_text::host::serve(font_service, fonts.take_asks());
         viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
         // No window publication: the bench's overrides (none) need no pin.
-        match disk.start_fill(seconds(start), seconds(end), &exe, Default::default(), None) {
+        match disk.start_fill(
+            seconds(start),
+            seconds(end),
+            &exe,
+            Default::default(),
+            |_| {},
+        ) {
             Ok(n) => break n,
             Err(e)
                 if wait.elapsed() < Duration::from_secs(120)

@@ -93,6 +93,8 @@ pub struct Controller {
     pub keyframes: usize,
     pub recovery_pending: bool,
     pub mcp: Arc<crate::mcp::Host>,
+    /// Every open document's override answers, for agents' jobs.
+    pub job_overrides: crate::raster_overrides::OverrideWindows,
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
@@ -414,6 +416,7 @@ impl Controller {
             keyframes: 0,
             recovery_pending: false,
             mcp,
+            job_overrides: Default::default(),
             window_key: 0,
             close_pending: false,
             close_window: None,

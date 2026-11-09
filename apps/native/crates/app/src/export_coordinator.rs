@@ -225,7 +225,8 @@ impl Controller {
                 destination,
                 without_offline,
             };
-            let current = this
+            // The window's extensions as the job starts answer its overrides.
+            let (current, overrides) = this
                 .update(cx, |v, _| {
                     let current = v
                         .builtins
@@ -235,9 +236,9 @@ impl Controller {
                     if current {
                         v.builtins.export_retry = Some(frozen.clone());
                     }
-                    current
+                    (current, v.extensions.overrides.as_ref().map(|o| o.jobs()))
                 })
-                .unwrap_or(false);
+                .unwrap_or((false, None));
             if !current {
                 job.cancel.store(true, Ordering::Release);
             }
@@ -247,7 +248,10 @@ impl Controller {
                 execute(
                     frozen,
                     worker_job,
-                    activity,
+                    EngineJob {
+                        activity,
+                        overrides,
+                    },
                     runtime.clone(),
                     executor,
                     tasks,
@@ -286,7 +290,7 @@ async fn observe(runtime: &pm_builtins::Builtins, run: Value) {
 async fn execute(
     frozen: Frozen,
     job: Job,
-    activity: pm_engine_service::jobs::Activity,
+    engine: EngineJob,
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
@@ -339,7 +343,7 @@ async fn execute(
                     execute_inner(
                         &frozen,
                         &job,
-                        activity,
+                        engine,
                         &runtime,
                         &executor,
                         TaskAdmission {
@@ -400,6 +404,13 @@ async fn execute(
     }
     result.map(|_| ())
 }
+/// What the window lends its export's job: the viewer's activity, which
+/// keeps precedence on the GPU, and its extensions, which answer the job's
+/// raster overrides.
+struct EngineJob {
+    activity: pm_engine_service::jobs::Activity,
+    overrides: Option<crate::raster_overrides::JobOverrides>,
+}
 struct TaskAdmission<'a> {
     tasks: &'a Arc<Mutex<BackgroundTasks>>,
     ticket: pm_promedia::tasks::Ticket,
@@ -408,7 +419,7 @@ struct TaskAdmission<'a> {
 async fn execute_inner(
     frozen: &Frozen,
     job: &Job,
-    activity: pm_engine_service::jobs::Activity,
+    engine: EngineJob,
     runtime: &pm_builtins::Builtins,
     executor: &gpui::BackgroundExecutor,
     task: TaskAdmission<'_>,
@@ -447,12 +458,15 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    let mut session = pm_engine_service::jobs::JobSession::new(request);
     // Its raster overrides answer from this publication, whatever is edited meanwhile.
-    request.frozen = Some(frozen.publication.clone());
+    if let Some(overrides) = engine.overrides {
+        overrides.pin(&mut session, &frozen.publication, false);
+    }
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
         &std::env::current_exe().map_err(|e| e.to_string())?,
-        request,
-        activity,
+        session,
+        engine.activity,
     )
     .map_err(|e| e.to_string())?;
     *job.handle.lock().unwrap() = Some(handle);

@@ -464,15 +464,15 @@ impl DiskFrames {
 
     /// Render Selection: the composition's frames in `[from, to)` seconds that
     /// are not on disk render in an `--engine-job` child (`executable`),
-    /// admitted around viewer `activity` as exports are. Returns the frames
-    /// queued.
+    /// admitted around viewer `activity` as exports are, its raster overrides
+    /// answered as `overrides` sets up. Returns the frames queued.
     pub fn start_fill(
         &self,
         from: f64,
         to: f64,
         executable: &Path,
         activity: crate::jobs::Activity,
-        frozen: Option<(u64, Arc<dyn std::any::Any + Send + Sync>)>,
+        overrides: impl FnOnce(&mut crate::jobs::JobSession),
     ) -> Result<u64, String> {
         let mut running = self.inner.running.lock().unwrap();
         if running.as_ref().is_some_and(|r| !r.thread.is_finished()) {
@@ -530,14 +530,11 @@ impl DiskFrames {
             height: size.height,
             frames: missing.into_iter().map(|m| m.1).collect(),
         };
-        // The window's publication at the fill's revision: its overrides
-        // answer from it whatever is edited meanwhile.
-        let request = fill_request(&source, rate, fill)
-            .map(|mut request| {
-                request.frozen = frozen
-                    .filter(|(revision, _)| *revision == request.revision)
-                    .map(|(_, frozen)| frozen);
-                request
+        let session = fill_request(&source, rate, fill)
+            .map(|request| {
+                let mut session = crate::jobs::JobSession::new(request);
+                overrides(&mut session);
+                session
             })
             .map_err(|e| e.to_string());
         let cancel = Arc::new(AtomicBool::new(false));
@@ -548,7 +545,7 @@ impl DiskFrames {
         );
         let thread = std::thread::Builder::new()
             .name("pm-render-fill".into())
-            .spawn(move || run_fill(weak, generation, order, request, &exe, activity, &stop))
+            .spawn(move || run_fill(weak, generation, order, session, &exe, activity, &stop))
             .map_err(|e| e.to_string())?;
         *running = Some(Running { cancel, thread });
         Ok(self.inner.published.lock().unwrap().queued)
@@ -725,8 +722,6 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
-        frozen: None,
-        look: false,
     })
 }
 
@@ -747,7 +742,7 @@ fn run_fill(
     inner: Weak<Inner>,
     generation: u64,
     order: Vec<i64>,
-    request: Result<crate::jobs::ExportRequest, String>,
+    session: Result<crate::jobs::JobSession, String>,
     executable: &Path,
     activity: crate::jobs::Activity,
     cancel: &AtomicBool,
@@ -774,8 +769,8 @@ fn run_fill(
         }
         bump(&mut state, &inner.published);
     };
-    let started = request.and_then(|request| {
-        crate::jobs::ExportHandle::start_scheduled(executable, request, activity)
+    let started = session.and_then(|session| {
+        crate::jobs::ExportHandle::start_scheduled(executable, session, activity)
             .map_err(|e| e.to_string())
     });
     let mut handle = match started {
@@ -1253,7 +1248,7 @@ mod tests {
         disk.observe(&scene, &[], None, None, 1);
         ready(&disk);
         let queued = disk
-            .start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), None)
+            .start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
         assert_eq!(queued, 6);
         let bars = settle(&disk, |b| !b.running);
@@ -1267,7 +1262,7 @@ mod tests {
             "the frame has drawn pixels"
         );
         // Nothing is left to render.
-        let again = disk.start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), None);
+        let again = disk.start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), |_| {});
         assert_eq!(again, Ok(0));
     }
 
@@ -1286,7 +1281,7 @@ mod tests {
             .unwrap();
         disk.observe(scene, &[], None, None, 1);
         ready(&disk);
-        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), None)
+        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
         let bars = settle(&disk, |b| !b.running);
         assert_eq!(bars.error.as_deref(), None, "{bars:?}");
@@ -1334,7 +1329,7 @@ mod tests {
         let scene = scene();
         disk.observe(&scene, &[], None, None, 1);
         ready(&disk);
-        disk.start_fill(0., 3., &exe, crate::jobs::Activity::default(), None)
+        disk.start_fill(0., 3., &exe, crate::jobs::Activity::default(), |_| {})
             .unwrap();
         settle(&disk, |b| b.done >= 1);
         disk.delete_all().unwrap();

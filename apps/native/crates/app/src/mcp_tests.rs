@@ -93,7 +93,8 @@ fn layers(f: &Fixture) -> usize {
 #[test]
 fn thread_tools_page_the_durable_archive() {
     let fixture = Fixture::new();
-    crate::mcp_services::connect_engine(&fixture.tools, Default::default()).unwrap();
+    crate::mcp_services::connect_engine(&fixture.tools, Default::default(), Default::default())
+        .unwrap();
     let long = "é".repeat(30);
     let archive = json!({"version":1,"threads":[{"id":"t1","title":"Headline",
         "updatedAt":5,"provider":"claude","access":"project","lastRunStatus":"completed",

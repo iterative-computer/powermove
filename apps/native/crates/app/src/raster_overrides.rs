@@ -11,13 +11,13 @@ use pm_engine_service::EngineService;
 use pm_engine_service::compat::{
     BaseRequest, CompatAnswer, CompatStore, Reply, hidden_raster, override_raster,
 };
-use pm_engine_service::jobs::{CompatAnswerer, CompatJobNeed, CompatPin, CompatReply};
-use pm_kernel::KernelHandle;
+use pm_engine_service::jobs::{CompatJobNeed, CompatReply, JobSession, OverrideAnswers};
+use pm_kernel::{KernelHandle, Published};
 use pm_protocol::common::{PixelRect, TICKS_PER_SECOND};
 use pm_protocol::snapshot::CompatNeed;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -53,14 +53,30 @@ const STALE: Duration = Duration::from_secs(10);
 const EXPORT_WAIT: Duration = Duration::from_secs(60);
 
 pub(crate) struct Overrides {
-    store: Arc<CompatStore>,
     rasters: Option<Arc<pm_engine_service::compat::LayerRasters>>,
+    jobs: JobOverrides,
+    windows: OverrideWindows,
+}
+/// What answers the raster overrides of this window's project for the jobs
+/// started from it (exports, renders, agents' captures): cloned to each.
+#[derive(Clone)]
+pub(crate) struct JobOverrides {
+    store: Arc<CompatStore>,
     kernel: KernelHandle,
     project: String,
     /// The document this window's extensions answer for.
     doc_id: u64,
     batches: Arc<Mutex<Batches>>,
     realm: Arc<Mutex<Option<RasterInbox>>>,
+}
+/// Each open document's [`JobOverrides`], for the jobs agents start: an
+/// agent names a project, not a window.
+#[derive(Clone, Default)]
+pub struct OverrideWindows(Arc<Mutex<HashMap<u64, JobOverrides>>>);
+impl OverrideWindows {
+    pub(crate) fn of(&self, doc_id: u64) -> Option<JobOverrides> {
+        self.0.lock().unwrap().get(&doc_id).cloned()
+    }
 }
 
 fn answer_of(answer: RasterAnswer) -> Reply {
@@ -88,17 +104,30 @@ fn answer_of(answer: RasterAnswer) -> Reply {
 }
 
 impl Overrides {
-    pub(crate) fn new(engine: &EngineService, kernel: KernelHandle, project: String) -> Self {
+    pub(crate) fn new(
+        engine: &EngineService,
+        kernel: KernelHandle,
+        project: String,
+        windows: OverrideWindows,
+    ) -> Self {
         let doc_id = kernel.published(&project).map_or(0, |p| p.snapshot.doc_id);
-        Self {
+        let jobs = JobOverrides {
             store: engine.compat(doc_id),
             doc_id,
-            rasters: engine.layer_rasters(),
             kernel,
             project,
             batches: Arc::default(),
             realm: Arc::default(),
+        };
+        windows.0.lock().unwrap().insert(doc_id, jobs.clone());
+        Self {
+            rasters: engine.layer_rasters(),
+            jobs,
+            windows,
         }
+    }
+    pub(crate) fn jobs(&self) -> JobOverrides {
+        self.jobs.clone()
     }
     pub(crate) fn hooks(&self) -> RasterHooks {
         let rasters = self.rasters.clone();
@@ -132,7 +161,7 @@ impl Overrides {
                 uv: r.uv,
             }))
         });
-        let (store, batches) = (self.store.clone(), self.batches.clone());
+        let (store, batches) = (self.jobs.store.clone(), self.jobs.batches.clone());
         let answers = Arc::new(move |batch: u64, answers: Vec<RasterAnswer>| {
             let asked = batches.lock().unwrap().open.remove(&batch);
             let (revision, epoch, needs) = match asked {
@@ -150,32 +179,17 @@ impl Overrides {
             store.answer_all(revision, epoch, answered);
         });
         let (store, kernel, project) = (
-            self.store.clone(),
-            self.kernel.clone(),
-            self.project.clone(),
+            self.jobs.store.clone(),
+            self.jobs.kernel.clone(),
+            self.jobs.project.clone(),
         );
-        let export = self.export_answerer();
-        let begin = self.export_begin();
-        let doc_id = self.doc_id;
         let producing = Arc::new(move |on: bool, epoch: u64, code: u64| {
             let revision = kernel.published(&project).map_or(0, |p| p.revision());
             // The disk render cache keys override frames by the compiled
             // records the wrappers run (the ones export realms pin).
             store.set_code(code);
+            // Jobs started while an override is registered ask this realm.
             store.set_state(on, revision, epoch);
-            // Exports started while an override is registered ask this realm.
-            let store = store.clone();
-            pm_engine_service::jobs::set_compat_answerer(
-                doc_id,
-                on.then(|| {
-                    (
-                        Arc::new(move || store.producing_now().then(|| store.epoch()))
-                            as pm_engine_service::jobs::CompatState,
-                        export.clone(),
-                        begin.clone(),
-                    )
-                }),
-            );
         });
         RasterHooks {
             base,
@@ -183,35 +197,92 @@ impl Overrides {
             producing,
         }
     }
-    /// A delivery starts: its realm starts now, so the extensions' code and
-    /// storage it runs are the ones at the export's start.
-    fn export_begin(&self) -> pm_engine_service::jobs::CompatBegin {
-        let realm = self.realm.clone();
-        let (kernel, project, doc_id) = (self.kernel.clone(), self.project.clone(), self.doc_id);
-        Arc::new(move |pin: &CompatPin| {
-            let realm = realm.lock().unwrap().clone();
-            if let (Some(realm), Ok(frozen)) = (realm, frozen_of(pin, &kernel, &project, doc_id)) {
-                let _ = realm.export(&pin.job, frozen, pin.cancel.clone());
-            }
-        })
+    /// The store's needs go to this window's realm, a batch at a time.
+    pub(crate) fn connect(&self, realm: RasterInbox) {
+        *self.jobs.realm.lock().unwrap() = Some(realm.clone());
+        let batches = self.jobs.batches.clone();
+        self.jobs.store.set_sink(Some(Arc::new(
+            move |revision, epoch, needs: Vec<CompatNeed>| {
+                let wire: Vec<Value> = needs
+                    .iter()
+                    .map(|need| {
+                        json!({
+                            "composition": need.composition.as_str(),
+                            "layer": need.layer.as_str(),
+                            "seconds": need.time.get() as f64 / TICKS_PER_SECOND as f64,
+                            "scale": need.scale,
+                            "crop": need.crop.map(|c| json!({"x":c.x,"y":c.y,"width":c.width,"height":c.height})),
+                        })
+                    })
+                    .collect();
+                let batch = batches
+                    .lock()
+                    .unwrap()
+                    .open(Asker::Viewer(revision, epoch, needs));
+                realm.ask(batch, Value::Array(wire), json!({"revision": revision}));
+            },
+        )));
     }
-    /// An export frame's needs, waited for on the job's reader thread (never
-    /// the main thread) until they come, the job is cancelled, the window's
-    /// extensions stop, or a minute passes. A delivery (an export, a render
-    /// cache fill) is answered by a realm of its own, started when it starts
-    /// from the publication it froze, so nothing the person edits meanwhile
-    /// reaches it and the window's realm keeps serving the viewer. A one-frame
-    /// look (an agent's still) asks the window's realm while that realm is at
-    /// its exact revision, and its own realm only once the project moved on.
-    fn export_answerer(&self) -> CompatAnswerer {
+}
+
+impl JobOverrides {
+    /// The generation of override wrappers drawing the project now (none: no
+    /// override).
+    pub(crate) fn epoch(&self) -> Option<u64> {
+        self.store.producing_now().then(|| self.store.epoch())
+    }
+    /// While an override is registered, `session`'s override layers are
+    /// answered by this window's extensions from `published`, the project the
+    /// job froze. A delivery (an export, a render cache fill) is answered by
+    /// a realm of its own, started now, so nothing the person edits meanwhile
+    /// reaches it, the extensions' code and storage are the ones at its
+    /// start, and the window's realm keeps serving the viewer. A one-frame
+    /// `look` (an agent's still) asks the window's realm while that realm is
+    /// at its exact revision, and its own realm only once the project moved
+    /// on. Answers wait on the job's reader thread (never the main thread)
+    /// until they come, the job is cancelled, the window's extensions stop,
+    /// or a minute passes.
+    pub(crate) fn pin(&self, session: &mut JobSession, published: &Arc<Published>, look: bool) {
+        if !self.store.producing_now() {
+            return;
+        }
+        let job = session.request.job.as_str().to_owned();
+        let revision = session.request.revision;
+        let cancel = session.cancellation();
+        // A job frozen from the viewer's scene a moment after `published`:
+        // the window's publication while it is still at the job's revision.
+        let frozen = Some(published.clone())
+            .filter(|p| p.revision() == revision)
+            .or_else(|| {
+                self.kernel
+                    .published(&self.project)
+                    .filter(|p| p.snapshot.doc_id == self.doc_id && p.revision() == revision)
+            });
+        if !look && let (Some(realm), Some(frozen)) = (self.realm.lock().unwrap().clone(), &frozen)
+        {
+            let _ = realm.export(&job, frozen.clone(), cancel.clone());
+        }
+        session.answer_overrides(self.answers(job, revision, frozen, look, cancel));
+    }
+    /// What answers job `job`'s needs (see [`Self::pin`]).
+    fn answers(
+        &self,
+        job: String,
+        revision: u64,
+        frozen: Option<Arc<Published>>,
+        look: bool,
+        cancel: Arc<AtomicBool>,
+    ) -> OverrideAnswers {
         let (batches, realm) = (self.batches.clone(), self.realm.clone());
-        let (kernel, project, doc_id) = (self.kernel.clone(), self.project.clone(), self.doc_id);
-        Arc::new(move |pin: &CompatPin, needs: &[CompatJobNeed]| {
+        Box::new(move |needs: &[CompatJobNeed]| {
             let realm = realm
                 .lock()
                 .unwrap()
                 .clone()
                 .ok_or("The project's window has no extensions running")?;
+            let frozen = frozen
+                .clone()
+                .ok_or("The project changed before its extensions could draw it")?;
             let wire = Value::Array(
                 needs
                     .iter()
@@ -227,7 +298,7 @@ impl Overrides {
                 let batch = batches.lock().unwrap().open(Asker::Export(tx));
                 realm.ask(batch, wire.clone(), ask);
                 loop {
-                    if pin.cancel.load(Ordering::Acquire) {
+                    if cancel.load(Ordering::Acquire) {
                         batches.lock().unwrap().open.remove(&batch);
                         return Err("cancelled".into());
                     }
@@ -246,10 +317,10 @@ impl Overrides {
             };
 
             let mut answers = None;
-            if pin.look {
+            if look {
                 // Behind the still's revision: ask again once it caught up.
                 loop {
-                    let got = ask(json!({"revision": pin.revision, "exact": true}))?;
+                    let got = ask(json!({"revision": revision, "exact": true}))?;
                     if got.iter().any(|a| matches!(a, RasterAnswer::Moved)) {
                         break;
                     }
@@ -268,9 +339,8 @@ impl Overrides {
             let answers = match answers {
                 Some(answers) => answers,
                 None => {
-                    let frozen = frozen_of(pin, &kernel, &project, doc_id)?;
-                    realm.export(&pin.job, frozen, pin.cancel.clone())?;
-                    ask(json!({"job": pin.job}))?
+                    realm.export(&job, frozen, cancel.clone())?;
+                    ask(json!({"job": job}))?
                 }
             };
             answers
@@ -302,62 +372,25 @@ impl Overrides {
                 .collect()
         })
     }
-    /// The store's needs go to this window's realm, a batch at a time.
-    pub(crate) fn connect(&self, realm: RasterInbox) {
-        *self.realm.lock().unwrap() = Some(realm.clone());
-        let batches = self.batches.clone();
-        self.store.set_sink(Some(Arc::new(
-            move |revision, epoch, needs: Vec<CompatNeed>| {
-                let wire: Vec<Value> = needs
-                    .iter()
-                    .map(|need| {
-                        json!({
-                            "composition": need.composition.as_str(),
-                            "layer": need.layer.as_str(),
-                            "seconds": need.time.get() as f64 / TICKS_PER_SECOND as f64,
-                            "scale": need.scale,
-                            "crop": need.crop.map(|c| json!({"x":c.x,"y":c.y,"width":c.width,"height":c.height})),
-                        })
-                    })
-                    .collect();
-                let batch = batches
-                    .lock()
-                    .unwrap()
-                    .open(Asker::Viewer(revision, epoch, needs));
-                realm.ask(batch, Value::Array(wire), json!({"revision": revision}));
-            },
-        )));
-    }
-}
-
-/// The publication a job froze; without one (a request made before it could
-/// carry it), the window's while it is still at the job's revision.
-fn frozen_of(
-    pin: &CompatPin,
-    kernel: &KernelHandle,
-    project: &str,
-    doc_id: u64,
-) -> Result<Arc<pm_kernel::Published>, String> {
-    pin.frozen
-        .clone()
-        .and_then(|f| f.downcast::<pm_kernel::Published>().ok())
-        .or_else(|| {
-            kernel
-                .published(project)
-                .filter(|p| p.snapshot.doc_id == doc_id && p.revision() == pin.revision)
-        })
-        .ok_or_else(|| "The project changed before its extensions could draw it".to_owned())
 }
 impl Drop for Overrides {
-    /// The window's extensions are gone: its project's frames and exports
-    /// stop asking them (and draw natively until another realm answers);
-    /// exports waiting on them fail now.
+    /// The window's extensions are gone: its project's frames and jobs stop
+    /// asking them (and draw natively until another realm answers); jobs
+    /// waiting on them fail now.
     fn drop(&mut self) {
-        self.store.set_sink(None);
-        self.store.set_state(false, 0, 0);
-        pm_engine_service::jobs::set_compat_answerer(self.doc_id, None);
-        *self.realm.lock().unwrap() = None;
-        self.batches.lock().unwrap().open.clear();
+        let jobs = &self.jobs;
+        jobs.store.set_sink(None);
+        jobs.store.set_state(false, 0, 0);
+        let mut windows = self.windows.0.lock().unwrap();
+        if windows
+            .get(&jobs.doc_id)
+            .is_some_and(|w| Arc::ptr_eq(&w.realm, &jobs.realm))
+        {
+            windows.remove(&jobs.doc_id);
+        }
+        drop(windows);
+        *jobs.realm.lock().unwrap() = None;
+        jobs.batches.lock().unwrap().open.clear();
     }
 }
 /// A new publication: frames are drawn at its revision, and asked ahead a
@@ -376,4 +409,132 @@ pub(crate) fn published(engine: &EngineService, p: &pm_kernel::Published) {
         .filter(|fps| *fps > 0.)
         .unwrap_or(30.);
     store.set_frame((TICKS_PER_SECOND as f64 / fps).round() as i64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_kernel::{KernelActor, KernelConfig, OpenSource};
+
+    fn window(
+        kernel: &KernelHandle,
+        store: &Arc<CompatStore>,
+        windows: &OverrideWindows,
+    ) -> Overrides {
+        let doc_id = kernel.published("synthetic").unwrap().snapshot.doc_id;
+        let jobs = JobOverrides {
+            store: store.clone(),
+            kernel: kernel.clone(),
+            project: "synthetic".into(),
+            doc_id,
+            batches: Arc::default(),
+            realm: Arc::default(),
+        };
+        windows.0.lock().unwrap().insert(doc_id, jobs.clone());
+        Overrides {
+            rasters: None,
+            jobs,
+            windows: windows.clone(),
+        }
+    }
+    fn session(published: &Published) -> JobSession {
+        use pm_protocol::{color::*, common::*, priority::*};
+        let settings = ExportSettings {
+            format: ExportFormat::PngStill { sixteen_bit: false },
+            alpha: AlphaOutput::Straight,
+            quality: QualityTier::High,
+            size: Size::new(64, 64),
+            frame_rate: FrameRate::new(30, 1),
+            range: TickRange {
+                start: Ticks::ZERO,
+                end: Ticks::new(1).unwrap(),
+            },
+            audio: false,
+            audio_index_playhead: None,
+            motion_blur: false,
+            color: OutputColor::SrgbImage,
+            precision: Precision::Float16,
+            dither: false,
+            draft_from_proxies: false,
+            delivery: Default::default(),
+        };
+        let request = pm_engine_service::jobs::ExportRequest::new(
+            "job".into(),
+            &published.snapshot,
+            JobSpec::Export {
+                session: SessionId::new(published.snapshot.doc_id).unwrap(),
+                composition: published.snapshot.render_comp().as_str().into(),
+                settings,
+            },
+            Default::default(),
+            "/nonexistent".into(),
+        )
+        .unwrap();
+        JobSession::new(request)
+    }
+    fn overridden(session: &JobSession) -> bool {
+        matches!(&session.request.spec, pm_protocol::priority::JobSpec::Export { settings, .. }
+            if settings.delivery.compat.contains(&pm_protocol::snapshot::CompatSource::RasterOverride))
+    }
+
+    /// Jobs are pinned only while an override is registered; a reload's new
+    /// extensions keep answering agents after the old ones go; a closed
+    /// window answers nothing, at once.
+    #[test]
+    fn jobs_follow_the_window_that_answers_their_overrides() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = pm_model::json::parse(
+            r##"{"id":"synthetic","name":"Jobs","compId":"root","w":64,"h":64,"fps":30,"dur":1,
+            "bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+        )
+        .unwrap();
+        kernel
+            .open("synthetic", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let published = kernel.published("synthetic").unwrap();
+        let doc_id = published.snapshot.doc_id;
+        let (store, windows) = (Arc::new(CompatStore::default()), OverrideWindows::default());
+        let old = window(&kernel, &store, &windows);
+        let mut unpinned = session(&published);
+        old.jobs.pin(&mut unpinned, &published, false);
+        assert!(!overridden(&unpinned), "no override is registered");
+        assert_eq!(windows.of(doc_id).and_then(|j| j.epoch()), None);
+        store.set_state(true, published.revision(), 3);
+        assert_eq!(windows.of(doc_id).and_then(|j| j.epoch()), Some(3));
+
+        let reloaded = window(&kernel, &store, &windows);
+        drop(old);
+        store.set_state(true, published.revision(), 4);
+        let agents = windows
+            .of(doc_id)
+            .expect("the reloaded window answers agents");
+        assert!(Arc::ptr_eq(&agents.realm, &reloaded.jobs.realm));
+        let mut pinned = session(&published);
+        agents.pin(&mut pinned, &published, false);
+        assert!(overridden(&pinned));
+
+        let answers = reloaded.jobs.answers(
+            "job".into(),
+            published.revision(),
+            Some(published.clone()),
+            false,
+            pinned.cancellation(),
+        );
+        drop(reloaded);
+        assert!(windows.of(doc_id).is_none());
+        assert!(!store.producing_now());
+        let need = CompatJobNeed {
+            composition: "root".into(),
+            layer: "title".into(),
+            seconds: 0.,
+            scale: 1.,
+        };
+        let started = Instant::now();
+        let error = answers(&[need]).unwrap_err();
+        assert_eq!(error, "The project's window has no extensions running");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }

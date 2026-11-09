@@ -56,16 +56,6 @@ pub struct ExportRequest {
     /// a file (`crate::render_cache`).
     #[serde(default)]
     pub cache: Option<crate::render_cache::CacheFill>,
-    /// The publication the request was frozen from (the app's
-    /// `pm_kernel::Published`), for the extensions that answer the export's
-    /// raster overrides. Never sent to the child.
-    #[serde(skip)]
-    pub frozen: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// A one-frame look at the project (an agent's still), not a delivery:
-    /// its raster overrides may be answered by the window's realm while it is
-    /// at the frame's revision. Exports and render cache fills are deliveries.
-    #[serde(skip)]
-    pub look: bool,
 }
 
 /// The viewer's activity, as exports and cache fills see it: whether it is
@@ -113,21 +103,6 @@ pub enum CompatReply {
         uv: [f64; 4],
     },
 }
-/// What an export's overrides answer for: its frozen project and the
-/// wrappers registered when it started. Edits and reloads made while it runs
-/// never reach it.
-pub struct CompatPin {
-    pub job: String,
-    pub revision: u64,
-    /// The generation of `raster` wrappers the export started with.
-    pub epoch: u64,
-    /// The publication the export froze (see [`ExportRequest::frozen`]).
-    pub frozen: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// A look at the project (an agent's still), not a delivery.
-    pub look: bool,
-    /// Set when the export is cancelled or its handle dropped.
-    pub cancel: Arc<AtomicBool>,
-}
 /// One layer an export frame needs an override answer for.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompatJobNeed {
@@ -136,54 +111,56 @@ pub struct CompatJobNeed {
     pub seconds: f64,
     pub scale: f64,
 }
-/// Answers a batch of export needs, in order, on the job's reader thread.
-/// An error fails the frame (and the export).
-pub type CompatAnswerer = Arc<
-    dyn Fn(&CompatPin, &[CompatJobNeed]) -> std::result::Result<Vec<CompatReply>, String>
-        + Send
-        + Sync,
->;
-/// The wrappers' generation while an override is registered (none: no override).
-pub type CompatState = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
-/// Called as a delivery starts: whatever answers its overrides pins the
-/// extensions' code and storage now, not at the first frame that asks.
-pub type CompatBegin = Arc<dyn Fn(&CompatPin) + Send + Sync>;
-struct CompatProducer {
-    state: CompatState,
-    answer: CompatAnswerer,
-    begin: CompatBegin,
+/// Answers a frame's override needs, in order, on the job's reader thread,
+/// for the window that has the project open. What it pinned (the frozen
+/// project, an export's realm) it lets go once the job's
+/// [`JobSession::cancellation`] is set. An error fails the frame (and the
+/// job).
+pub type OverrideAnswers =
+    Box<dyn Fn(&[CompatJobNeed]) -> std::result::Result<Vec<CompatReply>, String> + Send>;
+/// A job before it starts: its frozen input, what answers its raster
+/// overrides, and its cancellation. Dropped unstarted, or started and then
+/// ended, cancelled or dropped, the job's cancellation is set.
+pub struct JobSession {
+    pub request: ExportRequest,
+    overrides: Option<OverrideAnswers>,
+    cancel: Cancel,
 }
-/// Each open document's producer, by kernel `doc_id` (the job's session).
-static COMPAT: Mutex<Option<std::collections::HashMap<u64, CompatProducer>>> = Mutex::new(None);
-/// Whose extensions wrap `raster` for document `doc_id` (none: its exports
-/// draw natively).
-pub fn set_compat_answerer(
-    doc_id: u64,
-    producer: Option<(CompatState, CompatAnswerer, CompatBegin)>,
-) {
-    let mut all = COMPAT.lock().unwrap();
-    let all = all.get_or_insert_with(Default::default);
-    match producer {
-        Some((state, answer, begin)) => {
-            all.insert(
-                doc_id,
-                CompatProducer {
-                    state,
-                    answer,
-                    begin,
-                },
-            );
-        }
-        None => {
-            all.remove(&doc_id);
-        }
+/// Set when dropped: whatever a job pinned is let go when it ends, however
+/// it ends.
+struct Cancel(Arc<AtomicBool>);
+impl Drop for Cancel {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
     }
 }
-/// The generation of override wrappers drawing document `doc_id` now (none:
-/// no override).
-pub fn compat_epoch(doc_id: u64) -> Option<u64> {
-    let state = COMPAT.lock().unwrap().as_ref()?.get(&doc_id)?.state.clone();
-    state()
+impl JobSession {
+    pub fn new(request: ExportRequest) -> Self {
+        Self {
+            request,
+            overrides: None,
+            cancel: Cancel(Arc::default()),
+        }
+    }
+    /// Set when the job is cancelled or over.
+    pub fn cancellation(&self) -> Arc<AtomicBool> {
+        self.cancel.0.clone()
+    }
+    /// The job draws its raster override layers with `answers`' answers.
+    pub fn answer_overrides(&mut self, answers: OverrideAnswers) {
+        let override_source = pm_protocol::snapshot::CompatSource::RasterOverride;
+        if let JobSpec::Export { settings, .. } = &mut self.request.spec
+            && !settings.delivery.compat.contains(&override_source)
+        {
+            settings.delivery.compat.push(override_source);
+        }
+        self.overrides = Some(answers);
+    }
+}
+impl From<ExportRequest> for JobSession {
+    fn from(request: ExportRequest) -> Self {
+        Self::new(request)
+    }
 }
 /// What the parent sends the child, one line each on its stdin.
 #[derive(Serialize, Deserialize)]
@@ -375,8 +352,6 @@ impl ExportRequest {
             without_offline: false,
             preview: false,
             cache: None,
-            frozen: None,
-            look: false,
         })
     }
 }
@@ -413,7 +388,7 @@ pub fn is_offline_refusal(message: &str) -> bool {
 pub struct ExportHandle {
     child: Option<Child>,
     input: Arc<Mutex<ChildStdin>>,
-    cancel: Arc<AtomicBool>,
+    cancel: Cancel,
     status: Arc<Mutex<JobStatus>>,
     /// Ends with the child's output; true if it stopped at a line it could
     /// not use, with the child still running.
@@ -424,8 +399,8 @@ pub struct ExportHandle {
 impl ExportHandle {
     /// Call from a job worker: process spawn and snapshot serialization are
     /// deliberately excluded from the UI event path.
-    pub fn start(executable: &Path, request: ExportRequest) -> Result<Self> {
-        Self::start_scheduled(executable, request, Activity::default())
+    pub fn start(executable: &Path, session: impl Into<JobSession>) -> Result<Self> {
+        Self::start_scheduled(executable, session, Activity::default())
     }
     /// Interactive service activity takes precedence at every submission:
     /// none is granted while the viewer is busy; within [`QUIET`] of its
@@ -434,53 +409,14 @@ impl ExportHandle {
     /// submission cannot be preempted by Metal.
     pub fn start_scheduled(
         executable: &Path,
-        mut request: ExportRequest,
+        session: impl Into<JobSession>,
         interactive: Activity,
     ) -> Result<Self> {
-        // An export draws what the viewer draws: a raster override's layers too.
-        let session = match &request.spec {
-            JobSpec::Export { session, .. } => Some(session.get()),
-            _ => None,
-        };
-        let cancel = Arc::new(AtomicBool::new(false));
-        // Pinned now: the frozen project and the wrappers registered at start.
-        let producer = COMPAT.lock().unwrap().as_ref().and_then(|all| {
-            let c = all.get(&session?)?;
-            Some((c.state.clone(), c.answer.clone(), c.begin.clone()))
-        });
-        let answerer = producer.and_then(|(state, answer, begin)| {
-            let epoch = state()?;
-            Some((
-                answer,
-                begin,
-                CompatPin {
-                    job: request.job.as_str().to_owned(),
-                    revision: request.revision,
-                    epoch,
-                    frozen: request.frozen.clone(),
-                    look: request.look,
-                    cancel: cancel.clone(),
-                },
-            ))
-        });
-        let answerer = answerer.map(|(answer, begin, pin)| {
-            if !pin.look {
-                begin(&pin);
-            }
-            (answer, pin)
-        });
-        if answerer.is_some()
-            && let JobSpec::Export { settings, .. } = &mut request.spec
-            && !settings
-                .delivery
-                .compat
-                .contains(&pm_protocol::snapshot::CompatSource::RasterOverride)
-        {
-            settings
-                .delivery
-                .compat
-                .push(pm_protocol::snapshot::CompatSource::RasterOverride);
-        }
+        let JobSession {
+            request,
+            overrides,
+            cancel,
+        } = session.into();
         request.resources.validate()?;
         ensure!(
             matches!(request.spec, JobSpec::Export { .. }),
@@ -501,7 +437,7 @@ impl ExportHandle {
         }
         let input = Arc::new(Mutex::new(input));
         let child_input = input.clone();
-        let gate_cancel = cancel.clone();
+        let gate_cancel = cancel.0.clone();
         let output = child.stdout.take().unwrap();
         let state = Arc::new(Mutex::new(status(&id, JobState::Queued, 0., None, None)));
         let events = state.clone();
@@ -538,8 +474,8 @@ impl ExportHandle {
                     }
                     Ok(ChildMessage::Status(s)) => *events.lock().unwrap() = *s,
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
-                        let answered = match &answerer {
-                            Some((answer, pin)) => answer(pin, &needs),
+                        let answered = match &overrides {
+                            Some(answer) => answer(&needs),
                             None => Err("No window has this project's extensions open".into()),
                         };
                         let answers = wire_answers(id.as_str(), ask, answered);
@@ -571,6 +507,8 @@ impl ExportHandle {
                     .unwrap_or_else(|| "engine job child exited without a terminal status".into());
                 *last = status(&id, JobState::Failed, last.progress, None, Some(error));
             }
+            // The job is over: what its overrides pinned goes.
+            gate_cancel.store(true, Ordering::Release);
             broken.is_some()
         });
         Ok(Self {
@@ -596,7 +534,7 @@ impl ExportHandle {
         self.asks.load(Ordering::Acquire)
     }
     pub fn cancel(&mut self) -> Result<()> {
-        self.cancel.store(true, Ordering::Release);
+        self.cancel.0.store(true, Ordering::Release);
         send(&mut *self.input.lock().unwrap(), &ParentMessage::Cancel)?;
         Ok(())
     }
@@ -619,7 +557,7 @@ impl ExportHandle {
 }
 impl Drop for ExportHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Release);
+        self.cancel.0.store(true, Ordering::Release);
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
