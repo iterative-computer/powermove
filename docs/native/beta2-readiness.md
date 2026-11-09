@@ -4,7 +4,7 @@
 
 The historical beta2 gaps below are superseded in these owned paths:
 
-- `pm-services::media_adapter::FileMedia` reads the pinned main flat-file index
+- `pm-native-migrate::media_reader::FileMedia` reads the pinned main flat-file index
   and source links. Metadata/unknown fields survive offline access; bounded range
   reads verify the complete SHA-256 and descriptor identity, refuse symlinks and
   dataless placeholders, and never hydrate or modify a source.

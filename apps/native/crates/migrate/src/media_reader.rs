@@ -1,7 +1,7 @@
 //! Main-reference flat-file/source-link adapter. Explicit caller-owned index
 //! roots only; no profile discovery and no source writes or cloud hydration.
-use crate::{Result, ServiceError, ServiceErrorCode};
-use pm_native_migrate::library_media::{DiskMediaRecord, SourceStatus, read_index};
+use crate::library_media::{DiskMediaRecord, SourceStatus, read_index};
+use anyhow::{Result, anyhow, bail};
 use std::{
     io::{Read, Seek, SeekFrom},
     path::Path,
@@ -50,11 +50,10 @@ impl FileMedia {
         self.records.get(key)
     }
     pub fn status(&self, key: &str) -> Result<SourceStatus> {
-        Ok(self.require(key)?.source_status()?)
+        self.require(key)?.source_status()
     }
     fn require(&self, key: &str) -> Result<&DiskMediaRecord> {
-        self.record(key)
-            .ok_or_else(|| ServiceError::message(ServiceErrorCode::NotFound, "Unknown media key"))
+        self.record(key).ok_or_else(|| anyhow!("Unknown media key"))
     }
     /// Bounded range read through the same verified descriptor. No mtime-only
     /// fast path can accidentally accept a changed original with old metadata.
@@ -65,18 +64,13 @@ impl FileMedia {
                 .checked_add(length as u64)
                 .is_none_or(|end| end > r.size)
         {
-            return Err(ServiceError::message(
-                ServiceErrorCode::InvalidInput,
-                "Invalid media range",
-            ));
+            bail!("Invalid media range");
         }
         let path = r
             .owned_path
             .as_ref()
             .or(r.source_path.as_ref())
-            .ok_or_else(|| {
-                ServiceError::message(ServiceErrorCode::InvalidData, "Missing payload")
-            })?;
+            .ok_or_else(|| anyhow!("Missing payload"))?;
         let before = identity(&std::fs::symlink_metadata(path)?);
         let mut cache = self.verified.borrow_mut();
         if cache.get(key).is_some_and(|(stamp, file)| {
@@ -99,10 +93,7 @@ impl FileMedia {
             || before != identity(&std::fs::symlink_metadata(path)?)
         {
             cache.remove(key);
-            return Err(ServiceError::message(
-                ServiceErrorCode::InvalidData,
-                "Media changed during range read",
-            ));
+            bail!("Media changed during range read");
         }
         Ok(bytes)
     }

@@ -1,4 +1,4 @@
-use pm_services::media_adapter::FileMedia;
+use pm_native_migrate::media_reader::FileMedia;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
