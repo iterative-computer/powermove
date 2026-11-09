@@ -8,7 +8,7 @@ use crate::mesh::{self, Mesh};
 /// The layered material (an OpenPBR subset): base metal/dielectric, specular
 /// GGX, a clear coat, transmission, and emission (optionally from the screen
 /// texture).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Material {
     pub base: Vec3,
     pub metallic: f32,
@@ -62,7 +62,7 @@ impl Material {
 
 /// A rectangular softbox: `center`, two half-extent vectors spanning its face,
 /// emitting toward `u × v`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Softbox {
     pub center: Vec3,
     pub u: Vec3,
@@ -104,7 +104,7 @@ impl Softbox {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     pub position: Vec3,
     pub target: Vec3,
@@ -122,11 +122,13 @@ impl Camera {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Object {
     pub mesh: Mesh,
     pub material: usize,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Scene {
     pub objects: Vec<Object>,
     pub materials: Vec<Material>,
@@ -182,7 +184,7 @@ pub struct GpuMaterial {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct GpuLight {
     pub pos: [f32; 4], // softbox centre, kind 0
     pub u: [f32; 4],   // half extent, area
@@ -508,4 +510,66 @@ mod tests {
             assert!(facing.dot((target - l.center).normalize()) > 0.99);
         }
     }
+}
+
+
+/// Evaluated renderer input shared by Electron WebGPU and the native process.
+/// The project document stays on the host. Meshes contain world-space poses;
+/// layer/part identity and texture/material policies travel beside the Rust scene.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SceneDocument {
+    pub version: u32,
+    pub scene: Scene,
+    pub layer_ids: Vec<String>,
+    pub object_ids: Vec<ObjectIdentity>,
+    pub textures: Vec<Texture>,
+    pub material_options: Vec<MaterialOptions>,
+    pub camera_options: CameraOptions,
+    pub environment_options: EnvironmentOptions,
+    pub light_options: Vec<LightOptions>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ObjectIdentity {
+    pub layer: String,
+    pub part: Option<String>,
+    pub cast_shadow: bool,
+    pub receive_shadow: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Texture {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    /// Straight RGBA8, first row at UV v=0. Color/emission are sRGB.
+    pub rgba: Vec<u8>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MaterialOptions {
+    pub opacity: f32,
+    pub ambient_response: f32,
+    pub double_sided: bool,
+    pub alpha_test: f32,
+    /// color, emissive, roughness, metalness, normal, AO; -1 = no map.
+    pub maps: [i32; 6],
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CameraOptions {
+    pub projection: String,
+    pub up: Vec3,
+    pub ortho_height: f32,
+    pub near: f32,
+    pub far: f32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentOptions {
+    pub backdrop_opaque: bool,
+    pub shadows: bool,
+    pub floor_y: f32,
+    pub ground: Vec3,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LightOptions {
+    pub cast_shadow: bool,
+    pub distance: f32,
+    pub decay: f32,
 }
