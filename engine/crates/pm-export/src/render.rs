@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pm_model::{Document, Node, NodeKind};
 use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
@@ -186,6 +186,13 @@ pub trait GpuGate: Send + Sync {
     fn measures(&self) -> bool {
         true
     }
+    /// Whether an export may keep two whole frames in flight: the next
+    /// frame's CPU work runs while this one's GPU work does. Only frames
+    /// admitted whole overlap; a frame admitted in bands waits for the one
+    /// before it. Overlapped frames report wall time (`gpu_timed` false).
+    fn overlaps(&self) -> bool {
+        false
+    }
 }
 
 /// Refreshes export QoS while an encoder waits for a host reply. Callers
@@ -260,6 +267,10 @@ impl GpuGate for Unrestricted {
     fn measures(&self) -> bool {
         false
     }
+
+    fn overlaps(&self) -> bool {
+        true
+    }
 }
 
 /// A slicing pass key for one job at one output size: units of the same job
@@ -318,6 +329,7 @@ pub fn render_frame(
         cancel,
         Some(&mut crate::readback::ExportReadback::default()),
         Vec::new(),
+        None,
     );
     renderer.release_frame_reuse();
     result
@@ -351,6 +363,7 @@ pub fn render_frame_reusing(
         cancel,
         None,
         Vec::new(),
+        None,
     )
 }
 
@@ -367,6 +380,7 @@ fn render_frame_output(
     cancel: &AtomicBool,
     staging: Option<&mut crate::readback::ExportReadback>,
     rgba: Vec<f32>,
+    first: Option<u32>,
 ) -> Result<ReadFrame, JobError> {
     let span = if gate.measures() {
         gpu_span(renderer)
@@ -390,6 +404,7 @@ fn render_frame_output(
         span.as_deref(),
         staging,
         rgba,
+        first,
     );
     renderer.set_bracket(None);
     result
@@ -410,6 +425,7 @@ fn render_bands(
     span: Option<&crate::gpu_time::GpuSpan>,
     mut staging: Option<&mut crate::readback::ExportReadback>,
     mut rgba: Vec<f32>,
+    mut first: Option<u32>,
 ) -> Result<ReadFrame, JobError> {
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
@@ -426,10 +442,15 @@ fn render_bands(
             return Err(JobError::Cancelled);
         }
         let remaining = (h - y).div_ceil(BAND_ROWS);
-        let admitted = gate
-            .admit(pass, remaining, cancel)
-            .ok_or(JobError::Cancelled)?
-            .clamp(1, remaining);
+        // The first band may come admitted already (an overlapping export
+        // asked before it knew the frame would be banded).
+        let admitted = match first.take() {
+            Some(units) => units,
+            None => gate
+                .admit(pass, remaining, cancel)
+                .ok_or(JobError::Cancelled)?,
+        }
+        .clamp(1, remaining);
         gate.sync_worker_qos();
         let admission = Admitted {
             gate,
@@ -1481,10 +1502,17 @@ where
             let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
             let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {
-                let (n, rgba) = match rx.recv() {
-                    Ok(Rendered::Frame(n, rgba)) => (n, rgba),
-                    Ok(Rendered::Failed(e)) => return Err(e),
-                    Err(_) => return Err(JobError::Cancelled),
+                let (n, rgba) = loop {
+                    match rx.recv_timeout(ENCODER_IDLE) {
+                        Ok(Rendered::Frame(n, rgba)) => break (n, rgba),
+                        Ok(Rendered::Failed(e)) => return Err(e),
+                        // The render waits (a playing viewer, an extension):
+                        // the encoder must not hold frames that long.
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => pipeline.idle()?,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(JobError::Cancelled);
+                        }
+                    }
                 };
                 encoder_gate.sync_worker_qos();
                 debug_assert_eq!(n, expected);
@@ -1570,86 +1598,157 @@ where
         let mut render_ns = 0u128;
         let render_started = Instant::now();
         let mut available_pixels: Vec<Vec<f32>> = Vec::new();
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let total_units = h.div_ceil(BAND_ROWS);
+        // The frame submitted whole whose pixels are still on their way
+        // back (`GpuGate::overlaps`), and the readback slots it uses.
+        let mut flight: Option<(u64, InFlight<'_>)> = None;
+        let mut ring = pm_gpu::readback::ReadbackRing::default();
+        let mut sent = 0u64;
+        // Three frames' pixels circulate.
+        let mut pixels = |sent: u64| {
+            if sent >= PIXEL_BUFFERS
+                && let Ok(rgba) = back_rx.recv()
+            {
+                available_pixels.push(rgba);
+            }
+            available_pixels.pop().unwrap_or_default()
+        };
+        // A read frame, checked and finished as the exporting window leaves
+        // it, to the encoder in order. False: the encoder is gone.
+        let deliver = |n: u64, read: Result<ReadFrame, JobError>| -> Result<bool, JobError> {
+            let mut f = read?;
+            // Offline clips render absent (their names go in the report).
+            f.failures.retain(|failure| {
+                let asset = failure
+                    .message
+                    .strip_prefix("media for asset ")
+                    .and_then(|rest| rest.strip_suffix(" is offline"));
+                !offline
+                    .iter()
+                    .any(|clip| asset == Some(clip.asset.as_str()))
+            });
+            if !f.failures.is_empty() {
+                return Err(JobError::Unsupported(
+                    f.failures
+                        .iter()
+                        .map(|l| format!("layer {} in {}: {}", l.layer, l.composition, l.message))
+                        .collect(),
+                ));
+            }
+            // The frame as the exporting window's compatibility context
+            // leaves it (today's WebM frames: `frame:rendered` handlers drew
+            // on the compositor's canvas before it was encoded).
+            let rgba = match &frame_post {
+                None => f.rgba,
+                Some(post) => post.frame(n, timeline.tick(n), w, h, working, f.rgba)?,
+            };
+            Ok(tx.send(Rendered::Frame(n, rgba)).is_ok())
+        };
         for n in 0..frames {
             gate.sync_worker_qos();
             if cancel.load(Ordering::Relaxed) {
                 render_error = Some(JobError::Cancelled);
                 break;
             }
-            // Three frames' pixels circulate.
-            if n >= PIXEL_BUFFERS
-                && let Ok(rgba) = back_rx.recv()
-            {
-                available_pixels.push(rgba);
-            }
             let frame_started = Instant::now();
-            let rendered = render_frame_output(
-                renderer,
-                &document,
-                &job.composition,
-                timeline.tick(n),
-                &request,
-                &job.media,
-                gate,
-                pass,
-                cancel,
-                Some(&mut staging),
-                available_pixels.pop().unwrap_or_default(),
-            )
-            .and_then(|mut f| {
-                // Offline clips render absent (their names go in the report).
-                f.failures.retain(|failure| {
-                    let asset = failure
-                        .message
-                        .strip_prefix("media for asset ")
-                        .and_then(|rest| rest.strip_suffix(" is offline"));
-                    !offline
-                        .iter()
-                        .any(|clip| asset == Some(clip.asset.as_str()))
-                });
-                if f.failures.is_empty() {
-                    Ok(f)
-                } else {
-                    Err(JobError::Unsupported(
-                        f.failures
-                            .iter()
-                            .map(|l| {
-                                format!("layer {} in {}: {}", l.layer, l.composition, l.message)
-                            })
-                            .collect(),
-                    ))
+            // Whether a frame went to the encoder (`None`: none yet; false:
+            // the encoder is gone).
+            let step = (|| -> Result<Option<bool>, JobError> {
+                let time = timeline.tick(n);
+                if !gate.overlaps() {
+                    let read = render_frame_output(
+                        renderer,
+                        &document,
+                        &job.composition,
+                        time,
+                        &request,
+                        &job.media,
+                        gate,
+                        pass,
+                        cancel,
+                        Some(&mut staging),
+                        pixels(sent),
+                        None,
+                    );
+                    return deliver(n, read).map(Some);
                 }
-            });
-            render_ns += frame_started.elapsed().as_nanos();
-            // The frame as the exporting window's compatibility context
-            // leaves it (today's WebM frames: `frame:rendered` handlers drew
-            // on the compositor's canvas before it was encoded).
-            let rendered = rendered.and_then(|f| {
-                let rgba = match &frame_post {
-                    None => f.rgba,
-                    Some(post) => post.frame(
-                        n,
-                        timeline.tick(n),
-                        request.output_size.width,
-                        request.output_size.height,
-                        working,
-                        f.rgba,
-                    )?,
-                };
-                Ok(rgba)
-            });
-            match rendered {
-                Ok(rgba) => {
-                    if tx.send(Rendered::Frame(n, rgba)).is_err() {
-                        break;
+                let units = gate
+                    .admit(pass, total_units, cancel)
+                    .ok_or(JobError::Cancelled)?
+                    .clamp(1, total_units);
+                if units == total_units {
+                    // Submitted now; the frame before it is read while this
+                    // one's commands run.
+                    let next = submit_whole(
+                        renderer,
+                        &document,
+                        &job.composition,
+                        time,
+                        &request,
+                        &job.media,
+                        gate,
+                        pass,
+                        units,
+                        &mut ring,
+                    )?;
+                    return match flight.replace((n, next)) {
+                        Some((m, prev)) => {
+                            let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
+                            deliver(m, read).map(Some)
+                        }
+                        None => Ok(None),
+                    };
+                }
+                // Admitted in bands: the frame before goes first.
+                if let Some((m, prev)) = flight.take() {
+                    let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
+                    if !deliver(m, read)? {
+                        return Ok(Some(false));
                     }
+                    sent += 1;
                 }
+                let read = render_frame_output(
+                    renderer,
+                    &document,
+                    &job.composition,
+                    time,
+                    &request,
+                    &job.media,
+                    gate,
+                    pass,
+                    cancel,
+                    Some(&mut staging),
+                    pixels(sent),
+                    Some(units),
+                );
+                deliver(n, read).map(Some)
+            })();
+            render_ns += frame_started.elapsed().as_nanos();
+            match step {
+                Ok(Some(true)) => sent += 1,
+                Ok(None) => {}
+                Ok(Some(false)) => break,
                 Err(e) => {
                     render_error = Some(e);
                     break;
                 }
             }
         }
+        if render_error.is_none()
+            && let Some((m, prev)) = flight.take()
+        {
+            // Every frame is judged before the last one's pixels go.
+            renderer.wait_idle();
+            let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
+            if let Err(e) = deliver(m, read) {
+                render_error = Some(e);
+            }
+        }
+        drop(flight);
+        // Whatever an abandoned frame submitted completes before the
+        // renderer is reused.
+        renderer.wait_idle();
         if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
             eprintln!(
                 "[export timing] render_ms={:.3} render_pipeline_ms={:.3} qos={:?}",
@@ -1673,6 +1772,129 @@ where
 /// Frames' pixel buffers an export keeps in circulation between the render
 /// and encoder threads.
 const PIXEL_BUFFERS: u64 = 3;
+
+/// A frame submitted whole, its pixels being copied back
+/// ([`GpuGate::overlaps`]).
+struct InFlight<'g> {
+    frame: pm_render::Frame,
+    ticket: pm_gpu::readback::ReadbackTicket,
+    index: wgpu::SubmissionIndex,
+    submitted: Instant,
+    units: u32,
+    admission: Admitted<'g>,
+}
+
+/// Renders an admitted whole frame and starts copying it back, without
+/// waiting for either.
+#[allow(clippy::too_many_arguments)]
+fn submit_whole<'g>(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &'g dyn GpuGate,
+    pass: u64,
+    units: u32,
+    ring: &mut pm_gpu::readback::ReadbackRing,
+) -> Result<InFlight<'g>, JobError> {
+    gate.sync_worker_qos();
+    let admission = Admitted {
+        gate,
+        pass,
+        open: true,
+    };
+    let frame = match renderer.render(document, composition, time, request, media) {
+        Ok(frame) => frame,
+        Err(e) => {
+            wait_idle(renderer);
+            drop(admission);
+            return Err(e.into());
+        }
+    };
+    let submitted = Instant::now();
+    let (ticket, copy) = ring
+        .reserve(renderer.device(), &frame.color.texture, u64::MAX)
+        .map_err(|e| JobError::Render(e.to_string()))?
+        .ok_or_else(|| JobError::Render("no free export readback slot".into()))?;
+    let mut encoder = renderer
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pm export readback"),
+        });
+    copy.record(&mut encoder, &frame.color.texture);
+    let index = renderer.queue().submit([encoder.finish()]);
+    ring.start_map(ticket, || {});
+    Ok(InFlight {
+        frame,
+        ticket,
+        index,
+        submitted,
+        units,
+        admission,
+    })
+}
+
+/// Waits for `flight`'s commands (the watchdog looking on) and reads its
+/// pixels into `rgba`.
+fn finish_whole(
+    renderer: &mut Renderer,
+    flight: InFlight<'_>,
+    ring: &mut pm_gpu::readback::ReadbackRing,
+    mut rgba: Vec<f32>,
+    width: u32,
+    height: u32,
+) -> Result<ReadFrame, JobError> {
+    let InFlight {
+        mut frame,
+        ticket,
+        index,
+        submitted,
+        units,
+        admission,
+    } = flight;
+    renderer.wait_submission(index);
+    // A program ran away in this frame: its pixels are not delivered.
+    if let Some(why) = renderer.watchdog_stopped() {
+        drop(admission);
+        return Err(pm_render::RenderError::Watchdog(why.to_owned()).into());
+    }
+    admission.finish(units, submitted.elapsed().as_secs_f64() * 1e6, false);
+    let format = frame.color.texture.format();
+    rgba.resize(width as usize * height as usize * 4, 0.0);
+    let read = loop {
+        let decoded = ring.try_with_mapped_rows(
+            ticket,
+            |data, row, padded, rows| {
+                crate::readback::decode_rows(format, data, row, padded, rows, &mut rgba)
+            },
+            u64::MAX,
+        );
+        match decoded {
+            Some(result) => break result,
+            None => {
+                let _ = renderer.device().poll(wgpu::PollType::wait_indefinitely());
+            }
+        }
+    };
+    read.map_err(|e| JobError::Render(e.to_string()))?
+        .map_err(|e| JobError::Render(e.to_string()))?;
+    let failures = std::mem::take(&mut frame.failures);
+    renderer.recycle(frame);
+    Ok(ReadFrame {
+        rgba,
+        width,
+        height,
+        failures,
+    })
+}
+
+/// How long the encoder waits for a frame before it finishes the frames it
+/// holds for reordering (`Sink::idle`). The hardware H.264 encoder dropped
+/// held frames when the next one came 75 s late (30 s was fine); frames that
+/// arrive within this keep their B-frame structure.
+const ENCODER_IDLE: Duration = Duration::from_secs(5);
 
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// libvpx and libopus (WebM), or the engine's PNG writer.

@@ -46,6 +46,20 @@ fn scan_candidate(directory: &Path, name: &str) -> Option<Discovered> {
     })
 }
 
+/// Identity of the extensions under `roots` (ids, file names, sizes and
+/// modification times): the same on every launch while nothing changes.
+pub fn stamp(roots: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for found in scan(roots) {
+        found.id.hash(&mut hash);
+        if let Ok(tree) = crate::compile::fingerprint(&found.directory) {
+            tree.hash(&mut hash);
+        }
+    }
+    hash.finish()
+}
+
 /// Later roots replace earlier ones. A missing root is an empty one.
 pub fn scan(roots: &[PathBuf]) -> Vec<Discovered> {
     let mut found = BTreeMap::new();

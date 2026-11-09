@@ -328,7 +328,7 @@ impl Run {
         host.set_rasters(self.start.rasters.clone().map(|hooks| {
             let answers = hooks.answers.clone();
             RasterHooks {
-                producing: Arc::new(move |on, _| producing.store(on, Ordering::Release)),
+                producing: Arc::new(move |on, _, _| producing.store(on, Ordering::Release)),
                 answers: Arc::new(move |batch, given: Vec<RasterAnswer>| {
                     if events.layout_failed.load(Ordering::Acquire) {
                         let failed = given
@@ -359,6 +359,7 @@ impl Run {
         if let Some((width, height, scale)) = self.start.viewport {
             realm.eval(format!("__compat.viewport({width},{height},{scale})"))?;
         }
+        host.set_code(&self.start.records);
         realm.eval(format!("__compat.boot({})", self.start.records))?;
         self.start
             .shared

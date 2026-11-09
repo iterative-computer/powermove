@@ -91,6 +91,9 @@ pub struct Effects {
     cache: Arc<pm_glsl::Cache>,
     context: String,
     pub watchdog: Watchdog,
+    /// Legacy programs' uniform blocks, a frame's ranges of shared chunks
+    /// (a buffer per pass per frame before).
+    pub(crate) uniforms: crate::exec::UniformPool,
     /// Effects and transitions only the fallback runner draws
     /// ([`fallback`]).
     pub fallback: fallback::EffectFallback,
@@ -261,6 +264,7 @@ impl Effects {
             cache,
             context,
             watchdog: Watchdog::default(),
+            uniforms: crate::exec::UniformPool::default(),
             fallback: Default::default(),
             dummies: Default::default(),
             simple: Default::default(),

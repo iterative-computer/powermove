@@ -1072,6 +1072,7 @@ fn fill_cache(
             .iter()
             .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
             .collect();
+        let bytes = crate::frame_codec::encode(&bytes, fill.width, fill.height);
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
         }
@@ -1181,6 +1182,11 @@ impl pm_export::render::GpuGate for ChildGate {
         self.costs.lock().unwrap().record(units, measured_us);
     }
     fn abandoned(&self, _: u64) {}
+    /// Whole frames (a quiet viewer) overlap: the next frame's CPU work runs
+    /// during this one's GPU work. A banded frame waits for the one before.
+    fn overlaps(&self) -> bool {
+        true
+    }
 }
 #[cfg(test)]
 mod tests {

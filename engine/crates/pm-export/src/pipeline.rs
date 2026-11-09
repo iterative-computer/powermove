@@ -24,6 +24,12 @@ pub trait Sink {
     }
     /// Interleaved f32 PCM at the spec's sample rate.
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error>;
+    /// The next frame is late (the render waits on a busy viewer or an
+    /// extension): finish encoding the frames an encoder holds back, so a
+    /// hardware encoder never times them out (VideoToolbox drops them).
+    fn idle(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
     fn finish(self) -> Result<Self::Output, Error>;
     /// A job may be cancelled while a sink is finishing a long encoder or mux step.
     fn finish_with_cancel(self, _cancel: &AtomicBool) -> Result<Self::Output, Error>
@@ -223,6 +229,11 @@ impl<S: Sink> Pipeline<S> {
         self.sink.audio(interleaved)?;
         self.audio_frames += (interleaved.len() / audio.channels as usize) as u64;
         Ok(())
+    }
+
+    /// No frame has arrived for a while: see [`Sink::idle`].
+    pub fn idle(&mut self) -> Result<(), Error> {
+        self.sink.idle()
     }
 
     /// Finishes once every frame is delivered.

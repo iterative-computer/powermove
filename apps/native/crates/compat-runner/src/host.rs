@@ -1507,7 +1507,7 @@ impl Owner {
             self.sync_stores();
             self.publish_store();
         } else {
-            let records = self.trusted_records();
+            let records = self.realm_plan();
             self.eval(&format!(
                 "__compat.update({records},{},\"enable\")",
                 json!([id])
@@ -1600,15 +1600,7 @@ impl Owner {
         }
     }
     fn stamp(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        for found in discovery::scan(&self.config.roots) {
-            found.id.hash(&mut hash);
-            if let Ok(tree) = compile::fingerprint(&found.directory) {
-                tree.hash(&mut hash);
-            }
-        }
-        hash.finish()
+        discovery::stamp(&self.config.roots)
     }
     /// The record alone. Whether a Store extension's helper runs is `sync_stores`.
     fn compile(&mut self, compiler: &SvelteCompiler, found: &Discovered) -> Value {
@@ -1866,11 +1858,21 @@ impl Owner {
         self.sync_stores();
         self.publish_records();
         self.publish_store();
-        let records = self.trusted_records();
+        let records = self.realm_plan();
         if let Some((width, height, scale)) = self.viewport {
             self.eval(&format!("__compat.viewport({width},{height},{scale})"));
         }
         self.eval(&format!("__compat.boot({records})"));
+    }
+    /// The trusted records the window realm is about to run: its wrappers
+    /// report their code identity from them (the disk render cache keys
+    /// override frames by it; export realms pin these same records).
+    fn realm_plan(&self) -> Value {
+        let records = self.trusted_records();
+        if let Some(live) = &self.realm {
+            live.host.set_code(&records);
+        }
+        records
     }
     /// The plan of the trusted realm. Confined records never enter it.
     fn trusted_records(&self) -> Value {
@@ -1909,7 +1911,7 @@ impl Owner {
         self.sync_stores();
         self.publish_records();
         self.publish_store();
-        let records = self.trusted_records();
+        let records = self.realm_plan();
         self.eval(&format!(
             "__compat.update({records},{},\"rescan\")",
             Value::Array(changed)
@@ -2019,7 +2021,7 @@ impl Owner {
         match self.start_realm(Some(clock)) {
             Ok(()) => {
                 self.publish_records();
-                let records = self.trusted_records();
+                let records = self.realm_plan();
                 if let Some((width, height, scale)) = self.viewport {
                     self.eval(&format!("__compat.viewport({width},{height},{scale})"));
                 }
@@ -2810,7 +2812,7 @@ mod tests {
                     ));
                 }
             }),
-            producing: Arc::new(|_, _| ()),
+            producing: Arc::new(|_, _, _| ()),
         };
         let fixture = Fixture::start_full(root, document, Some(hooks), frames);
         fixture.until("activation", |host| host.is_ready());
@@ -2862,6 +2864,52 @@ mod tests {
          c.width=L.d.text.length + String(api.storage.get('extra') ?? '').length; c.height=1;
          api.project.get().name='written by '+L.d.text;
          return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0}});}";
+    /// The wrappers report the identity of the compiled records they run
+    /// (the ones an export realm pins), and a change on disk changes it: the
+    /// disk render cache keys override frames by it.
+    #[test]
+    fn producing_reports_the_code_identity_of_the_records_the_realm_runs() {
+        const RASTER: &str = "export default function(api: any){
+           api.services.register('raster',(L: any)=>{
+             const c=document.createElement('canvas'); c.width=1; c.height=1;
+             return {cv:c,w:1,h:1,anchorX:0,anchorY:0}});}";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(&extensions, "wrap", &[("index.ts", RASTER)]);
+        let calls: Arc<Mutex<Vec<(bool, u64)>>> = Arc::default();
+        let log = calls.clone();
+        let hooks = crate::RasterHooks {
+            base: Arc::new(|_| Ok(None)),
+            answers: Arc::new(|_, _| ()),
+            producing: Arc::new(move |on, _, code| log.lock().unwrap().push((on, code))),
+        };
+        let fixture =
+            Fixture::start_with(root, crate::initial()["document"].clone(), Some(hooks));
+        let running = |host: &ExtensionHost| {
+            crate::code_identity(&Value::Array(
+                host.records()
+                    .into_iter()
+                    .filter(|r| r["confined"] != true && r["surface"] != true)
+                    .collect(),
+            ))
+        };
+        let reported = |host: &ExtensionHost| {
+            let code = running(host);
+            calls.lock().unwrap().contains(&(true, code))
+        };
+        fixture.until("producing with the records' code", reported);
+        let first = running(&fixture.host);
+        assert!(calls.lock().unwrap().iter().all(|(_, code)| *code != 0));
+        std::thread::sleep(Duration::from_millis(1100));
+        extension(
+            &extensions,
+            "wrap",
+            &[("index.ts", &RASTER.replace("c.width=1", "c.width=2"))],
+        );
+        fixture.until("producing with the edited code", |host| {
+            running(host) != first && reported(host)
+        });
+    }
     #[test]
     fn an_export_realm_answers_from_its_frozen_project_code_and_storage_while_the_window_edits() {
         let (fixture, answered) = export_window(&[("spy", SPY)], "frozen", None);

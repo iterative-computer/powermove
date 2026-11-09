@@ -35,6 +35,8 @@ pub struct Encoder {
     output: Arc<Mutex<Output>>,
     timing: VideoTiming,
     invalidated: bool,
+    /// Frames submitted since the last [`Encoder::complete`].
+    held: bool,
     /// Whether VideoToolbox reports a hardware encoder.
     pub hardware: Option<bool>,
 }
@@ -301,6 +303,7 @@ impl Encoder {
             output: Arc::default(),
             timing,
             invalidated: false,
+            held: false,
             hardware,
         })
     }
@@ -337,6 +340,7 @@ impl Encoder {
             )
         };
         cf::check(st, "VTCompressionSessionEncodeFrame")?;
+        self.held = true;
         self.check()
     }
 
@@ -359,11 +363,20 @@ impl Encoder {
             .collect())
     }
 
-    /// Flushes every pending frame.
+    /// Flushes every pending frame. Encoding may continue afterwards: the
+    /// next frame starts a new reordering window. The hardware encoder drops
+    /// frames held for reordering when the next one is late by tens of
+    /// seconds (AVE error -1004), so an export whose frames wait calls this.
     pub fn complete(&mut self) -> Result<Vec<CFRetained<CMSampleBuffer>>, Error> {
         let st = unsafe { self.session.complete_frames(kCMTimeInvalid) };
         cf::check(st, "VTCompressionSessionCompleteFrames")?;
+        self.held = false;
         self.take()
+    }
+
+    /// Whether frames were submitted since the last [`Encoder::complete`].
+    pub fn holds_frames(&self) -> bool {
+        self.held
     }
 
     fn invalidate(&mut self) {

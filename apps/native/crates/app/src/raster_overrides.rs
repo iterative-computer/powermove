@@ -157,8 +157,11 @@ impl Overrides {
         let export = self.export_answerer();
         let begin = self.export_begin();
         let doc_id = self.doc_id;
-        let producing = Arc::new(move |on: bool, epoch: u64| {
+        let producing = Arc::new(move |on: bool, epoch: u64, code: u64| {
             let revision = kernel.published(&project).map_or(0, |p| p.revision());
+            // The disk render cache keys override frames by the compiled
+            // records the wrappers run (the ones export realms pin).
+            store.set_code(code);
             store.set_state(on, revision, epoch);
             // Exports started while an override is registered ask this realm.
             let store = store.clone();

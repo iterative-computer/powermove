@@ -4,7 +4,10 @@
 //! `--project=COPY.pmv [--definitions=FILE] [--width=1920 --height=1080]`
 //! plays a real project (a private copy: its embedded media are extracted to
 //! a scratch folder) and then seeks it at random, as the viewer does.
-//! `--from=SECONDS` starts the run there instead of at the start.
+//! `--from=SECONDS` starts the run there instead of at the start;
+//! `--quality=full|half|quarter` pins the resolution (Auto by default);
+//! `--fill=DIR` first renders the played range into a disk render cache in
+//! `DIR` (Render Selection's child) and reports its bytes and read cost.
 use pm_engine_service::{EngineService, MediaCatalog, Output, ViewerConfig};
 use pm_protocol::{
     clock::TransportCommand,
@@ -147,6 +150,14 @@ pub fn run() -> anyhow::Result<()> {
             },
         ))?;
     }
+    // `--quality=full|half|quarter` pins the resolution (Auto by default),
+    // so two builds compare the same frames under different machine load.
+    viewer.quality(match arg("quality", "auto").as_str() {
+        "full" => pm_engine_service::policy::Quality::Full,
+        "half" => pm_engine_service::policy::Quality::Half,
+        "quarter" => pm_engine_service::policy::Quality::Quarter,
+        _ => pm_engine_service::policy::Quality::Auto,
+    })?;
     // A frame drawn before playing settles fonts, definitions and media.
     let settle = Instant::now();
     viewer.scrub(Ticks::ZERO)?;
@@ -169,6 +180,19 @@ pub fn run() -> anyhow::Result<()> {
     viewer.command(TransportCommand::SetLoop {
         range: Some(TickRange { start, end }),
     })?;
+    let fill = match arg("fill", "").as_str() {
+        "" => serde_json::Value::Null,
+        dir => fill_range(
+            &viewer,
+            &service,
+            &mut font_service,
+            &fonts,
+            dir,
+            start,
+            end,
+            hz,
+        )?,
+    };
     viewer.command(TransportCommand::Play {
         rate: PlaybackRate::NORMAL,
     })?;
@@ -288,6 +312,7 @@ pub fn run() -> anyhow::Result<()> {
         "layer_failures":status.layer_failures.len(),
         "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"max":seeks.last(),"stuck":stuck},
         "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"budget_120hz":9.333},
+        "fill":fill,
         "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });
     std::fs::write(
@@ -297,4 +322,92 @@ pub fn run() -> anyhow::Result<()> {
     println!("{result}");
     viewer.retire();
     Ok(())
+}
+
+/// Renders `[start, end)` into a disk render cache in `dir` through the fill
+/// child, as Render Selection does, then times reading its frames back.
+#[allow(clippy::too_many_arguments)]
+fn fill_range(
+    viewer: &pm_engine_service::Viewer,
+    service: &EngineService,
+    font_service: &mut pm_node::fonts::FontService,
+    fonts: &pm_node::fonts::render::FontBroker,
+    dir: &str,
+    start: Ticks,
+    end: Ticks,
+    hz: f64,
+) -> anyhow::Result<serde_json::Value> {
+    let disk = service.render_cache();
+    std::fs::create_dir_all(dir)?;
+    disk.set_storage(Some((dir.into(), 64 << 30)))?;
+    let seconds = |t: Ticks| t.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+    let exe = std::env::current_exe()?;
+    let wait = Instant::now();
+    // The viewer observes its state when it draws (a frame at `end`, then
+    // at `start` again); fingerprinting follows.
+    viewer.scrub(end)?;
+    viewer.scrub(start)?;
+    let queued = loop {
+        pm_node::fonts::render::serve(font_service, fonts.take_asks());
+        viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+        match disk.start_fill(seconds(start), seconds(end), &exe, Default::default()) {
+            Ok(n) => break n,
+            Err(e)
+                if wait.elapsed() < Duration::from_secs(120)
+                    && (e.contains("moment") || e.contains("Open a composition")) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => anyhow::bail!(e),
+        }
+    };
+    let filling = Instant::now();
+    loop {
+        pm_node::fonts::render::serve(font_service, fonts.take_asks());
+        let bars = disk.bars();
+        if !bars.running && (bars.done >= queued || bars.error.is_some()) {
+            anyhow::ensure!(bars.error.is_none(), "{:?}", bars.error);
+            break;
+        }
+        anyhow::ensure!(filling.elapsed() < Duration::from_secs(1800), "fill stuck");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let fill_s = filling.elapsed().as_secs_f64();
+    // Every frame file of this fill: on-disk bytes, and one read (file,
+    // checksum, decode) each, as the reader thread does.
+    let mut files: Vec<_> = walk_frames(std::path::Path::new(dir));
+    files.sort();
+    let (mut bytes, mut reads) = (0u64, Vec::new());
+    let (mut width, mut height) = (0, 0);
+    for file in &files {
+        let t = Instant::now();
+        let data = std::fs::read(file)?;
+        let payload = &data[48..];
+        let word = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap());
+        (width, height) = (word(4), word(8));
+        let _ = blake3::hash(payload);
+        let frame = pm_engine_service::frame_codec::decode(payload, width, height)
+            .ok_or_else(|| anyhow::anyhow!("a frame does not decode"))?;
+        reads.push(t.elapsed().as_secs_f64() * 1000.);
+        anyhow::ensure!(frame.len() == width as usize * height as usize * 8);
+        bytes += data.len() as u64;
+    }
+    reads.sort_by(f64::total_cmp);
+    let raw = u64::from(width) * u64::from(height) * 8;
+    Ok(json!({"queued":queued,"fill_s":fill_s,"frames":files.len(),
+        "bytes_per_frame":bytes / (files.len().max(1) as u64),"raw_bytes_per_frame":raw,
+        "read_ms":{"p50":percentile(&reads,0.5),"p95":percentile(&reads,0.95),"max":reads.last()}}))
+}
+
+fn walk_frames(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk_frames(&path));
+        } else if path.extension().is_some_and(|e| e == "frame") {
+            out.push(path);
+        }
+    }
+    out
 }

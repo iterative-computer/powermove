@@ -328,6 +328,16 @@ pub enum Reply {
     Retry,
 }
 
+/// When this process started (ns since the epoch), fixed at first use.
+fn process_started() -> u128 {
+    static STARTED: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    })
+}
+
 /// The viewer's raster override answers for the open document.
 #[derive(Default)]
 pub struct CompatStore {
@@ -335,9 +345,30 @@ pub struct CompatStore {
     sink: Mutex<Option<CompatSink>>,
     /// Redraws the viewers when answers land.
     redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The code the wrappers come from (`set_code`); 0 while unknown.
+    code: std::sync::atomic::AtomicU64,
 }
 
 impl CompatStore {
+    /// Identity of the extension code the wrappers come from, the same on
+    /// every launch while that code is unchanged.
+    pub fn set_code(&self, code: u64) {
+        self.code.store(code, std::sync::atomic::Ordering::Release);
+    }
+    /// What the disk render cache keys override frames by: the wrappers'
+    /// code and their generation in this realm. Frames rendered with the
+    /// same code in the same generation are kept across launches; without a
+    /// code identity they belong to this process alone.
+    pub fn cache_identity(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        match self.code.load(std::sync::atomic::Ordering::Acquire) {
+            0 => (std::process::id(), process_started()).hash(&mut hash),
+            code => code.hash(&mut hash),
+        }
+        self.epoch().hash(&mut hash);
+        hash.finish()
+    }
     /// Whether an override is registered, the generation of wrappers
     /// answering, and the document revision frames are drawn at. A new
     /// revision or generation forgets every answer.
@@ -707,6 +738,23 @@ mod tests {
             log.lock().unwrap().push((epoch, needs.len()));
         })));
         asked
+    }
+    /// Override frames on disk are keyed by the wrappers' code and their
+    /// generation: the same code and generation in another launch (another
+    /// store) find them; other code, another generation, or no known code
+    /// (this process only) don't.
+    #[test]
+    fn override_cache_identity_follows_code_and_generation() {
+        let launch = |code: u64, epoch: u64| {
+            let store = CompatStore::default();
+            store.set_code(code);
+            store.set_state(true, 1, epoch);
+            store.cache_identity()
+        };
+        assert_eq!(launch(7, 2), launch(7, 2));
+        assert_ne!(launch(7, 2), launch(8, 2));
+        assert_ne!(launch(7, 2), launch(7, 3));
+        assert_ne!(launch(0, 2), launch(7, 2));
     }
     #[test]
     fn each_document_answers_from_its_own_window() {

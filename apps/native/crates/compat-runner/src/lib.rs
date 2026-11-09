@@ -220,9 +220,25 @@ pub struct RasterHooks {
     >,
     /// The answers to one batch of needs, in the batch's order.
     pub answers: Arc<dyn Fn(u64, Vec<RasterAnswer>) + Send + Sync>,
-    /// Whether a `raster` override is registered, and the generation of
-    /// wrappers answering (it changes whenever they do).
-    pub producing: Arc<dyn Fn(bool, u64) + Send + Sync>,
+    /// Whether a `raster` override is registered, the generation of
+    /// wrappers answering (it changes whenever they do), and the identity of
+    /// the compiled code they run ([`code_identity`]; 0 while unknown).
+    pub producing: Arc<dyn Fn(bool, u64, u64) + Send + Sync>,
+}
+
+/// Identity of the compiled extension code in a realm's records (each
+/// record's id, whether it runs, and its module graph's content hash): the
+/// records a window realm boots with and an export realm pins. The same on
+/// every launch while that code is unchanged; never 0.
+pub fn code_identity(records: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for record in records.as_array().into_iter().flatten() {
+        record["id"].as_str().hash(&mut hash);
+        (record["enabled"] != false).hash(&mut hash);
+        record["graph"]["hash"].as_str().hash(&mut hash);
+    }
+    hash.finish().max(1)
 }
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
@@ -650,6 +666,17 @@ mod tests {
     }
     type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
     type RasterRunner = (CompatRunner, Log<Value>, Log<Value>, Log<(bool, u64)>);
+    #[test]
+    fn code_identity_follows_compiled_code_not_health() {
+        let records = |hash: &str, enabled: bool, health: &str| {
+            json!([{"id":"a","enabled":enabled,"health":{"state":health},"graph":{"hash":hash}}])
+        };
+        let base = code_identity(&records("h1", true, "ok"));
+        assert_eq!(base, code_identity(&records("h1", true, "unresponsive")));
+        assert_ne!(base, code_identity(&records("h2", true, "ok")));
+        assert_ne!(base, code_identity(&records("h1", false, "ok")));
+        assert_ne!(code_identity(&json!([])), 0);
+    }
     /// A runner whose base rasters are 2×2 red, recording what was asked
     /// (layer, composition, whether a layer object was passed) and
     /// answered (as JSON), and the producing calls.
@@ -710,7 +737,7 @@ mod tests {
                     });
                 }
             }),
-            producing: Arc::new(move |on, epoch| o.lock().unwrap().push((on, epoch))),
+            producing: Arc::new(move |on, epoch, _| o.lock().unwrap().push((on, epoch))),
         }));
         (runner, painted, answered, producing)
     }

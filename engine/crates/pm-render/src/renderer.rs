@@ -1203,6 +1203,26 @@ impl Renderer {
             .collect(&self.device, &self.queue, true);
     }
 
+    /// [`Self::wait_idle`] for the commands up to `index` only: later
+    /// submissions (the next export frame) keep running. Completed frames
+    /// are judged as far as their timestamps allow; a later wait or
+    /// `wait_idle` judges the rest.
+    pub fn wait_submission(&mut self, index: wgpu::SubmissionIndex) {
+        loop {
+            let done = self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(index.clone()),
+                timeout: Some(std::time::Duration::from_millis(100)),
+            });
+            match done {
+                Err(wgpu::PollError::Timeout) => self.watchdog_watch(),
+                _ => break,
+            }
+        }
+        self.effects
+            .watchdog
+            .collect(&self.device, &self.queue, false);
+    }
+
     /// Records `bracket` around every following frame's commands (`None`:
     /// nothing).
     pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
@@ -2046,6 +2066,7 @@ impl Renderer {
         self.effects.fallback.blocked = false;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
+            self.effects.uniforms.reset();
             self.binds.begin_frame();
             self.text_gpu.begin_frame();
             self.pyramids.begin_frame();

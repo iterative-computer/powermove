@@ -76,6 +76,8 @@ pub struct NativeHost {
     text: Mutex<Option<CanvasText>>,
     frames: Mutex<Option<crate::FrameRenderer>>,
     rasters: Mutex<Option<crate::RasterHooks>>,
+    /// [`crate::code_identity`] of the records this realm runs (0: unknown).
+    code: std::sync::atomic::AtomicU64,
     /// The capture (`renderFrameTo`, `PM.Export.snapshot`) the realm waits for.
     capture: Mutex<Option<Capture>>,
     /// While a capture runs, override asks for this realm come here: the
@@ -178,6 +180,7 @@ impl NativeHost {
             text: Mutex::new(None),
             frames: Mutex::new(None),
             rasters: Mutex::new(None),
+            code: std::sync::atomic::AtomicU64::new(0),
             capture: Mutex::new(None),
             nested: Mutex::new(None),
         }
@@ -210,6 +213,14 @@ impl NativeHost {
     }
     pub fn set_rasters(&self, hooks: Option<crate::RasterHooks>) {
         *self.rasters.lock().unwrap() = hooks;
+    }
+    /// The records this realm boots with or updates to, before it evaluates
+    /// them: what its `producing` calls report as the wrappers' code.
+    pub fn set_code(&self, records: &Value) {
+        self.code.store(
+            crate::code_identity(records),
+            std::sync::atomic::Ordering::Release,
+        );
     }
     /// A recorder canvas holding straight RGBA8 pixels, as a surface id.
     fn canvas_of(&self, width: u32, height: u32, rgba: Vec<u8>) -> Result<String> {
@@ -1479,7 +1490,11 @@ impl EngineProxy for NativeHost {
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "compat.producing" => {
                 if let Some(hooks) = self.rasters.lock().unwrap().clone() {
-                    (hooks.producing)(input["on"] == true, input["epoch"].as_u64().unwrap_or(0));
+                    (hooks.producing)(
+                        input["on"] == true,
+                        input["epoch"].as_u64().unwrap_or(0),
+                        self.code.load(std::sync::atomic::Ordering::Acquire),
+                    );
                 }
                 return Ok(Value::Null);
             }

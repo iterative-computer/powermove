@@ -434,6 +434,10 @@ impl Engine {
             // it draws with, so no frame met while playing does (built ones
             // are kept: later documents pay nothing).
             self.renderer.prewarm(&scene.doc);
+            // Effect programs (built-in and extension GLSL) build on the
+            // renderer's worker now, not inside the first frame that draws
+            // each one while playing.
+            self.renderer.prewarm_programs(&scene.doc);
             self.studio_content = Some(key);
         }
         Ok(())
@@ -632,6 +636,7 @@ impl Engine {
                     store.begin_frame(spec.moment);
                 }
                 trace.lock().unwrap().render_start = now();
+                let cpu_start = crate::trace::thread_cpu_ms();
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
@@ -641,7 +646,11 @@ impl Engine {
                     &target,
                     None,
                 );
-                trace.lock().unwrap().render_submitted = now();
+                {
+                    let mut t = trace.lock().unwrap();
+                    t.render_submitted = now();
+                    t.render_cpu_ms = crate::trace::thread_cpu_ms() - cpu_start;
+                }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);
                 self.renderer.set_isolate_layers(false);
