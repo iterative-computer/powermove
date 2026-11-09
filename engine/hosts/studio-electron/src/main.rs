@@ -35,6 +35,7 @@ enum Command {
         #[serde(flatten)]
         patch: packed::Patch,
     },
+    PreparedView { key:String, view:packed::View },
     Snapshot,
     Scene {
         scene: Scene,
@@ -223,6 +224,10 @@ impl Host {
                 self.revision += 1;
                 json!({"revision":self.revision})
             }
+            Command::PreparedView{key,view}=>{
+                if self.packed.as_mut().ok_or("no prepared scene")?.patch_view(&key,view)?{self.history_revision+=1;}
+                self.revision+=1;json!({"revision":self.revision})
+            }
             Command::Snapshot => {
                 return self.snapshot();
             }
@@ -234,7 +239,7 @@ impl Host {
                 json!({"released":frame})
             }
             Command::Hello => {
-                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
+                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries","preparedView","environments"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
             }
             Command::Scene {
                 scene,
@@ -842,7 +847,15 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let u: packed::Upload = serde_json::from_value(value).unwrap();
-        let packed = packed::PackedScene::new(u, &binary).unwrap();
+        let mut packed = packed::PackedScene::new(u, &binary).unwrap();
+        let positions=packed.prepared.positions.as_ptr();let instances=packed.prepared.sdata.as_ptr();
+        let mut view=packed.view.clone();view.camera.position[0]+=1.;
+        assert!(!packed.patch_view("test",view.clone()).unwrap());
+        assert_eq!(positions,packed.prepared.positions.as_ptr());assert_eq!(instances,packed.prepared.sdata.as_ptr());
+        assert!(packed.patch_view("stale",view.clone()).is_err());
+        view.shadows=!view.shadows;assert!(packed.patch_view("test",view).unwrap());
+        // Restore the original view for the picking assertions below.
+        let original:packed::View=serde_json::from_value(h.snapshot().unwrap().0["view"].clone()).unwrap();packed.patch_view("test",original).unwrap();
         let expected = h.resident.as_ref().unwrap().bounds();
         let actual = packed.bounds(None).unwrap();
         assert!((glam::Vec3::from(expected.0.to_array()) - actual.0).length() < 1e-3);

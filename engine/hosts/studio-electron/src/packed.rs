@@ -245,6 +245,13 @@ impl PackedScene {
             local_bounds,
         })
     }
+    pub fn patch_view(&mut self,key:&str,view:View)->Result<bool,String>{
+        if key!=self.key{return Err("native geometry key is stale; upload scene again".into());}
+        view.validate()?;
+        let mut previous=self.view.clone();previous.camera=view.camera.clone();
+        let content_changed=self.view.camera.orthographic!=view.camera.orthographic || previous!=view;
+        self.view=view;Ok(content_changed)
+    }
     pub fn patch(&mut self, p: Patch, binary: &[u8]) -> Result<bool, String> {
         if self.key != p.key {
             return Err("native geometry key is stale; upload scene again".into());
