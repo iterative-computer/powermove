@@ -1051,13 +1051,16 @@ impl Controller {
                     );
                     let parent = crate::platform::ns_window(window)
                         .unwrap_or_else(|| self.host.borrow().window.clone());
-                    pm_compat_host::visual::show(
+                    let viewer = pm_compat_host::visual::show(
                         Some(&parent),
                         input["id"].as_str().unwrap_or_default(),
                         input["title"].as_str().unwrap_or("Visualization"),
                         &document,
                         input["height"].as_f64().unwrap_or(360.),
                     );
+                    // An ordinary window: forward only while Powermove is
+                    // active, otherwise behind the other apps (P-CHILD).
+                    gpui_macos::child_window::present(&viewer, true);
                     Ok(Value::Null)
                 }
                 "agent.close" => {

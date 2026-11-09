@@ -82,16 +82,18 @@ struct Viewer {
 thread_local! {
     static OPEN: RefCell<Vec<Viewer>> = const { RefCell::new(Vec::new()) };
 }
-/// Show reply `reply` (`document`, titled `title`, `height` points tall)
-/// beside `parent`; a reply already showing comes forward instead of opening
-/// twice. Main thread only. Returns the window number.
+/// The viewer for reply `reply` (`document`, titled `title`, `height` points
+/// tall) beside `parent`; a reply already showing is returned instead of
+/// opening twice. It isn't ordered on screen: the caller presents it through
+/// the app's window policy (P-CHILD), so it never lands above other apps
+/// while Powermove is inactive. Main thread only.
 pub fn show(
     parent: Option<&NSWindow>,
     reply: &str,
     title: &str,
     document: &str,
     height: f64,
-) -> isize {
+) -> Retained<NSWindow> {
     let mtm = MainThreadMarker::new().expect("visual replies open on the main thread");
     let shown = OPEN.with_borrow_mut(|open| {
         // Closed viewers already gave back their web views; let them go.
@@ -107,8 +109,7 @@ pub fn show(
             .map(|v| v.window.clone())
     });
     if let Some(window) = shown {
-        window.makeKeyAndOrderFront(None);
-        return window.windowNumber();
+        return window;
     }
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
     unsafe {
@@ -165,15 +166,13 @@ pub fn show(
     }
     window.setDelegate(Some(ProtocolObject::from_ref(&*guard)));
     unsafe { web.loadHTMLString_baseURL(&NSString::from_str(document), None) };
-    window.makeKeyAndOrderFront(None);
-    let number = window.windowNumber();
     OPEN.with_borrow_mut(|open| {
         open.push(Viewer {
             reply: reply.into(),
-            window,
+            window: window.clone(),
             web: Some(web),
             _guard: guard,
         })
     });
-    number
+    window
 }

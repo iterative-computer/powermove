@@ -147,6 +147,10 @@ fn main() {
             "app colour panel",
             include_str!("../../app/src/colour_panel.rs"),
         ),
+        (
+            "agent visual reply viewer",
+            include_str!("../../compat-host/src/visual.rs"),
+        ),
     ] {
         for banned in [
             "makeKeyAndOrderFront",
