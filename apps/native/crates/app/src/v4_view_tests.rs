@@ -809,7 +809,7 @@ fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
         json!({"id":"live","data-pm-component":"text-field","control":"text","label":"Live","value":"Editable"}),
         &[],
     ));
-    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
     vcx.run_until_parked();
     let shown = view.read_with(&vcx, |v, _| {
         [2, 3, 4].map(|id| {
