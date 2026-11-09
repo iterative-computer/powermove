@@ -26,11 +26,11 @@ lane identify integration destinations, not new work claimed in those crates.
 | Backups | M/project-files.ts:88–164: previous complete versions, five-successful-version pruning, uncertain recovery copies | pm-services::storage; pm-kernel | CPU streamed immutable backup generations and SHA-256 inventory implemented. Keeps every successful and incomplete generation; never prunes. Kernel must supply a coherent snapshot reader; external-save backup binding pending. |
 | Settings and extension storage | M/storage.ts; S/storage.ts; R/kernel/install.ts:539–567: app keys and `ext.<id>` objects, synchronous trusted read-after-write, async sandbox RPC, serialized bootstrap | pm-kernel::state/persistence; pm-services::settings; pm-runtime-v8 | CPU get/set/archive hook validates ordinary 32 MiB values, preserves unknown JSON and distinguishes null/deletion. Kernel owns application state. Special large project/history/takes keys stay in kernel, outside this ordinary-settings facade. V8 owns live JS identity and immediate trusted updates. |
 | Service-local settings | M/storage.ts durability patterns; D-STATE service metadata families | pm-services::storage | CPU private directory, writer lock, immutable JSON generations, tombstones, capped reads and corrupt-state refusal implemented. Auxiliary service state only: not the legacy profile reader or an alternate kernel settings database. |
-| Fonts catalog | M/fonts.ts:5–21: registry version, family enumeration, stable-version nonempty cache | pm-services::fonts; pm-engine-service / pm-node CoreText broker | CPU cache contract implemented, including copy ownership and unstable/empty/error recovery. FontHook must use the native main-thread CoreText broker; activation, notifications and font registration require macOS. |
-| Media probe and import queue | M/agent-tools/media-tools.ts (`probe_media`, source sampling); R/legacy/core/media.ts (import/fingerprint); M/media-path-cache.ts (lookup/stage/chunks/finish/abort/release) | pm-services::media; pm-engine-service; pm-kernel | CPU FIFO id-keyed queue, idempotent enqueue, attempt-fenced completion, cancellation/retry, exact rational probe metadata, persisted queue restore implemented. MediaHook probes on a worker and admits through kernel. FFmpeg/canonical media ingestion, retained asset versions/Undo and host route binding pending. |
+| Fonts catalog | M/fonts.ts:5–21: registry version, family enumeration, stable-version nonempty cache | app `colour_panel::font_families`; pm-compat-runner `font_families` (CoreText) | Live in the app; pm-services keeps no font cache. |
+| Media probe and import queue | M/agent-tools/media-tools.ts (`probe_media`, source sampling); R/legacy/core/media.ts (import/fingerprint); M/media-path-cache.ts (lookup/stage/chunks/finish/abort/release) | app `media_import`; pm-promedia tasks/cache; pm-kernel media archive | Live in the app and promedia; pm-services keeps no import queue. |
 | Local/cloud/remote media grants | M/cloud-media.ts: status/prompt/download/open/read/release; M/remote-media.ts: fetch/read/release; M/media-path-cache.ts: owner-scoped staged sources | pm-engine-service; pm-services host adapters; pm-shell | Inventory complete; production owner-scoped token/byte-stream adapters and cloud-provider consent/hydration remain. Queue source paths are explicitly supplied; it never discovers a profile or reads an arbitrary source itself. |
-| Playback proxies, preview conversions, image sequences/stills/animations | M/media-proxy.ts: preview begin/chunk/finish, proxy/sequence/image creation, animation frames, read/release | pm-engine-service; pm-services::media | Provenance and decoder identity represented in CPU jobs/cache. Actual conversion/decode uses engine hooks; no substitute pixel path or fake successful conversion. |
-| Thumbnails/posters and waveform artifacts | R/legacy/core/media.ts, R/legacy/core/projects.ts, R/extensions/timeline/; M/agent-tools/media-tools.ts:447–506 for agent waveform generation | pm-services::media; pm-engine-service | CPU bounded artifact cache implemented. Thumbnail/waveform kind, original/proxy content identity, exact ticks/timebase, dimensions, decoder, colour pipeline, channels/sample rate enter the key; digest checked on read. Renderer-managed posters/timeline waveforms are not a separate main IPC cache at the tag. Agent waveform generation is main-owned FFmpeg work; engine adapter pending. |
+| Playback proxies, preview conversions, image sequences/stills/animations | M/media-proxy.ts: preview begin/chunk/finish, proxy/sequence/image creation, animation frames, read/release | pm-engine-service; pm-promedia | Provenance and decoder identity represented in CPU jobs/cache. Actual conversion/decode uses engine hooks; no substitute pixel path or fake successful conversion. |
+| Thumbnails/posters and waveform artifacts | R/legacy/core/media.ts, R/legacy/core/projects.ts, R/extensions/timeline/; M/agent-tools/media-tools.ts:447–506 for agent waveform generation | pm-promedia cache; pm-engine-service | Content-addressed artifacts live in the promedia render cache. Thumbnail/waveform kind, original/proxy content identity, exact ticks/timebase, dimensions, decoder, colour pipeline, channels/sample rate enter the key; digest checked on read. Renderer-managed posters/timeline waveforms are not a separate main IPC cache at the tag. Agent waveform generation is main-owned FFmpeg work; engine adapter pending. |
 | Logs | M/log.ts: trusted validated level/text, single-line renderer stderr messages | pm-services::diagnostics | CPU local structured logs with explicit host text redactor, control normalization and bounds. Safe default omits text. No network sink. App stderr routing and broader error-code catalog pending. |
 | Diagnostics bundle | M/log.ts; M/agent-tools/media-tools.ts and R/engine-connection diagnostics (separate diagnostic sources) | pm-services::diagnostics | Additive CPU deterministic JSON export: last 256 structured log codes/levels and explicitly selected crash records, at most 128. Never exports log text, file paths, environment, attachments, project data or raw OS dumps. No general diagnostics-bundle main IPC handler found at the tag. |
 | Crash reports and recovery | M/renderer-recovery.ts; M/index.ts renderer-failure hooks | pm-services::diagnostics; pm-kernel; pm-shell | CPU stable-id local crash/recovered records with restricted process/reason vocabulary and archived revisions. No dedicated crash-upload service found in tagged main. Native panic/process termination capture, recovery UI and journal replay binding pending; platform proof on macOS required. |
@@ -59,11 +59,9 @@ calls. Dropping the sender does not join on main; already admitted tasks drain.
 The app must submit/poll its final checkpoint/flush before dropping the worker.
 No kernel actor callback or GPUI action should call these I/O methods inline.
 
-`LibraryHook` and `SettingsHook` forward to the one existing KernelHandle. They
-must not attach a new library or create a second document/settings authority.
-`FontHook` accesses the existing CoreText broker. `MediaHook` must probe/import
-an immutable source and deduplicate admission by job id; the kernel owns asset
-mutation and Undo. Host network/OS traits are absent until explicitly supplied.
+Library and settings persistence go through the one existing KernelHandle; no
+service attaches a new library or creates a second document/settings authority.
+Host network/OS traits are absent until explicitly supplied.
 
 `ServiceStorage::open` requires an absolute private path. A new root is created
 with mode 0700; an existing root must have the service marker and pass symlink
@@ -139,9 +137,9 @@ Linux verification commands (Rust 1.96.1):
 ```sh
 source /workspace/.tools/activate.sh
 cd /workspace/powermove
-cargo test --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml
-cargo clippy --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --all-targets --no-deps -- -D warnings
-cargo fmt --manifest-path apps/native/crates/services/isolated/Cargo.toml -- --check
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-services
+cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --no-deps -- -D warnings
+cargo fmt --manifest-path apps/native/Cargo.toml -p pm-services -- --check
 ```
 
 The isolated manifest points to the **same `src/lib.rs` and tests** and keeps its
@@ -210,7 +208,6 @@ macOS. Metadata is never interpreted as executable markup by this lane.
 
 | Review item | Implementation / selecting rule |
 |---|---|
-| 5 — font faces | `Face { name, weight, italic }` and `FontCatalog::faces(family)` use the same required `FontHook` broker as family/version enumeration. Registered names and fractional CSS/OpenType weights are preserved; owned face snapshots are fetched fresh so activation cannot leave a stale face cache. Shell draws each family in its own face and shares face facts with the inspector Weight row. N1 pro font selection, N3 broker facts rather than inferred names, N6 existing family-cache contract, N8 worker-only broker calls. |
 
 **71 tests pass**, including three face tests for family grouping/weight/italic
 facts, owned results, activation changes, empty results and typed broker failure

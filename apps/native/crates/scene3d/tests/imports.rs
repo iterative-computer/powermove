@@ -320,3 +320,19 @@ fn splat_framing_uses_dense_core_without_changing_outlier_bytes() {
     assert_eq!(model.splats[99].center[0], 1_000_000.);
     assert!(splats::Data { splats: vec![] }.normalization().is_err());
 }
+#[test]
+fn a_live_model_resource_is_shared_and_a_dropped_one_reloads() {
+    use pm_scene3d::render::Resource;
+    use std::sync::Arc;
+    let bytes = triangle();
+    let other = import::triangle_glb(&[[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]], &[0, 1, 2]);
+    let loads = [bytes.clone(), other.clone(), bytes.clone()]
+        .map(|b| std::thread::spawn(move || Resource::load("model.glb", &b).unwrap()));
+    let [a, b, c] = loads.map(|t| t.join().unwrap());
+    assert!(Arc::ptr_eq(&a, &c));
+    assert!(!Arc::ptr_eq(&a, &b));
+    let weak = Arc::downgrade(&a);
+    drop((a, c));
+    assert!(weak.upgrade().is_none());
+    assert!(Resource::load("model.glb", &bytes).is_ok());
+}

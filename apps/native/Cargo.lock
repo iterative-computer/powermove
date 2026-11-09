@@ -4618,6 +4618,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-acceptance-runtime"
+version = "0.1.0"
+dependencies = [
+ "pm-acceptance",
+ "pm-compat-runner",
+ "pm-mcp",
+ "pm-promedia",
+ "pm-recorder",
+ "pm-remote-dom",
+ "pm-runtime-v8",
+ "pm-services",
+ "pm-store-host",
+ "pm-surface",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-agents"
 version = "0.1.0"
 dependencies = [
@@ -4627,6 +4644,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "toml_edit",
  "url",
 ]
 
@@ -5014,6 +5032,7 @@ dependencies = [
 name = "pm-kernel"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "flate2",
  "libc",
  "pm-captions",
@@ -5028,13 +5047,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
-]
-
-[[package]]
-name = "pm-mac-core"
-version = "0.1.0"
-dependencies = [
- "pm-kernel",
 ]
 
 [[package]]

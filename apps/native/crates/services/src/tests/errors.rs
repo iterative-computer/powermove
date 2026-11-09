@@ -1,4 +1,4 @@
-use crate::{Result, ServiceError, ServiceErrorCode as Code, error::Context};
+use crate::{ServiceError, ServiceErrorCode as Code, error::Context};
 use std::io;
 
 #[test]
@@ -25,26 +25,6 @@ fn io_codes_are_typed_and_survive_context_without_message_matching() {
 
 #[test]
 fn service_validations_expose_codes_for_reviewed_developer_messages() {
-    let mut library = crate::library::LibraryService(RefusingKernel);
-    assert_eq!(
-        library
-            .apply(crate::library::LibraryAction::Duplicate {
-                id: "project".into(),
-                new_id: "project".into(),
-            })
-            .unwrap_err()
-            .code,
-        Code::InvalidInput
-    );
-    assert_eq!(
-        library
-            .apply(crate::library::LibraryAction::Open {
-                id: "project".into(),
-            })
-            .unwrap_err()
-            .code,
-        Code::PermissionDenied
-    );
     let mut queue = crate::entrypoints::EntryQueue::default();
     assert_eq!(
         queue.push_file("/tmp/example.txt".into()).unwrap_err().code,
@@ -84,27 +64,7 @@ fn service_validations_expose_codes_for_reviewed_developer_messages() {
             .code,
         Code::InvalidInput
     );
-    assert_eq!(
-        crate::media::ArtifactCache::new(0).err().unwrap().code,
-        Code::InvalidInput
-    );
 }
-struct RefusingKernel;
-impl crate::library::LibraryHook for RefusingKernel {
-    fn list(&mut self) -> Result<Vec<crate::library::ProjectEntry>> {
-        Ok(vec![])
-    }
-    fn recents(&mut self) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
-    fn apply(&mut self, _: crate::library::LibraryAction) -> Result<()> {
-        Err(ServiceError::message(
-            Code::PermissionDenied,
-            "kernel diagnostic",
-        ))
-    }
-}
-
 #[test]
 fn worker_returns_the_original_initialization_and_task_codes() {
     use std::time::{Duration, Instant};

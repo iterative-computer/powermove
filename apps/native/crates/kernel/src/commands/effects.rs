@@ -8,7 +8,7 @@
 //! (`extensions/inspector/effect-clipboard.ts`).
 //!
 //! The core holds no effect registry: callers pass the definition (from the
-//! effects lane's registry) so `add_effect` can build the instance exactly
+//! effect registry) so `add_effect` can build the instance exactly
 //! as `PM.mkEffect` did.
 
 use pm_model::{Map, Value};

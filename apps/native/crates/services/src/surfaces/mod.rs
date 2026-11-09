@@ -4,7 +4,6 @@
 //! Presentation follows Opus's design/surfaces specs through 78294c4c9; `copy` projects
 //! their supplied strings. No geometry, material, colour or new UX is defined.
 //! S066 is deliberately not built. Existing agent panels retain their consumers.
-pub const BEHAVIOR_REFERENCE: &str = "c7f46a05641b23944d3692c9d80f9677c7e1ef1d";
 pub const LEGACY_REFERENCE: &str = "07ed5fa17ee640659cb075f9cad1af2095011d60";
 pub mod agent_auth;
 pub mod agent_clients;

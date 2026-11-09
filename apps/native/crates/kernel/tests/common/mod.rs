@@ -18,7 +18,7 @@ impl TempDir {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "pm-mac-core-{tag}-{}-{nanos}-{}",
+            "pm-kernel-{tag}-{}-{nanos}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));

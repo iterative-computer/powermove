@@ -389,12 +389,16 @@ pub fn run(
     }
     let backings: Value = serde_json::from_str(include_str!("../data/backings.json")).unwrap();
     for w in &catalog.workflows {
-        if w.id == "W050" {
-            cases.push(blocked("MAIN.W050.contract".into(),"W050","main-workflow-contract","main:native-scene3d-editor","Owner requires the new Rust 3D system from feat/na-3d-source, automatic old-project upgrade, no Blender/compatibility mode, and actual native editor/render/resource verification. Old get_3d_scene fixtures do not certify this gate.".into(),true));
-            continue;
-        }
-        if w.id == "W072" {
-            cases.push(blocked("MAIN.W072.contract".into(),"W072","main-workflow-contract","delta-data:archived-web-export-preferences","Main removed standalone web-animation delivery. Preserve old project preferences/archives; verify the removed action stays absent. This gate does not request reinstating web export.".into(),true));
+        // A workflow whose current-main gate differs from its tagged backing.
+        if let Some(main) = backings[&w.id].get("main") {
+            cases.push(blocked(
+                format!("MAIN.{}.contract", w.id),
+                &w.id,
+                "main-workflow-contract",
+                main["blocked_by"].as_str().unwrap(),
+                main["reason"].as_str().unwrap().into(),
+                main["needs_macos"] == true,
+            ));
             continue;
         }
         cases.push(blocked(format!("MAIN.{}.contract",w.id),&w.id,"main-workflow-contract",&format!("main:{}",backings[&w.id]["id"].as_str().unwrap()),format!("Complete current-main workflow: {}. {}. Current declarations and A01–A10 deltas must execute; old tagged variants alone cannot certify this gate.",w.title,backings[&w.id]["missing"].as_str().unwrap()),backings[&w.id]["needs_macos"]==true));

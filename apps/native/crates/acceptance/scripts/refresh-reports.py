@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Refresh owned snapshots; append W1 evidence and never write shared triage."""
+"""Write the legacy coverage map to data/ and derived blocker lists next to the
+report; append W1 evidence and never write shared triage."""
 import collections
 import csv
 import io
@@ -60,9 +61,8 @@ def render(report, triage):
         f"Configured Linux: **{counts['pass']:,} pass / {counts['fail']} fail / {counts['blocked-by']:,} blocked**.",
         "All 83 complete workflow contracts remain blocked; a supporting failure makes W061's aggregate fail.",
         "All 396 triaged specs and the frozen 370 roster are retained. Shared e2e-triage.csv is historical input;",
-        "the lane-owned e2e-map.csv and remaining-blockers.csv hold current coverage and exact open assertions.",
-        "See [acceptance.md](acceptance.md#parity-follow-up--2026-11-04) and",
-        "[backing groups](../../apps/native/crates/acceptance/data/blocker-groups.csv).", "",
+        "the lane-owned e2e-map.csv holds current coverage; a run's remaining-blockers.csv lists open assertions.",
+        "See [acceptance.md](acceptance.md#parity-follow-up--2026-11-04).", "",
         "| Workflow | Status | Pass | Fail | Blocked | Remaining backing |", "|---|---|---:|---:|---:|---|",
         *[f'| {w["id"]} | {w["status"]} | {w["passed"]} | {w["failed"]} | {w["blocked"]} | '
           + "; ".join(sorted({c["blocked_by"] for c in cases.values() if c["workflow"] == w["id"] and c["blocked_by"]})) + " |"
@@ -73,7 +73,8 @@ def render(report, triage):
 
 def main():
     root = Path(__file__).resolve().parents[5]
-    report = json.loads(Path(sys.argv[1]).read_text())
+    report_path = Path(sys.argv[1])
+    report = json.loads(report_path.read_text())
     with (root / "docs/native/e2e-triage.csv").open(newline="") as source:
         triage = list(csv.DictReader(source))
     blockers, mapping, groups, status = render(report, triage)
@@ -84,9 +85,9 @@ def main():
     # replay needs a new dated section, preserving the earlier evidence.
     if marker in previous and status.rstrip() not in previous:
         raise ValueError("dated W1 evidence differs; append a new dated section")
-    data = root / "apps/native/crates/acceptance/data"
-    for name, content in [("remaining-blockers.csv", blockers), ("e2e-map.csv", mapping), ("blocker-groups.csv", groups)]:
-        (data / ("legacy-v1.2.0-" + name)).write_text(content)
+    (root / "apps/native/crates/acceptance/data/legacy-v1.2.0-e2e-map.csv").write_text(mapping)
+    for name, content in [("remaining-blockers.csv", blockers), ("blocker-groups.csv", groups)]:
+        report_path.with_name("legacy-v1.2.0-" + name).write_text(content)
     if marker not in previous:
         path.write_text(previous.rstrip() + "\n\n" + status)
 

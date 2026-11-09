@@ -8,6 +8,7 @@ pub mod indexeddb;
 pub mod leveldb;
 pub mod library_media;
 pub mod local_storage;
+pub mod media_reader;
 pub mod migration;
 pub mod snapshot;
 pub mod source_access;

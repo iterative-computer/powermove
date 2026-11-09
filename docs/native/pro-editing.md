@@ -266,7 +266,7 @@ Decisions and selecting rules:
 
 ## 2026-11-04 — cloud pro2 runnable native MCP
 
-`pm_kernel::pro_mcp::ProMcp` serves a supplemental
+`pm_mcp::pro_edit::ProEditSession` serves a supplemental
 `powermove_native_pro_edit` tool over MCP JSON-RPC. `tools/list` advertises the
 native operation vocabulary and argument schema. `tools/call` drives the real
 actor, with MCP provenance/hand-edit protection, connection-local read fences,
@@ -282,7 +282,7 @@ The independently runnable stdio transport is:
 ```sh
 # From apps/native. The explicit input is read-only; this runner edits a
 # disposable in-memory session. It does not save over input or scan a profile.
-cargo run --locked -p pm-kernel --bin pm-pro-edit-mcp -- --project /absolute/project.pmv
+cargo run --locked -p pm-mcp --bin pm-pro-edit-mcp -- --project /absolute/project.pmv
 ```
 
 For example, after MCP initialize, a client can send:
@@ -297,7 +297,7 @@ All blocking file/framing/actor lifecycle work in the runner executes on a
 worker, including on macOS. Input lines are bounded at 2 MiB. Invalid JSON,
 invalid RPC, unknown tools, command refusal and unavailable transport are
 observable. Notifications never cause unacknowledged edits. Production app
-hosting must forward the supplemental tool to a connection's ProMcp bound to
+hosting must forward the supplemental tool to a connection's ProEditSession bound to
 its existing KernelHandle; the frozen tools/allowlists remain unchanged.
 The standalone runner is not a replacement for the existing application's
 save/library/media/provider MCP tools or their session orchestration.

@@ -298,10 +298,6 @@ pub fn captions_import(count: usize, skipped: usize) -> String {
     }
     text
 }
-pub const EASING_SAVE_FAILED: &str = "Library couldn’t be saved. Export a backup.";
-pub const SHADER_LOCKED: &str = "Unlock the layer to edit its shader.";
-pub const SHADER_EMPTY_TITLE: &str = "No Shader Layers";
-pub const SHADER_EMPTY_LINE: &str = "This project does not contain any editable shader layers.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
@@ -506,7 +502,6 @@ mod tests {
             captions_import(1, 2),
             "Imported 1 caption · 2 unreadable skipped"
         );
-        assert_eq!(SHADER_LOCKED, "Unlock the layer to edit its shader.");
     }
     #[test]
     fn destructive_and_registry_confirmation_defaults_match_opus() {

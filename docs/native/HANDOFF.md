@@ -343,7 +343,7 @@ visible until its actual assertion has been demonstrated.
     [the engine e2e ledger](../engine/e2e-ledger.md). Those Electron runs do not
     certify native UI. Preserve all 396 triaged specs and
     the frozen 370 roster. Refresh the exact
-    [remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv),
+    `remaining-blockers.csv`,
     [e2e map](../../apps/native/crates/acceptance/data/e2e-map.csv) and
     [W1 status](w1-workflows.md#native-execution-status). An exit 0 with blockers
     is not a full pass; strict mode must expose them. Also resolve the recorded

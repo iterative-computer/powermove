@@ -1,5 +1,4 @@
-//! P4 test-only replay engine. Included by integration tests with `#[path]` so
-//! no edit to the production library or shared manifest is needed in this lane.
+//! P4 test-only replay engine, included by integration tests with `#[path]`.
 //! Golden bytes come exclusively from the frozen TypeScript oracle.
 use pm_agents::{Access, ApprovalMode, Effects, Event, approvals::Authority, claude, codex};
 use serde::{Deserialize, Serialize};

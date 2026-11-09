@@ -28,5 +28,5 @@ fn standalone_entry_defaults_to_main_and_retains_explicit_legacy_checks() {
         .unwrap();
     assert!(output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["reference"], pm_acceptance_e2e::inventory::REFERENCE);
+    assert_eq!(value["reference"], pm_acceptance::e2e::inventory::REFERENCE);
 }

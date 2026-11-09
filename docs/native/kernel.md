@@ -230,7 +230,7 @@ foreign split, sealing) are covered by the S5 scenario tests instead.
 
 | # | Decision | Rule |
 |---|---|---|
-| K1 | pm-mac-core's code moves into pm-kernel; `pm-mac-core` stays as a one-line re-export until nothing names it | N5 prune as you go, without breaking lanes that started on the old name (no code consumer today) |
+| K1 | pm-mac-core's code moved into pm-kernel; the re-export crate is deleted | N5 prune as you go |
 | K2 | The actor is one OS thread with an mpsc mailbox and a std-only oneshot future; no async runtime | §3.2 "kernel waits are asynchronous in every host"; N8 no overhead |
 | K3 | A short transaction is one actor turn; folding, never queueing; D10 not implemented | §3.2.1 "no writer ever waits"; D10 decided "no" |
 | K4 | Depth is a holder list, not a counter | Same returns as today (traces match) while letting a failed realm release its nesting (§3.2.1 sealing) |

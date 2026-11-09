@@ -4,7 +4,7 @@
 
 The historical beta2 gaps below are superseded in these owned paths:
 
-- `pm-services::media_adapter::FileMedia` reads the pinned main flat-file index
+- `pm-native-migrate::media_reader::FileMedia` reads the pinned main flat-file index
   and source links. Metadata/unknown fields survive offline access; bounded range
   reads verify the complete SHA-256 and descriptor identity, refuse symlinks and
   dataless placeholders, and never hydrate or modify a source.
@@ -180,7 +180,7 @@ per-file hashes and transitive Mach-O loads require an actual Mac bundle.
 | V8 archive/bindings/snapshots and compiler JS | runtime-v8/build.rs requires macos-sandbox; vm.rs includes the pinned Svelte compiler and web.js; runtime/cache constructors consume snapshot/bundle bytes | Record statically linked inputs separately from external runtime resources. No invented mandatory snapshot filename. Owner must specify the actual snapshot provider and hash. |
 | Built-in v4 and legacy extension source/resources | runtime/Store activation consumes actual entry bundles; first launch copies shared extension sources and creates an overlay | Bundle production entries/resources and preserve installed user sources. A manifest must distinguish shipped payloads from per-profile copies. |
 | Agent runtime helpers/assets | agents/src/runtime.rs reads pinned runtime facts; actual provider executables/homes are separate runtime capabilities | Inventory selected native provider binaries and resources; do not copy terminal homes or credentials. Missing provider payloads cannot become optimistic capabilities. |
-| Fonts | pm-services FontHook uses the CoreText broker; project/extension fonts may be runtime resources | System fonts require no copied files. Owner must enumerate any shipped/custom fonts and registration paths; no substituted font can count as exact authored output. |
+| Fonts | The app enumerates families through the CoreText registry; project/extension fonts may be runtime resources | System fonts require no copied files. Owner must enumerate any shipped/custom fonts and registration paths; no substituted font can count as exact authored output. |
 | Sparkle 2.10.1 framework and nested helpers | packaging pin and bundle input; release framework preserves contained version symlinks | Verify pinned upstream archive, inventory all nested Mach-O/signatures, then audit framework links and each helper entry point. No framework binary is vendored. |
 | Icons, accent catalog/Assets.car, update-config.json | existing packaging/package.py layout | Existing packaging inputs; keep update config disabled/unset until owner gates. No new visual choice. |
 

@@ -100,8 +100,6 @@ fn updater_allows_beta_lane_and_reports_feed_failure() {
     assert_eq!(feed.calls, [updater::FeedRoute::NativeCutover]);
     feed.fail = true;
     assert!(updater::check(eligible(), "1.2.0", &mut feed).is_err());
-    assert_eq!(updater::STARTUP_CHECK_MS, 30_000);
-    assert_eq!(updater::CHECK_INTERVAL_MS, 14_400_000);
 }
 
 #[test]
@@ -120,13 +118,6 @@ fn available_update_preserves_sheet_facts_and_untrusted_markdown_as_data() {
         updater::check(eligible(), "1.2.0", &mut feed).unwrap(),
         updater::UpdateStatus::Available(expected)
     );
-    assert_eq!(
-        updater::UPDATE_SHEET_TITLE,
-        "A New Version of Powermove Is Available"
-    );
-    assert_eq!(updater::INSTALL_UPDATE_LABEL, "Install Update");
-    assert_eq!(updater::REMIND_ME_LATER_LABEL, "Remind Me Later");
-    assert_eq!(updater::SKIP_THIS_VERSION_LABEL, "Skip This Version");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::surface_backing::{mixer::*, scene};
+use crate::surface_backing::mixer::*;
 use std::collections::{BTreeMap, BTreeSet};
 struct Source;
 impl MixerSource for Source {
@@ -194,59 +194,4 @@ fn invalid_meter_samples_leave_last_real_readout_unchanged() {
     assert_eq!(m, before);
     assert!(m.step(1., 1e300, 0.1).is_err());
     assert_eq!(m, before);
-}
-#[test]
-fn scene_fields_use_authored_domains_and_projection_specific_channels() {
-    let material = scene::fields(&json!({"object":{"useSourceMaterials":false}})).unwrap();
-    assert_eq!(
-        material
-            .iter()
-            .find(|f| f.path == "m.roughness")
-            .unwrap()
-            .min,
-        Some(0.02)
-    );
-    let camera = scene::fields(&json!({"camera":{"projection":"orthographic"}})).unwrap();
-    assert!(camera.iter().any(|f| f.path == "camera.zoom"));
-    assert!(!camera.iter().any(|f| f.path == "camera.fov"));
-    let spot = scene::fields(&json!({"light":{"type":"spot"}})).unwrap();
-    assert!(spot.iter().any(|f| f.path == "light.angle"));
-    assert!(scene::fields(&json!({"light":{"type":"future"}})).is_err());
-}
-#[test]
-fn scene_field_edits_validate_without_silent_clamp() {
-    let f = scene::fields(&json!({"object":{}}))
-        .unwrap()
-        .into_iter()
-        .find(|f| f.path == "m.roughness")
-        .unwrap();
-    assert!(scene::field_command("l", &f, json!(0.01), 0., false).is_err());
-    let c = scene::field_command("l", &f, json!(0.02), 2., true).unwrap();
-    assert_eq!(c["mode"], "keyframe");
-    assert_eq!(c["time"], 2.);
-}
-#[test]
-fn scene_host_defaults_are_unavailable_and_navigation_is_ephemeral() {
-    use scene::SceneHost;
-    struct Absent;
-    impl SceneHost for Absent {}
-    assert!(
-        Absent
-            .apply(&scene::SceneEdit {
-                session: session(1),
-                revision: 3,
-                layer_id: "l".into(),
-                operation: json!({})
-            })
-            .is_err()
-    );
-    let render_camera = json!({"position":[1,2,3]});
-    let mut nav = scene::Navigation {
-        editor_camera: render_camera.clone(),
-        before_gesture: None,
-    };
-    nav.begin().unwrap();
-    nav.editor_camera = json!({"position":[9,8,7]});
-    nav.cancel();
-    assert_eq!(nav.editor_camera, render_camera);
 }

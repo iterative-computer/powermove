@@ -1,6 +1,6 @@
 //! Editing-side render cache/task lifecycle. One worker owns this model and its
-//! IO adapter; it never owns a document writer. The media/engine lane supplies
-//! native rendering, byte verification, durable storage and process draining.
+//! IO adapter; it never owns a document writer. The adapter supplies native
+//! rendering, byte verification, durable storage and process draining.
 //! No IO method here is suitable for the AppKit/GPUI or kernel actor thread.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

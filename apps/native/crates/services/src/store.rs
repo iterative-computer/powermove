@@ -2,7 +2,6 @@
 //! Authentication belongs in the host transport; requests/results here carry no secrets.
 use crate::error::{Context, Result};
 use crate::service_ensure as ensure;
-use crate::{media::validate_hash, storage::component};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use url::Url;
@@ -80,44 +79,6 @@ pub struct VersionMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Current {
     pub yanked: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReleaseMetadata {
-    pub id: String,
-    pub repo_id: String,
-    pub version: String,
-    pub tree_sha: String,
-    pub tar_sha256: String,
-    pub api_version: u32,
-    pub file_count: u32,
-    pub size_bytes: u64,
-    #[serde(deserialize_with = "required_option")]
-    pub yanked_at: Option<String>,
-    pub manifest: Value,
-    /// Retain all unconsumed metadata for future consumers.
-    #[serde(flatten)]
-    pub extra: std::collections::BTreeMap<String, Value>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TreeFile {
-    pub path: String,
-    pub sha: String,
-    pub size: u64,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReleaseTree {
-    pub tree_sha: String,
-    pub files: Vec<TreeFile>,
-}
-/// This is a plan, never a receipt that code has been installed or trusted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstallPlan {
-    pub origin: String,
-    pub release: ReleaseMetadata,
-    pub tree: ReleaseTree,
 }
 #[derive(Deserialize)]
 struct Versions {
@@ -294,89 +255,6 @@ impl<T: StoreTransport> StoreClient<T> {
         }
         Ok(response.items)
     }
-    /// Resolve latest metadata afresh, so stale UI IDs and yanked/hidden releases
-    /// cannot silently authorize an install. Download/verification/activation is a host hook.
-    pub fn install_plan(&mut self, requested: InstalledRelease) -> Result<InstallPlan> {
-        let versions = self.versions(std::slice::from_ref(&requested))?;
-        let item = &versions[0];
-        ensure!(item.state == "ok", "repository is unavailable");
-        let latest = item.latest.as_ref().context("no installable release")?;
-        let release: ReleaseMetadata = self.request(
-            &format!("/v1/store/releases/{}", latest.release_id),
-            vec![],
-            None,
-        )?;
-        ensure!(
-            release.id == latest.release_id
-                && release.repo_id == requested.repo_id
-                && release.yanked_at.is_none(),
-            "release identity/state mismatch"
-        );
-        version(&release.version)?;
-        sha1(&release.tree_sha)?;
-        validate_hash(&release.tar_sha256)?;
-        ensure!(
-            release.version == latest.version
-                && release.tree_sha == latest.tree_sha
-                && release.tar_sha256 == latest.tar_sha256
-                && release.api_version == latest.api_version,
-            "release changed; refresh metadata"
-        );
-        ensure!(
-            (1..=4).contains(&release.api_version)
-                && release.file_count <= 400
-                && release.size_bytes <= 8 * 1024 * 1024,
-            "unsupported release limits/API"
-        );
-        slug(field(&release.manifest, "id")?)?;
-        ensure!(
-            field(&release.manifest, "version")? == release.version
-                && release.manifest.get("apiVersion").and_then(Value::as_u64)
-                    == Some(release.api_version as u64),
-            "manifest metadata mismatch"
-        );
-        let tree: ReleaseTree = self.request(
-            &format!("/v1/store/releases/{}/tree", release.id),
-            vec![],
-            None,
-        )?;
-        ensure!(
-            tree.tree_sha == release.tree_sha && tree.files.len() == release.file_count as usize,
-            "release tree mismatch"
-        );
-        let mut paths = std::collections::BTreeSet::new();
-        let mut total = 0u64;
-        for file in &tree.files {
-            safe_release_path(&file.path)?;
-            sha1(&file.sha)?;
-            ensure!(
-                paths.insert(file.path.to_lowercase()) && file.size <= 2 * 1024 * 1024,
-                "duplicate/oversized release file"
-            );
-            total = total.checked_add(file.size).context("tree size overflow")?;
-        }
-        ensure!(total == release.size_bytes, "release size mismatch");
-        Ok(InstallPlan {
-            origin: self.origin.to_string(),
-            release,
-            tree,
-        })
-    }
-    /// Metadata only. Local modifications/forks must go through the extension host's merge path.
-    pub fn update_plan(
-        &mut self,
-        installed: InstalledRelease,
-        local_id: &str,
-    ) -> Result<InstallPlan> {
-        component(local_id)?;
-        let plan = self.install_plan(installed.clone())?;
-        ensure!(plan.release.id != installed.release_id, "no newer release");
-        ensure!(
-            field(&plan.release.manifest, "id")? == local_id,
-            "update changes extension id"
-        );
-        Ok(plan)
-    }
 }
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
@@ -431,22 +309,6 @@ fn slug(value: &str) -> Result<()> {
     );
     Ok(())
 }
-pub fn safe_release_path(path: &str) -> Result<()> {
-    ensure!(
-        !path.is_empty()
-            && path.len() <= 200
-            && !path.contains(['\\', ':', '\0'])
-            && !path.chars().any(char::is_control),
-        "invalid release path"
-    );
-    for part in path.split('/') {
-        ensure!(
-            !part.is_empty() && part != "." && part != ".." && !part.ends_with(['.', ' ']),
-            "unsafe release path"
-        );
-    }
-    Ok(())
-}
 
 // Wire nullable fields are required, unlike optional Rust fields. Missing metadata
 // must not become an apparently valid empty/latest-unavailable response.
@@ -456,4 +318,14 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+fn validate_hash(value: &str) -> Result<()> {
+    ensure!(
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+        "invalid SHA-256"
+    );
+    Ok(())
 }

@@ -1,9 +1,6 @@
 //! Follow-up assertions for Opus specs merged at ce36cb6fc.
 use super::*;
-use crate::surface_backing::{
-    authorization::*, copy, generated::*, maintenance::*, native::tasks::*, projects::*,
-};
-use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, TaskFailureCode, TaskKind, TaskSpec};
+use crate::surface_backing::{authorization::*, copy, generated::*, maintenance::*, projects::*};
 
 #[test]
 fn notes_readonly_and_focused_external_change_follow_spec() {
@@ -114,27 +111,6 @@ fn generated_apply_accepts_only_its_published_revision_and_preview_cannot_mutate
         .is_err()
     );
     assert!(p.preview.is_none());
-}
-#[test]
-fn one_task_view_cannot_leak_previous_window_rows() {
-    let mut q = BackgroundTasks::default();
-    q.enqueue(
-        "one".into(),
-        "p".into(),
-        TaskSpec {
-            title: "Authored".into(),
-            kind: TaskKind::Import,
-            unit: ProgressUnit::Items,
-            priority: 0,
-            total: 0,
-        },
-    )
-    .unwrap();
-    let mut rows = TaskRows::default();
-    rows.refresh(&q, "one");
-    assert_eq!(rows.rows.len(), 1);
-    rows.refresh(&q, "two");
-    assert!(rows.rows.is_empty());
 }
 struct Os {
     status: Authorization,
@@ -247,10 +223,6 @@ fn copy_matches_approved_failure_and_archive_states() {
         "Saved Take 25 · Oldest take archived"
     );
     assert_eq!(
-        copy::task_failure(TaskFailureCode::Unknown),
-        Some("Something went wrong. Details are in Window ▸ Error Log.")
-    );
-    assert_eq!(
         copy::notification_detail(Authorization::Denied),
         "Notifications are off for Powermove in System Settings."
     );
@@ -263,37 +235,6 @@ fn copy_matches_approved_failure_and_archive_states() {
         copy::workspace_json_error("expected value"),
         "This isn’t valid JSON. expected value"
     );
-}
-
-#[test]
-fn queued_tasks_offer_cancel_only_and_terminal_popover_expiry_does_not_retire_data() {
-    let mut q = BackgroundTasks::default();
-    let id = q
-        .enqueue(
-            "w".into(),
-            "p".into(),
-            TaskSpec {
-                title: "T".into(),
-                kind: TaskKind::Import,
-                unit: ProgressUnit::Items,
-                priority: 0,
-                total: 10,
-            },
-        )
-        .unwrap();
-    assert!(act(&mut q, "w", id, TaskAction::Pause).is_err());
-    let t = q.start_next().unwrap();
-    let mut timing = TaskTiming::default();
-    timing.observe(q.get(id).unwrap(), 0);
-    q.progress(t, 5, 10).unwrap();
-    assert_eq!(timing.seconds_left(q.get(id).unwrap(), 4999), None);
-    assert_eq!(timing.seconds_left(q.get(id).unwrap(), 5000), Some(5));
-    q.finish(t, Ok(())).unwrap();
-    timing.observe(q.get(id).unwrap(), 5000);
-    assert!(timing.visible(q.get(id).unwrap(), 9999, TaskContainer::Popover));
-    assert!(!timing.visible(q.get(id).unwrap(), 10000, TaskContainer::Popover));
-    assert!(timing.visible(q.get(id).unwrap(), 10000, TaskContainer::Window));
-    assert!(q.get(id).is_some());
 }
 
 #[test]
@@ -391,25 +332,6 @@ fn main_reference_unchanged_meter_size_preserves_backing_and_scale_change_invali
     assert_eq!(backing.pixels, [12, 30]);
     assert!(MeterBacking::new(f64::NAN, 0., 1.).is_err());
 }
-#[test]
-fn main_reference_3d_context_is_empty_only_and_studio_upgrade_cannot_fake_success() {
-    use crate::surface_backing::scene::*;
-    assert!(add_menu_available(None));
-    assert!(add_menu_available(Some("empty")));
-    assert!(!add_menu_available(Some("layer")));
-    struct Absent;
-    impl SceneUpgradeHost for Absent {}
-    assert!(Absent.upgrade_and_inspect(&session(1), 7, "layer").is_err());
-    let material = studio_fields(&json!({"object":{}})).unwrap();
-    assert_eq!(
-        material.iter().find(|f| f.path == "m.ior").unwrap().max,
-        Some(2.6)
-    );
-    let area = studio_fields(&json!({"light":{"type":"area"}})).unwrap();
-    assert!(area.iter().any(|f| f.path == "light.width"));
-    assert!(!area.iter().any(|f| f.path == "light.decay"));
-}
-
 #[test]
 fn generated_local_flush_targets_captured_workspace_and_acknowledges_its_revision() {
     struct Host {

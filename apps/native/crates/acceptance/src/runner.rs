@@ -126,82 +126,40 @@ fn blocked(id: &str, workflow: &str, kind: &str) -> CaseResult {
     }
 }
 
+/// Original cases whose backing differs from their workflow's, and notes on
+/// MCP tools' remaining verification (`data/case-backings.json`). A case's
+/// `reason` template fills in `{backing}` and `{expected}`.
+#[derive(serde::Deserialize)]
+struct CaseBackings {
+    cases: std::collections::BTreeMap<String, CaseBacking>,
+    tools: std::collections::BTreeMap<String, String>,
+}
+#[derive(serde::Deserialize)]
+struct CaseBacking {
+    backing: String,
+    needs_macos: bool,
+    reason: String,
+}
+fn case_backings() -> &'static CaseBackings {
+    static CASES: std::sync::OnceLock<CaseBackings> = std::sync::OnceLock::new();
+    CASES.get_or_init(|| {
+        serde_json::from_str(include_str!("../data/case-backings.json"))
+            .expect("acceptance case backing inventory")
+    })
+}
+
 /// A case names the unverified assertion and its actual backing, rather than
 /// treating every member of a workflow as blocked on the same missing crate.
 fn blocked_original(c: &crate::catalog::Contract, workflow: &str) -> CaseResult {
     let mut result = blocked(&c.id, workflow, "original");
-    if matches!(c.id.as_str(), "A511" | "A512") {
-        result.blocked_by = Some("memory-post-tag-requirement".into());
-        result.needs_macos = false;
-        result.reason = format!(
-            "Frozen-source reconciliation (2026-11-04): tag 07ed5fa17 has no project_memory reference in agent-tools or renderer; its 67-tool union and get_project_state description have no memory index. W1 misattributes this later requirement to the tag. Preserve the original ID/claim as an explicit additional native requirement: no memory index/body is implemented. Missing backing: kernel memory storage/index plus versioned tool admission; retained unverified claim: {}",
-            c.expected
-        );
+    if let Some(case) = case_backings().cases.get(&c.id) {
+        result.blocked_by = Some(case.backing.clone());
+        result.needs_macos = case.needs_macos;
+        result.reason = case
+            .reason
+            .replace("{backing}", &case.backing)
+            .replace("{expected}", &c.expected);
         return result;
-    }
-    if workflow == "W040" {
-        let capability = match c.id.as_str() {
-            "A658" | "A697" | "A699" => Some("compat:panel-render-mount"),
-            "A664" => Some("compat:scene3d-backend"),
-            "A665" => Some("compat:asset-byte-import"),
-            "A667" => Some("compat:palette-host"),
-            "A670" => Some("compat:project-kernel"),
-            "A671" => Some("compat:animation-evaluator"),
-            "A672" => Some("compat:model-constructors"),
-            "A673" => Some("compat:selection-kernel"),
-            "A674" => Some("compat:group-query-edit"),
-            "A675" => Some("compat:transport-engine"),
-            "A676" => Some("compat:history-selection-adapter"),
-            "A677" => Some("compat:structural-mutation-lease-adapter"),
-            "A679" => Some("compat:media-registry"),
-            "A680" => Some("compat:complete-canvas-engine-resources"),
-            "A681" => Some("compat:ui-state-kernel"),
-            "A682" => Some("compat:remote-dom-controls"),
-            "A683" | "A694" | "A701" => Some("compat:native-host-actions"),
-            "A684" => Some("compat:native-drag-drop"),
-            "A685" => Some("compat:workspace-kernel"),
-            "A686" => Some("compat:legacy-util-backend"),
-            "A687" => Some("compat:ease-query-backend"),
-            "A688" => Some("compat:space3d-backend"),
-            "A690" => Some("compat:storage-kernel-persistence"),
-            "A692" => Some("compat:extension-lifecycle"),
-            "A700" => Some("compat:store-namespaced-events"),
-            _ => None,
-        };
-        if let Some(capability) = capability {
-            result.blocked_by = Some(capability.into());
-            result.needs_macos = !matches!(
-                c.id.as_str(),
-                "A670"
-                    | "A671"
-                    | "A672"
-                    | "A673"
-                    | "A674"
-                    | "A676"
-                    | "A677"
-                    | "A681"
-                    | "A685"
-                    | "A686"
-                    | "A687"
-                    | "A688"
-                    | "A690"
-                    | "A700"
-            );
-            result.reason = format!(
-                "Missing connected {capability}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {}",
-                c.expected
-            );
-            if c.id == "A676" {
-                result.reason.push_str("; native V8/kernel begin/do/cancel/undo/redo/external paths execute, but KernelAdapter has no history.selection dispatch arm");
-            }
-            if c.id == "A677" {
-                result.reason.push_str("; native V8/kernel apply/begin/dispatch/commit/cancel paths execute, but KernelAdapter lacks edit.mutateStart, edit.mutateFinish and edit.mutateAbort");
-            }
-            if c.id == "A680" {
-                result.reason.push_str("; real JS recorder/native CPU fill/drawImage/readback now executes; complete text, paint, encoding and engine frame resources remain required");
-            }
-            return result;
-        }
     }
     if let Some(name) = c
         .expected
@@ -238,8 +196,8 @@ fn blocked_original(c: &crate::catalog::Contract, workflow: &str) -> CaseResult 
             pm_mcp::catalog::backing(name),
             c.expected
         );
-        if name == "save_project" {
-            result.reason.push_str("; kernel container-copy probes preserve embedded media, but Automation exposes neither file-open/adopt nor durable media byte admission to seed this MCP case. Needs that host ingress and byte-for-byte packed media verification");
+        if let Some(note) = case_backings().tools.get(name) {
+            result.reason.push_str(note);
         }
     } else {
         result.reason.push_str("; unverified case: ");

@@ -64,7 +64,7 @@ The plan’s additional native colour/format/proxy requirements are not proven b
 
 Wave 5 Linux configured run; portable supporting probes are separate from full workflow verdicts.
 All 396 legacy spec replacements remain blocked. See [acceptance.md](acceptance.md) for evidence and limits;
-[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv) names every remaining case and exact unverified assertion.
+`remaining-blockers.csv` names every remaining case and exact unverified assertion.
 
 | Workflow | Status | Pass | Fail | Blocked | Remaining backing |
 |---|---|---:|---:|---:|---|
@@ -2730,7 +2730,7 @@ All 83 complete workflow contracts remain blocked; a supporting failure makes W0
 All 396 triaged specs and the frozen 370 roster are retained. Shared e2e-triage.csv is historical input;
 the lane-owned e2e-map.csv and remaining-blockers.csv hold current coverage and exact open assertions.
 See [acceptance.md](acceptance.md#parity-follow-up--2026-11-04) and
-[backing groups](../../apps/native/crates/acceptance/data/blocker-groups.csv).
+backing groups.
 
 | Workflow | Status | Pass | Fail | Blocked | Remaining backing |
 |---|---|---:|---:|---:|---|

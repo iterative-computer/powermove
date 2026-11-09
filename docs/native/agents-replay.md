@@ -140,9 +140,7 @@ records rules/reasons; it is **not** a waiver of the P4 gate. For strict identit
 ```sh
 source /workspace/.tools/activate.sh
 cd /workspace/powermove/apps/native
-RUSTC_BOOTSTRAP=1 CARGO_UNSTABLE_LOCKFILE_PATH=true \
-  CARGO_RESOLVER_LOCKFILE_PATH="$PWD/crates/agents/Cargo.lock" \
-  PM_REPLAY_REQUIRE_IDENTICAL=1 cargo test --locked -p pm-agents --test replay \
+PM_REPLAY_REQUIRE_IDENTICAL=1 cargo test --locked -p pm-agents --test replay \
   replay_all_surfaces_and_check_every_difference
 ```
 

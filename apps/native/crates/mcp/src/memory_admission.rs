@@ -16,36 +16,7 @@ pub fn prepare(root: &Node, args: &Value) -> Result<Prepared> {
     }
     let raw = root.get("memory").map(Node::to_value);
     if args["operation"] == "list" {
-        let all = raw
-            .as_ref()
-            .and_then(pm_model::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut selected: Vec<_> = all
-            .iter()
-            .filter(|e| {
-                args.get("kind").is_none_or(|k| {
-                    k.is_null() || k == "" || e.get("kind") == Some(&crate::model(k))
-                })
-            })
-            .cloned()
-            .collect();
-        let time = |e: &pm_model::Value| {
-            e.get("updatedAt")
-                .and_then(pm_model::Value::as_f64)
-                .unwrap_or(0.0)
-        };
-        selected.sort_by(|a, b| time(b).total_cmp(&time(a)));
-        let limit = args["limit"]
-            .as_f64()
-            .unwrap_or(100.0)
-            .trunc()
-            .clamp(1.0, 100.0) as usize;
-        selected.truncate(limit);
-        let mut result = Map::new();
-        result.insert("memory", pm_model::Value::Array(selected));
-        result.insert("total", pm_model::Value::Number(all.len() as f64));
-        return Ok(Prepared::Read(pm_model::Value::Object(result)));
+        return Ok(Prepared::Read(list(raw.as_ref(), args)));
     }
     // The pinned validation body consumes only these fields. Its temporary
     // Unicode view must never replace authored notes or become a tool response.
@@ -106,6 +77,38 @@ pub fn prepare(root: &Node, args: &Value) -> Result<Prepared> {
         now,
         id: pm_kernel::new_id("mem").as_str().into(),
     }))
+}
+
+/// Main's `list` over the authored notes, newest first, without sanitizing them.
+pub fn list(memory: Option<&pm_model::Value>, args: &Value) -> pm_model::Value {
+    let all = memory
+        .and_then(pm_model::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut selected: Vec<_> = all
+        .iter()
+        .filter(|e| {
+            args.get("kind")
+                .is_none_or(|k| k.is_null() || k == "" || e.get("kind") == Some(&crate::model(k)))
+        })
+        .cloned()
+        .collect();
+    let time = |e: &pm_model::Value| {
+        e.get("updatedAt")
+            .and_then(pm_model::Value::as_f64)
+            .unwrap_or(0.0)
+    };
+    selected.sort_by(|a, b| time(b).total_cmp(&time(a)));
+    let limit = args["limit"]
+        .as_f64()
+        .unwrap_or(100.0)
+        .trunc()
+        .clamp(1.0, 100.0) as usize;
+    selected.truncate(limit);
+    let mut result = Map::new();
+    result.insert("memory", pm_model::Value::Array(selected));
+    result.insert("total", pm_model::Value::Number(all.len() as f64));
+    pm_model::Value::Object(result)
 }
 
 pub fn result(ack: Ack) -> Result<pm_model::Value> {

@@ -7,9 +7,6 @@ use std::{
 };
 use url::Url;
 
-/// Verbatim error-alert action from design review item 7.
-pub const SHOW_IN_FINDER_LABEL: &str = "Show in Finder";
-
 /// Deliberately has no Debug/Serialize: callback state/token must never enter logs.
 pub struct AuthLink {
     state: String,

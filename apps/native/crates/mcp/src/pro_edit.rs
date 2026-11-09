@@ -1,17 +1,19 @@
 //! Supplemental native MCP namespace, bound to a real kernel actor/document.
 //! Hosts retain the frozen tools unchanged and forward this handler's one new
 //! tool. No second document writer, implicit profile discovery or JS runtime.
-use crate::{
-    Caller, KernelHandle, Notice, Reply,
+//! Values stay `pm_model` so authored UTF-16 arguments survive decoding.
+use pm_kernel::{
+    Caller, KernelHandle, Notice, Origin, Reply,
     pro_editing::{OPERATIONS, ProAction, ProReply, ProRequest},
 };
 use pm_model::{Map, Value};
+use std::io::{BufRead, Write};
 
 pub const TOOL: &str = "powermove_native_pro_edit";
 const PROTOCOL: &str = "2025-06-18";
 /// One connection's read fence. Reads refresh it; mutations use the last observed
 /// revision. Close/reopen never silently rebinds this connection's document.
-pub struct ProMcp {
+pub struct ProEditSession {
     kernel: KernelHandle,
     project: String,
     caller: Caller,
@@ -67,12 +69,12 @@ fn notice(n: Notice) -> Value {
         Notice::Barrier { label } => object([("kind", s("barrier")), ("label", s(label))]),
     }
 }
-impl ProMcp {
+impl ProEditSession {
     pub fn new(kernel: KernelHandle, project: &str, mut caller: Caller) -> Result<Self, String> {
         if caller.writer != Caller::native().writer {
             return Err("Native pro MCP requires a native caller".into());
         }
-        caller.origin = crate::Origin::Mcp;
+        caller.origin = Origin::Mcp;
         let p = kernel.published(project).ok_or("Project is not open")?;
         let state_revision = kernel.state().revision;
         Ok(Self {
@@ -135,7 +137,7 @@ impl ProMcp {
             ("inputSchema", schema),
         ])
     }
-    async fn invoke(&mut self, args: &Value) -> Value {
+    fn invoke(&mut self, args: &Value) -> Value {
         let action = match ProAction::decode(args) {
             Ok(a) => a,
             Err(e) => return failure(e.to_string()),
@@ -148,7 +150,7 @@ impl ProMcp {
             txid: None,
             action,
         };
-        let reply = match self.kernel.pro_editing(&self.project, r).await {
+        let reply = match self.kernel.pro_editing(&self.project, r).wait() {
             Some(Ok(v)) => v,
             Some(Err(e)) => return failure(e.to_string()),
             None => return failure("Kernel stopped; outcome is unknown. Inspect before retrying."),
@@ -258,10 +260,9 @@ impl ProMcp {
             }
         }
     }
-    /// Handle an MCP JSON-RPC message without blocking the caller thread. A
-    /// notification returns None. The app owns transport/authentication, frame
-    /// size limits and client lifecycle; the stdio runner supplies framing.
-    pub async fn handle(&mut self, message: &Value) -> Option<Value> {
+    /// Handle one MCP JSON-RPC message on a worker thread; a notification
+    /// returns None.
+    pub fn handle(&mut self, message: &Value) -> Option<Value> {
         let id = message.get("id").cloned();
         let method = message.get("method").and_then(Value::as_str);
         let valid_id = id
@@ -302,7 +303,7 @@ impl ProMcp {
             "tools/call" => match message.get("params") {
                 Some(params) if params.get("name").and_then(Value::as_str) == Some(TOOL) => {
                     match params.get("arguments") {
-                        Some(args) => Ok(self.invoke(args).await),
+                        Some(args) => Ok(self.invoke(args)),
                         None => Err("Missing tool arguments"),
                     }
                 }
@@ -325,4 +326,36 @@ impl ProMcp {
             ]),
         })
     }
+}
+
+/// Newline-delimited stdio with the same 2 MiB bound as the frozen server.
+pub fn serve_stdio(
+    mut reader: impl BufRead,
+    mut writer: impl Write,
+    session: &mut ProEditSession,
+) -> std::io::Result<()> {
+    while let Some(bytes) = crate::transport::line(&mut reader)? {
+        let message = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| pm_model::json::parse(s).ok());
+        let response = match message {
+            Some(v) => session.handle(&v),
+            None => Some(object([
+                ("jsonrpc", s("2.0")),
+                ("id", Value::Null),
+                (
+                    "error",
+                    object([
+                        ("code", Value::Number(-32700.)),
+                        ("message", s("Parse error")),
+                    ]),
+                ),
+            ])),
+        };
+        if let Some(response) = response {
+            writeln!(writer, "{}", pm_model::json::to_canonical_string(&response))?;
+            writer.flush()?;
+        }
+    }
+    Ok(())
 }

@@ -32,20 +32,34 @@ impl Resource {
             name.rsplit('.').next().unwrap_or("").to_ascii_lowercase(),
             Sha256::digest(bytes)
         );
-        type Cache = std::sync::Mutex<HashMap<String, std::sync::Weak<Resource>>>;
-        static SHARED: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
-        let mut cache = SHARED
-            .get_or_init(Default::default)
-            .lock()
-            .map_err(|_| Error("Model resource cache poisoned".into()))?;
-        if let Some(resource) = cache.get(&key).and_then(std::sync::Weak::upgrade) {
+        // One slot per source: the same model decodes once while different
+        // models decode in parallel.
+        type Slot = Arc<std::sync::Mutex<std::sync::Weak<Resource>>>;
+        static SHARED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Slot>>> =
+            std::sync::OnceLock::new();
+        fn poisoned<T>(_: T) -> Error {
+            Error("Model resource cache poisoned".into())
+        }
+        let slot = {
+            let mut slots = SHARED
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(poisoned)?;
+            slots.retain(|k, slot| {
+                *k == key
+                    || Arc::strong_count(slot) > 1
+                    || slot.try_lock().map_or(true, |held| held.strong_count() > 0)
+            });
+            slots.entry(key.clone()).or_default().clone()
+        };
+        let mut held = slot.lock().map_err(poisoned)?;
+        if let Some(resource) = held.upgrade() {
             return Ok(resource);
         }
         let mut resource = Self::new(crate::import::load(name, bytes)?);
-        resource.key = key.clone();
+        resource.key = key;
         let resource = Arc::new(resource);
-        cache.retain(|_, r| r.strong_count() > 0);
-        cache.insert(key, Arc::downgrade(&resource));
+        *held = Arc::downgrade(&resource);
         Ok(resource)
     }
     /// Source Studio uses a raw RGBA8 1024² map array; colour maps are

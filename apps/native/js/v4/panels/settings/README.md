@@ -24,7 +24,7 @@ and no profile request is submitted. The adapter must enforce native built-in
 privilege/allowed keys and return actual kernel/persistence acknowledgements; its
 `scope` label is not an authorization grant. The displayed value changes only
 after an accepted acknowledgement, and unknown authored values remain intact.
-`pm_services::SettingsService<SettingsHook>` is the existing persistence boundary;
+The kernel state transaction (`KernelHandle`) is the existing persistence boundary;
 no second durable store or speculative kernel command is created here.
 
 Other settings model capabilities do not exist in pm-services on this base.

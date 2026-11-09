@@ -25,7 +25,7 @@ pub struct CaptureRequest {
     pub times: Vec<f64>,
     pub width: u32,
 }
-/// A later engine lane supplies real image content (MCP base64 image blocks).
+/// Renders a project's frames as MCP base64 image blocks.
 pub trait EngineHook: Send + Sync {
     fn capture(&self, request: &CaptureRequest) -> Result<Value>;
     fn capture_snapshot(
@@ -114,13 +114,44 @@ impl std::ops::Deref for StateRead<'_> {
         }
     }
 }
+/// The host bound to one caller's attached document until dropped, so a
+/// queued request cannot land in a replacement document that reuses the
+/// project id. Without a fence, requests go to the project's current document.
+pub struct Fenced<'a>(std::sync::MutexGuard<'a, Automation>);
+impl Automation {
+    pub fn fenced(
+        host: &std::sync::Mutex<Automation>,
+        document: Option<u64>,
+    ) -> Result<Fenced<'_>> {
+        let mut guard = host
+            .lock()
+            .map_err(|_| Error::unavailable("headless host stopped"))?;
+        guard.document_fence = document;
+        Ok(Fenced(guard))
+    }
+}
+impl std::ops::Deref for Fenced<'_> {
+    type Target = Automation;
+    fn deref(&self) -> &Automation {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Fenced<'_> {
+    fn deref_mut(&mut self) -> &mut Automation {
+        &mut self.0
+    }
+}
+impl Drop for Fenced<'_> {
+    fn drop(&mut self) {
+        self.0.document_fence = None;
+    }
+}
 /// Single owner host. Call on a dedicated worker; do not put this behind a mutex
 /// that a UI thread waits for. It never discovers a profile.
 pub struct Automation {
     backend: Backend,
-    /// Document bound to the caller's session, so a queued request cannot land
-    /// in a replacement document that reuses the project id.
-    pub document_fence: Option<u64>,
+    /// See [`Fenced`].
+    document_fence: Option<u64>,
     pub profile: PathBuf,
     pub exports: PathBuf,
     pub active: Option<String>,
@@ -203,11 +234,11 @@ impl Automation {
             creative: Arc::new(crate::creative::CreativeReader::default()),
         }
     }
-    /// The owned kernel. Attached hosts go through the app's actor instead.
-    pub fn kernel(&self) -> &Kernel {
+    /// The headless binary's own kernel; none when attached to the app's actor.
+    pub fn kernel(&self) -> Option<&Kernel> {
         match &self.backend {
-            Backend::Owned(kernel) => kernel,
-            Backend::App(_) => panic!("Attached automation has no owned kernel"),
+            Backend::Owned(kernel) => Some(kernel),
+            Backend::App(_) => None,
         }
     }
     #[cfg(test)]
@@ -293,6 +324,7 @@ impl Automation {
     /// The owned store, for headless harnesses. Production paths read `view`.
     pub fn store(&self, id: &str) -> Result<&pm_kernel::DocumentStore> {
         self.kernel()
+            .ok_or_else(|| Error::unavailable("an owned kernel store"))?
             .project(id)
             .map(|p| p.store())
             .ok_or_else(|| Error::invalid("Project is not open"))
@@ -906,7 +938,14 @@ mod tests {
             );
             assert_eq!(host.squash(&id, &mark, "Agent run").unwrap(), None);
             assert_eq!(host.read_document(&id).unwrap(), snapshot);
-            assert!(host.kernel().project(&id).unwrap().open_entry().is_some());
+            assert!(
+                host.kernel()
+                    .unwrap()
+                    .project(&id)
+                    .unwrap()
+                    .open_entry()
+                    .is_some()
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }

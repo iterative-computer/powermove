@@ -1,0 +1,162 @@
+{
+  "cases": {
+    "A511": {
+      "backing": "memory-post-tag-requirement",
+      "needs_macos": false,
+      "reason": "Frozen-source reconciliation (2026-11-04): tag 07ed5fa17 has no project_memory reference in agent-tools or renderer; its 67-tool union and get_project_state description have no memory index. W1 misattributes this later requirement to the tag. Preserve the original ID/claim as an explicit additional native requirement: no memory index/body is implemented. Missing backing: kernel memory storage/index plus versioned tool admission; retained unverified claim: {expected}"
+    },
+    "A512": {
+      "backing": "memory-post-tag-requirement",
+      "needs_macos": false,
+      "reason": "Frozen-source reconciliation (2026-11-04): tag 07ed5fa17 has no project_memory reference in agent-tools or renderer; its 67-tool union and get_project_state description have no memory index. W1 misattributes this later requirement to the tag. Preserve the original ID/claim as an explicit additional native requirement: no memory index/body is implemented. Missing backing: kernel memory storage/index plus versioned tool admission; retained unverified claim: {expected}"
+    },
+    "A658": {
+      "backing": "compat:panel-render-mount",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A664": {
+      "backing": "compat:scene3d-backend",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A665": {
+      "backing": "compat:asset-byte-import",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A667": {
+      "backing": "compat:palette-host",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A670": {
+      "backing": "compat:project-kernel",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A671": {
+      "backing": "compat:animation-evaluator",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A672": {
+      "backing": "compat:model-constructors",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A673": {
+      "backing": "compat:selection-kernel",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A674": {
+      "backing": "compat:group-query-edit",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A675": {
+      "backing": "compat:transport-engine",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A676": {
+      "backing": "compat:history-selection-adapter",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}; native V8/kernel begin/do/cancel/undo/redo/external paths execute, but KernelAdapter has no history.selection dispatch arm"
+    },
+    "A677": {
+      "backing": "compat:structural-mutation-lease-adapter",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}; native V8/kernel apply/begin/dispatch/commit/cancel paths execute, but KernelAdapter lacks edit.mutateStart, edit.mutateFinish and edit.mutateAbort"
+    },
+    "A679": {
+      "backing": "compat:media-registry",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A680": {
+      "backing": "compat:complete-canvas-engine-resources",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}; real JS recorder/native CPU fill/drawImage/readback now executes; complete text, paint, encoding and engine frame resources remain required"
+    },
+    "A681": {
+      "backing": "compat:ui-state-kernel",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A682": {
+      "backing": "compat:remote-dom-controls",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A683": {
+      "backing": "compat:native-host-actions",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A684": {
+      "backing": "compat:native-drag-drop",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A685": {
+      "backing": "compat:workspace-kernel",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A686": {
+      "backing": "compat:legacy-util-backend",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A687": {
+      "backing": "compat:ease-query-backend",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A688": {
+      "backing": "compat:space3d-backend",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A690": {
+      "backing": "compat:storage-kernel-persistence",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A692": {
+      "backing": "compat:extension-lifecycle",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A694": {
+      "backing": "compat:native-host-actions",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A697": {
+      "backing": "compat:panel-render-mount",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A699": {
+      "backing": "compat:panel-render-mount",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A700": {
+      "backing": "compat:store-namespaced-events",
+      "needs_macos": false,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    },
+    "A701": {
+      "backing": "compat:native-host-actions",
+      "needs_macos": true,
+      "reason": "Missing connected {backing}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {expected}"
+    }
+  },
+  "tools": {
+    "save_project": "; kernel container-copy probes preserve embedded media, but Automation exposes neither file-open/adopt nor durable media byte admission to seed this MCP case. Needs that host ingress and byte-for-byte packed media verification"
+  }
+}

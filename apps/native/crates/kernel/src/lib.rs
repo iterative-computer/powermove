@@ -79,7 +79,6 @@ pub use media_versions::{MediaAdmission, MediaBinding};
 pub mod navigation;
 pub mod pro_editing;
 pub mod pro_jobs;
-pub mod pro_mcp;
 pub mod project_io;
 pub mod queries;
 pub mod selection;

@@ -90,32 +90,3 @@ impl Lines {
         }
     }
 }
-
-/// Optional property distinct from JSON null. Unlike Option<Option<T>>, serde
-/// does not collapse a present null into an absent field.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum Field<T> {
-    #[default]
-    Missing,
-    Present(T),
-}
-impl<T> Field<T> {
-    pub fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-}
-impl<T: Serialize> Serialize for Field<T> {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Missing => s.serialize_unit(),
-            Self::Present(v) => v.serialize(s),
-        }
-    }
-}
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Field<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        T::deserialize(d).map(Self::Present)
-    }
-}
-#[path = "generated.rs"]
-pub mod generated;

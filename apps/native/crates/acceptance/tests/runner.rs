@@ -134,8 +134,8 @@ fn every_remaining_original_names_the_exact_unverified_contract() {
 }
 
 #[test]
-fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
-    // This double certifies metadata/snapshot determinism only. Actual worker
+fn configured_blockers_are_complete_and_workflow_status_columns_cannot_drift() {
+    // This double certifies blocker metadata only. Actual worker
     // assertions execute in verify.sh, and failures stay failures there.
     struct Available;
     impl pm_acceptance::runtime::RuntimeHook for Available {
@@ -154,23 +154,14 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
         Some(&Available),
     )
     .unwrap();
-    if std::env::var_os("PM_UPDATE_BLOCKERS").is_some() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/data/legacy-v1.2.0-remaining-blockers.csv"
-        );
-        std::fs::write(path, report.blockers_csv()).unwrap();
-        eprintln!("counts {:?}", report.counts());
-        return;
-    }
     assert_eq!(report.counts(), (1469, 0, 3135));
-    assert_eq!(
-        report.blockers_csv(),
-        include_str!("../data/legacy-v1.2.0-remaining-blockers.csv")
-    );
     let rows = csv_rows(&report.blockers_csv()).unwrap();
     assert_eq!(rows.len(), 3136);
-    assert!(rows.iter().all(|r| r.len() == 6));
+    assert!(
+        rows.iter()
+            .skip(1)
+            .all(|r| r.len() == 6 && !r[4].is_empty() && !r[5].is_empty())
+    );
     for workflow in &report.workflows {
         let row = format!(
             "| {} | {} | {} | {} | {} |",

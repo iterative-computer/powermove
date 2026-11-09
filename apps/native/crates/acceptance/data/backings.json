@@ -197,7 +197,7 @@
   "W040": {
     "id": "compat-live-kernel-render-page-binding",
     "needs_macos": true,
-    "missing": "Merged native V8/kernel history and typed edits plus recorder CPU readback execute in acceptance. Complete history.selection and structural-mutation leases, animation/model/space3d query backends, engine resources and WebKit page transport with unchanged v1\u20133 scenarios remain open. StorageAPI scope/reload executes; profile/disk lifecycle still needs host integration."
+    "missing": "Merged native V8/kernel history and typed edits plus recorder CPU readback execute in acceptance. Complete history.selection and structural-mutation leases, animation/model/space3d query backends, engine resources and WebKit page transport with unchanged v1–3 scenarios remain open. StorageAPI scope/reload executes; profile/disk lifecycle still needs host integration."
   },
   "W041": {
     "id": "transcription-model-inference-service",
@@ -247,7 +247,12 @@
   "W050": {
     "id": "native-scene3d-editor",
     "needs_macos": true,
-    "missing": "Native 2.5D/3D scene import/gizmo/orbit controller and model/material/texture/lighting render backing; portable asset closure and exact camera/Undo must be verified."
+    "missing": "Native 2.5D/3D scene import/gizmo/orbit controller and model/material/texture/lighting render backing; portable asset closure and exact camera/Undo must be verified.",
+    "main": {
+      "blocked_by": "main:native-scene3d-editor",
+      "needs_macos": true,
+      "reason": "Owner requires the new Rust 3D system from feat/na-3d-source, automatic old-project upgrade, no Blender/compatibility mode, and actual native editor/render/resource verification. Old get_3d_scene fixtures do not certify this gate."
+    }
   },
   "W051": {
     "id": "native-playback-engine-transport",
@@ -357,7 +362,12 @@
   "W072": {
     "id": "owner-web-animation-export-scope",
     "needs_macos": false,
-    "missing": "Owner removed standalone web-animation export from cutover (2026-10-29); preserve shipped source evidence and do not report a pass."
+    "missing": "Owner removed standalone web-animation export from cutover (2026-10-29); preserve shipped source evidence and do not report a pass.",
+    "main": {
+      "blocked_by": "delta-data:archived-web-export-preferences",
+      "needs_macos": true,
+      "reason": "Main removed standalone web-animation delivery. Preserve old project preferences/archives; verify the removed action stays absent. This gate does not request reinstating web export."
+    }
   },
   "W073": {
     "id": "native-control-input-bindings",

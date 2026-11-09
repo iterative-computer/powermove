@@ -150,7 +150,6 @@ fn failed_file_context_preserves_exact_path_and_clears_after_retry() {
     assert_eq!(failed.path, path);
     assert_eq!(failed.code, error.code);
     assert_eq!(queue.pending(), (0, 2));
-    assert_eq!(entrypoints::SHOW_IN_FINDER_LABEL, "Show in Finder");
     hook.fail = false;
     queue.drain_files(&mut hook).unwrap();
     assert_eq!(hook.files, [path, PathBuf::from("/synthetic/Later.pmv")]);

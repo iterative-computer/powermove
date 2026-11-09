@@ -27,7 +27,7 @@ pub fn encode_disk_value(value: &Value, format: DiskFormat) -> io::Result<Vec<u8
     }
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     gzip.write_all(&plain)?;
-    let data = encode_base64(&gzip.finish()?);
+    let data = crate::project_io::base64::encode(&gzip.finish()?);
     let mut m = Map::new();
     m.insert("__powermoveDiskValue", Value::Number(1.0));
     m.insert("encoding", Value::from("gzip"));
@@ -435,29 +435,6 @@ impl Drop for LibraryWriter {
             let _ = w.join();
         }
     }
-}
-
-fn encode_base64(bytes: &[u8]) -> String {
-    const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for c in bytes.chunks(3) {
-        let n = ((c[0] as u32) << 16)
-            | ((c.get(1).copied().unwrap_or(0) as u32) << 8)
-            | c.get(2).copied().unwrap_or(0) as u32;
-        out.push(ABC[((n >> 18) & 63) as usize] as char);
-        out.push(ABC[((n >> 12) & 63) as usize] as char);
-        out.push(if c.len() > 1 {
-            ABC[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if c.len() > 2 {
-            ABC[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 // A roll-forward intent makes a multi-slot checkpoint restartable; plain legacy

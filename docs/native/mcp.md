@@ -250,7 +250,6 @@ provide primitives, not every end-to-end MCP guarantee:
 * `kernel/src/commands/captions.rs` and `scene3d.rs` still return
   `CommandError::NotImplemented`. `pm-captions` supplies normalization, editing
   and subtitle codecs, not a speech model/service or kernel command admission.
-* `services/src/media.rs::ImportQueue` requires a host `MediaHook::probe/admit`.
   `promedia/src/media.rs::MediaCatalog` retains original/proxy relationships;
   `promedia/src/codec.rs::{Decoder,Encoder}` are injected traits. These do not
   yet copy/admit durable imported bytes and media Undo together.
@@ -272,29 +271,10 @@ provide primitives, not every end-to-end MCP guarantee:
 
 ### Concrete host bindings within the MCP-owned path
 
-`apps/native/crates/mcp/backends` is package **pm-mcp-backends**, with an owned
-standalone workspace/lockfile. It depends on the actual `pm-services` and
-`pm-promedia` crates; it is not another kernel writer. Keeping its dependency
-integration here avoids modifying the integration lane's shared native
-Cargo.toml/Cargo.lock. App hosts must add this package to their dependencies and
-update that shared lockfile when integrating it. The standalone `powermove-mcp`
+The app binds the MCP worker's Store reads and media registry in
+`apps/native/crates/app/src/mcp_services.rs`. The standalone `powermove-mcp`
 binary does not discover an HTTP client, app resource root or loaded catalog.
 
-On the dedicated MCP worker:
-
-```rust,ignore
-pm_mcp_backends::bind_store(&mut host, store_origin, native_store_transport)?;
-host.extension_sources = Some(std::sync::Arc::new(
-    pm_mcp_backends::extensions::BuiltinSources::new(shipped_resources_root)?
-));
-// Share the actual catalog; retire/rebind it on project close/reopen.
-let registry = std::sync::Arc::new(pm_mcp_backends::NativeMediaRegistry::default());
-registry.bind(project_id, shared_native_media_catalog)?;
-host.media_registry = Some(registry);
-```
-
-`NativeStoreReads` validates origins using the actual native StoreClient,
-forwards bounded reads to its StoreTransport and strips diagnostic error chains.
 Rust maps catalog listings, full detail/release histories and release-ID-addressed
 source trees/files into exactly the tagged result fields. Source file reads
 resolve release coordinates first; local overlays are never used as release
@@ -556,9 +536,6 @@ provider login, installed app/profile scan or user project was used.
 cargo test --locked -p pm-mcp -p pm-kernel
 cargo fmt -p pm-mcp -- --check
 cargo clippy --locked -p pm-mcp --all-targets --no-deps -- -D warnings
-cargo test --locked --manifest-path crates/mcp/backends/Cargo.toml
-cargo fmt --manifest-path crates/mcp/backends/Cargo.toml -- --check
-cargo clippy --locked --manifest-path crates/mcp/backends/Cargo.toml --all-targets --no-deps -- -D warnings
 ```
 
 macOS still needs application dependency/lockfile integration, native transport

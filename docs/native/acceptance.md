@@ -49,7 +49,7 @@ All **396 legacy specs**, including the frozen **370-spec roster**, retain
 specs. 389 retain a macOS integration gate; seven have named portable dependencies.
 The authoritative triage CSV and generated replacement map retain all provenance.
 
-[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv)
+`remaining-blockers.csv`
 reports **every one of the 3,159 remaining case IDs**, with workflow, evidence kind,
 macOS flag, backing and precise unverified assertion. Original cases now include
 the exact W1 contract; MCP cases name the actual tool/backing and distinguish a
@@ -270,7 +270,7 @@ cargo test --locked -p pm-acceptance
 cargo run --locked -p pm-acceptance -- --workflow W033 --format markdown
 cargo run --locked -p pm-acceptance -- --format e2e-csv
 cargo run --locked -p pm-acceptance -- --format catalog
-cargo test --locked --manifest-path crates/acceptance/runtime/Cargo.toml
+cargo test --locked -p pm-acceptance-runtime
 ```
 
 JSON format `powermove.acceptance`, version 1, includes case kinds/status/reasons,
@@ -363,7 +363,7 @@ closure, agent/tool adapters and the macOS integration above remain open.
 
 All 83 workflow verdicts and pass/fail/blocked status columns are maintained in
 [W1](w1-workflows.md#native-execution-status). The complete per-case open work is
-[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv).
+`remaining-blockers.csv`.
 
 ## Parity follow-up — 2026-11-04
 
@@ -425,9 +425,9 @@ in JSON/CSV when a failure determines the process exit.
 
 ### Exact remaining backing and retained provenance
 
-[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv)
+`remaining-blockers.csv`
 contains all 3,136 outstanding assertion IDs and exact unverified contracts.
-[blocker-groups.csv](../../apps/native/crates/acceptance/data/blocker-groups.csv)
+`blocker-groups.csv`
 and JSON `blocker_groups` partition them once into **151 backing IDs**. The
 [83-workflow backing inventory](../../apps/native/crates/acceptance/data/backings.json)
 names each remaining coordinator/adapter/oracle. MCP groups retain exact tool
@@ -519,7 +519,7 @@ defect above; strict W040 exits 2. Every Cargo build/test/run/Clippy uses `--loc
 ```sh
 source /workspace/.tools/activate.sh; cd /workspace/powermove
 apps/native/crates/acceptance/scripts/verify.sh --strict
-cargo run --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml --bin pm-e2e-triage
+cargo run --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance --bin pm-e2e-triage
 python3 apps/native/crates/acceptance/scripts/refresh-reports.py work/native-acceptance/report.json
 ```
 
@@ -577,9 +577,9 @@ assertion exits **0**.
 | 2 actual memory calls | Main-valid project_memory list returns Unknown tool; get_project_state lacks the empty memory index required by pinned main. Source proves these are now required A07/P02 behavior. Full mutation/non-Undo/autosave semantics remain delta-data/kernel/MCP work outside acceptance ownership. |
 | 2 Glide assertions | Current main's exact unchanged declaration hash and operation parameters reproduce the existing sequential set_property defect: 90.42094586353606 versus 104.94929544957891 at 1 second. The paired replace_keyframes oracle passes. The probe and declaration each retain the failure; no tolerance changed. |
 
-[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv),
+`remaining-blockers.csv`,
 [failures.csv](../../apps/native/crates/acceptance/data/failures.csv) and
-[blocker-groups.csv](../../apps/native/crates/acceptance/data/blocker-groups.csv)
+`blocker-groups.csv`
 now describe active main. The e2e union map retains **all 396 legacy rows and the
 frozen 370 roster**, adding the main-only scrub-framebuffer-reuse spec for **397
 rows**. Existing acceptance links survive in `legacy_acceptance_ids`; every main
@@ -701,11 +701,10 @@ main `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`; the original v1.2.0 file and
 extension requirements remain separate. No shared W1/table/CSV was rewritten.
 
 The immutable [starting census](../../apps/native/crates/acceptance/data/blocked-baseline-2026-11-05.csv)
-retains **all 2,662 main + 3,136 legacy blocked rows**, with original IDs,
-requirements and backings. The reviewed [reason registry](../../apps/native/crates/acceptance/data/blocker-reasons-2026-11-05.json)
+retains **all 2,662 main + 3,136 legacy blocked rows**, with original IDs
+and backings. The reviewed [reason registry](../../apps/native/crates/acceptance/data/blocker-reasons-2026-11-05.json)
 assigns exactly one primary reason to each backing; the anonymized
-[row-by-row table](../../apps/native/crates/acceptance/data/census-2026-11-05.csv)
-contains all **5,798** rows, reference, ID, original backing, single reason,
+row-by-row table (`census.py --csv`) contains all **5,798** rows, reference, ID, original backing, single reason,
 dependency, current verdict and evidence. Nothing is retired or removed from
 the denominator when it passes or fails. The table below groups those exact rows
 by backing, without names, private extensions, profiles or user projects.
@@ -1235,9 +1234,7 @@ needed any dependency update; every Cargo command uses `--locked`.
 Exact suite commands, also executed by `verify.sh --strict`:
 
 ```sh
-cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance
-cargo test --locked --manifest-path apps/native/crates/acceptance/runtime/Cargo.toml
-cargo test --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance -p pm-acceptance-runtime
 python3 -m unittest discover -s apps/native/crates/acceptance/scripts -p 'test_*.py'
 ```
 

@@ -3,7 +3,7 @@ use pm_agents::{
     Access, ApprovalMode, Effects, Event, RunResult,
     approvals::{Approvals, Authority},
     claude, codex,
-    protocol::{Field, Lines, generated},
+    protocol::Lines,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -67,31 +67,6 @@ fn framing_ignores_nonobjects_and_malformed() {
         l.push(b"junk\nnull\n[]\ntrue\n{\"x\":1}\r\n"),
         vec![Ok(json!({"x":1}))]
     );
-}
-#[test]
-fn generated_shapes_preserve_missing_null_and_extra() {
-    for source in [
-        json!({}),
-        json!({"model":null}),
-        json!({"model":"model","cwd":"/tmp","ephemeral":true,"newFutureField":{"nested":3}}),
-    ] {
-        let v: generated::ThreadStartParams = serde_json::from_value(source.clone()).unwrap();
-        assert_eq!(serde_json::to_value(v).unwrap(), source);
-    }
-    let v: generated::ThreadStartParams = serde_json::from_value(json!({"model":null})).unwrap();
-    assert!(matches!(v.model, Field::Present(None)));
-}
-#[test]
-fn generated_union_rejects_wrong_literal() {
-    assert!(
-        serde_json::from_value::<generated::SandboxMode>(json!("invented-unrestricted")).is_err()
-    );
-}
-#[test]
-fn generated_steer_shape_roundtrip() {
-    let v = json!({"threadId":"t","expectedTurnId":"u","input":[{"type":"localImage","path":"/tmp/a.png"}]});
-    let parsed: generated::TurnSteerParams = serde_json::from_value(v.clone()).unwrap();
-    assert_eq!(serde_json::to_value(parsed).unwrap(), v);
 }
 #[test]
 fn computer_authority_requires_fresh_consent() {

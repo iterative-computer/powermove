@@ -3,8 +3,7 @@
 Rows S005 S017 S018 S019. Grammar: [README](README.md) §1–4. Ports
 `R/legacy/ui/projects.ts`, `R/legacy/core/projects.ts`,
 `R/legacy/ui/project-settings.ts` `createNewProjectForm`. Model:
-`pm-services::library::{ProjectEntry, ProjectSummary, LibraryAction,
-LibraryService}`; vocabulary from
+the app's `project_library` over the `pm-kernel` library store; vocabulary from
 [reviews/na-cloud-services.md](../reviews/na-cloud-services.md) (Move to
 Trash, Put Back, Recently Deleted).
 

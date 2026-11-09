@@ -55,7 +55,7 @@
 //! * The media order follows the media table (file order, then imports);
 //!   the old app followed `fileAssets` insertion order.
 //! * The project-file registry journal, macOS Versions snapshot, and the
-//!   renderer upload protocol are not ported (the shell lane owns file
+//!   renderer upload protocol are not ported (the app shell owns file
 //!   associations; there is no renderer upload in a native app).
 
 #[path = "file_guard.rs"]

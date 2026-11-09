@@ -1,7 +1,6 @@
-//! The four spine commands (the first lane), kept for existing callers:
-//! [`Command::SetStaticOpacity`], [`Command::SetLayerName`],
-//! [`Command::SetLayerVisible`], [`Command::SetLayerLocked`]. New code uses
-//! the domain commands.
+//! The four spine commands: [`Command::SetStaticOpacity`],
+//! [`Command::SetLayerName`], [`Command::SetLayerVisible`],
+//! [`Command::SetLayerLocked`].
 //!
 //! Ported from `set_property` (static path) and `set_layer` of
 //! `main:apps/desktop/src/renderer/src/legacy/core/editing.ts`, with

@@ -384,8 +384,7 @@ mod tests {
         );
     }
 
-    // The executable transition proposal is owned by this lane and tested as
-    // written, rather than maintaining an untested second implementation.
+    // The executable transition proposal is tested as written, rather than maintaining an untested second implementation.
     const PROPOSAL: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../../docs/native/file-guard.md"
