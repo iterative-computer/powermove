@@ -204,6 +204,15 @@ pub struct Extensions {
     face_keys: BTreeSet<(String, u16, bool)>,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
+    /// Where the realm's viewer stage shows the page over the viewer, once an
+    /// extension made one (`viewer.stage`, `viewer.ov`). The viewer keeps the
+    /// pointer there.
+    stage: Rc<std::cell::Cell<Option<layout::Rect>>>,
+    stage_used: bool,
+    /// The viewer slot and composition frame last told to the realm.
+    stage_sent: Option<Option<[i64; 8]>>,
+    /// The viewer frame last told to the realm (its stamp's sequence).
+    presented: Option<u64>,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -246,6 +255,10 @@ impl Default for Extensions {
             unresponsive: None,
             stopped_for_quit: false,
             resources: Arc::default(),
+            stage: Rc::default(),
+            stage_used: false,
+            stage_sent: None,
+            presented: None,
         }
     }
 }
@@ -572,6 +585,13 @@ impl Controller {
                     self.view.place(Some(zoom.clamp(ZOOM_MIN, top)), pan);
                     self.write_view(None, cx);
                 }
+            }
+            // An extension made the viewer's stage: show the page over the viewer.
+            Some("viewerStage") => {
+                self.extensions.stage_used = true;
+                self.extensions.stage_sent = None;
+                self.sync_viewer_stage();
+                cx.notify();
             }
             Some("fonts") => self.ensure_page_fonts(&request["faces"], cx),
             Some("download") => {
@@ -1589,6 +1609,7 @@ impl Controller {
         let owners = self.extensions.owners.clone();
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
+        let stage = self.extensions.stage.clone();
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
@@ -1596,10 +1617,13 @@ impl Controller {
             let mut dirty = false;
             for (key, page) in views.borrow().iter() {
                 let mut host = page.borrow_mut();
+                let stage = stage.get().filter(|_| key.is_empty());
                 let regions = bodies
                     .iter()
                     .filter(|(id, _)| owners.get(id).map_or("", String::as_str) == key)
-                    .map(|(_, r)| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64))
+                    .map(|(_, r)| r)
+                    .chain(stage.as_ref())
+                    .map(|r| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64))
                     .collect();
                 let _ = host.set_regions(regions);
                 dirty |= host.composition_dirty();
@@ -1676,8 +1700,58 @@ impl Controller {
             self.extensions.viewport = Some(viewport);
         }
     }
+    /// v1–3's viewer stage follows the viewer slot and its composition frame,
+    /// in window points; the realm hears only when either moved.
+    pub(crate) fn sync_viewer_stage(&mut self) {
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        let slot = self.host.borrow().viewer_rect.get();
+        let zoom = self.view.scale.get();
+        let placed = slot.filter(|s| s.w > 0. && s.h > 0.).map(|s| {
+            let (w, h) = (
+                (self.dimensions[0] * zoom) as f32,
+                (self.dimensions[1] * zoom) as f32,
+            );
+            let x = s.x + (s.w - w) / 2. + self.view.pan[0] as f32;
+            let y = s.y + (s.h - h) / 2. + self.view.pan[1] as f32;
+            ([s.x, s.y, s.w, s.h], [x, y, w, h])
+        });
+        let key = placed.map(|(a, b)| {
+            let mut key = [0; 8];
+            for (k, v) in key.iter_mut().zip(a.iter().chain(&b)) {
+                *k = (v * 100.).round() as i64;
+            }
+            key
+        });
+        if self.extensions.stage_sent == Some(key) {
+            return;
+        }
+        self.extensions.stage_sent = Some(key);
+        let shown = slot.filter(|_| self.extensions.stage_used && placed.is_some());
+        self.extensions.stage.set(shown);
+        let (stage, frame) = placed.map_or((Value::Null, Value::Null), |(a, b)| (json!(a), json!(b)));
+        host.shell_state(json!({ "stage": stage, "frame": frame }));
+    }
+    /// A new viewer frame on screen: v1–3's `frame:rendered` and overlay pass.
+    pub(crate) fn tell_presented(&mut self, frame: Option<&pm_engine_service::FrameReport>) {
+        let (Some(host), Some(frame)) = (&self.extensions.host, frame) else {
+            return;
+        };
+        if self.extensions.presented == Some(frame.stamp.sequence) {
+            return;
+        }
+        self.extensions.presented = Some(frame.stamp.sequence);
+        let time = frame.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        host.frame_presented(json!({
+            "time": time,
+            "version": frame.stamp.revision,
+            "quality": frame.scale,
+        }));
+    }
     fn place_panels(&mut self) {
         self.sync_viewport();
+        self.sync_viewer_stage();
         let Some(host) = &self.extensions.host else {
             return;
         };

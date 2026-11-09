@@ -95,6 +95,8 @@ enum Input {
     Viewport(f32, f32, f32),
     Realm(Writer, RealmEnvelope),
     Moved,
+    /// The viewer presented a frame; the latest waits in `presented`.
+    Presented,
     Run(String, Value),
     Panel(String, bool),
     Place(String, Option<[f32; 4]>),
@@ -525,6 +527,7 @@ pub struct ExtensionHost {
     profile: PathBuf,
     transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
     moved: Arc<AtomicU8>,
+    presented: Arc<Mutex<Option<Value>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl ExtensionHost {
@@ -547,6 +550,7 @@ impl ExtensionHost {
         });
         let transport = Arc::new(Mutex::new(None));
         let moved = Arc::new(AtomicU8::new(0));
+        let presented = Arc::new(Mutex::new(None));
         let writer = Writer {
             realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
             generation: GENERATION,
@@ -565,6 +569,8 @@ impl ExtensionHost {
             inbox: inbox.clone(),
             transport: transport.clone(),
             moved: moved.clone(),
+            presented: presented.clone(),
+            shell: serde_json::Map::new(),
             restarts: 0,
             asking: None,
             asking_culprit: None,
@@ -591,6 +597,7 @@ impl ExtensionHost {
             profile,
             transport,
             moved,
+            presented,
             worker: Some(worker),
         }
     }
@@ -691,6 +698,14 @@ impl ExtensionHost {
     /// (`{zoom, pan, fit}`), which the `tool` and `viewer` services report.
     pub fn shell_state(&self, state: Value) {
         let _ = self.inbox.send(Input::Shell(state));
+    }
+    /// The viewer presented a frame (`{time, version, quality, viewport}`):
+    /// the realm hears `frame:rendered`, then redraws `overlay`. Cheap enough
+    /// for every frame; a busy realm hears only the latest.
+    pub fn frame_presented(&self, frame: Value) {
+        if self.presented.lock().unwrap().replace(frame).is_none() {
+            let _ = self.inbox.send(Input::Presented);
+        }
     }
     /// Where override asks for this realm go, from any thread.
     pub fn raster_inbox(&self) -> RasterInbox {
@@ -893,6 +908,9 @@ struct Owner {
     inbox: Sender<Input>,
     transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
     moved: Arc<AtomicU8>,
+    presented: Arc<Mutex<Option<Value>>>,
+    /// Every shell fact the services report, replayed into a rebuilt realm.
+    shell: serde_json::Map<String, Value>,
     restarts: usize,
     /// The task the user is being asked about, so one hang asks once at a time.
     /// The task the D11 sheet asks about, and the extension running it.
@@ -1083,7 +1101,16 @@ impl Owner {
                 self.eval(&format!("__compat.answer({token},{value})"));
             }
             Input::Shell(state) => {
+                if let Value::Object(facts) = &state {
+                    self.shell.extend(facts.clone());
+                }
                 self.eval(&format!("__compat.shellState({state})"));
+            }
+            Input::Presented => {
+                let frame = self.presented.lock().unwrap().take();
+                if let Some(frame) = frame {
+                    self.eval(&format!("__compat.presented({frame})"));
+                }
             }
             Input::Rasters(batch, wire) => {
                 let ask = match &wire["ask"] {
@@ -1863,10 +1890,18 @@ impl Owner {
         self.publish_records();
         self.publish_store();
         let records = self.realm_plan();
+        self.replay_window();
+        self.eval(&format!("__compat.boot({records})"));
+    }
+    /// A new realm learns the window it lives in before anything activates.
+    fn replay_window(&mut self) {
         if let Some((width, height, scale)) = self.viewport {
             self.eval(&format!("__compat.viewport({width},{height},{scale})"));
         }
-        self.eval(&format!("__compat.boot({records})"));
+        if !self.shell.is_empty() {
+            let shell = Value::Object(self.shell.clone());
+            self.eval(&format!("__compat.shellState({shell})"));
+        }
     }
     /// The trusted records the window realm is about to run: its wrappers
     /// report their code identity from them (the disk render cache keys
@@ -2026,9 +2061,7 @@ impl Owner {
             Ok(()) => {
                 self.publish_records();
                 let records = self.realm_plan();
-                if let Some((width, height, scale)) = self.viewport {
-                    self.eval(&format!("__compat.viewport({width},{height},{scale})"));
-                }
+                self.replay_window();
                 self.eval(&format!("__compat.boot({records})"));
             }
             Err(error) => self.shared.update(|p| {

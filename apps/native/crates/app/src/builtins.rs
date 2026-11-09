@@ -380,6 +380,7 @@ impl Controller {
         if let Some(host) = &self.extensions.host {
             host.publish_time(time, playing);
         }
+        self.sync_viewer_stage();
         if !self.builtins.clock.due(time, playing) {
             return;
         }
@@ -1190,6 +1191,7 @@ impl Controller {
                 "pan": self.view.pan,
             }));
         }
+        self.sync_viewer_stage();
         self.view_write = Some(cx.spawn(async move |this, cx| {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;

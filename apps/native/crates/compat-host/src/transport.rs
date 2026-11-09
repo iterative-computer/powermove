@@ -145,7 +145,7 @@ pub(crate) fn page(
 ) -> String {
     let cfg = json!({"base":base,"generation":generation});
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style>html,body{{margin:0;background:transparent;font:14px -apple-system;color:CanvasText}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style>html,body{{margin:0;background:transparent;font:14px -apple-system;color:CanvasText}}[data-pm-contribution]{{background:var(--bg-panel,Canvas)}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
         csp(nonce, trust),
         nonce,
         cfg,

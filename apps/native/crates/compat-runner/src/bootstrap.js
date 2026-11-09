@@ -473,14 +473,22 @@ globalThis.__compat = {
               layer: layer?.id,
               time: time ?? this.realm.PM.time,
             }),
-          pick: (x, y, time) =>
-            host.query("engine.pick", {
+          // As main: the topmost layer under a composition point, or null.
+          pick: (x, y, time, options) => {
+            const id = host.query("engine.pick", {
               x,
               y,
               time: time ?? this.realm.PM.time,
-            }),
+              includeLocked: !!options?.includeLocked,
+            });
+            return id ? (this.realm.PM.L?.(id) ?? null) : null;
+          },
           compileError: () => null,
-          previewViewport: null,
+          // The composition window the viewer drew last, in composition
+          // pixels; null while all of it shows.
+          get previewViewport() {
+            return viewport();
+          },
           canvas: null,
           init: () => null,
           resize: () => undefined,
@@ -598,12 +606,99 @@ globalThis.__compat = {
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
     // Built-in services v1 registered for extensions: `tool` (the shell's tool)
-    // and `viewer` (its navigation; the native viewer has no DOM stage).
-    const shell = { tool: "select", toolShape: "rect", zoom: 1, pan: [0, 0], fit: true };
+    // and `viewer` (its navigation and its stage, a page element over the
+    // native viewer that the shell keeps on it).
+    const shell = {
+      tool: "select",
+      toolShape: "rect",
+      zoom: 1,
+      pan: [0, 0],
+      fit: true,
+      // Window points: the viewer's area and the composition frame in it.
+      stage: null,
+      frame: null,
+    };
+    const compat = this;
+    const stage = { el: null, inner: null, ov: null, ovUsed: false };
+    const px = (n) => `${Math.round(n * 100) / 100}px`;
+    const dpr = () => Math.min(globalThis.devicePixelRatio || 1, 2);
+    // As main's viewer layout: `#stage` fills the viewer, `#stage-inner` is the
+    // composition frame inside it, `#overlay` covers the stage at device pixels.
+    const placeStage = () => {
+      if (!stage.el) return;
+      const at = shell.stage;
+      if (!at) {
+        stage.el.style.display = "none";
+        return;
+      }
+      const [x, y, w, h] = at;
+      stage.el.style.cssText = `position:fixed;left:${px(x)};top:${px(y)};width:${px(w)};height:${px(h)};overflow:hidden;pointer-events:none`;
+      const f = shell.frame ?? [x, y, w, h];
+      stage.inner.style.cssText = `position:absolute;left:${px(f[0] - x)};top:${px(f[1] - y)};width:${px(f[2])};height:${px(f[3])};overflow:hidden`;
+      const [ow, oh] = [Math.round(w * dpr()), Math.round(h * dpr())];
+      // Assigning a canvas dimension clears it, so only on a real change.
+      if (stage.ov.width !== ow) stage.ov.width = ow;
+      if (stage.ov.height !== oh) stage.ov.height = oh;
+      stage.ov.style.cssText = `position:absolute;left:0;top:0;width:${px(w)};height:${px(h)};pointer-events:none`;
+    };
+    const ensureStage = () => {
+      const document = this.dom?.document;
+      if (!document) return null;
+      if (!stage.el) {
+        stage.el = document.createElement("div");
+        stage.el.id = "stage";
+        stage.inner = document.createElement("div");
+        stage.inner.id = "stage-inner";
+        stage.ov = document.createElement("canvas");
+        stage.ov.id = "overlay";
+        stage.el.append(stage.inner, stage.ov);
+        document.body.append(stage.el);
+        placeStage();
+        // The shell shows the page over the viewer only once a stage exists.
+        call("ui.request", { kind: "viewerStage" });
+      }
+      return stage.el;
+    };
+    // The composition rectangle the viewer shows, in composition pixels.
+    const viewport = () => {
+      const [s, f] = [shell.stage, shell.frame];
+      const project = this.realm.PM.proj;
+      if (!s || !f || !(f[2] > 0) || !project?.w) return null;
+      const scale = f[2] / project.w;
+      const x0 = Math.max(0, (s[0] - f[0]) / scale);
+      const y0 = Math.max(0, (s[1] - f[1]) / scale);
+      const x1 = Math.min(project.w, (s[0] + s[2] - f[0]) / scale);
+      const y1 = Math.min(project.h, (s[1] + s[3] - f[1]) / scale);
+      if (x0 <= 0 && y0 <= 0 && x1 >= project.w && y1 >= project.h) return null;
+      return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
+    };
+    // Main's overlay pass: the viewer clears its canvas, then listeners draw.
+    this.overlay = () => {
+      if (stage.ovUsed) {
+        const context = stage.ov.getContext("2d");
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.clearRect(0, 0, stage.ov.width, stage.ov.height);
+      }
+      this.realm.PM.bus.emit("overlay");
+    };
     this.shellState = (state) => {
       const tool = state.tool !== undefined && state.tool !== shell.tool;
+      const placed = ["stage", "frame", "zoom", "pan", "fit"].some(
+        (key) => key in state && JSON.stringify(state[key]) !== JSON.stringify(shell[key]),
+      );
+      const resized =
+        "stage" in state &&
+        JSON.stringify(state.stage?.slice(2)) !== JSON.stringify(shell.stage?.slice(2));
       Object.assign(shell, state);
-      if (tool) this.realm.PM.bus.emit("tool", shell.tool);
+      if (placed) placeStage();
+      this.realm.task(() => {
+        if (tool) this.realm.PM.bus.emit("tool", shell.tool);
+        if (!placed) return;
+        // As main: a panel size change is a layout; pan and zoom repaint the overlay.
+        if (resized) this.realm.PM.bus.emit("layout");
+        this.overlay();
+      });
+      this.dom?.flush();
     };
     // As main's toolbar service: the change is immediate here, and the shell
     // follows (its command carries a shape tool's shape).
@@ -644,13 +739,37 @@ globalThis.__compat = {
       get fit() {
         return shell.fit;
       },
-      shown: 1,
+      // Points per composition pixel on screen.
+      get shown() {
+        const project = compat.realm.PM.proj;
+        return shell.frame && project?.w ? shell.frame[2] / project.w : shell.zoom;
+      },
       showControls: true,
-      stage: null,
-      ov: null,
-      layout: () => undefined,
+      get stage() {
+        return ensureStage();
+      },
+      get ov() {
+        if (!ensureStage()) return null;
+        stage.ovUsed = true;
+        return stage.ov;
+      },
+      // The shell lays the viewer out; this re-places the stage and repaints.
+      layout: () => {
+        placeStage();
+        this.overlay();
+      },
       attach: () => undefined,
       worldBounds: (layer, time) => this.realm.PM.GL?.bounds?.(layer, time) ?? null,
+      // As main: the topmost layer under a window point inside the frame.
+      layerAtPoint: (clientX, clientY) => {
+        const [s, f] = [shell.stage, shell.frame];
+        const project = this.realm.PM.proj;
+        if (!s || !f || !project?.w) return null;
+        if (clientX < s[0] || clientY < s[1] || clientX > s[0] + s[2] || clientY > s[1] + s[3])
+          return null;
+        const scale = f[2] / project.w;
+        return this.realm.PM.GL.pick((clientX - f[0]) / scale, (clientY - f[1]) / scale, this.realm.PM.time);
+      },
       snapshotSnapCandidates: () => ({ x: [], y: [] }),
       isNavigating: () => false,
       deferNavigationRender: () => false,
@@ -758,6 +877,20 @@ globalThis.__compat = {
       this.realm.receive(runtime.engine("kernel.publication", {}));
       void this.projectFonts();
     });
+  },
+  /** The viewer presented a frame: main's `preview:presented`, then the
+   * overlay pass that follows each compositor frame. */
+  presented(frame) {
+    this.realm.task(() => {
+      this.realm.PM.bus.emit("preview:presented", {
+        time: frame.time,
+        viewport: this.realm.PM.GL.previewViewport,
+        version: frame.version,
+        quality: frame.quality,
+      });
+      this.overlay();
+    });
+    this.dom?.flush();
   },
   moved(time, timeChanged, playingChanged) {
     this.realm.task(() => {

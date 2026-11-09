@@ -914,7 +914,7 @@ mod tests {
         let runner = dom_runner();
         let value = runner
             .json("(()=>{const s=__compat.realm.services;const t=s.get('tool'),v=s.get('viewer');let heard=null;__compat.realm.PM.bus.on('tool',x=>heard=x);
-                const before=[t.tool,v.zoom,v.fit,v.stage];__compat.shellState({tool:'hand'});__compat.shellState({zoom:2,fit:false,pan:[3,4]});
+                const before=[t.tool,v.zoom,v.fit,v.stage.id];__compat.shellState({tool:'hand'});__compat.shellState({zoom:2,fit:false,pan:[3,4]});
                 const shell=[t.tool,heard,v.zoom,v.fit,v.pan];
                 // As main: setZoom leaves fit, clamped, at once; setTool reads back at once.
                 const zoomed=[v.setZoom(20),v.zoom,v.fit,v.setZoom(NaN)];t.setTool('shape','ellipse');const shape=[t.tool,t.toolShape,heard];t.toolShape='star';
@@ -923,7 +923,7 @@ mod tests {
         assert_eq!(
             value,
             json!([
-                ["select", 1, true, null],
+                ["select", 1, true, "stage"],
                 "hand",
                 "hand",
                 2,
@@ -935,6 +935,62 @@ mod tests {
                 "function"
             ])
         );
+    }
+    /// v1's viewer stage: `#stage` over the viewer, `#stage-inner` on the
+    /// composition frame, `ov` at device pixels; frames and placement reach
+    /// listeners as main's `frame:rendered`, `layout` and `overlay`.
+    #[test]
+    fn viewer_stage_follows_the_shell_and_hears_presented_frames() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const v=api.services.get('viewer');const heard=[];
+                for(const e of ['layout','overlay','frame:rendered'])api.events.on(e,x=>heard.push(x===undefined?e:[e,x]));
+                const stage=v.stage,inner=stage.querySelector(':scope > #stage-inner');
+                __compat.shellState({stage:[100,50,800,450],frame:[260,140,480,270]});
+                const ov=v.ov;
+                const placed=[stage.id,stage.style.left,stage.style.width,inner.style.left,inner.style.top,inner.style.width,ov.width,ov.height,v.shown,api.render.gl.previewViewport,v.stage===stage,stage.isConnected];
+                const ctx=ov.getContext('2d');ctx.fillStyle='#f00';ctx.fillRect(0,0,4,4);const drawn=ctx.getImageData(0,0,1,1).data[3];
+                __compat.presented({time:1.5,version:7,quality:.5});
+                const cleared=ctx.getImageData(0,0,1,1).data[3];
+                __compat.shellState({frame:[-200,-100,960,540]});
+                const crop=api.render.gl.previewViewport;
+                __compat.shellState({stage:null});
+                return [placed,drawn,cleared,heard,crop,stage.style.display,v.layerAtPoint(10,10)]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                ["stage", "100px", "800px", "160px", "90px", "480px", 1600, 900, 1.5, null, true, true],
+                255,
+                0,
+                [
+                    "layout",
+                    "overlay",
+                    ["frame:rendered", {"time": 1.5, "viewport": null, "version": 7, "quality": 0.5}],
+                    "overlay",
+                    "overlay",
+                    "layout",
+                    "overlay"
+                ],
+                {"x": 100, "y": 50, "width": 220, "height": 130},
+                "none",
+                null
+            ])
+        );
+    }
+    /// `layerAtPoint` and `render.gl.pick` answer with main's layer, from a
+    /// window point through the composition frame the shell reports.
+    #[test]
+    fn viewer_layer_at_point_picks_through_the_frame() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const v=api.services.get('viewer');
+                const made=api.edit.apply([{type:'add_layer',id:'box',layerType:'solid',name:'Box',from:0,duration:2,properties:{x:80,y:45,w:40,h:30}}]);
+                __compat.shellState({stage:[0,0,800,500],frame:[0,0,640,360]});
+                const hit=v.layerAtPoint(160,90),miss=v.layerAtPoint(700,400);
+                return [made.ok,hit?.id,hit===api.model.layer('box'),miss,api.render.gl.pick(80,45,0)?.id]})()"#)
+            .unwrap();
+        assert_eq!(value, json!([true, "box", true, null, "box"]));
     }
     #[test]
     fn ui_modal_keeps_main_semantics_with_native_frame_data() {

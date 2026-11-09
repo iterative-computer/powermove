@@ -772,7 +772,9 @@ impl KernelAdapter {
                     args["x"].as_f64().ok_or(Error::Invalid("pick x"))?,
                     args["y"].as_f64().ok_or(Error::Invalid("pick y"))?,
                     time,
-                    &Default::default(),
+                    &pm_kernel::queries::PickOptions {
+                        include_locked: args["includeLocked"] == true,
+                    },
                 );
                 Ok(hit.map_or(Value::Null, |hit| json!(hit.layer_id)))
             }
