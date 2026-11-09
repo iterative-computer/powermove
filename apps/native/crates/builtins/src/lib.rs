@@ -257,14 +257,14 @@ impl EffectDesk {
                 if targets == 0 {
                     return Ok(json!({"reason": "select"}));
                 }
-                let mut request = match model.paste_selected_effects(caller) {
-                    Ok(request) => request,
+                let (mut request, per_layer) = match model.paste_selected_effects(caller) {
+                    Ok(pasted) => pasted,
                     Err(pm_panel_inspector::InspectorError::EmptyEdit) => {
                         return Ok(json!({"reason": "unavailable"}));
                     }
                     Err(error) => return Err(error.to_string()),
                 };
-                let count = clipboard.len() * targets;
+                let count = per_layer * targets;
                 if let pm_kernel::Call::Transact { label, .. } = &mut request.call {
                     *label = Some(
                         if count == 1 {
@@ -1328,11 +1328,13 @@ impl Builtins {
     pub fn effect_desk(&self) -> EffectDesk {
         EffectDesk(self.broker.clone())
     }
-    /// The layers a Properties row's binding handle in `panel` edits.
+    /// The layers a Properties row's binding handle in `panel` edits. Called
+    /// on the main thread, so it never waits on the panel's worker: `None`
+    /// while it is busy, and the caller asks again at the next publication.
     pub fn bound_layers(&self, panel: &str, handle: &str) -> Option<std::sync::Arc<[String]>> {
-        let entry = self.broker.entries.lock().unwrap().get(panel)?.clone();
-        let entry = entry.lock().unwrap();
-        let backend = entry.backend.lock().unwrap();
+        let entry = self.broker.entries.try_lock().ok()?.get(panel)?.clone();
+        let entry = entry.try_lock().ok()?;
+        let backend = entry.backend.try_lock().ok()?;
         backend.native.properties.layers_of(handle)
     }
     pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {

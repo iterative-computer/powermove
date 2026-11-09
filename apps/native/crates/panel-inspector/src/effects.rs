@@ -373,12 +373,20 @@ impl Inspector {
         caller: Caller,
         layer: &str,
     ) -> Result<(Request, EffectSelection), InspectorError> {
-        self.layer(layer)?;
         let saved = self.clipboard.0.lock().expect("clipboard").clone();
+        self.paste_saved(caller, layer, &saved)
+    }
+    fn paste_saved(
+        &self,
+        caller: Caller,
+        layer: &str,
+        saved: &[Value],
+    ) -> Result<(Request, EffectSelection), InspectorError> {
+        self.layer(layer)?;
         let mut commands = Vec::new();
         let mut ids = Vec::new();
         for fx in saved {
-            let Some(definition) = self.saved_effect_definition(&fx) else {
+            let Some(definition) = self.saved_effect_definition(fx) else {
                 continue;
             };
             let id = pm_kernel::new_id("f");
@@ -461,14 +469,20 @@ impl Inspector {
 }
 impl Inspector {
     /// The inspector service's global paste targets the raw selected layers
-    /// (index.ts:56–75), whereas a row-local paste targets its own layer.
-    pub fn paste_selected_effects(&self, caller: Caller) -> Result<Request, InspectorError> {
+    /// (index.ts:56–75), whereas a row-local paste targets its own layer. One
+    /// clipboard snapshot serves every layer, so a copy from another window
+    /// mid-paste can't mix contents; returns the number of effects per layer.
+    pub fn paste_selected_effects(
+        &self,
+        caller: Caller,
+    ) -> Result<(Request, usize), InspectorError> {
+        let saved = self.clipboard.0.lock().expect("clipboard").clone();
         let mut commands = Vec::new();
         for layer in self.published.selection.layers() {
             if text(&self.layer(layer)?, "type") == "audio" {
                 continue;
             }
-            let (request, _) = self.paste_effects(caller, layer)?;
+            let (request, _) = self.paste_saved(caller, layer, &saved)?;
             if let pm_kernel::Call::Transact {
                 body: pm_kernel::WriteBody::Commands(batch),
                 ..
@@ -477,6 +491,6 @@ impl Inspector {
                 commands.extend(batch);
             }
         }
-        self.transaction(caller, commands)
+        Ok((self.transaction(caller, commands)?, saved.len()))
     }
 }
