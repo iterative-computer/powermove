@@ -302,7 +302,9 @@ export function kindSymbol(kind: string): string | null {
   );
 }
 function Layer({ row, send }: { row: LayerRow; send: Send }) {
-  const show = row.hovered || row.focused || row.selected;
+  // Unset switches appear under the pointer or keyboard focus only, so a
+  // selection never squeezes every layer name behind four icons.
+  const show = row.hovered || row.focused;
   return (
     <>
       <div
