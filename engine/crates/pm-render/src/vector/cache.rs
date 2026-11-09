@@ -47,7 +47,6 @@ struct Paint {
 
 #[derive(Default)]
 struct ScenePage {
-    inputs: InputScratch,
     values: Option<wgpu::Buffer>,
     value_capacity: u64,
     texture: Option<wgpu::Texture>,
@@ -73,9 +72,7 @@ impl ScenePage {
         if width > self.width || height > self.height {
             let grown = (self.width.max(width), self.height.max(height));
             let grown_bytes = u64::from(grown.0) * u64::from(grown.1) * 4;
-            let room = MAX_SCENE_SCRATCH_BYTES.saturating_sub(
-                self.inputs.capacity_bytes().saturating_add(self.value_capacity)
-            );
+            let room = MAX_SCENE_SCRATCH_BYTES.saturating_sub(self.value_capacity);
             // Reuse the larger rectangle while it fits the scratch cap.
             // Crossing two narrow dimensions must not allocate a huge square.
             (self.width, self.height) = if grown_bytes <= room { grown } else { (width, height) };
@@ -90,14 +87,88 @@ impl ScenePage {
     }
 
     fn bytes(&self) -> u64 {
-        self.inputs.capacity_bytes()
-            + self.value_capacity
-            + u64::from(self.width) * u64::from(self.height) * 4
+        self.value_capacity + u64::from(self.width) * u64::from(self.height) * 4
     }
 }
 
 /// Scratch is kept across vector misses but never grows without a bound.
 const MAX_SCENE_SCRATCH_BYTES: u64 = 48 * 1024 * 1024;
+
+/// Upload storage of the scenes recorded in one command encoder. Queue
+/// writes land before any command of the submit that follows them, so each
+/// page's coverage inputs and each scene's paint data recorded in the same
+/// encoder need their own buffers; the next encoder reuses them in order.
+#[derive(Default)]
+struct UploadSlots {
+    inputs: Vec<InputScratch>,
+    inputs_used: usize,
+    paints: Vec<(wgpu::Buffer, u64)>,
+    paints_used: usize,
+}
+
+impl UploadSlots {
+    fn bytes(&self) -> u64 {
+        self.inputs.iter().map(InputScratch::capacity_bytes).sum::<u64>()
+            + self.paints.iter().map(|(_, capacity)| capacity).sum::<u64>()
+    }
+
+    /// The next encoder starts: slots are reused from the first, and those
+    /// past `keep` bytes are released.
+    fn reset(&mut self, keep: u64) {
+        self.inputs_used = 0;
+        self.paints_used = 0;
+        let mut kept = 0;
+        self.inputs.retain(|slot| {
+            kept += slot.capacity_bytes();
+            kept <= keep
+        });
+        self.paints.retain(|(_, capacity)| {
+            kept += capacity;
+            kept <= keep
+        });
+    }
+
+    fn next_inputs(&mut self) -> usize {
+        if self.inputs_used == self.inputs.len() {
+            self.inputs.push(InputScratch::default());
+        }
+        self.inputs_used += 1;
+        self.inputs_used - 1
+    }
+
+    /// A paint buffer of at least `bytes` for this encoder.
+    fn next_paint(&mut self, device: &wgpu::Device, bytes: u64) -> Result<usize, String> {
+        let limit = device.limits().max_buffer_size;
+        if bytes > limit {
+            return Err(format!("paint data needs {bytes} bytes, buffer limit {limit}"));
+        }
+        let at = self.paints_used;
+        if self.paints.get(at).is_none_or(|(_, capacity)| *capacity < bytes) {
+            let capacity = crate::coverage::bounded_capacity(bytes, 256, limit)?;
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pm vector pooled paint data"),
+                size: capacity,
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if at == self.paints.len() {
+                self.paints.push((buffer, capacity));
+            } else {
+                self.paints[at] = (buffer, capacity);
+            }
+        }
+        self.paints_used += 1;
+        Ok(at)
+    }
+}
+
+/// Upload slots kept from one frame to the next.
+const SLOT_KEEP_BYTES: u64 = 8 * 1024 * 1024;
+/// Upload slots one frame's encoder may hold; scenes past it record and
+/// submit on their own, as single misses do.
+const SLOT_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 
 struct OutlineEntry {
     path: Arc<BezPath>,
@@ -412,8 +483,10 @@ pub struct VectorCache {
     scene_outlines: SceneOutlines,
     scene_pages: Vec<ScenePage>,
     paint_data: Vec<f32>,
-    paint_buffer: Option<wgpu::Buffer>,
-    paint_capacity: u64,
+    /// Slots of scenes recorded into the frame's encoder ([`Self::resolve_in`]).
+    frame_slots: UploadSlots,
+    /// Slots of scenes recorded and submitted on their own.
+    own_slots: UploadSlots,
     svg: Option<super::svg_float::SvgPainter>,
     svg_sample: Option<super::svg_sample::SvgSample>,
     svg_fallback_reason: Option<String>,
@@ -457,8 +530,8 @@ impl VectorCache {
             scene_outlines: SceneOutlines::default(),
             scene_pages: Vec::new(),
             paint_data: Vec::new(),
-            paint_buffer: None,
-            paint_capacity: 0,
+            frame_slots: UploadSlots::default(),
+            own_slots: UploadSlots::default(),
             svg: None,
             svg_sample: None,
             svg_fallback_reason: None,
@@ -531,6 +604,7 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
+        self.frame_slots.reset(SLOT_KEEP_BYTES);
         self.svg_fallbacks.clear();
         self.evict(
             self.max_bytes.saturating_sub(self.scene_scratch_bytes()),
@@ -544,6 +618,8 @@ impl VectorCache {
     pub fn trim(&mut self, budget: u64) {
         if self.scene_scratch_bytes() > budget {
             self.clear_scene_scratch();
+            // Between frames the frame's slots are submitted: they go too.
+            self.frame_slots = UploadSlots::default();
         }
         self.evict(budget.saturating_sub(self.scene_scratch_bytes()), self.max_entries, true);
     }
@@ -553,8 +629,9 @@ impl VectorCache {
             + self.outline_scratch.retained_bytes()
             + self.scene_outlines.bytes()
             + (self.paint_data.capacity() * size_of::<f32>()) as u64
-            + self.paint_capacity
             + self.scene_pages.iter().map(ScenePage::bytes).sum::<u64>()
+            + self.frame_slots.bytes()
+            + self.own_slots.bytes()
     }
 
     fn clear_scene_scratch(&mut self) {
@@ -564,8 +641,8 @@ impl VectorCache {
         self.scene_pages.clear();
         self.scene_pages.shrink_to_fit();
         self.paint_data = Vec::new();
-        self.paint_buffer = None;
-        self.paint_capacity = 0;
+        // Slots already recorded into an unsubmitted frame stay theirs.
+        self.own_slots = UploadSlots::default();
     }
 
     /// Evicts least recently used entries until at most `bytes` and
@@ -598,6 +675,30 @@ impl VectorCache {
         source: &VectorSource,
         precision: Precision,
     ) -> Result<wgpu::TextureView, String> {
+        self.resolve_with(device, queue, None, source, precision)
+    }
+
+    /// [`Self::resolve`], recording a coverage scene's miss into the frame's
+    /// `encoder` (one submit for the frame, not one per animated shape).
+    pub fn resolve_in(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &VectorSource,
+        precision: Precision,
+    ) -> Result<wgpu::TextureView, String> {
+        self.resolve_with(device, queue, Some(encoder), source, precision)
+    }
+
+    fn resolve_with(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: Option<&mut wgpu::CommandEncoder>,
+        source: &VectorSource,
+        precision: Precision,
+    ) -> Result<wgpu::TextureView, String> {
         self.tick += 1;
         let key = (source.key(), precision as u8);
         if let Some(e) = self.entries.get_mut(&key) {
@@ -615,7 +716,8 @@ impl VectorCache {
         pm_perf::bump(pm_perf::Counter::VectorCacheMisses);
         let (texture, bytes) = match source {
             VectorSource::Scene { scene, rect } => {
-                self.render_scene(device, queue, scene, *rect, precision)?
+                let frame = encoder.filter(|_| self.frame_slots.bytes() <= SLOT_FRAME_BYTES);
+                self.render_scene(device, queue, frame, scene, *rect, precision)?
             }
             VectorSource::SvgRaster {
                 path,
@@ -795,6 +897,7 @@ impl VectorCache {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        frame: Option<&mut wgpu::CommandEncoder>,
         scene: &CoverageScene,
         rect: PixelRect,
         precision: Precision,
@@ -811,9 +914,19 @@ impl VectorCache {
             return Err(format!("vector output {}x{} exceeds texture limit {}", rect.width, rect.height, limits.max_texture_dimension_2d));
         }
         let layout = AtlasLayout::pack(scene, rect, max_side);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pm vector"),
-        });
+        let mut own = None;
+        let in_frame = frame.is_some();
+        let encoder = match frame {
+            Some(encoder) => encoder,
+            None => own.insert(device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm vector"),
+            })),
+        };
+        let slots = if in_frame {
+            &mut self.frame_slots
+        } else {
+            &mut self.own_slots
+        };
         let coverage = self
             .coverage
             .get_or_insert_with(|| AreaCoverage::new(device));
@@ -854,16 +967,17 @@ impl VectorCache {
             self.scene_batch.fits_gpu_limits(&limits)?;
             let page = &mut self.scene_pages[i];
             page.ensure(device, w, h, self.scene_batch.bytes())?;
+            let inputs = slots.next_inputs();
             coverage.encode_pooled(
                 device,
                 queue,
-                &mut encoder,
+                encoder,
                 &self.scene_batch,
                 crate::coverage::CoverageOutput {
                     values: page.values.as_ref().expect("coverage values"),
                     page: page.view.as_ref(),
                 },
-                &mut page.inputs,
+                &mut slots.inputs[inputs],
             )?;
         }
         let format = pm_gpu::working_format(precision);
@@ -904,22 +1018,8 @@ impl VectorCache {
             self.paint_data.extend_from_slice(&item.premultiplied());
         }
         let bytes = crate::composite::gaussian::f32_bytes(&self.paint_data);
-        if bytes.len() as u64 > limits.max_buffer_size {
-            return Err(format!("paint data needs {} bytes, buffer limit {}", bytes.len(), limits.max_buffer_size));
-        }
-        if bytes.len() as u64 > self.paint_capacity {
-            let needed = bytes.len() as u64;
-            self.paint_capacity = crate::coverage::bounded_capacity(needed, 256, limits.max_buffer_size)?;
-            self.paint_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pm vector pooled paint data"),
-                size: self.paint_capacity,
-                usage: wgpu::BufferUsages::UNIFORM
-                    | wgpu::BufferUsages::VERTEX
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-        }
-        let paint_buffer = self.paint_buffer.as_ref().expect("paint buffer");
+        let paint_slot = slots.next_paint(device, bytes.len() as u64)?;
+        let paint_buffer = &slots.paints[paint_slot].0;
         queue.write_buffer(paint_buffer, 0, bytes);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -987,8 +1087,12 @@ impl VectorCache {
                 i = j;
             }
         }
-        queue.submit([encoder.finish()]);
-        if self.scene_scratch_bytes() > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
+        if let Some(own) = own {
+            queue.submit([own.finish()]);
+            self.own_slots.reset(SLOT_KEEP_BYTES);
+        }
+        let slot_bytes = self.frame_slots.bytes() + self.own_slots.bytes();
+        if self.scene_scratch_bytes() - slot_bytes > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
             self.clear_scene_scratch();
         }
         Ok((

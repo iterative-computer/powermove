@@ -2046,6 +2046,7 @@ impl Renderer {
         self.effects.fallback.blocked = false;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
+            self.effects.uniforms.reset();
             self.binds.begin_frame();
             self.text_gpu.begin_frame();
             self.pyramids.begin_frame();

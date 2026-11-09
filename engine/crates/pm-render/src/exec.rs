@@ -95,7 +95,7 @@ impl UniformPool {
     }
 
     /// `size` bytes of this frame's uniforms: a chunk and the range's start.
-    fn take(&mut self, device: &wgpu::Device, size: u64) -> (wgpu::Buffer, u64) {
+    pub(crate) fn take(&mut self, device: &wgpu::Device, size: u64) -> (wgpu::Buffer, u64) {
         let span = size.next_multiple_of(UNIFORM_STRIDE);
         if let Some(chunk) = self
             .chunks
@@ -520,10 +520,13 @@ impl Exec<'_> {
                         }
                     }
                     Source::Vector(v) => {
-                        match self
-                            .vector
-                            .resolve(self.device, self.queue, v, self.precision)
-                        {
+                        match self.vector.resolve_in(
+                            self.device,
+                            self.queue,
+                            encoder,
+                            v,
+                            self.precision,
+                        ) {
                             Ok(view) => {
                                 // Level 2 content on a plane is resampled
                                 // (`crate::space25d::local`).

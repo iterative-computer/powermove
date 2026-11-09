@@ -1132,23 +1132,28 @@ impl<'c> Gpu<'c> {
         let format = out.format();
         let dummy = self.effects.dummy(device, queue, format);
         let linear = self.linear;
+        // Back below, once the program's borrow of the effects ends.
+        let mut uniforms = std::mem::take(&mut self.effects.uniforms);
         let program = self
             .effects
             .program(device, kind, definition, format)
             .expect("checked by the caller");
-        let buffer = |block: &pm_glsl::reflect::Block| {
+        let mut buffer = |block: &pm_glsl::reflect::Block| {
             let bytes = GpuProgram::block_bytes(block, calls);
-            let b = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pm legacy uniforms"),
-                size: bytes.len() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&b, 0, &bytes);
-            b
+            let size = bytes.len() as u64;
+            let (b, at) = uniforms.take(device, size);
+            queue.write_buffer(&b, at, &bytes);
+            (b, at, size)
         };
-        let fragment_buffer = program.fragment_block.as_ref().map(buffer);
-        let vertex_buffer = program.vertex_block.as_ref().map(buffer);
+        let fragment_buffer = program.fragment_block.as_ref().map(&mut buffer);
+        let vertex_buffer = program.vertex_block.as_ref().map(&mut buffer);
+        fn range((buffer, offset, size): &(wgpu::Buffer, u64, u64)) -> wgpu::BindingResource<'_> {
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer,
+                offset: *offset,
+                size: std::num::NonZeroU64::new(*size),
+            })
+        }
         let views: Vec<&wgpu::TextureView> = program
             .sampler_units(calls)
             .into_iter()
@@ -1164,7 +1169,7 @@ impl<'c> Gpu<'c> {
         if let (Some(block), Some(b)) = (&program.fragment_block, &fragment_buffer) {
             entries.push(wgpu::BindGroupEntry {
                 binding: block.binding,
-                resource: b.as_entire_binding(),
+                resource: range(b),
             });
         }
         for ((_, binding), view) in program.samplers.iter().zip(&views) {
@@ -1186,7 +1191,7 @@ impl<'c> Gpu<'c> {
         if let (Some(block), Some(b)) = (&program.vertex_block, &vertex_buffer) {
             vertex_entries.push(wgpu::BindGroupEntry {
                 binding: block.binding,
-                resource: b.as_entire_binding(),
+                resource: range(b),
             });
         }
         let vertex = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1198,6 +1203,7 @@ impl<'c> Gpu<'c> {
             .pipeline(device, format)
             .expect("built above")
             .clone();
+        self.effects.uniforms = uniforms;
         let mut pass = begin(
             self.encoder,
             out,
