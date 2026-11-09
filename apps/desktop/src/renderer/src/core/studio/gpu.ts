@@ -79,7 +79,10 @@ export function initStudioGpu(): Promise<any> {
           maxBufferSize: adapter.limits.maxBufferSize,
         },
       });
-      device.lost.then((info: any) => { failure = `WebGPU device lost: ${info.message}`; device = null; devicePromise = null; });
+      failure=null;
+      device.addEventListener('uncapturederror',(event:any)=>{failure=event.error?.message || String(event.error);});
+      device.lost.then((info: any) => { failure = `WebGPU device lost: ${info.message}`; device = null; devicePromise = null; pipelines=null;denoisePipelines=null; });
+      await Promise.all([preparePipelines(),prepareDenoise()]);
       return device;
     } catch (error) {
       failure = String(error);
@@ -88,7 +91,7 @@ export function initStudioGpu(): Promise<any> {
   })();
   return devicePromise;
 }
-export const studioGpuReady = () => !!device;
+export const studioGpuReady = () => !!device && !!pipelines && !!denoisePipelines;
 /** The largest buffer one binding can hold (bytes): bounds how many triangles Studio can trace. */
 export const studioMaxBindingBytes = (): number => device?.limits?.maxStorageBufferBindingSize ?? 0;
 export const studioGpuFailure = () => failure;
@@ -103,8 +106,9 @@ function uniform(binding: number, visibility = S.COMPUTE) {
   return { binding, visibility, buffer: { type: 'uniform' } };
 }
 
-function build(): Pipelines {
-  if (pipelines) return pipelines;
+function build():Pipelines {if(!pipelines)throw new Error('Studio shaders are still preparing');return pipelines;}
+async function preparePipelines():Promise<Pipelines> {
+  if(pipelines)return pipelines;
   const traceLayout = device.createBindGroupLayout({
     label: 'studio trace',
     entries: [
@@ -125,10 +129,10 @@ function build(): Pipelines {
   const trace = device.createShaderModule({ label: 'trace.wgsl', code: traceSource });
   const post = device.createShaderModule({ label: 'post.wgsl', code: postSource });
   const present = device.createShaderModule({ label: 'present.wgsl', code: presentSource });
-  const compute = (module: any, layout: any, entryPoint: string) => device.createComputePipeline({
+  const compute = (module: any, layout: any, entryPoint: string) => device.createComputePipelineAsync({
     label: entryPoint, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint },
   });
-  pipelines = {
+  const prepared = {
     trace: compute(trace, traceLayout, 'main'),
     photons: compute(trace, traceLayout, 'photons'),
     resolve: compute(post, postLayout, 'resolve'),
@@ -136,7 +140,7 @@ function build(): Pipelines {
     compose: compute(post, postLayout, 'compose'),
     temporal: compute(post, postLayout, 'temporal'),
     pack: compute(post, postLayout, 'pack'),
-    present: device.createRenderPipeline({
+    present: device.createRenderPipelineAsync({
       label: 'present',
       layout: device.createPipelineLayout({ bindGroupLayouts: [presentLayout] }),
       vertex: { module: present, entryPoint: 'vs' },
@@ -146,6 +150,7 @@ function build(): Pipelines {
     traceLayout, postLayout, presentLayout,
     sampler: device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' }),
   };
+  pipelines=Object.fromEntries(await Promise.all(Object.entries(prepared).map(async([key,value])=>[key,await value]))) as Pipelines;
   return pipelines;
 }
 
@@ -153,8 +158,9 @@ type DenoisePipelines = { aovs: any; demod: any; step: any; finish: any; aovLayo
 let denoisePipelines: DenoisePipelines | null = null;
 
 /** Final's denoiser (built the first time a Final or still frame needs it). */
-function buildDenoise(): DenoisePipelines {
-  if (denoisePipelines) return denoisePipelines;
+function buildDenoise():DenoisePipelines {if(!denoisePipelines)throw new Error('Studio denoiser is still preparing');return denoisePipelines;}
+async function prepareDenoise():Promise<DenoisePipelines> {
+  if(denoisePipelines)return denoisePipelines;
   // The denoiser's guides read only the scene (a pipeline may bind 10 storage buffers; the trace uses all of them).
   const aovLayout = device.createBindGroupLayout({
     label: 'studio aov',
@@ -171,13 +177,14 @@ function buildDenoise(): DenoisePipelines {
   });
   const aov = device.createShaderModule({ label: 'aov.wgsl', code: `${traceSource}\n@group(0) @binding(13) var<storage, read_write> aov: array<vec4f>;\n${aovSource}` });
   const denoise = device.createShaderModule({ label: 'denoise.wgsl', code: denoiseSource });
-  const compute = (module: any, l: any, entryPoint: string) => device.createComputePipeline({
+  const compute = (module: any, l: any, entryPoint: string) => device.createComputePipelineAsync({
     label: entryPoint, layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module, entryPoint },
   });
-  denoisePipelines = {
+  const prepared = {
     aovs: compute(aov, aovLayout, 'aovs'), demod: compute(denoise, layout, 'demod'),
     step: compute(denoise, layout, 'atrous_step'), finish: compute(denoise, layout, 'finish'), aovLayout, layout,
   };
+  denoisePipelines=Object.fromEntries(await Promise.all(Object.entries(prepared).map(async([key,value])=>[key,await value]))) as DenoisePipelines;
   return denoisePipelines;
 }
 
@@ -301,7 +308,7 @@ export class StudioTarget {
     f.set([...c.forward, c.focus], 4);
     f.set([...c.right, c.tanY * c.aspect], 8);
     f.set([...c.up, c.tanY], 12);
-    f.set([...view.backdrop, view.shadowCatcher ? 1 : 0], 16);
+    f.set([...view.backdrop, (view.shadowCatcher?1:-1)*(c.far ?? 1000)], 16);
     f.set([...view.environment.zenith, view.exposure], 20);
     f.set([...view.environment.horizon, 0.82], 24);
     u.set([this.width, this.height, 0, 1], 28);
@@ -343,7 +350,9 @@ export class StudioTarget {
       const u = new Uint32Array(this.base);
       u.set([this.width, this.height, this.frame, n], 28);
       u.set([this.lightCount, bounces, reset && first ? 1 : 0, clamp], 32);
-      u.set([this.live ? 1 : 0, this.view.shadows === false ? 1 : 0, this.instanceCount, this.view.camera.orthographic ? 1 : 0], 36);
+      const nearBits=new Uint32Array(new Float32Array([this.view.camera.near ?? .01]).buffer)[0]!;
+      const cameraFlags=((nearBits & 0x7ffffffe) | 0x80000000 | (this.view.camera.orthographic?1:0))>>>0;
+      u.set([this.live ? 1 : 0, this.view.shadows === false ? 1 : 0, this.instanceCount, cameraFlags], 36);
       const f = new Float32Array(this.base);
       f.set([this.bounds[3] / 160, this.photonsEmitted, 0, 0], 44);
       f.set(this.bounds, 48);
@@ -407,7 +416,7 @@ export class StudioTarget {
     const bd = this.view.backdrop;
     const cam = this.view.camera, prev = this.prevCamera;
     const camera = (c: StudioCamera) => [...c.position, 0, ...c.forward, 0, ...c.right, c.tanY * c.aspect, ...c.up, c.tanY];
-    const temporalOn = this.live && !!prev;
+    const temporalOn = this.live && !!prev && !cam.orthographic;
     // Final's denoiser hands compose its own coverage (see denoise.wgsl's finish).
     let sums = [this.accum, this.bgsum, this.ebuf];
     const run = (pipe: any, src: number, dst: number, step: number) => {
@@ -586,3 +595,6 @@ export class StudioTarget {
     return device.queue.onSubmittedWorkDone();
   }
 }
+
+// Compile asynchronously while the home screen loads, before the first model is drawn.
+if(GPU)void initStudioGpu();

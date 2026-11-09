@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { patchStudioScene, type StudioBackend, type StudioBounds, type StudioCameraDescription, type StudioCameraOptions, type StudioFrame, type StudioRenderRequest, type StudioSceneDescription, type StudioScenePatch, type StudioTextureSource } from '../scene3d/studio-backend';
 import { type StudioScene } from './extract';
-import { initStudioGpu, StudioTarget, type StudioView } from './gpu';
+import { initStudioGpu, studioGpuFailure, StudioTarget, type StudioView } from './gpu';
 import { compileSceneDescription, viewFromDescription } from './scene-description';
 
 /** The page runs the same Studio WGSL as Rust; three.js supplies geometry/math only. */
@@ -43,6 +43,7 @@ export class WebGpuStudioBackend implements StudioBackend {
     this.view = view; this.viewKey = JSON.stringify(view);
   }
   render(request: StudioRenderRequest): StudioFrame {
+    if(studioGpuFailure())throw new Error(studioGpuFailure()!);
     if (request.signal?.aborted) throw new Error('Studio frame cancelled');
     if (!this.scene || !this.view) throw new Error('Set a Studio scene and camera before rendering');
     const width = Math.max(2, Math.min(8192, Math.round(request.size.width))), height = Math.max(2, Math.min(8192, Math.round(request.size.height)));

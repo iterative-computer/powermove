@@ -17,7 +17,7 @@ struct Params {
   cam_fwd: vec4f,      // w: focus distance
   cam_right: vec4f,    // w: tan(fov/2) * aspect
   cam_up: vec4f,       // w: tan(fov/2)
-  backdrop: vec4f,     // display-referred rgb; w: shadow catcher on (1)
+  backdrop: vec4f,     // display-referred rgb; w: signed far clip when clipping enabled (+ catcher, - no catcher)
   env_zenith: vec4f,   // w: exposure
   env_horizon: vec4f,  // w: floor albedo for secondary bounces
   dims: vec4u,         // width, height, frame seed, samples this dispatch
@@ -26,6 +26,15 @@ struct Params {
   ground: vec4f,       // environment radiance below the horizon; w: floor height
   caustic: vec4f,      // x: grid cell size, y: photons emitted so far, z: caustics on (1), w: photons this pass
   bounds: vec4f,       // scene centre (xyz) and radius, for sun photons
+}
+
+// opts.w keeps the legacy projection bit; its high bit enables clipping.
+// The remaining bits are the positive f32 near plane (one mantissa bit unused).
+fn camera_clip_on() -> bool { return (P.opts.w & 0x80000000u) != 0u; }
+fn camera_near() -> f32 { return bitcast<f32>(P.opts.w & 0x7ffffffeu); }
+fn camera_limit(ro:vec3f, rd:vec3f) -> f32 {
+  if (!camera_clip_on()) { return BIG; }
+  return max(0.0, (abs(P.backdrop.w) - dot(ro - P.cam_pos.xyz, P.cam_fwd.xyz)) / max(dot(rd, P.cam_fwd.xyz), 1e-6));
 }
 
 // Per-triangle shading data in BVH order (positions live in `pos`).
@@ -243,7 +252,7 @@ fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
 
 fn floor_t(ro: vec3f, rd: vec3f) -> f32 {
   let y = ro.y - P.ground.w;
-  if (P.backdrop.w < 0.5 || rd.y >= -1e-6 || y <= 0.0) { return BIG; }
+  if (P.backdrop.w <= 0.0 || rd.y >= -1e-6 || y <= 0.0) { return BIG; }
   return -y / rd.y;
 }
 
@@ -778,7 +787,7 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   let d = normalize(fwd + P.cam_right.xyz * ndc.x * P.cam_right.w - P.cam_up.xyz * ndc.y * P.cam_up.w);
   var ro = P.cam_pos.xyz;
   var rd = d;
-  if (P.opts.w == 1u) {
+  if ((P.opts.w & 1u) != 0u) {
     ro += P.cam_right.xyz * ndc.x * P.cam_right.w - P.cam_up.xyz * ndc.y * P.cam_up.w;
     rd = fwd;
   }
@@ -791,6 +800,7 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
     ro = ro + P.cam_right.xyz * r * cos(a) + P.cam_up.xyz * r * sin(a);
     rd = normalize(focus - ro);
   }
+  if (camera_clip_on()) { ro += rd * max(0.0, camera_near() - dot(ro - P.cam_pos.xyz, fwd)) / max(dot(rd, fwd), 1e-6); }
   return array<vec3f, 2>(ro, rd);
 }
 
@@ -811,7 +821,7 @@ fn path(px: vec2f) -> Sample {
   let max_b = P.counts.y;
   for (var b = 0u; b <= max_b + 2u; b++) {
     if (b > max_b && !primary) { break; }
-    let h = intersect(ro, rd, BIG, false);
+    let h = intersect(ro, rd, select(BIG, camera_limit(ro, rd), primary), false);
     let tf = floor_t(ro, rd);
     // Lights: invisible to the camera, visible in reflections.
     if (!primary) {
@@ -885,7 +895,7 @@ fn path(px: vec2f) -> Sample {
     var n = sf.n;
     var ng = sf.ng;
     if (!front) { n = -n; ng = -ng; }
-    if (primary) { s.normal = n; s.depth = h.t; s.object = sf.object + 1u; }
+    if (primary) { s.normal = n; s.depth = select(distance(sf.p,P.cam_pos.xyz), dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz), (P.opts.w & 1u)!=0u); s.object = sf.object + 1u; }
     let v = -rd;
     // Emission (a product's screen, or a glowing part).
     if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
@@ -1011,7 +1021,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var nd = vec4f(0.0, 0.0, 0.0, -1.0);
   var object = 0u;
   for (var i = 0u; i < P.dims.w; i++) {
-    let jitter = rnd2();
+    var jitter = rnd2();
+    // Four-sample batches cover all pixel quadrants. Thin artwork and live
+    // texture edges must not disappear because every ray landed on one side.
+    if (P.dims.w == 4u) { jitter = (vec2f(f32(i & 1u), f32((i >> 1u) & 1u)) + jitter) * 0.5; }
     var smp = path(vec2f(f32(gid.x), f32(gid.y)) + jitter);
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }
@@ -1023,7 +1036,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     em += smp.emit;
     bg += smp.bg;
     nbg += smp.void_hit;
-    if (i == 0u) { nd = vec4f(smp.normal, smp.depth); object = smp.object; }
+    if (i == 0u && object == 0u) { nd = vec4f(smp.normal, smp.depth); }
+    if (smp.object != 0u && (object == 0u || smp.depth < nd.w)) { nd = vec4f(smp.normal, smp.depth); object = smp.object; }
   }
   let n = f32(P.dims.w);
   if (P.counts.z == 1u) {
@@ -1035,6 +1049,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     accum[idx] += vec4f(rad, n);
     bgsum[idx] += vec4f(bg, nbg);
     ebuf[idx] += vec4f(em, l2);
+    if (object != 0u && (gbuf[idx].z == 0.0 || nd.w < gbuf[idx].w)) { gbuf[idx] = vec4f(oct_encode(nd.xyz), f32(object), nd.w); }
   }
 }
 

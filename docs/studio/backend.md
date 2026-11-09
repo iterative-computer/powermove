@@ -67,3 +67,13 @@ prepared instance stride remains 36 floats. Optional `instancePolicies`,
 picking without changing those binary buffers. `Params.opts.w = 1` selects
 orthographic camera rays; 0 selects perspective. Camera right/up extents contain
 half the orthographic frame span in that mode.
+
+Camera clipping is an optional extension of that same 208-byte Params block:
+`opts.w` bit 31 enables it; bit 0 remains the orthographic flag. Bits 1–30
+contain the positive near-plane f32 bits (the least significant mantissa bit
+is cleared). With clipping enabled, `backdrop.w` holds the far plane: positive
+with a shadow catcher, negative without one. Hosts leaving bit 31 clear retain
+the original parameter meaning and output. The page's `StudioView.camera`
+contains ordinary `near` and `far` numbers; backend implementations need no
+bit packing outside their GPU upload. Primary and guide rays use clip planes;
+reflections still see the complete scene.

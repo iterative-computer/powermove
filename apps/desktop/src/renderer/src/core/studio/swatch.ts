@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { extractScene, MAP_SIZE } from './extract';
-import { studioGpuReady, StudioTarget } from './gpu';
+import { initStudioGpu, studioGpuReady, StudioTarget } from './gpu';
 
 /*
  * Finish swatches rendered by Studio itself: each preset on a sphere under
@@ -25,8 +25,8 @@ function material(p: Record<string, number | string>): THREE.MeshPhysicalMateria
 }
 
 /** A data URL of `p` rendered on a sphere, or null where Studio cannot run. */
-export function studioSwatch(id: string, p: Record<string, number | string>): Promise<string | null> {
-  if (!studioGpuReady()) return Promise.resolve(null);
+export async function studioSwatch(id: string, p: Record<string, number | string>): Promise<string | null> {
+  if (!studioGpuReady() && !await initStudioGpu()) return null;
   const key = `${id}:${JSON.stringify(p)}`;
   let pending = cache.get(key);
   if (pending) return pending;
