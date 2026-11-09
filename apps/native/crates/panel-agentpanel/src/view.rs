@@ -238,9 +238,6 @@ impl VisualState {
         } + delta)
             .clamp(2, 8);
     }
-    pub fn reset_zoom(&mut self) {
-        self.zoom_quarters = 4;
-    }
     pub fn scale(&self) -> f64 {
         f64::from(if self.zoom_quarters == 0 {
             4

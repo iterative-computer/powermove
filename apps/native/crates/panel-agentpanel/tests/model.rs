@@ -410,18 +410,6 @@ fn provider_cannot_switch_during_run_and_model_uses_catalog_ids() {
     );
 }
 #[test]
-fn scope_deduplicates_registered_ids_caps_at_32_and_never_grants_authority() {
-    let ids = (0..40).map(|i| format!("p{i}")).collect::<Vec<_>>();
-    let scope = format!("panels:{}", ids.join(","));
-    assert_eq!(normalize_scope(&scope, &ids).split(',').count(), 32);
-    assert_eq!(
-        normalize_scope("panels:p1,p1,missing,p2", &ids),
-        "panels:p1,p2"
-    );
-    assert_eq!(normalize_scope("panel:missing", &ids), "workspace");
-    assert_eq!(normalize_scope("composition", &ids), "composition");
-}
-#[test]
 fn plan_apply_blocks_switches_but_failure_preserves_preview_and_draft() {
     let mut p = panel();
     start(&mut p);

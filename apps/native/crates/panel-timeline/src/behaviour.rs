@@ -121,16 +121,6 @@ pub fn composition_tabs(ids: &[String], active: &str) -> Vec<CompositionTab> {
 }
 
 impl TimelineModel {
-    /// Linked Scale row: distinct stored keys stay distinct at unequal legacy times.
-    pub fn scale_members(&self, layer: &str, time: f64) -> Vec<String> {
-        ["scale.x", "scale.y"]
-            .into_iter()
-            .filter_map(|p| self.index.channel(layer, p))
-            .flat_map(|c| c.keys.iter())
-            .filter(|k| k.time == time)
-            .map(|k| k.id.clone())
-            .collect()
-    }
     pub fn expand_scale_keys(&self, ids: &[String]) -> Vec<String> {
         let mut result = ids.to_vec();
         for id in ids {
@@ -271,19 +261,6 @@ impl TimelineModel {
             },
             time,
             pm_kernel::Origin::Interface,
-        )
-    }
-    pub fn group_into(&self, ids: Vec<String>, group: Option<String>, time: f64) -> Plan {
-        Plan::edit(
-            vec![
-                GroupCommand::MoveToGroup {
-                    layer_ids: ids,
-                    group,
-                    time,
-                }
-                .into(),
-            ],
-            self.index.revision,
         )
     }
     pub fn import_drop(

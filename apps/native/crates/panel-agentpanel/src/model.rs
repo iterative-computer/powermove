@@ -1437,24 +1437,6 @@ impl Panel {
             .retain(|_, p| !matches!(p, Pending::Consent(t) if t.thread == id));
         Ok(revoke.then(|| self.effect(target, EffectKind::RevokeComputerConsent)))
     }
-    pub fn set_scope(&mut self, id: &str, scope: &str, registered: &[String]) -> Result<()> {
-        let s = self
-            .sessions
-            .get_mut(id)
-            .ok_or_else(|| Error::UnknownId(id.into()))?;
-        s.settings_dirty = true;
-        s.settings.scope = normalize_scope(scope, registered);
-        Ok(())
-    }
-    pub fn toggle_auto_apply_panels(&mut self, id: &str) -> Result<()> {
-        let s = self
-            .sessions
-            .get_mut(id)
-            .ok_or_else(|| Error::UnknownId(id.into()))?;
-        s.settings_dirty = true;
-        s.settings.auto_apply_panels = !s.settings.auto_apply_panels;
-        Ok(())
-    }
     pub fn disclose(&mut self, thread: &str, row: &str, open: bool) -> Result<()> {
         let s = self
             .sessions
@@ -1710,39 +1692,6 @@ impl Panel {
 }
 fn host(e: io::Error) -> Error {
     Error::Host(e.to_string())
-}
-/// Source: panel-focus.ts:24–40. Registered hidden panels remain valid targets.
-pub fn normalize_scope(scope: &str, registered: &[String]) -> String {
-    if scope == "composition" {
-        return scope.into();
-    }
-    let Some(ids) = scope
-        .strip_prefix("panel:")
-        .or_else(|| scope.strip_prefix("panels:"))
-    else {
-        return "workspace".into();
-    };
-    let mut valid = vec![];
-    let mut seen = HashSet::new();
-    for id in ids
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .filter(|id| seen.insert(*id))
-        .take(32)
-    {
-        if registered.iter().any(|s| s == id) {
-            valid.push(id);
-        }
-    }
-    if valid.is_empty() {
-        "workspace".into()
-    } else {
-        format!(
-            "{}:{}",
-            if valid.len() == 1 { "panel" } else { "panels" },
-            valid.join(",")
-        )
-    }
 }
 
 impl Panel {
