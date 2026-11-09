@@ -192,10 +192,6 @@ const MAX_BYTES: u64 = 256 << 20;
 const MAX_ENTRIES: usize = 16_384;
 /// A need asked this long ago and never answered is asked again.
 const ASK_AGAIN: Duration = Duration::from_secs(5);
-/// Frame times asked of the realm and not answered, at most, while playing:
-/// a realm slower than the frame rate answers at its own pace (frames stand
-/// in meanwhile) instead of falling ever further behind a queue of asks.
-const IN_FLIGHT: usize = 4;
 
 #[derive(Default)]
 struct Answers {
@@ -213,15 +209,6 @@ struct Answers {
     /// Needs whose override failed: their frames fail (as main's compositor
     /// throws) and are not asked again until the revision or wrappers change.
     failed: HashSet<NeedKey>,
-    /// Each layer's (at one scale and crop) newest answer, a playing frame's
-    /// stand-in while the realm has not answered its own time.
-    latest: HashMap<LayerKey, NeedKey>,
-    /// While a playing frame renders: the needs it drew from a stand-in.
-    standing_in: Option<Vec<CompatNeed>>,
-}
-type LayerKey = (String, String, u64, Option<[u32; 4]>);
-fn layer_key(key: &NeedKey) -> LayerKey {
-    (key.0.clone(), key.1.clone(), key.3, key.4)
 }
 
 /// Where needs go: the extension realm of the window showing the document,
@@ -285,23 +272,6 @@ impl CompatStore {
     pub fn set_frame(&self, ticks: i64) {
         self.answers.lock().unwrap().frame = ticks.max(0);
     }
-    /// The next frame plays (`true`): a layer whose answer for its time has
-    /// not come draws its newest answer instead of holding the frame (the
-    /// viewer never waits on a realm while playing, as video stands in for a
-    /// late decode). Paused and scrubbed frames wait for their own answers.
-    pub(crate) fn begin_frame(&self, playing: bool) {
-        self.answers.lock().unwrap().standing_in = playing.then(Vec::new);
-    }
-    /// The needs the frame since [`begin_frame`](Self::begin_frame) drew
-    /// from stand-ins: still asked, and the frame is not the exact picture.
-    pub(crate) fn end_frame(&self) -> Vec<CompatNeed> {
-        self.answers
-            .lock()
-            .unwrap()
-            .standing_in
-            .take()
-            .unwrap_or_default()
-    }
     /// A frame's missing answers: each is asked of the realm once, and while
     /// playing with the same layers' next frames, so playback finds them answered.
     pub(crate) fn request(&self, needs: Vec<CompatNeed>, playing: bool) {
@@ -326,12 +296,6 @@ impl CompatStore {
         }
         let now = Instant::now();
         let answers = &mut *answers;
-        let mut waiting: HashSet<i64> = answers
-            .asked
-            .iter()
-            .filter(|(_, at)| at.elapsed() < ASK_AGAIN)
-            .map(|(key, _)| key.2)
-            .collect();
         let fresh: Vec<CompatNeed> = all
             .into_iter()
             .filter(|need| {
@@ -339,40 +303,20 @@ impl CompatStore {
                 if answers.map.contains_key(&key) || answers.failed.contains(&key) {
                     return false;
                 }
-                if matches!(answers.asked.get(&key), Some(at) if at.elapsed() < ASK_AGAIN) {
-                    return false;
-                }
-                // Nearest first (the missed frame, then ahead): past the
-                // cap, later frames ask when these are answered.
-                if playing && !waiting.contains(&key.2) {
-                    if waiting.len() >= IN_FLIGHT {
-                        return false;
+                match answers.asked.get(&key) {
+                    Some(at) if at.elapsed() < ASK_AGAIN => false,
+                    _ => {
+                        answers.asked.insert(key, now);
+                        true
                     }
-                    waiting.insert(key.2);
                 }
-                answers.asked.insert(key, now);
-                true
             })
             .collect();
         if fresh.is_empty() {
             return;
         }
-        // One realm task per frame time, nearest first: a batch runs as one
-        // task, and a whole look-ahead in one (every layer's override for 13
-        // frames) ran past the realm's 8 s prompt on a real project.
-        let Some(sink) = self.sink.lock().unwrap().clone() else {
-            return;
-        };
-        let mut by_time: Vec<(i64, Vec<CompatNeed>)> = Vec::new();
-        for need in fresh {
-            let t = need.time.get();
-            match by_time.iter_mut().find(|(time, _)| *time == t) {
-                Some((_, group)) => group.push(need),
-                None => by_time.push((t, vec![need])),
-            }
-        }
-        for (_, group) in by_time {
-            sink(revision, epoch, group);
+        if let Some(sink) = self.sink.lock().unwrap().clone() {
+            sink(revision, epoch, fresh);
         }
     }
     /// The realm's answers for `revision` and `epoch`; stale ones are dropped.
@@ -409,11 +353,6 @@ impl CompatStore {
             };
             answers.bytes += bytes;
             answers.order.push_back((key.clone(), bytes));
-            let layer = layer_key(&key);
-            let newer = answers.latest.get(&layer).is_none_or(|k| k.2 <= key.2);
-            if newer {
-                answers.latest.insert(layer, key.clone());
-            }
             answers.map.insert(key, answer);
             drew = true;
         }
@@ -484,31 +423,13 @@ impl CompatRasters for CompatStore {
             return CompatAnswer::Native;
         }
         let ticks = pm_render::compat::ticks_of(time).get();
-        let mut answers = self.answers.lock().unwrap();
-        let exact = key(composition, layer, ticks, scale, crop);
-        if let Some(answer) = answers.map.get(&exact) {
-            return answer.clone();
-        }
-        if answers.standing_in.is_some() && !answers.failed.contains(&exact) {
-            // The layer's newest answer, or the layer as the engine draws it
-            // until the realm first answers it.
-            let answer = answers
-                .latest
-                .get(&layer_key(&exact))
-                .and_then(|k| answers.map.get(k))
-                .cloned()
-                .unwrap_or(CompatAnswer::Native);
-            answers.standing_in.as_mut().unwrap().push(CompatNeed {
-                composition: composition.into(),
-                layer: layer.into(),
-                time: pm_render::compat::ticks_of(time),
-                source,
-                scale,
-                crop,
-            });
-            return answer;
-        }
-        CompatAnswer::Missing
+        self.answers
+            .lock()
+            .unwrap()
+            .map
+            .get(&key(composition, layer, ticks, scale, crop))
+            .cloned()
+            .unwrap_or(CompatAnswer::Missing)
     }
 }
 
@@ -572,81 +493,6 @@ mod tests {
             log.lock().unwrap().push((epoch, needs.len()));
         })));
         asked
-    }
-    fn need_at(layer: &str, seconds: f64) -> CompatNeed {
-        CompatNeed {
-            time: pm_render::compat::ticks_of(seconds),
-            ..need(layer)
-        }
-    }
-    /// A playing frame whose override answer has not come draws the layer's
-    /// newest answer and still asks for its own; a paused frame waits.
-    #[test]
-    fn playing_frames_stand_in_with_the_newest_answer_paused_frames_wait() {
-        let store = CompatStore::default();
-        let asked = asking(&store);
-        store.set_state(true, 7, 1);
-        store.answer_all(7, 1, vec![(need_at("x", 0.5), draw(9))]);
-        let at = |t| store.answer("c", "x", t, 1., CompatSource::RasterOverride, None);
-        store.begin_frame(false);
-        assert!(matches!(at(1.), CompatAnswer::Missing));
-        assert!(store.end_frame().is_empty());
-        store.begin_frame(true);
-        assert!(matches!(at(1.), CompatAnswer::Raster(_)));
-        let stood_in = store.end_frame();
-        assert_eq!(stood_in, vec![need_at("x", 1.)]);
-        store.request(stood_in, true);
-        assert_eq!(asked.lock().unwrap().first(), Some(&(1, 1)));
-        // A layer the realm never answered draws as the engine draws it
-        // until its first answer, and is asked for.
-        store.begin_frame(true);
-        let other = store.answer("c", "y", 1., 1., CompatSource::RasterOverride, None);
-        assert!(matches!(other, CompatAnswer::Native));
-        assert_eq!(store.end_frame(), vec![need_at("y", 1.)]);
-        // A failed override is never stood in for: its frames fail.
-        store.answer_all(7, 1, vec![(need_at("x", 1.5), Reply::Failed)]);
-        store.begin_frame(true);
-        assert!(matches!(at(1.5), CompatAnswer::Missing));
-        assert!(store.end_frame().is_empty());
-        // Outside a frame (an export's or a still's), nothing stands in.
-        assert!(matches!(at(2.), CompatAnswer::Missing));
-    }
-    /// Asks reach the realm one frame time per batch (each batch is one realm
-    /// task), nearest first; while playing at most `IN_FLIGHT` frame times
-    /// wait at once, and answers let the next ones go.
-    #[test]
-    fn asks_go_one_frame_time_per_batch_and_never_pile_up_while_playing() {
-        let store = CompatStore::default();
-        let times = Arc::new(Mutex::new(vec![]));
-        let log = times.clone();
-        store.set_sink(Some(Arc::new(move |_, _, needs: Vec<CompatNeed>| {
-            assert!(needs.iter().all(|n| n.time == needs[0].time) && needs.len() == 2);
-            log.lock().unwrap().push(needs[0].time.get());
-        })));
-        store.set_state(true, 7, 1);
-        let frame = pm_render::compat::ticks_of(0.5).get();
-        store.set_frame(frame);
-        let at = |k: i64| pm_render::compat::ticks_of(1. + k as f64 * 0.5).get();
-        store.request(vec![need_at("x", 1.), need_at("y", 1.)], true);
-        assert_eq!(
-            *times.lock().unwrap(),
-            (0..IN_FLIGHT as i64).map(at).collect::<Vec<_>>()
-        );
-        // The realm answers the first frame: one more goes.
-        store.answer_all(
-            7,
-            1,
-            vec![(need_at("x", 1.), draw(1)), (need_at("y", 1.), draw(1))],
-        );
-        store.request(vec![need_at("x", 1.5), need_at("y", 1.5)], true);
-        assert_eq!(times.lock().unwrap().last(), Some(&at(IN_FLIGHT as i64)));
-        assert_eq!(times.lock().unwrap().len(), IN_FLIGHT + 1);
-        // A paused frame is asked whatever waits.
-        store.request(vec![need_at("x", 30.), need_at("y", 30.)], false);
-        assert_eq!(
-            times.lock().unwrap().last(),
-            Some(&pm_render::compat::ticks_of(30.).get())
-        );
     }
     #[test]
     fn each_document_answers_from_its_own_window() {

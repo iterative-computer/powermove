@@ -683,9 +683,6 @@ impl Engine {
                 self.renderer.set_playback(spec.decode_deadline);
                 self.renderer.set_isolate_layers(true);
                 trace.lock().unwrap().render_start = now();
-                if let Some(store) = &self.compat_document {
-                    store.begin_frame(spec.moment == Moment::Playing);
-                }
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
@@ -696,16 +693,6 @@ impl Engine {
                     None,
                 );
                 trace.lock().unwrap().render_submitted = now();
-                let stood_in = self
-                    .compat_document
-                    .as_ref()
-                    .map(|store| store.end_frame())
-                    .unwrap_or_default();
-                if !stood_in.is_empty()
-                    && let Some(store) = &self.compat_document
-                {
-                    store.request(stood_in.clone(), true);
-                }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);
                 self.renderer.set_isolate_layers(false);
@@ -717,7 +704,7 @@ impl Engine {
                     return Err(FontsPending(error.to_string()).into());
                 }
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
-                stand_ins = !rendered.stand_ins.is_empty() || !stood_in.is_empty();
+                stand_ins = !rendered.stand_ins.is_empty();
                 // A frame with stand-ins is not the exact picture of its time.
                 if self.cache_enabled && !stand_ins {
                     self.cache.push_back(CachedFrame {
