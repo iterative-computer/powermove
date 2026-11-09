@@ -12,7 +12,7 @@ use pm_panel_timeline::{
     graph_render::{self, Graph},
     render::{Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, Viewport},
 };
-use std::{collections::VecDeque, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc};
 
 /// Host services a gesture needs. Implemented by the Controller; tests record.
 pub trait Delegate: 'static {
@@ -1609,12 +1609,36 @@ impl Render for TimelineSurface {
             _ => None,
         };
         let weak = this.clone();
+        // The canvas prepaints before the list's children are written: it
+        // leaves the frame it prepared here for the clips' accessible elements.
+        let shown: Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>> = Rc::default();
+        let prepared = shown.clone();
         div()
             .id("native-timeline")
             .size_full()
             .cursor(self.cursor)
-            .role(Role::Group)
+            .role(Role::List)
             .aria_label("Timeline tracks")
+            // Each clip is an element VoiceOver and agents can find and press; a
+            // Press clicks its centre, the same path as the pointer.
+            .a11y_synthetic_children(move |children| {
+                let Some((origin, frame)) = shown.borrow_mut().take() else {
+                    return;
+                };
+                for clip in frame.clip_nodes() {
+                    let mut node = gpui::accesskit::Node::new(Role::ListItem);
+                    node.set_label(clip.label());
+                    node.set_selected(clip.selected);
+                    node.add_action(gpui::AccessibleAction::Click);
+                    let b = clip.bounds;
+                    let bounds = Bounds::new(
+                        origin + point(px(b.x as f32), px(b.y as f32)),
+                        size(px(b.width as f32), px(b.height as f32)),
+                    );
+                    let id = children.synthetic_node_id(&clip.id);
+                    children.push_child_at(id, node, bounds);
+                }
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
@@ -1643,9 +1667,12 @@ impl Render for TimelineSurface {
             .child(
                 canvas(
                     move |bounds, _, cx| {
-                        weak.update(cx, |s, cx| s.prepared(bounds, cx))
+                        let frame = weak
+                            .update(cx, |s, cx| s.prepared(bounds, cx))
                             .ok()
-                            .flatten()
+                            .flatten();
+                        *prepared.borrow_mut() = frame.clone().map(|f| (bounds.origin, f));
+                        frame
                     },
                     move |bounds, frame, window, cx| {
                         if let Some(frame) = frame {
