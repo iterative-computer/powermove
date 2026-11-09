@@ -1075,11 +1075,26 @@ fn service_reveal_adds_keys_to_the_animated_channels() {
     c.model.reveal_paths("a", &strings(&["rotation"])).unwrap();
     let shown = &c.model.reveal.layers["a"];
     assert!(!shown.collapsed);
-    assert_eq!(shown.paths, Some(strings(&["opacity", "position.x", "scale.x", "scale.y", "rotation"])));
+    assert_eq!(
+        shown.paths,
+        Some(strings(&[
+            "opacity",
+            "position.x",
+            "scale.x",
+            "scale.y",
+            "rotation"
+        ]))
+    );
     c.model.reveal_paths("a", &strings(&["rotation"])).unwrap();
     assert_eq!(
         c.model.reveal.layers["a"].paths,
-        Some(strings(&["opacity", "position.x", "scale.x", "scale.y", "rotation"]))
+        Some(strings(&[
+            "opacity",
+            "position.x",
+            "scale.x",
+            "scale.y",
+            "rotation"
+        ]))
     );
     assert!(c.model.reveal_paths("missing", &[]).is_err());
     assert_eq!(c.model.index.revision, revision);

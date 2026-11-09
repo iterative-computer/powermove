@@ -739,7 +739,10 @@ impl KernelAdapter {
                 if reply["value"]["ok"] == true {
                     let after = wire(&realized(&*self.published()?));
                     let id = pm_mcp::scene3d::result_id(&before, &after, &args["args"], &selection);
-                    let layer = id.clone().or_else(|| args["args"]["target"].as_str().map(str::to_owned)).or_else(|| selection.first().cloned());
+                    let layer = id
+                        .clone()
+                        .or_else(|| args["args"]["target"].as_str().map(str::to_owned))
+                        .or_else(|| selection.first().cloned());
                     reply["value"]["data"] = json!({"result":{"id":id,"layerId":layer}});
                 }
                 return Ok(reply);

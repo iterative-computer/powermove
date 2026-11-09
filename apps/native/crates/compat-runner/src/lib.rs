@@ -1058,22 +1058,30 @@ mod tests {
         let runner = dom_runner();
         let asked = Arc::new(std::sync::Mutex::new(vec![]));
         let seen = asked.clone();
-        runner.host.set_frames(Some(Arc::new(move |frame: &crate::FrameRequest| {
-            seen.lock().unwrap().push((frame.width, frame.height));
-            let (w, h) = (frame.width, frame.height);
-            let mut png = vec![];
-            let mut encoder = png::Encoder::new(&mut png, w, h);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder.write_header().unwrap();
-            // Left half red, right half blue: a crop shows which part it took.
-            let row: Vec<u8> = (0..w)
-                .flat_map(|x| if x < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] })
-                .collect();
-            writer.write_image_data(&row.repeat(h as usize)).unwrap();
-            drop(writer);
-            Ok(png)
-        })));
+        runner
+            .host
+            .set_frames(Some(Arc::new(move |frame: &crate::FrameRequest| {
+                seen.lock().unwrap().push((frame.width, frame.height));
+                let (w, h) = (frame.width, frame.height);
+                let mut png = vec![];
+                let mut encoder = png::Encoder::new(&mut png, w, h);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header().unwrap();
+                // Left half red, right half blue: a crop shows which part it took.
+                let row: Vec<u8> = (0..w)
+                    .flat_map(|x| {
+                        if x < w / 2 {
+                            [255, 0, 0, 255]
+                        } else {
+                            [0, 0, 255, 255]
+                        }
+                    })
+                    .collect();
+                writer.write_image_data(&row.repeat(h as usize)).unwrap();
+                drop(writer);
+                Ok(png)
+            })));
         let value = runner
             .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const gl=api.render.gl;
                 const canvas=document.createElement('canvas');canvas.width=4;canvas.height=2;

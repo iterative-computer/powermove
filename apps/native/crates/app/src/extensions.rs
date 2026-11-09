@@ -612,7 +612,10 @@ impl Controller {
                 let time = self.time();
                 timeline.update(cx, |t, cx| {
                     let number = |key: &str| request[key].as_f64();
-                    if ["pps", "scrollT", "scrollY"].iter().any(|k| number(k).is_some()) {
+                    if ["pps", "scrollT", "scrollY"]
+                        .iter()
+                        .any(|k| number(k).is_some())
+                    {
                         t.set_view(number("pps"), number("scrollT"), number("scrollY"), cx);
                     }
                     if request["graph"].is_boolean() {
@@ -623,7 +626,9 @@ impl Controller {
                     }
                     if let Some(layer) = request["reveal"]["layer"].as_str() {
                         let keys = request["reveal"]["keys"].as_array().map_or(vec![], |keys| {
-                            keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect()
+                            keys.iter()
+                                .filter_map(|k| k.as_str().map(str::to_owned))
+                                .collect()
                         });
                         t.reveal(layer.to_owned(), keys, cx);
                     }
@@ -1766,7 +1771,8 @@ impl Controller {
         self.extensions.stage_sent = Some(key);
         let shown = slot.filter(|_| self.extensions.stage_used && placed.is_some());
         self.extensions.stage.set(shown);
-        let (stage, frame) = placed.map_or((Value::Null, Value::Null), |(a, b)| (json!(a), json!(b)));
+        let (stage, frame) =
+            placed.map_or((Value::Null, Value::Null), |(a, b)| (json!(a), json!(b)));
         host.shell_state(json!({ "stage": stage, "frame": frame }));
     }
     /// A new viewer frame on screen: v1–3's `frame:rendered` and overlay pass.

@@ -572,7 +572,10 @@ impl TimelineSurface {
         use pm_panel_timeline::{RowId, v4::parse_row};
         let b = self.bounds;
         let (x, y) = (f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64);
-        let (w, h) = (f32::from(b.size.width) as f64, f32::from(b.size.height) as f64);
+        let (w, h) = (
+            f32::from(b.size.width) as f64,
+            f32::from(b.size.height) as f64,
+        );
         let ruler = self.tokens.metrics.ruler as f64;
         let mut rows = vec![];
         if let (Some(scene), Some((start, end))) = (&self.scene, self.visible_rows()) {

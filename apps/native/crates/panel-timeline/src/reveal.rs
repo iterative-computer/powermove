@@ -230,11 +230,16 @@ impl TimelineModel {
             .index
             .layer(layer)
             .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
-        let current = self.reveal.layers.get(layer).cloned().unwrap_or(Disclosure {
-            collapsed: l.collapsed,
-            group_collapsed: l.group_collapsed,
-            paths: None,
-        });
+        let current = self
+            .reveal
+            .layers
+            .get(layer)
+            .cloned()
+            .unwrap_or(Disclosure {
+                collapsed: l.collapsed,
+                group_collapsed: l.group_collapsed,
+                paths: None,
+            });
         let mut paths = current.paths.clone().unwrap_or_else(|| {
             l.channels
                 .iter()
