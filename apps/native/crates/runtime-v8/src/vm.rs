@@ -243,6 +243,7 @@ impl NativeState {
     }
     /// Starts waiting fetches while they fit; the rest keep waiting in order.
     pub fn admit_deferred(&mut self) {
+        // A waiting fetch already holds its body; it needs its response room.
         let reserve = self.limits.max_response_bytes;
         while !self.deferred.is_empty() && self.admits_response(reserve + self.engine_headroom()) {
             let (id, mut request) = self.deferred.pop_front().unwrap();
@@ -513,10 +514,22 @@ fn view_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
         None
     }
 }
+/// The byte length of an ArrayBuffer or view, without copying it.
+fn view_len(value: v8::Local<v8::Value>) -> Option<usize> {
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
+        Some(view.byte_length())
+    } else {
+        v8::Local::<v8::ArrayBuffer>::try_from(value)
+            .ok()
+            .map(|buffer| buffer.byte_length())
+    }
+}
 /// `__fetch(body, request)`: start a fetch whose body goes over as bytes,
-/// never as a JSON number array. Returns the request id.
+/// never as a JSON number array. Returns the request id. The body is
+/// measured and admitted before it is copied, and its copy is reserved
+/// until the request retires (`fetch`).
 fn fetch_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
-    let Some(body) = view_bytes(a.get(0)) else {
+    let Some(len) = view_len(a.get(0)) else {
         throw(s, "Fetch body must be bytes");
         return;
     };
@@ -524,10 +537,15 @@ fn fetch_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::
     let state = s.get_slot::<Native>().unwrap().0.clone();
     state.lock().unwrap().sampled_external = s.get_heap_statistics().external_memory();
     let limits = state.lock().unwrap().limits.clone();
-    if body.len() > limits.max_response_bytes || request.len() > limits.max_op_bytes {
+    if len > limits.max_response_bytes || request.len() > limits.max_op_bytes {
         throw(s, "Host argument quota");
         return;
     }
+    if let Err(error) = fetch_room(&state.lock().unwrap(), len) {
+        throw(s, &error);
+        return;
+    }
+    let body = view_bytes(a.get(0)).unwrap_or_default();
     let result = serde_json::from_str::<Value>(&request)
         .map_err(|e| e.to_string())
         .and_then(|request| fetch(&mut state.lock().unwrap(), &request, body));
@@ -689,21 +707,8 @@ fn engine_call(
 }
 /// Admit one fetch (`__fetch`): its reservation, URL, headers and body.
 fn fetch(n: &mut NativeState, v: &Value, body: Vec<u8>) -> std::result::Result<u64, String> {
-    if n.in_flight >= n.limits.max_host_ops {
-        return Err("Host operation quota".into());
-    }
     let reserve = n.limits.max_response_bytes;
-    let headroom = n.engine_headroom();
-    let start = n.admits_response(reserve + headroom);
-    // Waiting helps only when other fetches hold the room it needs.
-    let fits_alone = n
-        .sampled_external
-        .checked_add(n.engine_reserved)
-        .and_then(|v| v.checked_add(reserve + headroom))
-        .is_some_and(|v| v <= n.limits.external_bytes);
-    if !start && (!n.limits.queue_fetches || !fits_alone) {
-        return Err("External memory reservation quota".into());
-    }
+    let start = fetch_room(n, body.len())?;
     let url =
         url::Url::parse(v["url"].as_str().ok_or("Missing URL")?).map_err(|e| e.to_string())?;
     if !["http", "https"].contains(&url.scheme()) {
@@ -733,6 +738,9 @@ fn fetch(n: &mut NativeState, v: &Value, body: Vec<u8>) -> std::result::Result<u
             deadline: Instant::now() + n.limits.host_timeout,
         },
     );
+    // The body's copy is held from now on; a started fetch also holds its
+    // response room. Each is released when the request retires.
+    n.reserved += request.1.body.len();
     if start {
         n.reserved += reserve;
         n.queued.push(request);
@@ -740,6 +748,35 @@ fn fetch(n: &mut NativeState, v: &Value, body: Vec<u8>) -> std::result::Result<u
         n.deferred.push_back(request);
     }
     Ok(n.next_id)
+}
+/// Whether a fetch with a `body`-byte upload starts now (`true`), waits for
+/// room (`false`), or can never fit.
+fn fetch_room(n: &NativeState, body: usize) -> std::result::Result<bool, String> {
+    if n.in_flight >= n.limits.max_host_ops {
+        return Err("Host operation quota".into());
+    }
+    let need = n.limits.max_response_bytes + body + n.engine_headroom();
+    let start = n.admits_response(need);
+    // Waiting helps only when other fetches hold the room it needs.
+    let fits_alone = n
+        .sampled_external
+        .checked_add(n.engine_reserved)
+        .and_then(|v| v.checked_add(need))
+        .is_some_and(|v| v <= n.limits.external_bytes);
+    if !start && (!n.limits.queue_fetches || !fits_alone) {
+        return Err("External memory reservation quota".into());
+    }
+    Ok(start)
+}
+/// What a not-yet-started fetch holds: its body, and its response room once
+/// it was admitted to start.
+pub(crate) fn held(request: &FetchRequest, started: bool) -> usize {
+    request.body.len()
+        + if started {
+            request.max_response_bytes
+        } else {
+            0
+        }
 }
 fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value, String> {
     match op {
