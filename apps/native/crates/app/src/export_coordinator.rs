@@ -263,8 +263,13 @@ impl Controller {
                     .is_some_and(|j| Arc::ptr_eq(j, &job))
                 {
                     v.builtins.export_job = None;
-                    if let Err(error) = &result {
-                        v.message = error.clone();
+                    match &result {
+                        Err(error)
+                            if !(job.cancel.load(Ordering::Acquire) && error == "cancelled") =>
+                        {
+                            v.message = error.clone();
+                        }
+                        _ => v.close_export_sheet(cx),
                     }
                 }
                 cx.notify();

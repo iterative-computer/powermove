@@ -792,6 +792,13 @@ impl Controller {
         })
         .detach();
     }
+    /// The Export sheet ends (Cancel, or the export finished or was cancelled);
+    /// a failure keeps it, showing why. A sheet has no close button.
+    pub(crate) fn close_export_sheet(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.builtins.windows.remove("export") {
+            let _ = handle.update(cx, |_, w, _| w.remove_window());
+        }
+    }
     pub fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(p) = &self.published else {
             return;
@@ -939,11 +946,16 @@ impl Controller {
                         job.cancel.store(true, std::sync::atomic::Ordering::Release);
                     } else {
                         let _ = runtime.observe_export(json!({"phase":"cancelled"}));
+                        self.close_export_sheet(cx);
                     }
                     Ok(Value::Null)
                 }
                 "export.reveal" => {
                     self.show_builtin("export", window, cx);
+                    Ok(Value::Null)
+                }
+                "export.dismiss" => {
+                    self.close_export_sheet(cx);
                     Ok(Value::Null)
                 }
                 "activatePanel" => {

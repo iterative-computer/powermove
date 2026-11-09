@@ -1312,7 +1312,8 @@ impl Backend {
                 self.native.export["run"] = json!({"phase":"idle"});
                 self.command_reply(command)?
             }
-            "export.reveal" => {
+            // The sheet's window shows (reveal) or ends (dismiss) on the host.
+            "export.reveal" | "export.dismiss" => {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?
             }
