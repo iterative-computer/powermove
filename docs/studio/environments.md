@@ -126,3 +126,20 @@ one BLAS per prototype remain resident; the TLAS and nine-vec4 transform rows
 scale with placements. Both the standalone renderer and native scene protocol
 use this path. Transform patches address placement input order when explicit
 instances are present. Maximum one million total placements; no LOD or paging.
+
+## Desktop integration
+
+`StudioSceneDescription.scene` accepts the same optional `world`, `instances`,
+`terrains` and `scatters` fields. `compileSceneDescription` resolves procedural
+geometry, makes one Three `InstancedMesh` per prototype, and packs the shared
+GPU trailer; native prepared uploads and the browser backend consume identical
+buffers. Direct graph extraction also handles `THREE.InstancedMesh` without
+copying triangles. Changing instance capacity rebases BLAS roots correctly.
+Scene-description round trips remove the automatically generated sun before
+serializing `world.sky`, so editing a scene cannot duplicate its sun.
+
+Import `StudioWorld` from `core/studio/environment.ts` and the geometry types
+from `core/studio/environment-geometry.ts`. `packWorld` and `worldSun` are the
+portable preparation helpers for evaluated app data. HDR/EXR decoding stays at
+the file-import boundary; `hdri.pixels` carries linear floats, not display PNGs.
+`Terrain::load_height_image` is the Rust grayscale decoding/resizing helper.

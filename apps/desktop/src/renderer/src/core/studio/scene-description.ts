@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { packWorld,worldSun } from './environment';
+import {expandEnvironmentGeometry,instanceMatrix} from './environment-geometry';
 import { MAP_SIZE, extractScene, type StudioScene } from './extract';
 import type { StudioView } from './gpu';
 import type { StudioCameraDescription, StudioCameraOptions, StudioMaterial, StudioMesh, StudioSceneDescription, StudioTextureSource, StudioVec3 } from '../scene3d/studio-backend';
@@ -67,7 +69,9 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
   }
   const lights: StudioSceneDescription['scene']['lights'] = [], extra: StudioSceneDescription['scene']['extra_lights'] = [];
   const areaOptions: StudioSceneDescription['light_options'] = [], extraOptions: StudioSceneDescription['light_options'] = [];
+  const generatedSun=worldSun(input.world??{});
   for (let i = 0; i < input.lightCount; i++) {
+    if(generatedSun.length && i===input.lightCount-1 && generatedSun.every((v,j)=>Math.abs(v-input.sdata[i*16+j]!)<=Math.max(1e-6,Math.abs(v)*1e-5)))continue;
     const o = i * 16, d = input.sdata, policy = input.lightPolicies?.[i] ?? { castShadow: true, distance: 0, decay: 2 };
     const options = { cast_shadow: policy.castShadow, distance: policy.distance, decay: policy.decay };
     if (d[o + 3] === 0) { lights.push({ center: vec(d, o), u: vec(d, o + 4), v: vec(d, o + 8), radiance: vec(d, o + 12) }); areaOptions.push(options); }
@@ -75,7 +79,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
   }
   const { camera, options } = describeCamera(view);
   return {
-    version: 1, scene: { objects, materials, lights, extra_lights: extra, layers, camera, backdrop: vec(view.backdrop), environment: [vec(view.environment.zenith), vec(view.environment.horizon)], exposure: view.exposure, shadow_catcher: view.shadowCatcher },
+    version: 1, scene: { world: input.world, objects, materials, lights, extra_lights: extra, layers, camera, backdrop: vec(view.backdrop), environment: [vec(view.environment.zenith), vec(view.environment.horizon)], exposure: view.exposure, shadow_catcher: view.shadowCatcher },
     layer_ids: [...input.objects], object_ids: identities, material_options: materialOptions, light_options: [...areaOptions, ...extraOptions],
     camera_options: options, environment_options: { backdrop_opaque: view.backdropOpaque, shadows: view.shadows, floor_y: view.floorY, ground: vec(view.environment.ground) },
     textures: maps.map((source, index) => {
@@ -99,6 +103,11 @@ export function viewFromDescription(document: StudioSceneDescription, aspect: nu
 /** Portable JSON entry point, also used to verify the canonical scene contract. */
 export function compileSceneDescription(document: StudioSceneDescription): { graph: THREE.Scene; scene: StudioScene; maps: StudioTextureSource[] } {
   if (document.version !== 1) throw new Error('Unsupported Studio scene version');
+  document=expandEnvironmentGeometry(document);
+  if((document.scene.instances?.length??0)>1000000)throw new Error('At most one million Studio instances');
+  for(const instance of document.scene.instances??[]){
+    if(!Number.isInteger(instance.object)||!document.scene.objects[instance.object]||instance.layer!=null&&!document.layer_ids[instance.layer]||[instance.position,instance.rotation,instance.scale].some(p=>p&&Object.values(p).some(x=>!Number.isFinite(x)))||instance.scale&&Object.values(instance.scale).some(x=>x<1e-4))throw new Error('Invalid Studio instance');
+  }
   const graph = new THREE.Scene();
   const textures = document.textures.map(t => { const texture = new THREE.DataTexture(new Uint8Array(t.rgba), t.width, t.height); texture.flipY = false; return texture; });
   const materials = document.scene.materials.map((m, i) => {
@@ -117,7 +126,11 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
     const colors=document.object_ids[i]?.vertex_colors;
     if(colors)g.setAttribute('color',new THREE.Float32BufferAttribute(colors.flat(),4));
     const material=materials[o.material]!.clone();material.vertexColors=!!colors;
-    const mesh = new THREE.Mesh(g, material); mesh.userData.sceneId = document.object_ids[i]?.layer ?? document.layer_ids[document.scene.layers[i]!] ?? `object-${i}`;
+    const placements=document.scene.instances?.length?document.scene.instances.filter(p=>p.object===i):null;
+    if(placements?.length===0){g.dispose();material.dispose();return;}
+    const mesh=placements?new THREE.InstancedMesh(g,material,placements.length):new THREE.Mesh(g,material);
+    if(placements){placements.forEach((p,j)=>(mesh as THREE.InstancedMesh).setMatrixAt(j,instanceMatrix(p)));mesh.userData.studioInstanceLayerNames=placements.map(p=>p.layer==null?null:document.layer_ids[p.layer]);}
+    mesh.userData.sceneId = document.object_ids[i]?.layer ?? document.layer_ids[document.scene.layers[i]!] ?? `object-${i}`;
     mesh.userData.studioPart = document.object_ids[i]?.part ?? null;
     mesh.castShadow = document.object_ids[i]?.cast_shadow ?? true; mesh.receiveShadow = document.object_ids[i]?.receive_shadow ?? true; graph.add(mesh);
   });
@@ -125,7 +138,9 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
   const scene = extractScene(graph, () => true, { sky: new THREE.Color(), ground: new THREE.Color(), intensity: 0 });
   const lights = document.scene.lights.flatMap(l => [...tuple(l.center), 0, ...tuple(l.u), 4 * new THREE.Vector3(...tuple(l.u)).cross(new THREE.Vector3(...tuple(l.v))).length(), ...tuple(l.v), 0, ...tuple(l.radiance), 0]);
   lights.push(...document.scene.extra_lights.flatMap(l => [...l.pos, ...l.u, ...l.v, ...l.radiance]));
-  const data = new Float32Array(lights.length + scene.instanceCount * 36); data.set(lights); data.set(scene.sdata.subarray(scene.lightCount * 16), lights.length); scene.sdata = data; scene.lightCount = lights.length / 16;
+  lights.push(...worldSun(document.scene.world??{}));
+  const trailer=packWorld(document.scene.world??{},lights);
+  const data = new Float32Array(lights.length + scene.instanceCount * 36+trailer.length); data.set(lights); data.set(scene.sdata.subarray(scene.lightCount * 16,scene.lightCount*16+scene.instanceCount*36), lights.length); data.set(trailer,lights.length+scene.instanceCount*36);scene.world=document.scene.world; scene.sdata = data; scene.lightCount = lights.length / 16;
   const maps = scene.maps.map(map => {
     const index = textures.findIndex(t => 'source' in map && t.image === map.source);
     const t = document.textures[index];

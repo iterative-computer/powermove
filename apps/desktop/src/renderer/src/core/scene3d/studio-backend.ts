@@ -1,3 +1,5 @@
+import type { StudioInstance, StudioTerrain, StudioScatter } from '../studio/environment-geometry';
+import type { StudioWorld } from '../studio/environment';
 import type { StudioScene } from '../studio/extract';
 import type { StudioView } from '../studio/gpu';
 
@@ -50,6 +52,10 @@ export type StudioSceneDescription = {
   version: 1;
   /** Direct serialized Rust Scene. Mesh positions/normals are evaluated world space. */
   scene: {
+    world?: StudioWorld;
+    instances?: StudioInstance[];
+    terrains?: StudioTerrain[];
+    scatters?: StudioScatter[];
     objects: { mesh: StudioMesh; material: number }[];
     materials: StudioMaterial[]; lights: StudioSoftbox[];
     camera: StudioCameraDescription; backdrop: StudioVec3;

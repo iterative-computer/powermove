@@ -18,6 +18,7 @@ export const STUDIO_MATERIAL_FLOATS = 32;
 export type StudioMap = { source: TexImageSource; flipY: boolean } | { screen: string };
 
 export type StudioScene = {
+  world?: import('./environment').StudioWorld;
   positions: Float32Array;   // 12 floats per triangle (3 × vec4), model space, per-mesh BVH order
   tris: Float32Array;        // 24 floats per triangle (6 × vec4)
   /** Wide nodes: the top level (tlasNodes, fixed capacity) then every mesh's own BVH. */
@@ -141,7 +142,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   // One BVH per mesh, in its own space, reused until its geometry or material
   // assignment changes; only the top level is rebuilt when things move.
   const blases: Blas[] = [];
-  const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean }[] = [];
+  const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean; layerOverride?:number }[] = [];
   let pending = 0, total = 0;
   for (const { mesh, id } of meshes) {
     const g = mesh.geometry as THREE.BufferGeometry;
@@ -187,14 +188,20 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     if (!blas.triangles) continue;
     blases.push(blas);
     let root:THREE.Object3D=mesh;while(root.parent && root.parent!==scene && root.parent.userData.sceneId===id)root=root.parent;
-    instances.push({ blas, world: mesh.matrixWorld.clone(), part:mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh), castShadow:mesh.castShadow, receiveShadow:mesh.receiveShadow });
-    bounds.union(blas.bounds.clone().applyMatrix4(mesh.matrixWorld));
+    const instanced=mesh as THREE.InstancedMesh;const count=instanced.isInstancedMesh?instanced.count:1;
+    for(let index=0;index<count;index++){
+      const world=mesh.matrixWorld.clone();if(instanced.isInstancedMesh){const local=new THREE.Matrix4();instanced.getMatrixAt(index,local);world.multiply(local);}
+      const layerName=mesh.userData.studioInstanceLayerNames?.[index];let layerOverride:number|undefined;
+      if(layerName){layerOverride=objectIndex.get(layerName);if(layerOverride===undefined){layerOverride=objects.length;objects.push(layerName);objectIndex.set(layerName,layerOverride);}}
+      instances.push({blas,world,part:mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh),castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,layerOverride});
+      bounds.union(blas.bounds.clone().applyMatrix4(world));
+    }
   }
   if (pending) return { pending, total };
   // Geometry in layout order (stable across frames while meshes do not change).
   const unique = [...new Set(blases)];
-  const geometryKey = unique.map(b => b.key).join('|');
   const tlasCapacity = Math.max(1, instances.length + 1);
+  const geometryKey = unique.map(b => b.key).join('|')+`:${tlasCapacity}`;
   let geometry = geometryCache.get(geometryKey);
   if (!geometry) {
     const triangles = unique.reduce((n, b) => n + b.triangles, 0);
@@ -289,6 +296,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       sdata.set([w[r]!, w[4 + r]!, w[8 + r]!, 0], o + 24 + r * 4);
     }
     sdata[o + 15] = geometry.roots.get(blas)!;
+    const override=instances[top.order[k]!]!.layerOverride;sdata[o+23]=override===undefined?0:override+1;
   }
 
   void environment;
