@@ -556,7 +556,7 @@ mod media_tests {
         let png = write("still.png", b"\x89PNG\r\n\x1a\n", 0o644);
         let script = write("run.sh", b"#!/bin/sh\necho hi\n", 0o755);
         let text = write("notes.txt", b"hello", 0o644);
-        let marked = write("marked.png", b"\x89PNG\r\n\x1a\n", 0o755);
+        write("marked.png", b"\x89PNG\r\n\x1a\n", 0o755);
         let app = root.join("Fake.app/Contents/MacOS");
         std::fs::create_dir_all(&app).unwrap();
         write("Fake.app/Contents/MacOS/Fake", b"#!/bin/sh\n", 0o755);
