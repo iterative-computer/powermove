@@ -11,9 +11,9 @@ snapshot includes them in every appearance.
 | metrics.thumbnail_min | 120 | Minimum Project thumbnail width |
 | metrics.status_dot | 6 | Open-composition/attention/insertion dot |
 | colors.media_badge | #000000 | Over-media capsule RGB in both schemes |
-| panels::MEDIA_BADGE_ALPHA | 0.55 | Over-media capsule alpha in both schemes |
+| metrics.media_badge_opacity | 0.55 | Over-media capsule alpha in both schemes |
 
-The existing colour patch contract is RGB. Alpha is a separate constant so the
+The existing colour patch contract is RGB. Alpha is a separate metric so the
 new colour does not change the representation of existing theme values. The
 native card recipe combines these. UI-kit-2 should reuse these entries if its
 parallel work adds the same names; existing values are unchanged.
