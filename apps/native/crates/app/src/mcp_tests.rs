@@ -892,3 +892,52 @@ fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
     assert_eq!(host.window_session(4).unwrap().project, "eta");
     actor.shutdown();
 }
+/// A provider run's tool server carries its grant token on connect; the app's
+/// own connection hands it to the session, so orchestration acts as that run
+/// while it lives, and a revoked or forged token acts as no run.
+#[test]
+fn a_connection_acts_as_the_run_that_launched_it() {
+    struct Recorder(std::sync::Mutex<Vec<Value>>);
+    impl pm_mcp::automation::SurfaceHook for Recorder {
+        fn call(&self, _: &str, _: Option<&str>, args: &Value) -> pm_mcp::Result<Value> {
+            self.0.lock().unwrap().push(args.clone());
+            Ok(json!({}))
+        }
+    }
+    let f = Fixture::new();
+    let recorder = Arc::new(Recorder(Default::default()));
+    {
+        let mut automation = f.tools.automation.lock().unwrap();
+        automation.surfaces = Some(recorder.clone());
+        automation.agent_grants = Some(Arc::new(|token: &str| {
+            pm_agents::launch::grants::resolve(token).map(|(run, _)| (run, "project".to_owned()))
+        }));
+    }
+    let mut c = f.connection();
+    start(&mut c);
+    let refused = c
+        .dispatch("orchestrator_capabilities", &json!({}))
+        .unwrap_err();
+    assert!(
+        refused.message.contains("Powermove agent run"),
+        "{}",
+        refused.message
+    );
+    let grant = pm_agents::launch::grants::issue("run-9", pm_agents::Access::Project).unwrap();
+    let mut c = f.connection();
+    pm_mcp::transport::ToolConnection::bind_agent_run(&mut c, grant.token());
+    start(&mut c);
+    c.dispatch("orchestrator_capabilities", &json!({})).unwrap();
+    assert_eq!(recorder.0.lock().unwrap()[0]["agentRunId"], "run-9");
+    // The run ended: its token no longer acts as it.
+    drop(grant);
+    assert!(c.dispatch("orchestrator_capabilities", &json!({})).is_err());
+    let mut forged = f.connection();
+    pm_mcp::transport::ToolConnection::bind_agent_run(&mut forged, "run-9");
+    assert!(
+        forged
+            .dispatch("start_session", &json!({"prompt":"x"}))
+            .is_err()
+    );
+    assert_eq!(recorder.0.lock().unwrap().len(), 1);
+}

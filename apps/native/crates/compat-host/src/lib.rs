@@ -14,5 +14,7 @@ pub use transport::*;
 mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::{MacDomHost, StoreDataStores};
+#[cfg(target_os = "macos")]
+pub mod visual;
 
 pub const PAGE_APPLIER: &str = include_str!("applier.js");

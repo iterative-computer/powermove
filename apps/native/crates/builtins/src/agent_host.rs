@@ -78,6 +78,9 @@ impl AgentLink {
             accounts.close();
         }
     }
+    pub fn environment(&self) -> Option<Environment> {
+        self.environment.lock().unwrap().clone()
+    }
     pub fn accounts(&self) -> Option<Arc<Accounts>> {
         self.accounts.lock().unwrap().clone()
     }
@@ -228,6 +231,8 @@ impl Drop for AgentCarry {
 pub(crate) struct AgentState {
     pub panel: Panel,
     pub runs: ProviderRuns,
+    /// Subagent tasks and run watches (`agent_tasks`).
+    pub tasks: crate::agent_tasks::Tasks,
     worker: bool,
 }
 impl AgentState {
@@ -235,6 +240,7 @@ impl AgentState {
         Self {
             panel,
             runs: ProviderRuns::default(),
+            tasks: Default::default(),
             worker: false,
         }
     }
@@ -356,13 +362,35 @@ pub fn run_effect(
             let environment = link.environment.lock().unwrap().clone();
             launch_request(state, environment, effect, text, settings).and_then(
                 |(environment, request)| {
+                    let kept = request.clone();
                     state
                         .runs
                         .start(&mut state.panel, &mut store, effect, now(), || {
                             launch::launch(&environment, request).map_err(Error::Host)
-                        })
+                        })?;
+                    let target = &effect.target;
+                    state.tasks.launched(&target.project, &target.thread, &kept);
+                    Ok(())
                 },
             )
+        }
+        // A subagent's question, answered in its parent's conversation.
+        EffectKind::Answer {
+            question, answers, ..
+        } if state.tasks.owns_question(question) => {
+            let accepted = state.tasks.answer(question, answers.0.clone());
+            state
+                .panel
+                .acknowledge(effect.id, accepted)
+                .and_then(|()| state.panel.save(&mut store, now()))
+        }
+        EffectKind::StopTask { task, request_id } => {
+            let stopped = state.tasks.stop_task(link, request_id, task);
+            let saved = state
+                .panel
+                .acknowledge(effect.id, stopped.is_ok())
+                .and_then(|()| state.panel.save(&mut store, now()));
+            stopped.map_err(Error::Host).and(saved)
         }
         _ => state
             .runs
@@ -399,7 +427,7 @@ fn launch_request(
         .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
-        prompt: with_files(prompt(&state.panel, thread, text)?, &files),
+        prompt: prompt(&state.panel, thread, text)?,
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
         effort: Some(settings.effort.clone()).filter(|e| !e.is_empty()),
@@ -407,6 +435,8 @@ fn launch_request(
         approval: settings.approval,
         workspace: directory,
         images,
+        role: None,
+        files,
     };
     Ok((environment, request))
 }
@@ -456,15 +486,6 @@ fn lay_out(
     }
     Ok((images, files))
 }
-fn with_files(prompt: String, files: &[Value]) -> String {
-    if files.is_empty() {
-        return prompt;
-    }
-    format!(
-        "{prompt}\n\nATTACHED FILES\n{}",
-        Value::Array(files.to_vec())
-    )
-}
 /// Standard base64 (attachment payloads); `None` for anything malformed.
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
@@ -496,7 +517,7 @@ pub(crate) fn ensure_worker(
     application: bool,
 ) {
     let mut state = shared.lock().unwrap();
-    if state.worker || state.runs.is_empty() && !state.panel.unsaved() {
+    if state.worker || state.runs.is_empty() && !state.panel.unsaved() && state.tasks.idle() {
         return;
     }
     let (worker, link, kernel) = (shared.clone(), link.clone(), kernel.clone());
@@ -518,22 +539,26 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
             if link.closing.load(Ordering::Acquire) && closed.is_none() {
                 closed = Some(Instant::now());
                 state.runs.cancel_all();
+                state.tasks.cancel_all();
             }
             if closed.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
                 state.runs = ProviderRuns::default();
             }
             let saved = state.panel.save_error.clone();
             let polled = state.runs.poll(&mut state.panel, &mut store, now(), 64);
+            let tasks = crate::agent_tasks::Tasks::poll(state, &link, now());
             let mut failed = polled.is_err();
             if state.runs.is_empty() && state.panel.unsaved() && closed.is_some() {
                 failed |= state.panel.save(&mut store, now()).is_err();
             }
-            let done = state.runs.is_empty() && !state.panel.unsaved();
+            let done = state.runs.is_empty() && !state.panel.unsaved() && state.tasks.idle();
             if done {
                 state.worker = false;
             }
-            let changed =
-                *polled.as_ref().unwrap_or(&0) > 0 || failed || saved != state.panel.save_error;
+            let changed = *polled.as_ref().unwrap_or(&0) > 0
+                || tasks
+                || failed
+                || saved != state.panel.save_error;
             (changed, failed, done)
         };
         if changed {

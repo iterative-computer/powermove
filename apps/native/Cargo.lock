@@ -5630,6 +5630,16 @@ name = "pm-time"
 version = "0.1.0"
 
 [[package]]
+name = "pm-transcribe"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "pm-update-policy"
 version = "0.1.0"
 dependencies = [

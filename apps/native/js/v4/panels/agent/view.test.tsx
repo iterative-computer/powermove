@@ -376,7 +376,11 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
       startedAt: 1000,
       endedAt: 4200,
     },
-    { kind: "visual", title: "Rendered result", status: "error" },
+    {
+      role: "assistant",
+      text: "",
+      visualReplies: [{ id: "visual-a", title: "Timing chart" }],
+    },
     { kind: "result", text: "The rendered change is ready." },
     {
       kind: "tool",
@@ -395,6 +399,9 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
   await root.render(<AgentView publication={withRows(rows)} send={() => {}} />);
   expect(
     root.inspect().nodes.some((n) => n.props.label === "Thought for 3 s"),
+  ).toBe(true);
+  expect(
+    root.inspect().nodes.some((n) => n.props.label === "Timing chart"),
   ).toBe(true);
   assertWire(commits);
   root.dispose();

@@ -1042,6 +1042,24 @@ impl Controller {
                     self.show_builtin("agent", window, cx);
                     Ok(Value::Null)
                 }
+                "agent.visual" => {
+                    let input = &request.input;
+                    let dark = self.host.borrow().tokens.scheme == pm_design::Scheme::Dark;
+                    let document = pm_agents::visual::document(
+                        input["html"].as_str().unwrap_or_default(),
+                        dark,
+                    );
+                    let parent = crate::platform::ns_window(window)
+                        .unwrap_or_else(|| self.host.borrow().window.clone());
+                    pm_compat_host::visual::show(
+                        Some(&parent),
+                        input["id"].as_str().unwrap_or_default(),
+                        input["title"].as_str().unwrap_or("Visualization"),
+                        &document,
+                        input["height"].as_f64().unwrap_or(360.),
+                    );
+                    Ok(Value::Null)
+                }
                 "agent.close" => {
                     if let Some(handle) = self.builtins.windows.remove("agent") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());

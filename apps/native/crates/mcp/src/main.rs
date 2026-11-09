@@ -24,7 +24,8 @@ fn run() -> pm_mcp::Result<()> {
         )
     })?;
     if args.iter().any(|a| a == "--powermove-mcp") {
-        return transport::proxy_stdio(&profile);
+        let run = value("--agent-run").map(|p| p.to_string_lossy().into_owned());
+        return transport::proxy_stdio(&profile, run);
     }
     let exports = value("--exports").unwrap_or_else(|| profile.join("exports"));
     let host = Arc::new(Mutex::new(Automation::new(profile.clone(), exports)?));

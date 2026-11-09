@@ -103,6 +103,7 @@ export type Action =
         | "switchThread"
         | "removeAttachment"
         | "openAttachment"
+        | "openVisual"
         | "chooseSlash"
         | "stopTask";
       id: string;

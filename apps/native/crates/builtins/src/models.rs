@@ -1179,6 +1179,23 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "openVisual" {
+                        // A saved reply is checked again before it's shown (main's
+                        // readVisualReply); the window opens its own viewer.
+                        let id = action["id"].as_str().unwrap_or_default();
+                        let reply = state
+                            .panel
+                            .visual_reply(&thread, id)
+                            .ok()
+                            .and_then(|v| pm_agents::visual::read(&v))
+                            .ok_or("This visualization can't be shown.")?;
+                        drop(state);
+                        self.native.platform.push((
+                            "agent.visual".into(),
+                            json!({"id":id,"title":reply.title,"html":reply.html,"height":reply.height}),
+                        ));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     crate::agent_host::admit(action, link.available(provider), live)?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
