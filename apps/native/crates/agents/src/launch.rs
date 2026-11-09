@@ -216,37 +216,22 @@ impl Environment {
     }
 }
 fn private_store(config: &Path) -> std::io::Result<()> {
-    let current = fs::read_to_string(config).unwrap_or_default();
-    let mut next = current.clone();
-    for (key, line) in [
-        (
-            "cli_auth_credentials_store",
-            "cli_auth_credentials_store = \"file\"",
-        ),
-        (
-            "suppress_unstable_features_warning",
-            "suppress_unstable_features_warning = true",
-        ),
-    ] {
-        let set = next.lines().any(|l| l.trim_start().starts_with(key));
-        next = if set {
-            next.lines()
-                .map(|l| {
-                    if l.trim_start().starts_with(key) {
-                        line
-                    } else {
-                        l
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n"
-        } else {
-            format!("{line}\n{next}")
-        };
-    }
+    let current = match fs::read_to_string(config) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let mut document: toml_edit::DocumentMut = current
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    document["cli_auth_credentials_store"] = toml_edit::value("file");
+    document["suppress_unstable_features_warning"] = toml_edit::value(true);
+    let next = document.to_string();
     if next != current {
-        fs::write(config, next)?;
+        let part = config.with_extension("toml.powermove-part");
+        fs::write(&part, next)?;
+        fs::set_permissions(&part, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&part, config)?;
     }
     fs::set_permissions(config, fs::Permissions::from_mode(0o600))
 }
@@ -456,4 +441,35 @@ pub fn reply_text(text: &str) -> String {
         .ok()
         .and_then(|value| value["reply"].as_str().map(str::to_owned))
         .unwrap_or_else(|| text.to_owned())
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn private_store_sets_top_level_keys_and_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!("pm-agents-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "model = \"m\"\ncli_auth_credentials_store = \"keyring\"\n\n[profiles.work]\ncli_auth_credentials_store = \"keyring\"\n",
+        )
+        .unwrap();
+        super::private_store(&config).unwrap();
+        let written: toml_edit::DocumentMut =
+            std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(written["model"].as_str(), Some("m"));
+        assert_eq!(written["cli_auth_credentials_store"].as_str(), Some("file"));
+        assert_eq!(
+            written["suppress_unstable_features_warning"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            written["profiles"]["work"]["cli_auth_credentials_store"].as_str(),
+            Some("keyring")
+        );
+        std::fs::write(&config, "not = [toml").unwrap();
+        assert!(super::private_store(&config).is_err());
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "not = [toml");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
