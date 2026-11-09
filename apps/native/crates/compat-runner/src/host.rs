@@ -125,8 +125,8 @@ enum Input {
     /// The watchdog's question about one running task, and the user's answer.
     Unresponsive(u32, u64),
     StopTask(u64, bool),
-    /// The realm's page loaded the faces it was given.
-    FontsLoaded,
+    /// The realm's page settled these faces (`family|weight|italic` keys).
+    FontsLoaded(Value),
     Close,
 }
 
@@ -439,9 +439,21 @@ impl RasterInbox {
     /// [`Self::export`]). Answered through `RasterHooks::answers` with `batch`.
     pub fn ask(&self, batch: u64, needs: Value, ask: Value) {
         if let Some(job) = ask["job"].as_str() {
-            let route = self.shared.exports.lock().unwrap().inbox(job);
-            if let Some(route) = route {
-                let _ = route.send(export::RunInput::Ask(batch, needs));
+            let route = self.shared.exports.lock().unwrap().route(job);
+            if let Some((inbox, capturing)) = route {
+                // A capture its realm waits for: answered inline there.
+                let wire = json!({"needs": needs, "ask": {}});
+                let pending = match capturing {
+                    Some(host) => host.nested_ask(batch, wire).err(),
+                    None => Some(wire),
+                };
+                if let Some(wire) = pending {
+                    let _ = inbox.send(export::RunInput::Ask(batch, wire["needs"].clone()));
+                }
+            } else if let Some(native) = self.native.lock().unwrap().clone() {
+                // A capture the window's realm waits for (`export` kept no
+                // route for it): answered inline there; otherwise the job is over.
+                let _ = native.nested_ask(batch, json!({"needs": needs, "ask": {}}));
             }
             return;
         }
@@ -474,7 +486,8 @@ impl RasterInbox {
             return Ok(());
         }
         let mut exports = self.shared.exports.lock().unwrap();
-        if exports.inbox(job).is_some() {
+        let at = (published.snapshot.doc_id, published.revision());
+        if exports.inbox(job).is_some() || exports.adopt_capture(job, at) {
             return Ok(());
         }
         let (tx, rx) = mpsc::channel();
@@ -484,6 +497,7 @@ impl RasterInbox {
                 inbox: tx.clone(),
                 view: export::next_view(),
                 batches: VecDeque::new(),
+                host: None,
             },
         );
         drop(exports);
@@ -703,15 +717,15 @@ impl ExtensionHost {
         }
     }
     /// The page under `key` (`""`: the window's realm; `export:<job>`: an
-    /// export's) loaded the faces it was given.
-    pub fn fonts_loaded(&self, key: &str) {
+    /// export's) settled the faces `keys` (loaded, or failed to load).
+    pub fn fonts_loaded(&self, key: &str, keys: Value) {
         match key.strip_prefix("export:") {
             None => {
-                let _ = self.inbox.send(Input::FontsLoaded);
+                let _ = self.inbox.send(Input::FontsLoaded(keys));
             }
             Some(job) => {
                 if let Some(inbox) = self.shared.exports.lock().unwrap().inbox(job) {
-                    let _ = inbox.send(export::RunInput::FontsLoaded);
+                    let _ = inbox.send(export::RunInput::FontsLoaded(keys));
                 }
             }
         }
@@ -1083,6 +1097,8 @@ impl Owner {
                     frozen,
                     cancel,
                     records: self.trusted_records(),
+                    storage: crate::adapter::storage_of(&self.config.kernel),
+                    frames: self.config.frames.clone(),
                     viewport: self.viewport,
                     text: self.config.text.as_ref().map(|text| text()),
                     rasters: self.config.rasters.clone(),
@@ -1130,8 +1146,8 @@ impl Owner {
                 self.reopen_panels(None);
             }
             Input::Rescan => self.rescan(),
-            Input::FontsLoaded => {
-                self.eval("__compat.fontsLoaded()");
+            Input::FontsLoaded(keys) => {
+                self.eval(&format!("__compat.fontsLoaded({keys})"));
             }
             Input::Failed(generation) if generation == self.writer.generation => {
                 let culprit = self.activating_now();
@@ -2049,6 +2065,14 @@ mod tests {
             document: Value,
             rasters: Option<crate::RasterHooks>,
         ) -> Self {
+            Self::start_full(root, document, rasters, None)
+        }
+        fn start_full(
+            root: tempfile::TempDir,
+            document: Value,
+            rasters: Option<crate::RasterHooks>,
+            frames: Option<crate::FrameRenderer>,
+        ) -> Self {
             let actor = KernelActor::spawn(KernelConfig::default());
             let kernel = actor.handle();
             let document = pm_model::json::parse(&document.to_string()).unwrap();
@@ -2064,7 +2088,7 @@ mod tests {
                 cache: root.path().join("cache"),
                 owner: None,
                 text: None,
-                frames: None,
+                frames,
                 rasters,
                 wake: Arc::new(|| ()),
             });
@@ -2755,29 +2779,22 @@ mod tests {
         );
     }
     /// A page that answers before the read starts waiting is not missed.
-    #[test]
-    fn an_export_realm_answers_from_its_frozen_project_while_the_window_edits() {
+    type Answers = Arc<Mutex<Vec<(u64, Value)>>>;
+    /// A window whose project has one text layer `t1`, the given extensions,
+    /// and raster hooks that log every answer as `(batch, width | error)`.
+    fn export_window(
+        extensions: &[(&str, &str)],
+        text: &str,
+        frames: Option<crate::FrameRenderer>,
+    ) -> (Fixture, Answers) {
         let root = tempfile::tempdir().unwrap();
-        // The override's width is the layer's text length: which project it
-        // read is in its pixels. It also writes the project, which only its
-        // own realm may see.
-        extension(
-            &root.path().join("extensions"),
-            "spy",
-            &[(
-                "index.ts",
-                "export default function activate(api: any){
-                   api.commands.register({id:'spy.text',label:'Text',run(text: string){
-                     api.history.do('Text',()=>{api.project.get().layers[0].d.text=text})}});
-                   api.services.register('raster',(L: any)=>{const c=document.createElement('canvas');
-                     c.width=L.d.text.length;c.height=1;api.project.get().name='written by '+L.d.text;
-                     return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0}});}",
-            )],
-        );
+        for (id, source) in extensions {
+            extension(&root.path().join("extensions"), id, &[("index.ts", source)]);
+        }
         let mut document = crate::initial()["document"].clone();
         document["layers"] = json!([{"id":"t1","type":"text","name":"T1","from":0,"dur":5,
-            "d":{"text":"frozen"}}]);
-        let answered: Arc<Mutex<Vec<(u64, Value)>>> = Arc::default();
+            "d":{"text":text}}]);
+        let answered: Answers = Arc::default();
         let log = answered.clone();
         let hooks = crate::RasterHooks {
             base: Arc::new(|_| Ok(None)),
@@ -2795,42 +2812,88 @@ mod tests {
             }),
             producing: Arc::new(|_, _| ()),
         };
-        let fixture = Fixture::start_with(root, document, Some(hooks));
+        let fixture = Fixture::start_full(root, document, Some(hooks), frames);
         fixture.until("activation", |host| host.is_ready());
-        let frozen = fixture.kernel.published("window").unwrap();
-        let comp = frozen.snapshot.render_comp();
-        let needs = json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}]);
-        let inbox = fixture.host.raster_inbox();
-        let cancel = Arc::new(AtomicBool::new(false));
-        inbox
-            .export("job-1", frozen.clone(), cancel.clone())
-            .unwrap();
-        // The person edits while the export renders.
-        fixture
-            .host
-            .run_command("spy.text", json!(["edited meanwhile"]));
-        let text = |published: &pm_kernel::Published| {
-            pm_model::json::to_canonical_string(&published.snapshot.document.to_value().unwrap())
-        };
+        (fixture, answered)
+    }
+    fn needs(fixture: &Fixture) -> Value {
+        let comp = fixture
+            .kernel
+            .published("window")
+            .unwrap()
+            .snapshot
+            .render_comp();
+        json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}])
+    }
+    fn answer_of(answered: &Answers, batch: u64, wait: Duration) -> Value {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Some((_, answer)) = answered.lock().unwrap().iter().find(|(b, _)| *b == batch) {
+                return answer.clone();
+            }
+            assert!(Instant::now() < deadline, "batch {batch} was answered");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn edit_text(fixture: &Fixture, command: &str, text: &str) {
+        fixture.host.run_command(command, json!([text]));
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !text(&fixture.kernel.published("window").unwrap()).contains("edited meanwhile") {
+        loop {
+            let p = fixture.kernel.published("window").unwrap();
+            if pm_model::json::to_canonical_string(&p.snapshot.document.to_value().unwrap())
+                .contains(text)
+            {
+                return;
+            }
             assert!(Instant::now() < deadline, "the edit reached the kernel");
             thread::sleep(Duration::from_millis(5));
         }
+    }
+    const SPY: &str = "export default function activate(api: any){
+       api.commands.register({id:'spy.text',label:'Text',run(text: string){
+         api.history.do('Text',()=>{api.project.get().layers[0].d.text=text})}});
+       api.commands.register({id:'spy.store',label:'Store',run(v: string){ api.storage.set('extra', v) }});
+       api.services.register('raster',(L: any)=>{
+         if (L.id === 't1' && globalThis.capture && !globalThis.inside) {
+           globalThis.inside = true;
+           try { globalThis.capture(); } finally { globalThis.inside = false; }
+         }
+         const c=document.createElement('canvas');
+         c.width=L.d.text.length + String(api.storage.get('extra') ?? '').length; c.height=1;
+         api.project.get().name='written by '+L.d.text;
+         return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0}});}";
+    #[test]
+    fn an_export_realm_answers_from_its_frozen_project_code_and_storage_while_the_window_edits() {
+        let (fixture, answered) = export_window(&[("spy", SPY)], "frozen", None);
+        fixture.host.run_command("spy.store", json!(["ab"]));
+        fixture.until("storage", |_| {
+            fixture.kernel.state().settings.contains_key("ext.spy")
+        });
+        let frozen = fixture.kernel.published("window").unwrap();
+        let needs = needs(&fixture);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        // The export starts: its realm pins the extensions' code and storage now.
+        inbox
+            .export("job-1", frozen.clone(), cancel.clone())
+            .unwrap();
+        // The person edits the project and the extension's storage meanwhile.
+        fixture.host.run_command("spy.store", json!(["abcdef"]));
+        edit_text(&fixture, "spy.text", "edited meanwhile");
         inbox.ask(1, needs.clone(), json!({"job":"job-1"}));
         let live = fixture.kernel.published("window").unwrap().revision();
         inbox.ask(2, needs.clone(), json!({"revision": live}));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while answered.lock().unwrap().len() < 2 {
-            assert!(Instant::now() < deadline, "both realms answered");
-            thread::sleep(Duration::from_millis(10));
-        }
-        let mut answers = answered.lock().unwrap().clone();
-        answers.sort_by_key(|(batch, _)| *batch);
-        // The export draws the project it froze; the window's viewer the edit.
-        assert_eq!(answers, vec![(1, json!(6)), (2, json!(16))]);
+        // The export draws its frozen project and storage; the viewer the edits.
+        assert_eq!(
+            answer_of(&answered, 1, Duration::from_secs(30)),
+            json!(6 + 2)
+        );
+        assert_eq!(
+            answer_of(&answered, 2, Duration::from_secs(30)),
+            json!(16 + 6)
+        );
         assert_eq!(fixture.host.export_pages().len(), 1);
-        // The export realm's own write stays in its realm.
+        // Neither the export realm's write nor its registrations reached the kernel.
         thread::sleep(Duration::from_millis(200));
         assert_ne!(fixture.name(), "written by frozen");
         let commands = fixture
@@ -2839,8 +2902,8 @@ mod tests {
             .registries
             .get("commands")
             .map_or(0, Vec::len);
-        assert_eq!(commands, 1, "only the window's realm registers");
-        // The export ends: its realm and page go.
+        assert_eq!(commands, 2, "only the window's realm registers");
+        // The export ends: its realm and page go, and nothing answers it again.
         cancel.store(true, Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !fixture.host.export_pages().is_empty() {
@@ -2849,11 +2912,127 @@ mod tests {
         }
         inbox.ask(3, needs, json!({"job":"job-1"}));
         thread::sleep(Duration::from_millis(100));
-        assert_eq!(
-            answered.lock().unwrap().len(),
-            2,
-            "an ended export is not answered"
+        assert!(!answered.lock().unwrap().iter().any(|(b, _)| *b == 3));
+    }
+    #[test]
+    fn an_export_realms_capture_renders_its_frozen_project_and_asks_it_inline() {
+        // The renderer stands in for the app's engine job: it checks which
+        // project it was given and asks the realm waiting for it to draw t1.
+        type Wiring = Arc<Mutex<Option<(RasterInbox, Answers)>>>;
+        let wiring: Wiring = Arc::default();
+        let rendered: Arc<Mutex<Vec<u64>>> = Arc::default();
+        let (w, r) = (wiring.clone(), rendered.clone());
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let published = frame
+                .published
+                .clone()
+                .ok_or("a frame of the window's project")?;
+            r.lock().unwrap().push(published.revision());
+            let (inbox, answered) = w.lock().unwrap().clone().unwrap();
+            let comp = published.snapshot.render_comp();
+            inbox.export("capture-1", published, Arc::default())?;
+            inbox.ask(
+                77,
+                json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}]),
+                json!({"job":"capture-1"}),
+            );
+            answer_of(&answered, 77, Duration::from_secs(10));
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0, 0, 255, 255])
+                .unwrap();
+            Ok(png)
+        });
+        let capturer = "export default function activate(){
+            globalThis.capture = () => { globalThis.PM.renderFrameTo(0, 1, 1) } }";
+        let (fixture, answered) = export_window(
+            &[("spy", SPY), ("capturer", capturer)],
+            "frozen",
+            Some(frames),
         );
+        *wiring.lock().unwrap() = Some((fixture.host.raster_inbox(), answered.clone()));
+        let frozen = fixture.kernel.published("window").unwrap();
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox
+            .export("job-2", frozen.clone(), cancel.clone())
+            .unwrap();
+        edit_text(&fixture, "spy.text", "edited meanwhile");
+        inbox.ask(5, needs(&fixture), json!({"job":"job-2"}));
+        // The capture inside the export's override drew the export's project,
+        // its t1 answered inline by the export realm (frozen text: 6).
+        assert_eq!(answer_of(&answered, 5, Duration::from_secs(40)), json!(6));
+        assert_eq!(answer_of(&answered, 77, Duration::from_secs(1)), json!(6));
+        assert_eq!(*rendered.lock().unwrap(), vec![frozen.revision()]);
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn an_extension_that_runs_in_the_window_but_not_for_the_export_fails_it_by_name() {
+        let flaky = "export default function activate(api: any){
+            if (api.project.get().layers?.[0]?.d?.text === 'boom') throw Error('boom') }";
+        let (fixture, answered) = export_window(&[("spy", SPY), ("flaky", flaky)], "fine", None);
+        assert_eq!(fixture.health("flaky"), "ok");
+        edit_text(&fixture, "spy.text", "boom");
+        let inbox = fixture.host.raster_inbox();
+        let frozen = fixture.kernel.published("window").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox.export("job-3", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-3"}));
+        let answer = answer_of(&answered, 1, Duration::from_secs(30));
+        assert_eq!(answer, json!("flaky could not start for the export"));
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn an_export_realm_reads_the_network_but_never_sends_changes() {
+        // Activation tries a POST; the realm notes whether it was refused as a
+        // delivery, and the override's width says so (3: refused).
+        let poster = "export default function activate(api: any){
+            globalThis.refused = false;
+            fetch('http://127.0.0.1:9/record', {method:'POST', body:'x'})
+              .catch((e: any) => { globalThis.refused = /only read the network/.test(String(e?.message ?? e)) });
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=globalThis.refused ? 3 : 1; c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("poster", poster)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        thread::sleep(Duration::from_millis(500));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(10)), json!(1));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-5", frozen, cancel.clone()).unwrap();
+        inbox.ask(2, needs(&fixture), json!({"job":"job-5"}));
+        assert_eq!(answer_of(&answered, 2, Duration::from_secs(40)), json!(3));
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn a_layout_read_no_page_answers_fails_the_export() {
+        let measure = "export default function activate(api: any){
+            const base = api.services.get('raster');
+            api.services.register('raster',(L: any, ...rest: any[])=>{
+              const d=document.createElement('div'); d.textContent='x'; document.body.append(d);
+              const w=d.getBoundingClientRect().width; d.remove();
+              const c=document.createElement('canvas'); c.width=1+Math.round(w); c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("measure", measure)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-4", frozen, cancel.clone()).unwrap();
+        // No window shows the export's page here: the read cannot be answered.
+        inbox.ask(1, needs(&fixture), json!({"job":"job-4"}));
+        let answer = answer_of(&answered, 1, Duration::from_secs(40));
+        assert!(
+            answer.as_str().unwrap().contains("stopped answering"),
+            "{answer}"
+        );
+        cancel.store(true, Ordering::Release);
     }
     #[test]
     fn the_projects_text_faces_and_pm_fonts_reach_the_window() {
@@ -2865,7 +3044,8 @@ mod tests {
                 "index.ts",
                 "export default function activate(api: any){
                    const fonts = api.media.fonts;
-                   api.commands.register({id:'fonts.ensure',label:'Ensure',run(){ void fonts.ensure('Probe Serif', 700) }});
+                   api.commands.register({id:'fonts.ensure',label:'Ensure',run(){
+                     void fonts.ensure('Probe Serif', 700).then(() => api.storage.set('ensured', true)) }});
                    api.commands.register({id:'fonts.list',label:'List',run(){
                      api.storage.set('seen', {system: fonts.system.length, has: fonts.families.includes('Helvetica')}) }});
                  }",
@@ -2906,6 +3086,20 @@ mod tests {
             take("Probe Serif"),
             json!({"family":"Probe Serif","weight":700,"italic":false})
         );
+        // `ensure` waits for its own face, not for any page answer.
+        let ensured = || {
+            fixture
+                .kernel
+                .state()
+                .settings
+                .get("ext.fonts")
+                .is_some_and(|v| pm_model::json::to_canonical_string(v).contains("ensured"))
+        };
+        fixture.host.fonts_loaded("", json!(["Probe Sans|600|0"]));
+        thread::sleep(Duration::from_millis(300));
+        assert!(!ensured(), "another face settling does not resolve ensure");
+        fixture.host.fonts_loaded("", json!(["Probe Serif|700|0"]));
+        fixture.until("ensure resolved", |_| ensured());
         fixture.host.run_command("fonts.list", json!([]));
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {

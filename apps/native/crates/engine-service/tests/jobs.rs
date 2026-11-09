@@ -520,3 +520,36 @@ fn a_preview_still_draws_offline_media_and_an_export_refuses_it() {
     assert_eq!(drawn.state, JobState::Done, "{drawn:?}");
     assert_eq!(std::fs::read_dir(preview).unwrap().count(), 30);
 }
+
+/// A delivery's override answerer starts (pinning the extensions' code and
+/// storage) when the export starts; a one-frame look does not.
+#[test]
+fn deliveries_begin_their_override_answerer_at_start_and_looks_do_not() {
+    use std::sync::{Arc, Mutex};
+    let session = 987_654;
+    let begun: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
+    let seen = begun.clone();
+    set_compat_answerer(
+        session,
+        Some((
+            Arc::new(|| Some(1)),
+            Arc::new(|_, _| Ok(vec![])),
+            Arc::new(move |pin: &CompatPin| {
+                seen.lock().unwrap().push((pin.job.clone(), pin.look));
+            }),
+        )),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for (job, look) in [("delivery", false), ("look", true)] {
+        let mut request = request(dir.path().join(format!("{job}.mp4")), 1);
+        request.job = job.into();
+        request.look = look;
+        if let JobSpec::Export { session: s, .. } = &mut request.spec {
+            *s = SessionId::new(session).unwrap();
+        }
+        // No such executable: the job never runs, but it has started.
+        let _ = ExportHandle::start(Path::new("/nonexistent/pm-engine-job"), request);
+    }
+    set_compat_answerer(session, None);
+    assert_eq!(*begun.lock().unwrap(), vec![("delivery".to_owned(), false)]);
+}

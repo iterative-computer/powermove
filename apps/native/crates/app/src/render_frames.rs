@@ -98,7 +98,11 @@ impl Controller {
         // Spawning the child serializes the document: off the main thread.
         let started = cx.background_executor().spawn(async move {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let queued = disk.start_fill(from, to, &exe, activity)?;
+            let frozen = (
+                p.revision(),
+                p.clone() as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            );
+            let queued = disk.start_fill(from, to, &exe, activity, Some(frozen))?;
             if queued > 0 {
                 follow(disk, tasks, p.project.clone(), title, queued);
             }

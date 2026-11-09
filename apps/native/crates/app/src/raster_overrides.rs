@@ -155,6 +155,7 @@ impl Overrides {
             self.project.clone(),
         );
         let export = self.export_answerer();
+        let begin = self.export_begin();
         let doc_id = self.doc_id;
         let producing = Arc::new(move |on: bool, epoch: u64| {
             let revision = kernel.published(&project).map_or(0, |p| p.revision());
@@ -168,6 +169,7 @@ impl Overrides {
                         Arc::new(move || store.producing_now().then(|| store.epoch()))
                             as pm_engine_service::jobs::CompatState,
                         export.clone(),
+                        begin.clone(),
                     )
                 }),
             );
@@ -178,10 +180,22 @@ impl Overrides {
             producing,
         }
     }
+    /// A delivery starts: its realm starts now, so the extensions' code and
+    /// storage it runs are the ones at the export's start.
+    fn export_begin(&self) -> pm_engine_service::jobs::CompatBegin {
+        let realm = self.realm.clone();
+        let (kernel, project, doc_id) = (self.kernel.clone(), self.project.clone(), self.doc_id);
+        Arc::new(move |pin: &CompatPin| {
+            let realm = realm.lock().unwrap().clone();
+            if let (Some(realm), Ok(frozen)) = (realm, frozen_of(pin, &kernel, &project, doc_id)) {
+                let _ = realm.export(&pin.job, frozen, pin.cancel.clone());
+            }
+        })
+    }
     /// An export frame's needs, waited for on the job's reader thread (never
     /// the main thread) until they come, the job is cancelled, the window's
     /// extensions stop, or a minute passes. A delivery (an export, a render
-    /// cache fill) is answered by a realm of its own, started at its first ask
+    /// cache fill) is answered by a realm of its own, started when it starts
     /// from the publication it froze, so nothing the person edits meanwhile
     /// reaches it and the window's realm keeps serving the viewer. A one-frame
     /// look (an agent's still) asks the window's realm while that realm is at
@@ -251,18 +265,7 @@ impl Overrides {
             let answers = match answers {
                 Some(answers) => answers,
                 None => {
-                    // A render cache fill carries no publication: the window's,
-                    // while it is still the one the fill froze.
-                    let frozen = pin
-                        .frozen
-                        .clone()
-                        .and_then(|f| f.downcast::<pm_kernel::Published>().ok())
-                        .or_else(|| {
-                            kernel.published(&project).filter(|p| {
-                                p.snapshot.doc_id == doc_id && p.revision() == pin.revision
-                            })
-                        })
-                        .ok_or("The project changed before its extensions could draw it")?;
+                    let frozen = frozen_of(pin, &kernel, &project, doc_id)?;
                     realm.export(&pin.job, frozen, pin.cancel.clone())?;
                     ask(json!({"job": pin.job}))?
                 }
@@ -324,6 +327,24 @@ impl Overrides {
     }
 }
 
+/// The publication a job froze; without one (a request made before it could
+/// carry it), the window's while it is still at the job's revision.
+fn frozen_of(
+    pin: &CompatPin,
+    kernel: &KernelHandle,
+    project: &str,
+    doc_id: u64,
+) -> Result<Arc<pm_kernel::Published>, String> {
+    pin.frozen
+        .clone()
+        .and_then(|f| f.downcast::<pm_kernel::Published>().ok())
+        .or_else(|| {
+            kernel
+                .published(project)
+                .filter(|p| p.snapshot.doc_id == doc_id && p.revision() == pin.revision)
+        })
+        .ok_or_else(|| "The project changed before its extensions could draw it".to_owned())
+}
 impl Drop for Overrides {
     /// The window's extensions are gone: its project's frames and exports
     /// stop asking them (and draw natively until another realm answers);

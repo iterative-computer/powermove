@@ -259,21 +259,31 @@ globalThis.__compat = {
     ];
     const clean = (value) => String(value || "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
     const unique = (values) => [...new Set(values.map(clean).filter(Boolean))];
-    const requested = new Set();
-    let fontWaiters = [];
+    // Each face settles once the page has loaded it (or it could not be had);
+    // `ensure` waits for its own faces only.
+    const settled = new Set();
+    const pending = new Map();
+    const faceKey = (face) =>
+      `${face.family}|${Math.trunc(Math.min(1000, Math.max(1, face.weight)))}|${face.italic ? 1 : 0}`;
     const requestFaces = (faces) => {
-      const fresh = faces.filter((face) => {
-        const key = `${face.family}|${face.weight}|${face.italic}`;
-        if (requested.has(key)) return false;
-        requested.add(key);
-        return true;
+      const fresh = [];
+      const waits = faces.map((face) => {
+        const key = faceKey(face);
+        if (settled.has(key)) return Promise.resolve();
+        if (!pending.has(key)) {
+          let resolve;
+          const promise = new Promise((done) => (resolve = done));
+          pending.set(key, { promise, resolve });
+          fresh.push(face);
+        }
+        return pending.get(key).promise;
       });
-      if (!fresh.length) return Promise.resolve();
-      call("ui.request", { kind: "fonts", faces: fresh });
-      return new Promise((resolve) => {
-        fontWaiters.push(resolve);
-        setTimeout(resolve, 5000);
-      });
+      if (fresh.length) call("ui.request", { kind: "fonts", faces: fresh });
+      // A window that never answers (its page gone) does not hold `ensure` forever.
+      return Promise.race([
+        Promise.all(waits),
+        new Promise((resolve) => setTimeout(resolve, 15000)),
+      ]);
     };
     const fonts = {
       bundled: [],
@@ -310,12 +320,14 @@ globalThis.__compat = {
       for (const comp of Object.values(project?.comps ?? {})) scan(comp?.layers);
       return requestFaces(faces);
     };
-    /** The page loaded what it was given: layouts measured before now re-measure. */
-    this.fontsLoaded = () => {
-      const waiters = fontWaiters;
-      fontWaiters = [];
+    /** The page settled these faces: layouts measured before now re-measure. */
+    this.fontsLoaded = (keys = []) => {
       this.realm.task(() => {
-        for (const resolve of waiters) resolve();
+        for (const key of keys) {
+          settled.add(key);
+          pending.get(key)?.resolve();
+          pending.delete(key);
+        }
         this.realm.PM.bus.emit("fonts", fonts.families);
         this.realm.PM.rasterClear?.();
         this.realm.PM.invalidate();

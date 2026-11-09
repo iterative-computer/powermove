@@ -390,6 +390,7 @@ impl NativeHost {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopped = stop.clone();
         *self.nested.lock().unwrap() = Some(tx.clone());
+        let published = self.kernel.lock().unwrap().frozen_publication();
         std::thread::Builder::new()
             .name("pm-compat-capture".into())
             .spawn(move || {
@@ -400,6 +401,7 @@ impl NativeHost {
                     height,
                     motion_blur,
                     stop: &stop,
+                    published,
                 });
                 let _ = tx.send(CaptureEvent::Frame(png));
             })
@@ -1616,12 +1618,23 @@ impl KernelHooks for NativeHost {
 }
 impl HostProxy for NativeHost {
     /// Local and trusted extensions hold no network restriction, as in the shipped app.
+    /// An export's realm (a delivery) reads but never changes anything outside
+    /// it: the window's realm already did whatever its extensions send, and an
+    /// export must not do it again for every frame.
     fn fetch(
         &self,
         _: &Generation,
         request: FetchRequest,
         cancel: Cancellation,
     ) -> Result<Box<dyn HostRequest>> {
+        if self.kernel.lock().unwrap().frozen_publication().is_some()
+            && !matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD")
+        {
+            return Err(Error::Host(format!(
+                "An export's extensions only read the network ({} refused while exporting)",
+                request.method
+            )));
+        }
         crate::net::fetch(request, crate::net::Reach::Open, cancel)
     }
     fn console(&self, _: &Generation, _: &str, _: &str) {}

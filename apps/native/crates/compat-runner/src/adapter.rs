@@ -119,6 +119,17 @@ struct Sent {
     workspace: pm_model::Value,
 }
 
+/// `ext.*` settings as a realm's storage object: durable, and already the
+/// keys the shipped app wrote.
+pub fn storage_of(kernel: &KernelHandle) -> Value {
+    let state = kernel.state();
+    let values = state
+        .settings
+        .iter()
+        .filter(|(key, _)| key.starts_with("ext."))
+        .map(|(key, value)| (key.clone(), wire(value)));
+    Value::Object(values.collect())
+}
 pub struct KernelAdapter {
     kernel: KernelHandle,
     project: String,
@@ -136,6 +147,8 @@ pub struct KernelAdapter {
     mirror: Option<(u64, QueryMirror)>,
     /// An export's realm: this publication for good (see [`Self::frozen`]).
     frozen: Option<Arc<Published>>,
+    /// An export's realm: its extensions' storage as the export started.
+    pinned_storage: Option<Value>,
 }
 /// What an export's extensions are told when they try to change the project.
 const FROZEN: &str = "An export's extensions cannot change the project or its history";
@@ -158,6 +171,7 @@ impl KernelAdapter {
             mutations: 0,
             mirror: None,
             frozen: None,
+            pinned_storage: None,
         }
     }
     /// An export's realm (`export.rs`): it reads `published`, the project the
@@ -165,14 +179,24 @@ impl KernelAdapter {
     /// kernel: direct writes and selection are acknowledged into the realm's
     /// own mirror only, storage writes are dropped, and history, edits and
     /// workspace changes are refused.
-    pub fn frozen(kernel: KernelHandle, published: Arc<Published>, realm: &str) -> Self {
+    pub fn frozen(
+        kernel: KernelHandle,
+        published: Arc<Published>,
+        storage: Value,
+        realm: &str,
+    ) -> Self {
         let writer = Writer {
             realm: u32::MAX,
             generation: 1,
         };
         let mut adapter = Self::new(kernel, &published.project, realm, writer);
         adapter.frozen = Some(published);
+        adapter.pinned_storage = Some(storage);
         adapter
+    }
+    /// The publication an export realm reads; `None` for a window's realm.
+    pub fn frozen_publication(&self) -> Option<Arc<Published>> {
+        self.frozen.clone()
     }
     fn published(&self) -> Result<Arc<Published>> {
         if let Some(frozen) = &self.frozen {
@@ -190,13 +214,10 @@ impl KernelAdapter {
     /// `ext.*` settings as the realm's storage object: durable, and already the
     /// keys the shipped app wrote.
     pub fn storage(&self) -> Value {
-        let state = self.kernel.state();
-        let values = state
-            .settings
-            .iter()
-            .filter(|(key, _)| key.starts_with("ext."))
-            .map(|(key, value)| (key.clone(), wire(value)));
-        Value::Object(values.collect())
+        match &self.pinned_storage {
+            Some(storage) => storage.clone(),
+            None => storage_of(&self.kernel),
+        }
     }
     pub fn store(&self, key: &str, value: &Value) -> Result<()> {
         if self.frozen.is_some() {

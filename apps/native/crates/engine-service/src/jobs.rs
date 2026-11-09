@@ -60,6 +60,11 @@ pub struct ExportRequest {
     /// raster overrides. Never sent to the child.
     #[serde(skip)]
     pub frozen: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// A one-frame look at the project (an agent's still), not a delivery:
+    /// its raster overrides may be answered by the window's realm while it is
+    /// at the frame's revision. Exports and render cache fills are deliveries.
+    #[serde(skip)]
+    pub look: bool,
 }
 
 /// The viewer's activity, as exports and cache fills see it: whether it is
@@ -139,20 +144,34 @@ pub type CompatAnswerer = Arc<
 >;
 /// The wrappers' generation while an override is registered (none: no override).
 pub type CompatState = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+/// Called as a delivery starts: whatever answers its overrides pins the
+/// extensions' code and storage now, not at the first frame that asks.
+pub type CompatBegin = Arc<dyn Fn(&CompatPin) + Send + Sync>;
 struct CompatProducer {
     state: CompatState,
     answer: CompatAnswerer,
+    begin: CompatBegin,
 }
 /// Each open document's producer, by kernel `doc_id` (the job's session).
 static COMPAT: Mutex<Option<std::collections::HashMap<u64, CompatProducer>>> = Mutex::new(None);
 /// Whose extensions wrap `raster` for document `doc_id` (none: its exports
 /// draw natively).
-pub fn set_compat_answerer(doc_id: u64, producer: Option<(CompatState, CompatAnswerer)>) {
+pub fn set_compat_answerer(
+    doc_id: u64,
+    producer: Option<(CompatState, CompatAnswerer, CompatBegin)>,
+) {
     let mut all = COMPAT.lock().unwrap();
     let all = all.get_or_insert_with(Default::default);
     match producer {
-        Some((state, answer)) => {
-            all.insert(doc_id, CompatProducer { state, answer });
+        Some((state, answer, begin)) => {
+            all.insert(
+                doc_id,
+                CompatProducer {
+                    state,
+                    answer,
+                    begin,
+                },
+            );
         }
         None => {
             all.remove(&doc_id);
@@ -285,6 +304,7 @@ impl ExportRequest {
             preview: false,
             cache: None,
             frozen: None,
+            look: false,
         })
     }
 }
@@ -355,15 +375,22 @@ impl ExportHandle {
             let epoch = (c.state)()?;
             Some((
                 c.answer.clone(),
+                c.begin.clone(),
                 CompatPin {
                     job: request.job.as_str().to_owned(),
                     revision: request.revision,
                     epoch,
                     frozen: request.frozen.clone(),
-                    look: request.bypass_missing_effects,
+                    look: request.look,
                     cancel: cancel.clone(),
                 },
             ))
+        });
+        let answerer = answerer.map(|(answer, begin, pin)| {
+            if !pin.look {
+                begin(&pin);
+            }
+            (answer, pin)
         });
         if answerer.is_some()
             && let JobSpec::Export { settings, .. } = &mut request.spec

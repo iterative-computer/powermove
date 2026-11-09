@@ -788,12 +788,15 @@ pub(crate) fn kind_label(kind: &str) -> &'static str {
     }
 }
 
-/// One contributed layer type parameter in main's schema: `type` color, toggle
-/// or select, else a number with `min`, `max` and `step`.
+/// One contributed layer type parameter in main's schema: options make it a
+/// choice; else `type` color, toggle or select, else a number with `min`,
+/// `max` and `step`.
 fn layer_param(param: &Value) -> Option<pm_panel_inspector::LayerParam> {
     use pm_panel_inspector::FieldType;
     let key = param["k"].as_str()?.to_owned();
+    let options = param["options"].as_array().filter(|o| !o.is_empty());
     let kind = match param["type"].as_str() {
+        _ if options.is_some() => FieldType::Choice,
         Some("color") => FieldType::Color,
         Some("toggle") => FieldType::Boolean,
         Some("select") => FieldType::Choice,
@@ -815,11 +818,22 @@ fn layer_param(param: &Value) -> Option<pm_panel_inspector::LayerParam> {
         label: param["label"].as_str().unwrap_or(&key).to_owned(),
         key,
         kind,
-        options: param["options"]
-            .as_array()
+        options: options
             .into_iter()
             .flatten()
             .filter_map(|o| model(o).ok())
             .collect(),
+        default: param.get("def").and_then(|d| model(d).ok()),
+        default_from: matches!(param["type"].as_str(), None | Some("number"))
+            .then(|| {
+                let from = &param["defaultFrom"];
+                let factor = from["factor"].as_f64().filter(|f| f.is_finite())?;
+                match from["dimension"].as_str()? {
+                    "width" => Some((true, factor)),
+                    "height" => Some((false, factor)),
+                    _ => None,
+                }
+            })
+            .flatten(),
     })
 }

@@ -176,8 +176,9 @@ pub enum HostEvent {
         new_pid: i32,
     },
     Failure(&'static str),
-    /// The page has loaded every face it was given (`MacDomHost::add_fonts`).
-    FontsLoaded,
+    /// The page settled these faces (`PageFace::key`), loaded or failed, after
+    /// `MacDomHost::add_fonts`.
+    FontsLoaded(Vec<String>),
 }
 /// Narrow boundary for pm-remote-dom. Invoke only on the AppKit main thread.
 /// A successful send is admission, not a DOM-paint acknowledgement. The bridge

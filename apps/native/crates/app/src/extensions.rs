@@ -1447,15 +1447,30 @@ impl Controller {
         if wanted.is_empty() {
             return;
         }
+        let keys: Vec<String> = wanted
+            .iter()
+            .map(|(family, weight, italic)| format!("{family}|{weight}|{}", u8::from(*italic)))
+            .collect();
         let resolved = cx
             .background_executor()
             .spawn(async move { crate::text_host::page_faces(&wanted) });
         cx.spawn(async move |this, cx| {
             let faces = resolved.await;
-
             let _ = this.update(cx, |v, _| {
                 for page in v.extensions.views.borrow().values() {
                     let _ = page.borrow_mut().add_fonts(&faces);
+                }
+                // A face the registry could not give is settled now: no page
+                // will load it, and whoever waits for it stops waiting.
+                let unresolved: Vec<Value> = keys
+                    .iter()
+                    .filter(|key| !faces.iter().any(|f| &f.key() == *key))
+                    .map(|key| json!(key))
+                    .collect();
+                if let (false, Some(host)) = (unresolved.is_empty(), &v.extensions.host) {
+                    for key in v.extensions.pages.keys() {
+                        host.fonts_loaded(key, Value::Array(unresolved.clone()));
+                    }
                 }
                 v.extensions.faces.extend(faces);
             });
@@ -1482,7 +1497,9 @@ impl Controller {
             .collect();
         for key in ended {
             self.extensions.pages.remove(&key);
-            self.extensions.views.borrow_mut().remove(&key);
+            if let Some(view) = self.extensions.views.borrow_mut().remove(&key) {
+                view.borrow_mut().end_background_job();
+            }
         }
         for (key, view) in running {
             if !self.extensions.pages.contains_key(&key) {
@@ -1549,6 +1566,10 @@ impl Controller {
             return;
         }
         let _ = host.add_fonts(&self.extensions.faces);
+        // An export's page keeps running for its job, the window hidden or not.
+        if key.starts_with(EXPORT_PAGE) && host.begin_background_job(false).is_err() {
+            eprintln!("an export page could not keep running in the background");
+        }
         let shell = self.host.borrow();
         host.install_below(&shell.native_container(), &shell.gpui);
         drop(shell);
@@ -1720,7 +1741,7 @@ impl Controller {
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::Recovered { .. } => page.ready = true,
                     HostEvent::Failure(code) => eprintln!("extension page: {code}"),
-                    HostEvent::FontsLoaded => host.fonts_loaded(key),
+                    HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),
                     _ => (),
                 }
             }

@@ -126,7 +126,14 @@ impl Shared {
             return Ok(Value::Null);
         }
         if kind == "fonts_loaded" {
-            self.handler.event(HostEvent::FontsLoaded);
+            let keys = m["payload"]["keys"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str().map(str::to_owned))
+                .filter(|k| self.fonts.borrow().contains_key(k))
+                .collect();
+            self.handler.event(HostEvent::FontsLoaded(keys));
             return Ok(Value::Null);
         }
         if !self.panels.borrow().items.contains_key(&id) {

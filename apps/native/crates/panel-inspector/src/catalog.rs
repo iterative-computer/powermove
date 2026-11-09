@@ -22,8 +22,13 @@ pub struct LayerParam {
     pub key: String,
     pub label: String,
     pub kind: FieldType,
-    /// A `select` parameter's options as the definition gives them.
+    /// Its options as the definition gives them (a parameter with options is a
+    /// choice whatever its type, as on main).
     pub options: Vec<crate::Value>,
+    /// What Reset returns it to: `def`, or for a number with `defaultFrom`
+    /// the layer's width or height times `factor` (main's `effectParameterDefault`).
+    pub default: Option<crate::Value>,
+    pub default_from: Option<(bool, f64)>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldDescriptor {

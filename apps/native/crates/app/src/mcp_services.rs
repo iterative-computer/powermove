@@ -209,6 +209,13 @@ impl EngineJobs {
         )?;
         request.preview = preview;
         request.frozen = Some(published.clone());
+        // A look at the window's project now may ask its realm; a frame of a
+        // frozen publication (an export realm's capture) is that realm's.
+        request.look = look
+            && self
+                .kernel
+                .published(&published.project)
+                .is_some_and(|now| Arc::ptr_eq(&now, published));
         // An agent's capture draws the effects its project's window defines.
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
@@ -365,7 +372,10 @@ pub(crate) fn frame_renderer(
     // frame again (thumbnails, a check on every redraw) gets it without a render.
     let cache: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>> = Mutex::default();
     Ok(Arc::new(move |request: &pm_compat_runner::FrameRequest| {
-        let published = kernel.published(&project).ok_or("No open project")?;
+        let published = match &request.published {
+            Some(frozen) => frozen.clone(),
+            None => kernel.published(&project).ok_or("No open project")?,
+        };
         // The same frame drawn by other override wrappers is another frame.
         let key = format!(
             "{}:{}:{:?}:{}:{}x{}:{}",

@@ -128,7 +128,7 @@
       document.fonts.add(font);
       try { await font.load(); } catch (_) {}
     }));
-    call({ kind: "fonts_loaded", panel: 0, payload: null });
+    call({ kind: "fonts_loaded", panel: 0, payload: { keys: faces.map((face) => face.key) } });
   };
   const apply = async (event) => {
     if (event.kind === "fonts") {

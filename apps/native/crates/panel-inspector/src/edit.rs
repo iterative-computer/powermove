@@ -770,6 +770,32 @@ impl Inspector {
     }
     fn effect_parameter_default(&self, id: &PropertyId) -> Result<Option<Value>, InspectorError> {
         let layer = self.layer(&id.layer)?;
+        if let Some(key) = id.path.strip_prefix("x.") {
+            let definition = layer
+                .get("d")
+                .map(|d| text(d, "definition"))
+                .unwrap_or_default();
+            let Some(param) = self.layer_param(definition, key) else {
+                return Ok(None);
+            };
+            if let Some((width, factor)) = param.default_from {
+                // As main: the layer's own size, else the composition's.
+                let field = if width { "w" } else { "h" };
+                let positive = |v: Option<&Value>| {
+                    v.and_then(|v| v.get("v").or(Some(v)))
+                        .and_then(Value::as_f64)
+                        .filter(|n| n.is_finite() && *n > 0.)
+                };
+                let size = positive(layer.get("d").and_then(|d| d.get(field)))
+                    .or_else(|| positive(Some(&self.composition_field(field))))
+                    .unwrap_or(1.);
+                let value = size * factor;
+                if value.is_finite() {
+                    return Ok(Some(Value::from(value)));
+                }
+            }
+            return Ok(param.default.clone());
+        }
         if let Some((effect, key)) = id.path.split_once('.') {
             let effect = array(layer.get("fx"))
                 .iter()

@@ -2681,11 +2681,13 @@ fn a_contributed_layer_types_parameters_are_properties_rows() {
         ops: vec![pm_kernel::state::StateOp::Register { registry:"layerTypes".into(), entry: pm_kernel::state::Registration {
             token:"synthetic-layer-token".into(), owner:Caller::native().writer,
             id:"synthetic.cursor".into(), definition: data::model(&json!({"id":"synthetic.cursor","label":"Synthetic Cursor","version":1,"width":128,"height":128,
-                "params":[{"k":"size","label":"Cursor size","def":1,"min":0.1,"max":4,"step":0.01},{"k":"fill","label":"Fill","def":"#ffffff","type":"color"},{"k":"swap","label":"Swap fill / outline","def":false,"type":"toggle"}],
+                "params":[{"k":"size","label":"Cursor size","def":1,"min":0.1,"max":4,"step":0.01},{"k":"fill","label":"Fill","def":"#ffffff","type":"color"},{"k":"swap","label":"Swap fill / outline","def":false,"type":"toggle"},
+                    {"k":"cursor","label":"Cursor type","def":0,"min":0,"max":10,"step":1,"options":[{"v":0,"label":"Arrow"},{"v":1,"label":"I-beam"}]},
+                    {"k":"radius","label":"Radius","def":5,"defaultFrom":{"dimension":"width","factor":0.5}}],
                 "renderer":{"kind":"fragment","fragment":"void main(){fragColor=vec4(1.0);}"}})).unwrap(),
         }}],
     }).wait().unwrap().unwrap();
-    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"extension","name":"Cursor","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"definition":"synthetic.cursor","version":1,"w":128,"h":128,"params":{"size":{"v":2,"kf":[]},"fill":{"v":"#112233","kf":[]},"swap":{"v":true,"kf":[]}}},"fx":[]}]}"##).unwrap();
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"extension","name":"Cursor","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"definition":"synthetic.cursor","version":1,"w":128,"h":128,"params":{"size":{"v":2,"kf":[]},"fill":{"v":"#112233","kf":[]},"swap":{"v":true,"kf":[]},"cursor":{"v":1,"kf":[]},"radius":{"v":12,"kf":[]}}},"fx":[]}]}"##).unwrap();
     kernel
         .open("synthetic", OpenSource::Untitled(project))
         .wait()
@@ -2723,6 +2725,57 @@ fn a_contributed_layer_types_parameters_are_properties_rows() {
     assert_eq!(row("content.x.fill")["control"]["value"], "#112233");
     assert_eq!(row("content.x.swap")["control"]["kind"], "toggle");
     assert_eq!(row("content.x.swap")["label"], "Swap fill / outline");
+    // A numeric parameter with options is a choice, as on main.
+    let cursor = row("content.x.cursor");
+    assert_eq!(cursor["control"]["kind"], "choice");
+    assert_eq!(
+        cursor["control"]["options"][1],
+        json!({"v":1,"label":"I-beam"})
+    );
+    // Reset returns a parameter to its definition's default (`defaultFrom`:
+    // half the layer's 128 px width), and Undo brings the authored value back.
+    let x = |key: &str| {
+        let mut inspector = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        inspector
+            .binding_state(
+                &pm_panel_inspector::Binding::Property(pm_panel_inspector::PropertyId::new(
+                    "a",
+                    format!("x.{key}"),
+                )),
+                0.,
+            )
+            .unwrap()
+            .value
+            .as_f64()
+    };
+    for (key, default) in [("radius", 64.), ("size", 1.)] {
+        backend.sync().unwrap();
+        let request = backend
+            .model
+            .as_mut()
+            .unwrap()
+            .property_action(
+                Caller::native(),
+                &[pm_panel_inspector::PropertyId::new("a", format!("x.{key}"))],
+                pm_panel_inspector::PropertyAction::Reset(None),
+                0.,
+            )
+            .unwrap();
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert_eq!(x(key), Some(default), "{key} reset");
+    }
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(x("size"), Some(2.), "undo restores the authored size");
     // The mounted Properties panel draws the row, and its field writes the layer.
     let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
     finish(panels.mount("inspector").unwrap());
