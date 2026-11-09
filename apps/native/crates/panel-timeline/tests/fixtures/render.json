@@ -918,7 +918,7 @@
             450.0,
             20.0
           ],
-          "color": 14474464,
+          "color": 15000804,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -932,6 +932,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 12724767,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -964,15 +990,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 12724767,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 1776931,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -3031,7 +3082,7 @@
             450.0,
             20.0
           ],
-          "color": 14474464,
+          "color": 15000804,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -3045,6 +3096,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 12724767,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -3077,15 +3154,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 12724767,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 1776931,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -5064,7 +5166,7 @@
             450.0,
             20.0
           ],
-          "color": 14474464,
+          "color": 15000804,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -5078,6 +5180,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 12724767,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -5110,15 +5238,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 12724767,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 1776931,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -7166,7 +7319,7 @@
             450.0,
             20.0
           ],
-          "color": 14474464,
+          "color": 15000804,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -7180,6 +7333,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 12724767,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -7212,15 +7391,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 12724767,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 1776931,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -9348,7 +9552,7 @@
             450.0,
             20.0
           ],
-          "color": 3815994,
+          "color": 921102,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -9362,6 +9566,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 15950679,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -9394,15 +9624,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 15950679,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 15921906,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -11461,7 +11716,7 @@
             450.0,
             20.0
           ],
-          "color": 3815994,
+          "color": 921102,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -11475,6 +11730,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 15950679,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -11507,15 +11788,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 15950679,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 15921906,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -13494,7 +13800,7 @@
             450.0,
             20.0
           ],
-          "color": 3815994,
+          "color": 921102,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -13508,6 +13814,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 15950679,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -13540,15 +13872,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 15950679,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 15921906,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,
@@ -15596,7 +15953,7 @@
             450.0,
             20.0
           ],
-          "color": 3815994,
+          "color": 921102,
           "opacity": 1.0,
           "radius": 4.0,
           "stroke": 0.0,
@@ -15610,6 +15967,32 @@
               232.5,
               770.0
             ]
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-hatch:offline",
+          "shape": "stripes-45",
+          "bounds": [
+            320.0,
+            56.0,
+            450.0,
+            20.0
+          ],
+          "color": 15950679,
+          "opacity": 0.2800000011920929,
+          "radius": 4.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 12.6,
+            "stripe": 5.04
           },
           "clip": [
             320.0,
@@ -15642,15 +16025,40 @@
           ]
         },
         {
-          "id": "clip-content:offline",
+          "id": "clip-offline:offline",
           "shape": "text",
           "bounds": [
             328.0,
             56.0,
-            442.0,
+            39.6,
             20.0
           ],
           "color": 15950679,
+          "opacity": 1.0,
+          "radius": 0.0,
+          "stroke": 0.0,
+          "text": "Offline",
+          "fontSize": 11.0,
+          "detail": {
+            "truncate": "tail"
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-content:offline",
+          "shape": "text",
+          "bounds": [
+            373.6,
+            56.0,
+            396.4,
+            20.0
+          ],
+          "color": 15921906,
           "opacity": 1.0,
           "radius": 0.0,
           "stroke": 0.0,

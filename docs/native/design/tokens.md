@@ -230,6 +230,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#080808` | `#EEEEF1` | `#080808` |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.09 | 0.07 | 0.09 | 0.07 |
+| `translucency.offline_hatch` | Media Offline hatch on timeline clips, as `danger` ink | 0.28 | 0.28 | 0.28 | 0.28 |
 | `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.66 | 0.7 | 0.66 | 0.7 |
 | `translucency.tick_major` | Labelled ruler tick, as `text` ink | 0.3 | 0.3 | 0.3 | 0.3 |
 | `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |

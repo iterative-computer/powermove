@@ -22,6 +22,7 @@ pub fn clip(id: &str) -> Clip {
         media: Media::Ready,
         waveform: None,
         trim: None,
+        missing_effect: None,
     }
 }
 pub fn key(id: &str, time: f64) -> Key {
@@ -137,4 +138,18 @@ pub fn large_scene(count: usize, t: &Tokens) -> Scene {
         t,
     )
     .unwrap()
+}
+
+/// One layer row holding `clip`.
+#[allow(dead_code)]
+pub fn scene_with(t: &Tokens, clip: Clip) -> Scene {
+    let id = clip.id.clone();
+    let r = row(
+        &id,
+        RowContent::Layer {
+            clip: Some(clip),
+            summary: vec![],
+        },
+    );
+    Scene::new(vec![r], 12., 30., t).unwrap()
 }

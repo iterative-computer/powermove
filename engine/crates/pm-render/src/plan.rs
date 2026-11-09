@@ -321,6 +321,8 @@ pub struct Build<'r> {
     /// producer draws, and what the frame still needs from it.
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     pub compat_missing: Vec<crate::compat::CompatNeed>,
+    /// See [`BuildOptions::offline_cards`].
+    offline_cards: bool,
     /// [`BuildOptions::preview`].
     preview: Option<crate::compat_crop::PreviewWindow>,
     /// Layer draws kept from the last frame (`crate::reuse`): the
@@ -393,6 +395,9 @@ pub struct BuildOptions {
     /// root composition (today's preview source clipping, which a `raster`
     /// override sees as its `crop` argument: `crate::compat_crop`).
     pub preview: Option<crate::compat_crop::PreviewWindow>,
+    /// Draw the Media Offline card for offline media (frames that isolate
+    /// failing layers); otherwise offline media is a layer failure.
+    pub offline_cards: bool,
     /// The top level's output origin
     /// ([`RenderRequest::origin`](crate::RenderRequest::origin)).
     pub origin: Option<(f64, f64)>,
@@ -548,6 +553,7 @@ pub(crate) fn build_reusing<'r>(
         compat,
         compat_missing: Vec::new(),
         preview: options.preview,
+        offline_cards: options.offline_cards,
         reuse,
     };
     let mut scope = Scope::new(ev, root_comp, project);
@@ -1437,6 +1443,53 @@ fn native_content_quad<'d>(
                 return Ok(None);
             };
             let Some(path) = b.assets.path(&asset_id, Some(record)) else {
+                // Frames that isolate failing layers (the viewer, agent
+                // stills) draw the Media Offline card in the layer's box;
+                // exports never do (the job refuses offline originals).
+                if b.offline_cards {
+                    let file =
+                        js::member_string(record, "name").unwrap_or_else(|| asset_id.clone());
+                    let bw = js::or_number(js::get(&d, "w"), wf);
+                    let bh = js::or_number(js::get(&d, "h"), hf);
+                    let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+                    let playback = b.sampling == crate::sampling::Sampling::Playback;
+                    let world = vector_world(scope, b, layer, time, scale)?;
+                    // The box's height on screen picks how much the card says.
+                    let device_h = bh * world[2].hypot(world[3]);
+                    let tier = crate::offline_card::Tier::for_height(device_h);
+                    if let Ok(card) = crate::offline_card::path(&file, bw, bh, tier) {
+                        let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
+                            Ok(crate::vector::svg::plan_svg(
+                                &card,
+                                bw,
+                                bh,
+                                [0.0, 0.0, 1.0, 1.0],
+                                world,
+                                target,
+                                playback,
+                            )
+                            .ok()
+                            .flatten()
+                            .map(|q| *q))
+                        };
+                        if scope.is_3d_layer(layer)? {
+                            return local_level2(
+                                scope, layer, time, scale, b.origin, target, &mut plan,
+                            );
+                        }
+                        if let Ok(quad) = crate::vector::svg::plan_svg(
+                            &card,
+                            bw,
+                            bh,
+                            [0.0, 0.0, 1.0, 1.0],
+                            &world,
+                            target,
+                            playback,
+                        ) {
+                            return Ok(quad.map(|q| device_quad(*q)));
+                        }
+                    }
+                }
                 b.failures.push(LayerFailure {
                     composition: comp_id,
                     layer: js::layer_id(layer),

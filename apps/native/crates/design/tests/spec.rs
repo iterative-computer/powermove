@@ -361,6 +361,10 @@ const ROLES: &[(&str, &str)] = &[
         "translucency.grid",
         "Time grid under the timeline tracks, as `text` ink",
     ),
+    (
+        "translucency.offline_hatch",
+        "Media Offline hatch on timeline clips, as `danger` ink",
+    ),
 ];
 
 fn root() -> PathBuf {

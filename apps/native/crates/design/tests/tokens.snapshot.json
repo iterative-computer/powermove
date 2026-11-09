@@ -162,7 +162,8 @@
       "line": 0.09,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   },
   {
@@ -328,7 +329,8 @@
       "line": 0.09,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   },
   {
@@ -494,7 +496,8 @@
       "line": 0.09,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   },
   {
@@ -660,7 +663,8 @@
       "line": 0.09,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   },
   {
@@ -826,7 +830,8 @@
       "line": 0.07,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   },
   {
@@ -992,7 +997,8 @@
       "line": 0.07,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   },
   {
@@ -1158,7 +1164,8 @@
       "line": 0.07,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   },
   {
@@ -1324,7 +1331,8 @@
       "line": 0.07,
       "tick_minor": 0.14,
       "tick_major": 0.3,
-      "grid": 0.04
+      "grid": 0.04,
+      "offline_hatch": 0.28
     }
   }
 ]

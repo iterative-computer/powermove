@@ -55,6 +55,11 @@ pub struct Layer {
     pub scale_linked: bool,
     pub separate_dimensions: bool,
     pub effects: Vec<(String, String)>,
+    /// The media asset an image, video or audio layer draws (`d.asset`).
+    pub asset: Option<String>,
+    /// Effects whose extension is missing (`fx[].missing`): the layer draws
+    /// with them bypassed. Their display names, else types.
+    pub missing_effects: Vec<String>,
     pub masks: Vec<String>,
     pub definition: Option<String>,
     pub channels: Vec<Channel>,
@@ -224,11 +229,19 @@ impl TimelineIndex {
                 .iter()
                 .filter_map(|fx| Some((string(fx.get("id"))?, string(fx.get("type"))?)))
                 .collect();
+            let missing_effects = array(layer.get("fx"))
+                .iter()
+                .filter(|fx| boolean(fx.get("missing")))
+                .filter_map(|fx| string(fx.get("name")).or_else(|| string(fx.get("type"))))
+                .collect();
+            let asset = layer.get("d").and_then(|d| string(d.get("asset")));
             let masks = array(layer.get("masks"))
                 .iter()
                 .filter_map(|m| string(m.get("id")))
                 .collect();
             result.layers.push(Layer {
+                asset,
+                missing_effects,
                 id,
                 name: js_string(layer.get("name")).unwrap_or_default(),
                 kind: string(layer.get("type")).unwrap_or_default(),

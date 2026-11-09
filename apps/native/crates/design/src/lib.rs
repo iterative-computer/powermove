@@ -247,6 +247,8 @@ pub struct Translucency {
     pub tick_minor: f32,
     pub tick_major: f32,
     pub grid: f32,
+    /// Media Offline hatch on timeline clips, as `danger` ink.
+    pub offline_hatch: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -573,6 +575,7 @@ impl Tokens {
                     tick_minor: 0.14,
                     tick_major: 0.3,
                     grid: 0.04,
+                    offline_hatch: 0.28,
                 },
                 (Scheme::Light, true) => Translucency {
                     ground: 0xeeeef1,
@@ -583,6 +586,7 @@ impl Tokens {
                     tick_minor: 0.14,
                     tick_major: 0.3,
                     grid: 0.04,
+                    offline_hatch: 0.28,
                 },
                 (Scheme::Dark, false) => Translucency {
                     ground: 0x080808,
@@ -593,6 +597,7 @@ impl Tokens {
                     tick_minor: 0.14,
                     tick_major: 0.3,
                     grid: 0.04,
+                    offline_hatch: 0.28,
                 },
                 (Scheme::Light, false) => Translucency {
                     ground: 0xeeeef1,
@@ -603,6 +608,7 @@ impl Tokens {
                     tick_minor: 0.14,
                     tick_major: 0.3,
                     grid: 0.04,
+                    offline_hatch: 0.28,
                 },
             },
         };

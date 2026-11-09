@@ -241,6 +241,7 @@ impl Controller {
             self.message = crate::media::failure_note(resolution.failed.len());
         }
         self.media_base = resolution.catalog;
+        self.media_resolved = true;
         let before = std::mem::take(&mut self.media);
         self.decorate_media();
         self.identify_media();
@@ -263,6 +264,24 @@ impl Controller {
                 .decorate(&project, &mut media, &self.project_assets());
         }
         self.media = media;
+        self.publish_offline_media();
+    }
+    /// The assets the viewer cannot read in its media mode, for the timeline's
+    /// Media Offline clips (the same catalog the engine draws the card from).
+    pub(crate) fn publish_offline_media(&mut self) {
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        let offline = if self.media_resolved {
+            let readable = self.media.viewer_paths(self.media_mode);
+            self.project_assets()
+                .into_iter()
+                .filter(|id| !readable.contains_key(id))
+                .collect()
+        } else {
+            Default::default()
+        };
+        self.offline_changed |= crate::timeline_surface::set_offline_media(&project, offline);
     }
     /// The pro media worker moved: renditions change the catalog; every
     /// change redraws the Project panel's status and the tasks window.

@@ -41,6 +41,11 @@ pub struct Controller {
     pub(crate) media_refresh: crate::media_refresh::Refresh,
     /// What the media resolver found; `media` adds the renditions.
     pub(crate) media_base: MediaCatalog,
+    /// A media resolution for this session has landed: only then do missing
+    /// files read as offline (before it, everything is still loading).
+    pub(crate) media_resolved: bool,
+    /// The offline set changed since the timeline last rebuilt.
+    pub(crate) offline_changed: bool,
     /// Proxies, optimized media and their Background Tasks.
     pub pro_media: Arc<crate::pro_media::ProMedia>,
     /// Window ▸ Background Tasks, while open.
@@ -349,6 +354,8 @@ impl Controller {
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
             media_base: MediaCatalog::default(),
+            media_resolved: false,
+            offline_changed: false,
             pro_media,
             tasks_window: None,
             opening: false,
@@ -1169,6 +1176,7 @@ impl Controller {
         self.media_refresh.reset();
         self.media = MediaCatalog::default();
         self.media_base = MediaCatalog::default();
+        self.media_resolved = false;
         self.mirror = None;
         self.selected = None;
         self.refresh(cx);

@@ -45,6 +45,12 @@ pub struct ExportRequest {
     /// refuses it by name.
     #[serde(default)]
     pub without_offline: bool,
+    /// A look at the project, not a delivery (agent stills): offline media
+    /// draws the Media Offline card as in the viewer instead of refusing.
+    /// Never set for an export or a
+    /// delivery capture.
+    #[serde(default)]
+    pub preview: bool,
 }
 /// An export frame's raster override answer from the window that has the
 /// document open.
@@ -238,6 +244,7 @@ impl ExportRequest {
             disk_reserve: DISK_RESERVE,
             bypass_missing_effects: false,
             without_offline: false,
+            preview: false,
         })
     }
 }
@@ -596,7 +603,9 @@ pub fn run_child() -> Result<()> {
                 );
             }
         }
-        if !offline.is_empty() && !request.without_offline {
+        // A preview (an agent's still) draws offline media as the Media
+        // Offline card instead.
+        if !offline.is_empty() && !request.without_offline && !request.preview {
             let names: Vec<_> = offline.iter().take(3).map(|c| c.name.as_str()).collect();
             let more = match offline.len().saturating_sub(3) {
                 0 => String::new(),
@@ -615,6 +624,8 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("cancelled");
         }
         let mut renderer = pm_render::Renderer::headless()?;
+        // Previews isolate failing layers, as the viewer: the card draws.
+        renderer.set_isolate_layers(request.preview);
         if overriding {
             renderer.set_compat_rasters(Some(rasters.clone()));
         }

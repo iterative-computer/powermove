@@ -166,6 +166,9 @@ pub struct TimelineSurface {
     fitted: bool,
     gesture: Gesture,
     cursor: CursorStyle,
+    /// A badge's tooltip shown after `motion.tooltip_delay` (text, local point).
+    tip: Option<(SharedString, (f64, f64))>,
+    tip_wait: Option<Task<()>>,
     /// A wheel or pinch view change waiting for the gesture to rest.
     idle_persist: Option<Task<()>>,
     /// Extension clip decorations by clip id (`timeline.paint`), and what
@@ -215,6 +218,8 @@ impl TimelineSurface {
             fitted: false,
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
+            tip: None,
+            tip_wait: None,
             idle_persist: None,
             decorations: Default::default(),
             painted: None,
@@ -1240,6 +1245,23 @@ impl TimelineSurface {
             self.cursor = cursor;
             cx.notify();
         }
+        let text = self.frame.as_ref().and_then(|f| f.tooltip_at(x, y));
+        let shown = self.tip.as_ref().map(|(t, _)| t.to_string());
+        if text != shown {
+            if self.tip.take().is_some() {
+                cx.notify();
+            }
+            self.tip_wait = text.map(|text| {
+                let delay = std::time::Duration::from_secs_f64(self.tokens.motion.tooltip_delay);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.tip = Some((text.into(), (x, y)));
+                        cx.notify();
+                    });
+                })
+            });
+        }
     }
     #[cfg(test)]
     pub fn graph_ops_for_test(&self) -> Vec<Op> {
@@ -1537,7 +1559,31 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         }
     })
 }
-struct Presenter;
+/// Assets the viewer cannot read, per project: their clips show Media
+/// Offline (docs/native/design/media-offline.md).
+static OFFLINE: std::sync::Mutex<
+    std::collections::BTreeMap<String, Arc<std::collections::BTreeSet<String>>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Replaces `project`'s offline assets; `true` when they changed.
+pub fn set_offline_media(project: &str, offline: std::collections::BTreeSet<String>) -> bool {
+    let mut all = OFFLINE.lock().unwrap_or_else(|e| e.into_inner());
+    if all.get(project).is_some_and(|o| **o == offline) {
+        return false;
+    }
+    all.insert(project.to_owned(), Arc::new(offline));
+    true
+}
+fn offline_media(project: &str) -> Arc<std::collections::BTreeSet<String>> {
+    OFFLINE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(project)
+        .cloned()
+        .unwrap_or_default()
+}
+struct Presenter {
+    offline: Arc<std::collections::BTreeSet<String>>,
+}
 impl ModelPresenter for Presenter {
     fn accessibility_label(&self, row: &RowId) -> String {
         match row {
@@ -1555,8 +1601,16 @@ impl ModelPresenter for Presenter {
             _ => Label::Gray,
         }
     }
-    fn media(&self, _: &pm_panel_timeline::Layer) -> Media {
-        Media::Ready
+    fn media(&self, layer: &pm_panel_timeline::Layer) -> Media {
+        if layer
+            .asset
+            .as_ref()
+            .is_some_and(|asset| self.offline.contains(asset))
+        {
+            Media::Offline
+        } else {
+            Media::Ready
+        }
     }
     fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
         match key.stored.get("e").and_then(pm_model::Value::as_str) {
@@ -1575,7 +1629,10 @@ impl ModelPresenter for Presenter {
 }
 fn build(client: &TimelineClient, tokens: &Tokens) -> Option<Built> {
     let published: Arc<Published> = client.kernel.published(&client.project)?;
-    let scene = Scene::from_model(&client.model, &Presenter, tokens, 0.).ok()?;
+    let presenter = Presenter {
+        offline: offline_media(&client.project),
+    };
+    let scene = Scene::from_model(&client.model, &presenter, tokens, 0.).ok()?;
     let graph = (client.model.graph_display != GraphDisplay::DopeSheet)
         .then(|| {
             let mut mirror = QueryMirror::new(&published);
@@ -1609,8 +1666,27 @@ impl Render for TimelineSurface {
             _ => None,
         };
         let weak = this.clone();
+        let t = &self.tokens;
+        let tip = self.tip.clone().map(|(text, (x, y))| {
+            // The shell's tooltip look: floating fill, separator edge, minimum type.
+            div()
+                .absolute()
+                .left(px(x as f32 + t.metrics.inset))
+                .top(px(y as f32 + t.metrics.inset))
+                .px(px(t.metrics.gap))
+                .py(px(t.metrics.border * 2.))
+                .rounded(px(t.metrics.control_radius))
+                .bg(rgb(t.colors.floating))
+                .border(px(t.metrics.border))
+                .border_color(rgb(t.colors.separator))
+                .text_size(px(t.typography.minimum))
+                .text_color(rgb(t.colors.text))
+                .whitespace_nowrap()
+                .child(text)
+        });
         div()
             .id("native-timeline")
+            .relative()
             .size_full()
             .cursor(self.cursor)
             .role(Role::Group)
@@ -1694,6 +1770,8 @@ impl Render for TimelineSurface {
                 )
                 .size_full(),
             )
+            // Over the canvas.
+            .children(tip)
     }
 }
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
@@ -1706,7 +1784,33 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         .clip
         .map(|c| Bounds::new(at(c.x, c.y), size(px(c.width as f32), px(c.height as f32))));
     let draw = |window: &mut Window, cx: &mut App| match op.shape {
-        "rect" | "rounded-rect" | "stripes-45" | "work-area-handle" | "square" => {
+        // 45° stripes clipped to the op's rounded box (offline clips, the
+        // render bar while rendering).
+        "stripes-45" => {
+            let period = op.detail["period"].as_f64().unwrap_or(6.).max(2.) as f32;
+            let stripe = op.detail["stripe"].as_f64().unwrap_or(2.).max(0.5) as f32;
+            let (x0, y0) = (f32::from(area.origin.x), f32::from(area.origin.y));
+            let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: area,
+                    fade_out: Default::default(),
+                }),
+                |window| {
+                    let mut x = x0 - h;
+                    while x < x0 + w {
+                        let mut path = PathBuilder::stroke(px(stripe));
+                        path.move_to(point(px(x), px(y0 + h)));
+                        path.line_to(point(px(x + h), px(y0)));
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, color);
+                        }
+                        x += period;
+                    }
+                },
+            );
+        }
+        "rect" | "rounded-rect" | "work-area-handle" | "square" => {
             window.paint_quad(
                 PaintQuad::new(area)
                     .background(color)

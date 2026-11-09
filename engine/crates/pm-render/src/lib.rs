@@ -39,6 +39,7 @@ pub mod js;
 pub mod media;
 pub mod motion;
 mod nearest_half;
+pub mod offline_card;
 pub mod parity;
 mod pipelines;
 pub mod plan;

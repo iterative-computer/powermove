@@ -286,11 +286,13 @@ fn build_options(
     comp: &Comp<'_>,
     request: &RenderRequest,
     shader_fallback: bool,
+    offline_cards: bool,
 ) -> plan::BuildOptions {
     plan::BuildOptions {
         blur: crate::motion::resolve(comp, request.motion_blur),
         sampling: request.sampling,
         shader_fallback,
+        offline_cards,
         preview: preview_window(comp, request),
         origin: request.origin,
     }
@@ -1871,7 +1873,12 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
+            build_options(
+                &comp,
+                request,
+                self.shaders.fallback_runner,
+                self.isolate_layers,
+            ),
             self.compat.as_deref(),
             None,
         );
@@ -1966,7 +1973,12 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
+            build_options(
+                &comp,
+                request,
+                self.shaders.fallback_runner,
+                self.isolate_layers,
+            ),
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
@@ -2568,7 +2580,12 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
+            build_options(
+                &comp,
+                request,
+                self.shaders.fallback_runner,
+                self.isolate_layers,
+            ),
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
