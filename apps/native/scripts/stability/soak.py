@@ -340,6 +340,7 @@ def main():
     text = ''.join(f.read_text(errors='replace') for f in a.scratch.glob('app*.log'))
     stalls = [float(m) for m in re.findall(r'"stall_ms":([\d.]+)', text)]
     panics = [l for l in text.splitlines() if 'panicked' in l]
+    activations = [json.loads(l[8:]) for l in text.splitlines() if l.startswith('PM_MAIN ') and 'became_active' in l]
     if panics:
         failures.append(f'panics: {panics[:3]}')
     third = samples[len(samples) // 3:] if len(samples) >= 6 else samples
@@ -351,7 +352,8 @@ def main():
     summary = {'minutes': round((time.monotonic() - started) / 60, 1), 'cycles': cycle, 'events': events,
                'growth_last_two_thirds': growth, 'first': samples[0] if samples else None,
                'last': samples[-1] if samples else None, 'stalls_over_50ms': len(stalls),
-               'worst_stall_ms': round(max(stalls)) if stalls else 0, 'failures': failures}
+               'worst_stall_ms': round(max(stalls)) if stalls else 0, 'activations': activations,
+               'failures': failures}
     (a.scratch / 'summary.json').write_text(json.dumps({'summary': summary, 'samples': samples}, indent=1))
     print(json.dumps(summary, indent=1))
     sys.exit(1 if failures else 0)

@@ -81,6 +81,39 @@ impl Drop for Span {
     }
 }
 
+/// When the app becomes the active app, and the event that did it (a
+/// person's click reads `mouse`; anything else, e.g. another app quitting
+/// and the system choosing this one, reads its event type or `none`), so an
+/// unattended run can tell a focus steal from a person.
+fn report_activation() {
+    use objc2_app_kit::{NSApplication, NSApplicationDidBecomeActiveNotification, NSEventType};
+    let block = block2::RcBlock::new(|_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+        let event = objc2::MainThreadMarker::new()
+            .and_then(|mtm| NSApplication::sharedApplication(mtm).currentEvent())
+            .map(|e| {
+                let t = e.r#type();
+                if t == NSEventType::LeftMouseDown || t == NSEventType::RightMouseDown {
+                    "mouse".to_owned()
+                } else {
+                    format!("{t:?}")
+                }
+            })
+            .unwrap_or_else(|| "none".into());
+        line(serde_json::json!({"app": "became_active", "event": event}));
+    });
+    // SAFETY: a notification name constant; the observer lives for the process.
+    let token = unsafe {
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidBecomeActiveNotification),
+                None,
+                None,
+                &block,
+            )
+    };
+    std::mem::forget(token);
+}
+
 /// Main-thread responsiveness: a foreground task asks for a 5 ms timer and
 /// reports how late it resumes. A late resume is time the UI thread could
 /// not paint or handle input.
@@ -90,6 +123,7 @@ pub fn install_probe(cx: &mut gpui::App) {
     }
     let timer = cx.background_executor().clone();
     stall_sampler::start();
+    report_activation();
     cx.spawn(async move |_| {
         let mut worst = 0f64;
         let mut reported = Instant::now();
