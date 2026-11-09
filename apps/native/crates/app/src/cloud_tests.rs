@@ -238,24 +238,59 @@ fn offline_sign_out_forgets_the_native_and_migrated_sessions_and_reports_a_keych
         "expiresAt":"2999-01-01T00:00:00Z"})
     .to_string();
     let items = Items::default();
-    let migrated = crate::cloud::migrated_session();
+    let profile = tempfile::tempdir().unwrap();
+    // The first launch migrated two versions of the shipped app's session,
+    // each at `hash("cloud/session:<version>")`, and registered both.
+    let migrated: Vec<(String, String)> = ["v1", "v2"]
+        .iter()
+        .map(|version| {
+            let service = format!("{} migration secrets", pm_first_launch::BETA_BUNDLE_ID);
+            let account = blake3::hash(format!("cloud/session:{version}").as_bytes())
+                .to_hex()
+                .to_string();
+            let writer = pm_kernel::persistence::LibraryWriter::open(
+                profile.path(),
+                pm_kernel::persistence::DiskFormat::V1_2,
+                None,
+            )
+            .unwrap();
+            pm_kernel::profile::ProfileStorage::new(&writer)
+                .register_secret(&pm_kernel::profile::SecretLocator {
+                    id: "cloud/session".into(),
+                    version: (*version).into(),
+                    service: service.clone(),
+                    account: account.clone(),
+                })
+                .unwrap();
+            (service, account)
+        })
+        .collect();
     let native = ("app Powermove Cloud".to_owned(), "session".to_owned());
-    for key in [native.clone(), migrated.clone()] {
+    // Only the oldest migrated item holds a session: it is still read.
+    items
+        .map
+        .lock()
+        .unwrap()
+        .insert(migrated[0].clone(), sealed.clone().into_bytes());
+    let vault = || {
+        Box::new(crate::cloud::Keychain::with_items(
+            native.0.clone(),
+            native.1.clone(),
+            Some(profile.path().to_owned()),
+            Box::new(items.clone()),
+        ))
+    };
+    {
+        let host = Http::new(origin, vault(), profile.path().to_owned());
+        assert!(host.signed_in());
+    }
+    for key in [native.clone(), migrated[1].clone()] {
         items
             .map
             .lock()
             .unwrap()
             .insert(key, sealed.clone().into_bytes());
     }
-    let profile = tempfile::tempdir().unwrap();
-    let vault = || {
-        Box::new(crate::cloud::Keychain::with_items(
-            native.0.clone(),
-            native.1.clone(),
-            Some(migrated.clone()),
-            Box::new(items.clone()),
-        ))
-    };
     let mut host = Http::new(origin, vault(), profile.path().to_owned());
     assert!(host.signed_in());
     let sign_out = |host: &mut Http| {

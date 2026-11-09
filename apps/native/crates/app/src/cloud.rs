@@ -43,22 +43,25 @@ pub trait Items: Send {
 }
 /// A generic password named after this app's bundle id, so a beta, a
 /// release and each development bundle keep their own session. A release
-/// build's session also reads the item the first launch migrated from the
-/// shipped app; delete removes both, so a signed-out Mac stays signed out.
+/// build's session also reads the items the first launch migrated from the
+/// shipped app (every location it registered in the profile, one per
+/// migrated version); delete removes all of them, so a signed-out Mac stays
+/// signed out.
 pub struct Keychain {
     service: String,
     account: String,
-    migrated: Option<(String, String)>,
+    /// The profile whose registered migrated sessions are read and deleted.
+    migrated: Option<PathBuf>,
     items: Box<dyn Items>,
 }
 impl Keychain {
     #[cfg(target_os = "macos")]
-    pub fn for_app() -> Self {
+    pub fn for_app(profile: &Path) -> Self {
         let mut keychain = Self::named("Powermove Cloud", "session");
         // Settings › Accounts › Sign-Ins from the Original App. Release builds
         // only: a development build never reads or touches a real account.
         if !cfg!(debug_assertions) {
-            keychain.migrated = Some(migrated_session());
+            keychain.migrated = Some(profile.to_owned());
         }
         keychain
     }
@@ -76,7 +79,7 @@ impl Keychain {
     pub fn with_items(
         service: String,
         account: String,
-        migrated: Option<(String, String)>,
+        migrated: Option<PathBuf>,
         items: Box<dyn Items>,
     ) -> Self {
         Self {
@@ -87,36 +90,53 @@ impl Keychain {
         }
     }
 }
-/// Where the first launch put the shipped app's Cloud session.
-pub fn migrated_session() -> (String, String) {
-    (
-        format!("{} migration secrets", pm_first_launch::BETA_BUNDLE_ID),
-        blake3::hash(b"cloud/session").to_hex().to_string(),
-    )
+impl Keychain {
+    /// Where the first launch put the shipped app's Cloud session, newest
+    /// registration first.
+    fn migrated(&self) -> Result<Vec<(String, String)>, String> {
+        let Some(profile) = &self.migrated else {
+            return Ok(Vec::new());
+        };
+        let locators = pm_kernel::profile::registered_secrets(profile, "cloud/session")
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(locators
+            .into_iter()
+            .rev()
+            .map(|l| (l.service, l.account))
+            .collect())
+    }
 }
 impl Vault for Keychain {
     fn read(&self) -> Result<Option<Vec<u8>>, String> {
         if let Some(bytes) = self.items.read(&self.service, &self.account)? {
             return Ok(Some(bytes));
         }
-        match &self.migrated {
-            Some((service, account)) => self.items.read(service, account),
-            None => Ok(None),
+        for (service, account) in self.migrated()? {
+            if let Some(bytes) = self.items.read(&service, &account)? {
+                return Ok(Some(bytes));
+            }
         }
+        Ok(None)
     }
     fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.items.write(&self.service, &self.account, bytes)
     }
     /// Every item `read` could return; each is tried, the first failure reported.
     fn delete(&mut self) -> Result<(), String> {
-        let native = self.items.delete(&self.service, &self.account);
-        let migrated = match &self.migrated {
-            Some((service, account)) => self.items.delete(service, account),
-            None => Ok(()),
-        };
-        native.and(migrated)
+        let mut outcome = self.items.delete(&self.service, &self.account);
+        match self.migrated() {
+            Ok(locations) => {
+                for (service, account) in locations {
+                    let deleted = self.items.delete(&service, &account);
+                    outcome = outcome.and(deleted);
+                }
+            }
+            Err(error) => outcome = outcome.and(Err(error)),
+        }
+        outcome
     }
 }
+
 #[cfg(target_os = "macos")]
 mod keychain {
     use std::{ffi::c_void, ptr};
@@ -529,7 +549,7 @@ pub fn init(profile: PathBuf, cx: &mut App) {
     let Ok(worker) = ServiceWorker::start(move || {
         Ok(Http::new(
             origin,
-            Box::new(Keychain::for_app()),
+            Box::new(Keychain::for_app(&worker_profile)),
             worker_profile,
         ))
     }) else {
@@ -1027,7 +1047,7 @@ pub fn delete_account(owner: Retained<NSWindow>, cx: &mut App) {
 pub fn remember_install(profile: &Path, repo: &str, release: Option<&str>) {
     let mut http = Http::new(
         store_install::origin(),
-        Box::new(Keychain::for_app()),
+        Box::new(Keychain::for_app(profile)),
         profile.to_owned(),
     );
     let remember = cached(profile, store_install::origin()).is_some_and(|a| a.remember_installs);

@@ -235,6 +235,44 @@ fn safe_path(root: &Path, relative: &Path, parents: bool) -> Result<PathBuf, Ker
     }
     Ok(path)
 }
+/// The registered locations of secret `id`, in registration order.
+fn locators(values: &[Value], id: &str) -> Result<Vec<SecretLocator>, KernelFailure> {
+    let mut out = vec![];
+    for v in values
+        .iter()
+        .filter(|v| v.get("id").and_then(Value::as_str) == Some(id))
+    {
+        let get = |key| {
+            v.get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| err("Invalid secret locator"))
+        };
+        out.push(SecretLocator {
+            id: id.to_owned(),
+            version: get("version")?,
+            service: get("service")?,
+            account: get("account")?,
+        });
+    }
+    Ok(out)
+}
+/// Every location secret `id` was registered at in `profile`, read without
+/// the library writer (registration replaces the sidecar atomically), so a
+/// worker that holds no writer (the Cloud account) can find them.
+pub fn registered_secrets(profile: &Path, id: &str) -> Result<Vec<SecretLocator>, KernelFailure> {
+    let path = safe_path(profile, Path::new("secret-locators.json"), false)?;
+    let values = match fs::read_to_string(path) {
+        Ok(text) => parse(&text)
+            .map_err(err)?
+            .as_array()
+            .cloned()
+            .ok_or_else(|| err("Invalid profile sidecar"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(err(e)),
+    };
+    locators(&values, id)
+}
 impl Kernel {
     pub fn profile(&self, call: ProfileCall) -> Result<ProfileReply, KernelFailure> {
         let writer = self
@@ -276,28 +314,10 @@ impl Kernel {
                 storage.register_secret(&locator)?;
                 Ok(ProfileReply::Changed)
             }
-            ProfileCall::SecretLocators { id } => {
-                let values = storage.read("secret-locators.json")?;
-                let mut locators = vec![];
-                for v in values
-                    .iter()
-                    .filter(|v| v.get("id").and_then(Value::as_str) == Some(&id))
-                {
-                    let get = |key| {
-                        v.get(key)
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                            .ok_or_else(|| err("Invalid secret locator"))
-                    };
-                    locators.push(SecretLocator {
-                        id: id.clone(),
-                        version: get("version")?,
-                        service: get("service")?,
-                        account: get("account")?,
-                    });
-                }
-                Ok(ProfileReply::Secrets(locators))
-            }
+            ProfileCall::SecretLocators { id } => Ok(ProfileReply::Secrets(locators(
+                &storage.read("secret-locators.json")?,
+                &id,
+            )?)),
             ProfileCall::ExtensionSources { id } => {
                 Ok(ProfileReply::Sources(storage.sources(&id)?))
             }

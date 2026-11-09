@@ -49,7 +49,7 @@ impl Services {
                 Arc::new(move || {
                     crate::cloud::Http::new(
                         store_install::origin(),
-                        Box::new(crate::cloud::Keychain::for_app()),
+                        Box::new(crate::cloud::Keychain::for_app(&profile)),
                         profile.clone(),
                     )
                 })
