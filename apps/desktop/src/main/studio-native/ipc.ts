@@ -1,4 +1,5 @@
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from 'electron';
+import { StudioSurfaceReceiver } from './surface';
 import { StudioHostManager } from './manager';
 import { STUDIO_NATIVE_IPC, STUDIO_MAX_BINARY, type StudioNativeCommand } from '../../shared/studio-native';
 
@@ -7,12 +8,14 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
   trusted: (event: IpcMainInvokeEvent) => boolean): () => void {
   const sessions = new Map<number, Map<string, StudioHostManager>>();
   const watched = new Set<number>();
+  const surfaces=new Map<StudioHostManager,StudioSurfaceReceiver>();
+  const releaseManager=(manager:StudioHostManager)=>{manager.dispose();surfaces.get(manager)?.close();surfaces.delete(manager);};
   const check = (event: IpcMainInvokeEvent, key: unknown): string => {
     if (!trusted(event)) throw new Error('Unauthorized Studio IPC sender');
     if (typeof key !== 'string' || !/^[a-zA-Z0-9:_-]{1,128}$/.test(key)) throw new Error('Invalid Studio session');
     return key;
   };
-  const releaseAll = (id: number) => { for (const manager of sessions.get(id)?.values() ?? []) manager.dispose(); sessions.delete(id); };
+  const releaseAll = (id: number) => { for (const manager of sessions.get(id)?.values() ?? []) releaseManager(manager); sessions.delete(id); };
   const watch = (contents: WebContents) => {
     if (watched.has(contents.id)) return;
     watched.add(contents.id);
@@ -29,11 +32,19 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
     if (!manager) {
       // Bound the native memory budget; the backend releases idle sessions.
       if (owner.size >= 2) throw new Error('Too many active Studio sessions');
-      manager = new StudioHostManager({ executable }); owner.set(id, manager);
+      const surface=StudioSurfaceReceiver.open(executable);
+      manager = new StudioHostManager({ executable, surfaceService:surface?.service }); owner.set(id, manager);
+      if(surface)surfaces.set(manager,surface);
     }
-    return manager.request(command, binary);
+    const receiver=surfaces.get(manager);
+    const reply=await manager.request(receiver?command:{...command,sharedTexture:false},binary);
+    if(typeof reply.result?.surface==='number') {
+      try {if(!receiver)throw new Error('Studio surface transport is unavailable');await receiver.present(event.sender,id,reply,()=>{if(manager!.status().running&&manager!.status().generation===reply.generation)void manager!.request({op:'releaseFrame',frame:reply.result.surface}).catch(()=>{});});}
+      catch {return manager.request({...command,sharedTexture:false,goal:true,reset:false},binary);}
+    }
+    return reply;
   });
-  ipc.handle(STUDIO_NATIVE_IPC.release, (event, key: unknown) => { const id = check(event, key); const owner = sessions.get(event.sender.id); owner?.get(id)?.dispose(); owner?.delete(id); });
+  ipc.handle(STUDIO_NATIVE_IPC.release, (event, key: unknown) => { const id = check(event, key); const owner = sessions.get(event.sender.id); const manager=owner?.get(id); if(manager)releaseManager(manager); owner?.delete(id); });
   ipc.handle(STUDIO_NATIVE_IPC.status, event => {
     if (!trusted(event)) throw new Error('Unauthorized Studio IPC sender');
     const manager = sessions.get(event.sender.id)?.values().next().value;

@@ -21,7 +21,10 @@ export type StudioNativeStatus = {
   generation: number;
   failure: string | null;
 };
+export type StudioNativeTextureInfo = { session: string; frame: number; width: number; height: number };
+export type StudioNativeTexture = { getVideoFrame(): unknown };
 export interface StudioNativeBridge {
+  onTexture?(callback: (info: StudioNativeTextureInfo, texture: StudioNativeTexture) => Promise<void> | void): () => void;
   request(session: string, command: StudioNativeCommand, binary?: Uint8Array): Promise<StudioNativeReply>;
   release(session: string): Promise<void>;
   status(): Promise<StudioNativeStatus>;

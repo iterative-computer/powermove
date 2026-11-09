@@ -1,4 +1,4 @@
-import { STUDIO_NATIVE_IPC } from '../shared/studio-native';
+import { studioNativeBridge } from './studio-native';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 
 import {
@@ -63,11 +63,7 @@ function cloudEvent<T>(channel: string) {
 
 let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
-  studioNative: {
-    request: (session, command, binary) => ipcRenderer.invoke(STUDIO_NATIVE_IPC.request, session, command, binary),
-    release: session => ipcRenderer.invoke(STUDIO_NATIVE_IPC.release, session),
-    status: () => ipcRenderer.invoke(STUDIO_NATIVE_IPC.status),
-  },
+  studioNative: studioNativeBridge(),
   onInputKey: (cb) => {
     const listener = (_event: IpcRendererEvent, input: import('../shared/ipc').SandboxInputKey): void => cb(input);
     ipcRenderer.on(IPC.inputKey, listener);

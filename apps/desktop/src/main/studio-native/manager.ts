@@ -12,9 +12,10 @@ export type HostOptions = {
   args?: string[];
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  surfaceService?: string;
   spawnHost?: typeof spawn;
 };
-const OPS = new Set(['hello', 'scene', 'preset', 'patch', 'screen', 'render', 'pick', 'bounds', 'shutdown', 'prepared', 'preparedPatch', 'textures', 'snapshot']);
+const OPS = new Set(['hello', 'scene', 'preset', 'patch', 'screen', 'render', 'pick', 'bounds', 'shutdown', 'prepared', 'preparedPatch', 'textures', 'snapshot', 'releaseFrame']);
 
 /** One GPU process per active editor session. A failure rejects all pending work;
  * the next connection starts a fresh process and a new scene generation. */
@@ -40,6 +41,7 @@ export class StudioHostManager {
     this.starting = (async () => {
       const env = { ...process.env, ...this.options.env };
       delete env.ELECTRON_RUN_AS_NODE;
+      if(this.options.surfaceService)env.STUDIO_SURFACE_SERVICE=this.options.surfaceService;
       const child = (this.options.spawnHost ?? spawn)(this.options.executable!, this.options.args ?? [], { stdio: ['pipe', 'pipe', 'pipe'], env, windowsHide: true });
       this.child = child; this.generation++;
       const decoder = new StudioPacketDecoder();
@@ -75,7 +77,7 @@ export class StudioHostManager {
   private send(command: StudioNativeCommand, binary?: Uint8Array): Promise<StudioNativeReply> {
     const child = this.child;
     if (!child) return Promise.reject(new Error('Native Studio is unavailable'));
-    if (this.pending.size >= 8) return Promise.reject(new Error('Native Studio queue is full'));
+    if (this.pending.size >= 8 && command.op!=='releaseFrame') return Promise.reject(new Error('Native Studio queue is full'));
     const id = this.nextId++;
     // Validate/serialize before adding a pending promise or touching stdin.
     const parts = studioPacket(id, command, binary);
