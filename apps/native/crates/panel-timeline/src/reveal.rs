@@ -223,6 +223,48 @@ impl TimelineModel {
         self.rebuild_rows();
         Ok(())
     }
+    /// v1–3's `TimelineService.reveal` (timeline.ts:4452): open the layer and
+    /// add `keys` to what it already shows (its animated channels by default).
+    pub fn reveal_paths(&mut self, layer: &str, keys: &[String]) -> Result<(), ModelError> {
+        let l = self
+            .index
+            .layer(layer)
+            .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
+        let current = self
+            .reveal
+            .layers
+            .get(layer)
+            .cloned()
+            .unwrap_or(Disclosure {
+                collapsed: l.collapsed,
+                group_collapsed: l.group_collapsed,
+                paths: None,
+            });
+        let mut paths = current.paths.clone().unwrap_or_else(|| {
+            l.channels
+                .iter()
+                .filter(|c| !c.keys.is_empty())
+                .map(|c| c.path.clone())
+                .collect()
+        });
+        if !paths.iter().any(|p| p == "*") {
+            for key in keys {
+                if !paths.contains(key) {
+                    paths.push(key.clone());
+                }
+            }
+        }
+        self.reveal.layers.insert(
+            layer.into(),
+            Disclosure {
+                collapsed: false,
+                paths: Some(paths),
+                ..current
+            },
+        );
+        self.rebuild_rows();
+        Ok(())
+    }
 }
 fn same_paths(a: &[String], b: &[String]) -> bool {
     let a: HashSet<_> = a.iter().collect();

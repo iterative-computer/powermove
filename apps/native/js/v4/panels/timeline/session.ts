@@ -110,6 +110,10 @@ export class TimelineSession {
       }
     });
   }
+  /** Read the projection again after an action from outside this panel. */
+  refresh(): Promise<void> {
+    return this.enqueue(() => this.read());
+  }
   async act(intent: Intent): Promise<void> {
     if (!this.started || !this.accepting)
       throw new Error("Timeline session is not active");

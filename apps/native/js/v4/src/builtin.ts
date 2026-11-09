@@ -161,6 +161,8 @@ export interface Mounted {
   show?(): Promise<unknown>;
   /** A publication wake: pull host-side registries before settling. */
   publish?(): void;
+  /** A command from outside the panel changed its model: show it again. */
+  refresh?(): Promise<unknown>;
 }
 
 /** Mounts a built-in panel into its window: the same entry a fork of it uses. */

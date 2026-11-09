@@ -579,6 +579,12 @@ impl Scene {
     pub fn navigate_first(&self, ordinal: usize) -> Option<String> {
         self.rows.get(ordinal).map(|r| r.id.clone())
     }
+    /// Row `i` and its top and bottom in content space.
+    pub fn span(&self, i: usize) -> Option<(&PaintRow, f64, f64)> {
+        let row = self.rows.get(i)?;
+        let top = self.tops[i];
+        Some((row, top, self.tops.get(i + 1).copied().unwrap_or(top)))
+    }
     pub fn scroll_for(&self, id: &str) -> Option<f64> {
         self.positions.get(id).map(|i| self.tops[*i])
     }

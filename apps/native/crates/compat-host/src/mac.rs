@@ -577,6 +577,12 @@ impl MacDomHost {
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*bridge)));
             web.setUIDelegate(Some(ProtocolObject::from_ref(&*bridge)));
+            // Transparent: panel roots paint their own fill, and the viewer's
+            // stage shows the native viewer through the page.
+            web.setValue_forKey(
+                Some(&NSNumber::new_bool(false)),
+                &NSString::from_str("drawsBackground"),
+            );
         }
         let slot = SlotView::new(mtm, frame);
         slot.addSubview(&web);

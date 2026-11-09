@@ -150,8 +150,9 @@ pub struct FrameRequest<'a> {
     pub motion_blur: bool,
     /// True once the realm's task is stopped or past its host deadline.
     pub stop: &'a (dyn Fn() -> bool + Sync),
-    /// An export realm's frozen publication: the frame is of that project,
-    /// not the window's (`None`: the window's project now).
+    /// The project the asking realm holds (an export realm's frozen one, a
+    /// window realm's last received): the frame is of it, so the realm can
+    /// answer its overrides while it waits (`None`: the kernel's project now).
     pub published: Option<Arc<pm_kernel::Published>>,
 }
 /// A layer's base raster (`render.raster`, today's `PM.raster` before any
@@ -234,6 +235,13 @@ pub fn code_identity(records: &Value) -> u64 {
     }
     hash.finish().max(1)
 }
+/// The window's side of the app's effect clipboard (v1's inspector service):
+/// `copy` the effects selected in Effect Controls (`{copied}`), `paste` them
+/// onto the selected layers (`{pasted}`, or `{empty}` / `{reason}`), `clear`.
+pub type EffectsHook = Arc<dyn Fn(&str) -> std::result::Result<Value, String> + Send + Sync>;
+/// Where a window's realm finds its [`EffectsHook`], set once the window's
+/// panels run (they start after its extensions).
+pub type EffectsSlot = Arc<std::sync::Mutex<Option<EffectsHook>>>;
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
     Arc<dyn Fn(&FrameRequest) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
@@ -914,7 +922,7 @@ mod tests {
         let runner = dom_runner();
         let value = runner
             .json("(()=>{const s=__compat.realm.services;const t=s.get('tool'),v=s.get('viewer');let heard=null;__compat.realm.PM.bus.on('tool',x=>heard=x);
-                const before=[t.tool,v.zoom,v.fit,v.stage];__compat.shellState({tool:'hand'});__compat.shellState({zoom:2,fit:false,pan:[3,4]});
+                const before=[t.tool,v.zoom,v.fit,v.stage.id];__compat.shellState({tool:'hand'});__compat.shellState({zoom:2,fit:false,pan:[3,4]});
                 const shell=[t.tool,heard,v.zoom,v.fit,v.pan];
                 // As main: setZoom leaves fit, clamped, at once; setTool reads back at once.
                 const zoomed=[v.setZoom(20),v.zoom,v.fit,v.setZoom(NaN)];t.setTool('shape','ellipse');const shape=[t.tool,t.toolShape,heard];t.toolShape='star';
@@ -923,7 +931,7 @@ mod tests {
         assert_eq!(
             value,
             json!([
-                ["select", 1, true, null],
+                ["select", 1, true, "stage"],
                 "hand",
                 "hand",
                 2,
@@ -933,6 +941,258 @@ mod tests {
                 ["shape", "ellipse", "shape"],
                 "star",
                 "function"
+            ])
+        );
+    }
+    /// v1's viewer stage: `#stage` over the viewer, `#stage-inner` on the
+    /// composition frame, `ov` at device pixels; frames and placement reach
+    /// listeners as main's `frame:rendered`, `layout` and `overlay`.
+    #[test]
+    fn viewer_stage_follows_the_shell_and_hears_presented_frames() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const v=api.services.get('viewer');const heard=[];
+                for(const e of ['layout','overlay','frame:rendered'])api.events.on(e,x=>heard.push(x===undefined?e:[e,x]));
+                const stage=v.stage,inner=stage.querySelector(':scope > #stage-inner');
+                __compat.shellState({stage:[100,50,800,450],frame:[260,140,480,270]});
+                const ov=v.ov;
+                const placed=[stage.id,stage.style.left,stage.style.width,inner.style.left,inner.style.top,inner.style.width,ov.width,ov.height,v.shown,api.render.gl.previewViewport,v.stage===stage,stage.isConnected];
+                const ctx=ov.getContext('2d');ctx.fillStyle='#f00';ctx.fillRect(0,0,4,4);const drawn=ctx.getImageData(0,0,1,1).data[3];
+                __compat.presented({time:1.5,version:7,quality:.5});
+                const cleared=ctx.getImageData(0,0,1,1).data[3];
+                __compat.shellState({frame:[-200,-100,960,540]});
+                const crop=api.render.gl.previewViewport;
+                __compat.shellState({stage:null});
+                return [placed,drawn,cleared,heard,crop,stage.style.display,v.layerAtPoint(10,10)]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                ["stage", "100px", "800px", "160px", "90px", "480px", 1600, 900, 1.5, null, true, true],
+                255,
+                0,
+                [
+                    "layout",
+                    "overlay",
+                    ["frame:rendered", {"time": 1.5, "viewport": null, "version": 7, "quality": 0.5}],
+                    "overlay",
+                    "overlay",
+                    "layout",
+                    "overlay"
+                ],
+                {"x": 100, "y": 50, "width": 220, "height": 130},
+                "none",
+                null
+            ])
+        );
+    }
+    /// `layerAtPoint` and `render.gl.pick` answer with main's layer, from a
+    /// window point through the composition frame the shell reports.
+    #[test]
+    fn viewer_layer_at_point_picks_through_the_frame() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const v=api.services.get('viewer');
+                const made=api.edit.apply([{type:'add_layer',id:'box',layerType:'solid',name:'Box',from:0,duration:2,properties:{x:80,y:45,w:40,h:30}}]);
+                __compat.shellState({stage:[0,0,800,500],frame:[0,0,640,360]});
+                const hit=v.layerAtPoint(160,90),miss=v.layerAtPoint(700,400);
+                return [made.ok,hit?.id,hit===api.model.layer('box'),miss,api.render.gl.pick(80,45,0)?.id]})()"#)
+            .unwrap();
+        assert_eq!(value, json!([true, "box", true, null, "box"]));
+    }
+    /// Main's `timeline` service over the native timeline's reported view and
+    /// rows; its edges come from the project as timeline.ts computes them.
+    #[test]
+    fn timeline_service_reads_the_native_view_and_rows() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const t=api.services.get('timeline');
+                api.edit.apply([{type:'add_layer',id:'a',layerType:'solid',from:.5,duration:1}]);
+                let redraws=0;api.events.on('invalidate',w=>{if(w==='timeline')redraws++});
+                __compat.shellState({timeline:{graph:true,pps:50,scrollT:1,scrollY:0,keySelectionActive:true,rect:[10,500,600,200],ruler:24,column:200,rows:[['a',524,550]]}});
+                const read=[t.graph,t.pps,t.scrollT,t.keySelectionActive,t.cv,redraws];
+                t.pps=1e6;t.scrollY=-5;const written=[t.pps,t.scrollY];
+                PM.setTime(.2);const early=[t.prevEdge(),t.nextEdge()];PM.setTime(1);const mid=[t.prevEdge(),t.nextEdge()];
+                const hits=[t.layerAtPoint(100,530)?.id,t.layerAtPoint(100,505),t.layerAtPoint(5,530),t.layerAtPoint(100,560)];
+                return [read,written,early,mid,hits,typeof t.frameView,typeof t.reveal]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                [true, 50, 1, true, null, 1],
+                [4000, 0],
+                [0, 0.5],
+                [0.5, 1.5],
+                ["a", null, null, null],
+                "function",
+                "function"
+            ])
+        );
+    }
+    /// shaderHooks reconciles `d.uniforms` with the kernel's `@param` parser,
+    /// as main's inspector did; the inspector's effect clipboard is the app's
+    /// (`effects.clipboard`), with main's booleans, and a paste is readable
+    /// as soon as it returns, as main's `edit.apply` was.
+    #[test]
+    fn shader_hooks_and_inspector_service() {
+        let runner = dom_runner();
+        let kernel = runner.actor.as_ref().unwrap().handle();
+        let asked = Arc::new(std::sync::Mutex::new(vec![]));
+        let log = asked.clone();
+        let hook: crate::EffectsHook = Arc::new(move |op: &str| {
+            let mut asked = log.lock().unwrap();
+            asked.push(op.to_owned());
+            Ok(match (op, asked.len()) {
+                ("copy", 1) => json!({"copied": 0}),
+                ("copy", _) => json!({"copied": 2}),
+                ("paste", 3) => json!({"empty": true}),
+                ("paste", 4) => json!({"reason": "select"}),
+                ("paste", _) => {
+                    // The app pastes through the kernel; the realm hears it now.
+                    let rename = pm_kernel::Call::Transact {
+                        label: Some("Paste Effects".into()),
+                        body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                            pm_kernel::LayerCommand::Set {
+                                layer_id: "sh".into(),
+                                patch: pm_kernel::commands::layers::LayerPatch {
+                                    name: Some("Pasted".into()),
+                                    ..Default::default()
+                                },
+                            },
+                        )]),
+                        expected_revision: None,
+                    };
+                    kernel
+                        .call_blocking(
+                            PROJECT,
+                            pm_kernel::Request::new(pm_kernel::Caller::native(), rename),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    json!({"pasted": 2})
+                }
+                _ => json!({}),
+            })
+        });
+        runner
+            .host
+            .set_effects(Some(Arc::new(std::sync::Mutex::new(Some(hook)))));
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const h=api.services.get('shaderHooks'),i=api.services.get('inspector');
+                api.edit.apply([{type:'add_layer',id:'sh',layerType:'shader',from:0,duration:2}]);
+                const before=Object.keys(PM.L('sh').d.uniforms).sort();
+                api.history.do('Code',()=>{const L=PM.L('sh');L.d.code='uniform float uGain; // @param 2 0 4\nuniform vec3 uTint; // @param #ff0000\nvoid main(){}';h.syncShaderUniforms(L);});
+                const L=api.model.layer('sh');const after=Object.keys(L.d.uniforms).sort();
+                const clip=[i.copySelectedEffects(),i.copySelectedEffects(),i.pasteCopiedEffects(),i.pasteCopiedEffects(),i.pasteCopiedEffects(),api.model.layer('sh').name,i.clearEffectClipboard()];
+                return [before,after,L.d.uniforms.uGain.v,L.d.uniforms.uTint.v,i===api.services.get('inspector'),i.body,i.syncs.length,typeof i.refresh,clip]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                ["uScale", "uSpeed", "uTint"],
+                ["uGain", "uTint"],
+                2,
+                "#FF6B1A",
+                true,
+                null,
+                0,
+                "function",
+                [false, true, false, true, true, "Pasted", null]
+            ])
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["copy", "copy", "paste", "paste", "paste", "clear"]
+        );
+    }
+    /// D7's presenter fixture: bind a canvas, resize it, read its pixels and
+    /// observe frame events; frames reach it by readback from the engine.
+    #[test]
+    fn presenter_canvas_is_filled_by_readback_before_frame_events() {
+        let runner = dom_runner();
+        let asked = Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = asked.clone();
+        runner
+            .host
+            .set_frames(Some(Arc::new(move |frame: &crate::FrameRequest| {
+                seen.lock().unwrap().push((frame.width, frame.height));
+                let (w, h) = (frame.width, frame.height);
+                let mut png = vec![];
+                let mut encoder = png::Encoder::new(&mut png, w, h);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header().unwrap();
+                // Left half red, right half blue: a crop shows which part it took.
+                let row: Vec<u8> = (0..w)
+                    .flat_map(|x| {
+                        if x < w / 2 {
+                            [255, 0, 0, 255]
+                        } else {
+                            [0, 0, 255, 255]
+                        }
+                    })
+                    .collect();
+                writer.write_image_data(&row.repeat(h as usize)).unwrap();
+                drop(writer);
+                Ok(png)
+            })));
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const gl=api.render.gl;
+                const canvas=document.createElement('canvas');canvas.width=4;canvas.height=2;
+                const px=(x)=>[...canvas.getContext('2d').getImageData(x,0,1,1).data];
+                const bound=[gl.init({}),gl.init(canvas),PM.GL.canvas===canvas,px(0),px(3)];
+                const resized=[gl.resize(4,2),gl.resize(8,2),canvas.width];
+                let heard=null;api.events.on('frame:rendered',()=>{heard=px(7)});
+                const v=__compat.realm.revision;__compat.presented({time:0,version:v,quality:1});
+                const cropped=gl.resize(8,2,{x:160,y:0,width:160,height:180});__compat.presented({time:0,version:v,quality:1});
+                return [bound,resized,heard,cropped,px(0),gl.previewViewport.x]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                [false, true, true, [255, 0, 0, 255], [0, 0, 255, 255]],
+                [false, true, 8],
+                [0, 0, 255, 255],
+                false,
+                [0, 0, 255, 255],
+                160
+            ])
+        );
+        // init, resize, a presented frame, then a frame with the crop: the
+        // whole composition at the crop's scale (8 px across 160 of 320).
+        assert_eq!(*asked.lock().unwrap(), [(4, 2), (8, 2), (8, 2), (16, 9)]);
+    }
+    /// `api.scene3d` edits through the native Studio command (one undo
+    /// step), describes and selects as main; the studio-only view controls
+    /// say they are missing.
+    #[test]
+    fn scene3d_edits_through_the_native_studio_command() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const s=api.scene3d;const heard=[];api.events.on('scene3d:selection',x=>heard.push(x));
+                const made=s.edit({operation:'add_object',id:'cube',name:'Cube'});
+                api.history.undo();const undone=api.model.layer('cube');api.history.redo();
+                const scene=s.describe();s.select(null,['cube']);
+                let refused=null;try{s.setView('editor')}catch(e){refused=e.message}
+                const facts=[made.ok,made.data.result.layerId,scene.objects.map(o=>o.id),s.selection(),heard,s.isGroup('cube'),s.convert('cube').message,
+                  s.createScene().lights.length,s.createObject('o1').source.primitive,s.createLight('l1','point').type,s.getView(),refused];
+                return [...facts,undone]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                true,
+                "cube",
+                ["cube"],
+                {"layerId": "cube", "ids": ["cube"]},
+                [{"layerId": "cube", "ids": ["cube"]}],
+                false,
+                "Already a 3D layer",
+                1,
+                "box",
+                "point",
+                "camera",
+                "scene3d.setView('editor') needs the 3D studio, which this build does not have",
+                null
             ])
         );
     }

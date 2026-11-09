@@ -425,6 +425,7 @@ async function mountExtension(
   },
   async command(name: string, args: Json) {
     await host.command(name, args);
+    await mounted?.refresh?.();
     await this.publish();
     return true;
   },

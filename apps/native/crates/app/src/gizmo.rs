@@ -1168,6 +1168,9 @@ impl GizmoSurface {
         self.controls = !self.controls;
         self.redraw(cx);
     }
+    pub fn controls(&self) -> bool {
+        self.controls
+    }
     #[cfg(test)]
     pub fn gesture_active(&self) -> bool {
         self.drag.as_ref().is_some_and(|d| d.active)

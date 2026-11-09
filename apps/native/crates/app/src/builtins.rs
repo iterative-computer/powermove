@@ -169,6 +169,7 @@ impl Controller {
             Arc::new(pm_agents::account::open_in_browser),
         );
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
+        runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
         let mut tickets = vec![];
         for panel in BUILTIN_PANELS.iter() {
             if application && !panel.application {
@@ -178,6 +179,7 @@ impl Controller {
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
+        self.wire_effect_desk();
         let check = runtime.clone();
         let mounting = project.clone();
         cx.spawn(async move |this, cx| {
@@ -384,6 +386,7 @@ impl Controller {
         if let Some(host) = &self.extensions.host {
             host.publish_time(time, playing);
         }
+        self.sync_viewer_stage();
         if !self.builtins.clock.due(time, playing) {
             return;
         }
@@ -607,6 +610,11 @@ impl Controller {
                 cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
             if id == "timeline" {
                 outline.bind(view.downgrade());
+            }
+            if id == "inspector"
+                && let Some(layer) = self.extensions.focus_text.take()
+            {
+                view.update(cx, |v, cx| v.focus_text(layer, cx));
             }
             self.builtins.views.insert(id.into(), view);
         }
@@ -1197,6 +1205,7 @@ impl Controller {
                 "pan": self.view.pan,
             }));
         }
+        self.sync_viewer_stage();
         self.view_write = Some(cx.spawn(async move |this, cx| {
             if let Some(after) = after {
                 cx.background_executor().timer(after).await;
@@ -1258,6 +1267,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             }
             other => v.message = format!("Not available yet: {other:?}"),
         });
+    }
+    fn view_facts(&self, facts: serde_json::Value, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(host) = &controller.read(cx).extensions.host
+        {
+            host.shell_state(serde_json::json!({ "timeline": facts }));
+        }
     }
     fn report(&self, message: String, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {

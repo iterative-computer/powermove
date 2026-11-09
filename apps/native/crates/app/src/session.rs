@@ -1503,7 +1503,13 @@ impl Controller {
             }
             "toggleLayerControls" => {
                 if let Some(gizmos) = self.builtins.gizmos.clone() {
-                    gizmos.update(cx, |g, cx| g.toggle_controls(cx));
+                    let shown = gizmos.update(cx, |g, cx| {
+                        g.toggle_controls(cx);
+                        g.controls()
+                    });
+                    if let Some(host) = &self.extensions.host {
+                        host.shell_state(serde_json::json!({ "showControls": shown }));
+                    }
                 }
             }
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),

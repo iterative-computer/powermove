@@ -351,3 +351,36 @@ fn layer_numbers_follow_the_workspace_chrome() {
     panels.close();
     actor.shutdown();
 }
+
+/// v1–3's `timeline.graph = shown` (the compat service sends this intent):
+/// the timeline panel's view is shown or hidden as asked, never toggled, and
+/// a combined view stays combined.
+#[test]
+fn the_graph_intent_sets_the_panels_view_as_asked() {
+    use pm_panel_timeline::GraphDisplay::{Combined, DopeSheet, Graph};
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("timeline").unwrap());
+    let view = |panels: &Builtins| {
+        let entry = panels.broker.entry("timeline").unwrap();
+        let entry = entry.lock().unwrap();
+        let backend = entry.backend.lock().unwrap();
+        backend
+            .native
+            .timeline
+            .as_ref()
+            .unwrap()
+            .model
+            .graph_display
+    };
+    let ask = |intent: Value| {
+        finish(panels.timeline_action(intent).unwrap());
+        view(&panels)
+    };
+    assert_eq!(ask(json!({"type":"graph","shown":true})), Graph);
+    assert_eq!(ask(json!({"type":"graph","shown":true})), Graph);
+    assert_eq!(ask(json!({"type":"graph","shown":false})), DopeSheet);
+    assert_eq!(ask(json!({"type":"graph","shown":false})), DopeSheet);
+    assert_eq!(ask(json!({"type":"view","view":"Combined"})), Combined);
+    assert_eq!(ask(json!({"type":"graph","shown":true})), Combined);
+}

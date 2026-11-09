@@ -346,6 +346,12 @@ globalThis.__compat = {
         reload: (id) => this.loader.reload(id),
       },
       assets: this.assets,
+      scene3d: PowermoveCompat.scene3dAPI(
+        new Proxy({}, { get: (_, key) => this.realm.PM[key] }),
+        (args, meta) => this.realm.scene3dEdit(args, meta),
+        (time) => host.query("scene3d.describe", { time }),
+        (selection) => this.realm.kernel.events.emit("scene3d:selection", selection),
+      ),
       panelsBackend: Object.fromEntries(
         ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
           (name) => [
@@ -473,17 +479,42 @@ globalThis.__compat = {
               layer: layer?.id,
               time: time ?? this.realm.PM.time,
             }),
-          pick: (x, y, time) =>
-            host.query("engine.pick", {
+          // As main: the topmost layer under a composition point, or null.
+          pick: (x, y, time, options) => {
+            const id = host.query("engine.pick", {
               x,
               y,
               time: time ?? this.realm.PM.time,
-            }),
+              includeLocked: !!options?.includeLocked,
+            });
+            return id ? (this.realm.PM.L?.(id) ?? null) : null;
+          },
           compileError: () => null,
-          previewViewport: null,
-          canvas: null,
-          init: () => null,
-          resize: () => undefined,
+          // The composition window the viewer drew last (or a presenter asked
+          // for), in composition pixels; null while all of it shows.
+          get previewViewport() {
+            return presenter.viewport ?? viewport();
+          },
+          // D7: a canvas bound with init presents the viewer's frames by
+          // readback, at its own size: slower than main, same contract.
+          get canvas() {
+            return presenter.canvas;
+          },
+          init: (canvas) => {
+            if (typeof canvas?.getContext !== "function") return false;
+            presenter.canvas = canvas;
+            this.present();
+            return true;
+          },
+          resize: (width, height, previewViewport = null) => {
+            presenter.viewport = previewViewport?.width > 0 ? previewViewport : null;
+            const canvas = presenter.canvas;
+            if (!canvas || (canvas.width === width && canvas.height === height)) return false;
+            canvas.width = width;
+            canvas.height = height;
+            this.present();
+            return true;
+          },
         },
         assets: {
           get: (id) => this.realm.PM.proj.assets?.[id],
@@ -598,12 +629,148 @@ globalThis.__compat = {
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
     // Built-in services v1 registered for extensions: `tool` (the shell's tool)
-    // and `viewer` (its navigation; the native viewer has no DOM stage).
-    const shell = { tool: "select", toolShape: "rect", zoom: 1, pan: [0, 0], fit: true };
+    // and `viewer` (its navigation and its stage, a page element over the
+    // native viewer that the shell keeps on it).
+    const shell = {
+      tool: "select",
+      toolShape: "rect",
+      zoom: 1,
+      pan: [0, 0],
+      fit: true,
+      // Window points: the viewer's area and the composition frame in it.
+      stage: null,
+      frame: null,
+      // The native timeline's view and visible rows (`[layerId, top, bottom]`).
+      timeline: null,
+    };
+    const compat = this;
+    const stage = { el: null, inner: null, ov: null, ovUsed: false };
+    const px = (n) => `${Math.round(n * 100) / 100}px`;
+    const dpr = () => Math.min(globalThis.devicePixelRatio || 1, 2);
+    // As main's viewer layout: `#stage` fills the viewer, `#stage-inner` is the
+    // composition frame inside it, `#overlay` covers the stage at device pixels.
+    const placeStage = () => {
+      if (!stage.el) return;
+      const at = shell.stage;
+      if (!at) {
+        stage.el.style.display = "none";
+        return;
+      }
+      const [x, y, w, h] = at;
+      stage.el.style.cssText = `position:fixed;left:${px(x)};top:${px(y)};width:${px(w)};height:${px(h)};overflow:hidden;pointer-events:none`;
+      const f = shell.frame ?? [x, y, w, h];
+      stage.inner.style.cssText = `position:absolute;left:${px(f[0] - x)};top:${px(f[1] - y)};width:${px(f[2])};height:${px(f[3])};overflow:hidden`;
+      const [ow, oh] = [Math.round(w * dpr()), Math.round(h * dpr())];
+      // Assigning a canvas dimension clears it, so only on a real change.
+      if (stage.ov.width !== ow) stage.ov.width = ow;
+      if (stage.ov.height !== oh) stage.ov.height = oh;
+      stage.ov.style.cssText = `position:absolute;left:0;top:0;width:${px(w)};height:${px(h)};pointer-events:none`;
+    };
+    const ensureStage = () => {
+      const document = this.dom?.document;
+      if (!document) return null;
+      if (!stage.el) {
+        stage.el = document.createElement("div");
+        stage.el.id = "stage";
+        stage.inner = document.createElement("div");
+        stage.inner.id = "stage-inner";
+        stage.ov = document.createElement("canvas");
+        stage.ov.id = "overlay";
+        stage.el.append(stage.inner, stage.ov);
+        document.body.append(stage.el);
+        placeStage();
+        // The shell shows the page over the viewer only once a stage exists.
+        call("ui.request", { kind: "viewerStage" });
+      }
+      return stage.el;
+    };
+    // The composition rectangle the viewer shows, in composition pixels.
+    const viewport = () => {
+      const [s, f] = [shell.stage, shell.frame];
+      const project = this.realm.PM.proj;
+      if (!s || !f || !(f[2] > 0) || !project?.w) return null;
+      const scale = f[2] / project.w;
+      const x0 = Math.max(0, (s[0] - f[0]) / scale);
+      const y0 = Math.max(0, (s[1] - f[1]) / scale);
+      const x1 = Math.min(project.w, (s[0] + s[2] - f[0]) / scale);
+      const y1 = Math.min(project.h, (s[1] + s[3] - f[1]) / scale);
+      if (x0 <= 0 && y0 <= 0 && x1 >= project.w && y1 >= project.h) return null;
+      return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
+    };
+    // Main's overlay pass: the viewer clears its canvas, then listeners draw.
+    // The presenter canvas fills from the engine, its crop drawn from a
+    // frame of the whole composition at the crop's scale (at most 8192 px).
+    // It shows `frame`, the viewer's last frame this realm drew: its time,
+    // from the publication the realm holds (captures draw that one), which
+    // is the frame's revision. Before any frame, or once the project moved
+    // past it (init, resize), the playhead now.
+    const presenter = { canvas: null, viewport: null, frame: null };
+    this.presenting = () => !!(presenter.canvas?.width && presenter.canvas?.height);
+    this.present = (frame = presenter.frame) => {
+      const canvas = presenter.canvas;
+      const PM = this.realm.PM;
+      if (!this.presenting()) return;
+      if (frame) presenter.frame = frame;
+      const time = frame?.version === this.realm.revision ? frame.time : PM.time;
+      const crop = presenter.viewport;
+      if (!crop) {
+        PM.renderFrameTo(time, canvas.width, canvas.height, {}, canvas);
+        return;
+      }
+      const project = PM.proj;
+      const scale = Math.min(
+        canvas.width / crop.width,
+        8192 / Math.max(project.w, project.h),
+      );
+      const whole = PM.renderFrameTo(
+        time,
+        Math.max(1, Math.round(project.w * scale)),
+        Math.max(1, Math.round(project.h * scale)),
+      );
+      const context = canvas.getContext("2d");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(
+        whole,
+        crop.x * scale,
+        crop.y * scale,
+        crop.width * scale,
+        crop.height * scale,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+    };
+    this.overlay = () => {
+      if (stage.ovUsed) {
+        const context = stage.ov.getContext("2d");
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.clearRect(0, 0, stage.ov.width, stage.ov.height);
+      }
+      this.realm.PM.bus.emit("overlay");
+    };
     this.shellState = (state) => {
       const tool = state.tool !== undefined && state.tool !== shell.tool;
+      const placed = ["stage", "frame", "zoom", "pan", "fit", "showControls"].some(
+        (key) => key in state && JSON.stringify(state[key]) !== JSON.stringify(shell[key]),
+      );
+      const resized =
+        "stage" in state &&
+        JSON.stringify(state.stage?.slice(2)) !== JSON.stringify(shell.stage?.slice(2));
+      const timeline =
+        "timeline" in state && JSON.stringify(state.timeline) !== JSON.stringify(shell.timeline);
       Object.assign(shell, state);
-      if (tool) this.realm.PM.bus.emit("tool", shell.tool);
+      if (placed) placeStage();
+      this.realm.task(() => {
+        if (tool) this.realm.PM.bus.emit("tool", shell.tool);
+        // As main: scrolling, zooming or revealing redraws the timeline.
+        if (timeline) this.realm.PM.bus.emit("draw:timeline");
+        if (!placed) return;
+        // As main: a panel size change is a layout; pan and zoom repaint the overlay.
+        if (resized) this.realm.PM.bus.emit("layout");
+        this.overlay();
+      });
+      this.dom?.flush();
     };
     // As main's toolbar service: the change is immediate here, and the shell
     // follows (its command carries a shape tool's shape).
@@ -634,6 +801,127 @@ globalThis.__compat = {
         });
       },
     });
+    // Main's timeline service over the native timeline: its view reads back
+    // at once and the timeline follows; rows come from what it last drew.
+    const lane = () => (shell.timeline ??= {});
+    const timeline = (request) => call("ui.request", { kind: "timeline", ...request });
+    const view = (key, min, max) => ({
+      get: () => lane()[key] ?? (key === "pps" ? 100 : 0),
+      set: (value) => {
+        const number = Number(value);
+        if (!Number.isFinite(number)) return;
+        lane()[key] = Math.min(max, Math.max(min, number));
+        timeline({ [key]: lane()[key] });
+      },
+      enumerable: true,
+    });
+    // timeline.ts edges(): ends of the composition, layers and keyframes.
+    const edges = () => {
+      const PM = this.realm.PM;
+      const round = (v) => Math.round(v * 1e4) / 1e4;
+      const project = PM.proj;
+      const all = new Set([0, project.dur]);
+      for (const layer of project.layers) {
+        all.add(round(layer.from));
+        all.add(round(layer.from + layer.dur));
+        for (const { prop } of PM.allProps(layer))
+          for (const key of prop.kf ?? []) all.add(round(layer.from + key.t));
+      }
+      return [...all].sort((a, b) => a - b);
+    };
+    const timelineService = {
+      get graph() {
+        return !!lane().graph;
+      },
+      set graph(value) {
+        lane().graph = !!value;
+        timeline({ graph: !!value });
+      },
+      // The native timeline draws in Metal; v4's timeline.paint replaces cv.
+      cv: null,
+      get keySelectionActive() {
+        return !!lane().keySelectionActive;
+      },
+      nextEdge: () => {
+        const now = this.realm.PM.time;
+        return edges().find((t) => t > now + 1e-4) ?? this.realm.PM.proj.dur;
+      },
+      prevEdge: () => {
+        const now = this.realm.PM.time;
+        return [...edges()].reverse().find((t) => t < now - 1e-4) ?? 0;
+      },
+      layerAtPoint: (clientX, clientY) => {
+        const facts = lane();
+        const [x, y, w, h] = facts.rect ?? [0, 0, 0, 0];
+        if (clientX < x || clientX > x + w || clientY < y + (facts.ruler ?? 0) || clientY > y + h)
+          return null;
+        const row = (facts.rows ?? []).find(([, top, bottom]) => clientY >= top && clientY < bottom);
+        return row ? (this.realm.PM.L?.(row[0]) ?? null) : null;
+      },
+      frameView: () => timeline({ frameView: true }),
+      reveal: (layer, keys) => {
+        const id = typeof layer === "string" ? layer : layer?.id;
+        if (id) timeline({ reveal: { layer: id, keys: [...(keys ?? [])].map(String) } });
+      },
+    };
+    Object.defineProperties(timelineService, {
+      pps: view("pps", 4, 4000),
+      scrollT: view("scrollT", -Infinity, Infinity),
+      scrollY: view("scrollY", 0, Infinity),
+    });
+    this.realm.services.register("timeline", timelineService);
+    // Main's inspector service. The native Properties panel and Effect
+    // Controls draw the inspector; v1–3 sections live in their own panel.
+    // The app's one effect clipboard, shared with Effect Controls in every
+    // window; copy reads Effect Controls' selected effects, as main's did.
+    const clipboard = (op) => runtime.engine("effects.clipboard", { op });
+    const toast = (text) => runtime.engine("ui.toast", { text, options: {} });
+    const effects = (count) => `${count} ${count === 1 ? "effect" : "effects"}`;
+    const syncShaderUniforms = (layer) => {
+      // As main (inspector/shader.ts:39), with the kernel's parser.
+      const PM = this.realm.PM;
+      const content = layer.d ?? (layer.d = {});
+      const definitions = host.query("shader.parameters", { code: String(content.code ?? "") });
+      PM.UIState?.setShaderMeta?.(layer, { udefs: definitions });
+      const uniforms = content.uniforms ?? (content.uniforms = {});
+      for (const definition of definitions)
+        if (!uniforms[definition.name]) uniforms[definition.name] = PM.P(definition.def);
+      for (const name of Object.keys(uniforms))
+        if (!definitions.some((definition) => definition.name === name)) delete uniforms[name];
+    };
+    this.realm.services.register("inspector", {
+      refresh: () => this.panels?.refresh(PowermoveCompat.SECTIONS_PANEL),
+      body: null,
+      syncs: [],
+      // As main: select the layer, then its text field in Properties takes
+      // the keyboard with the text selected.
+      focusText: (layer) => {
+        if (!layer?.id) return;
+        this.realm.PM.selectLayers([layer.id]);
+        call("ui.request", { kind: "focusText", layer: String(layer.id) });
+      },
+      copySelectedEffects: () => {
+        const { copied } = clipboard("copy");
+        if (!copied) return false;
+        toast(`Copied ${effects(copied)}`);
+        return true;
+      },
+      clearEffectClipboard: () => void clipboard("clear"),
+      pasteCopiedEffects: () => {
+        const result = clipboard("paste");
+        if (result.empty) return false;
+        if (result.reason === "select") toast("Select a layer to paste the effect");
+        else if (result.reason === "unavailable") toast("The copied effect is not available");
+        else {
+          // As main's edit.apply: the realm reads the pasted effects at once.
+          this.realm.receive(runtime.engine("kernel.publication", {}));
+          toast(`Pasted ${effects(result.pasted)}`);
+        }
+        return true;
+      },
+      syncShaderUniforms,
+    });
+    this.realm.services.register("shaderHooks", { syncShaderUniforms });
     this.realm.services.register("viewer", {
       get pan() {
         return [...shell.pan];
@@ -644,13 +932,53 @@ globalThis.__compat = {
       get fit() {
         return shell.fit;
       },
-      shown: 1,
-      showControls: true,
-      stage: null,
-      ov: null,
-      layout: () => undefined,
+      // Points per composition pixel on screen.
+      get shown() {
+        const project = compat.realm.PM.proj;
+        return shell.frame && project?.w ? shell.frame[2] / project.w : shell.zoom;
+      },
+      // The viewer's layer controls (View ▸ Layer Controls).
+      get showControls() {
+        return shell.showControls !== false;
+      },
+      set showControls(value) {
+        shell.showControls = !!value;
+        call("ui.request", { kind: "viewerControls", shown: !!value });
+      },
+      // Main's source monitor; the native viewer has none, so nothing shows.
+      preview: {
+        show: () => false,
+        toggle: () => undefined,
+        clear: () => undefined,
+        dispose: () => undefined,
+        activeId: null,
+        playing: false,
+      },
+      get stage() {
+        return ensureStage();
+      },
+      get ov() {
+        if (!ensureStage()) return null;
+        stage.ovUsed = true;
+        return stage.ov;
+      },
+      // The shell lays the viewer out; this re-places the stage and repaints.
+      layout: () => {
+        placeStage();
+        this.overlay();
+      },
       attach: () => undefined,
       worldBounds: (layer, time) => this.realm.PM.GL?.bounds?.(layer, time) ?? null,
+      // As main: the topmost layer under a window point inside the frame.
+      layerAtPoint: (clientX, clientY) => {
+        const [s, f] = [shell.stage, shell.frame];
+        const project = this.realm.PM.proj;
+        if (!s || !f || !project?.w) return null;
+        if (clientX < s[0] || clientY < s[1] || clientX > s[0] + s[2] || clientY > s[1] + s[3])
+          return null;
+        const scale = f[2] / project.w;
+        return this.realm.PM.GL.pick((clientX - f[0]) / scale, (clientY - f[1]) / scale, this.realm.PM.time);
+      },
       snapshotSnapCandidates: () => ({ x: [], y: [] }),
       isNavigating: () => false,
       deferNavigationRender: () => false,
@@ -758,6 +1086,30 @@ globalThis.__compat = {
       this.realm.receive(runtime.engine("kernel.publication", {}));
       void this.projectFonts();
     });
+  },
+  /** The viewer presented a frame: main's `preview:presented`, then the
+   * overlay pass that follows each compositor frame. */
+  presented(frame) {
+    this.realm.task(() => {
+      // A bound presenter shows this frame's pixels before anyone hears of
+      // it. Behind the frame, the realm takes the newer publication first;
+      // a frame it still can't draw (the project moved past it) is dropped,
+      // as playback drops frames.
+      if (this.presenting()) {
+        if (frame.version > this.realm.revision)
+          this.realm.receive(runtime.engine("kernel.publication", {}));
+        if (frame.version !== this.realm.revision) return this.overlay();
+        this.present(frame);
+      }
+      this.realm.PM.bus.emit("preview:presented", {
+        time: frame.time,
+        viewport: this.realm.PM.GL.previewViewport,
+        version: frame.version,
+        quality: frame.quality,
+      });
+      this.overlay();
+    });
+    this.dom?.flush();
   },
   moved(time, timeChanged, playingChanged) {
     this.realm.task(() => {

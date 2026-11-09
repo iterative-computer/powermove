@@ -112,6 +112,9 @@ fn realize_op(op: &Op, open: Option<&str>) -> Option<Value> {
 
 /// What the realm last saw.
 struct Sent {
+    /// The publication itself: the realm's captures draw it (see
+    /// [`KernelAdapter::capture_publication`]).
+    published: Arc<Published>,
     document_id: u64,
     revision: u64,
     open: Option<String>,
@@ -194,9 +197,18 @@ impl KernelAdapter {
         adapter.pinned_storage = Some(storage);
         adapter
     }
-    /// The publication an export realm reads; `None` for a window's realm.
-    pub fn frozen_publication(&self) -> Option<Arc<Published>> {
-        self.frozen.clone()
+    /// An export's realm.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.is_some()
+    }
+    /// The project this realm holds: an export realm's frozen publication, a
+    /// window realm's last one received. Its captures draw this, so the
+    /// override answers they ask of the waiting realm are at its own revision
+    /// even when the kernel has moved on (`None`: nothing received yet).
+    pub fn capture_publication(&self) -> Option<Arc<Published>> {
+        self.frozen
+            .clone()
+            .or_else(|| self.sent.as_ref().map(|s| s.published.clone()))
     }
     fn published(&self) -> Result<Arc<Published>> {
         if let Some(frozen) = &self.frozen {
@@ -245,6 +257,7 @@ impl KernelAdapter {
         let publication = json!({"revision":p.revision(),"document":wire(&document),
             "selection":selection,"workspace":workspace(&p.workspace),"facts":Self::facts(&p)});
         self.sent = Some(Sent {
+            published: p.clone(),
             document_id: p.snapshot.doc_id,
             revision: p.revision(),
             open: p.snapshot.open_comp(),
@@ -289,6 +302,7 @@ impl KernelAdapter {
         text.push_str(&rest[1..]);
         drop(document);
         self.sent = Some(Sent {
+            published: p.clone(),
             document_id: p.snapshot.doc_id,
             revision: p.revision(),
             open: p.snapshot.open_comp(),
@@ -334,6 +348,7 @@ impl KernelAdapter {
             out["events"] = json!(events);
         }
         self.sent = Some(Sent {
+            published: p.clone(),
             document_id: p.snapshot.doc_id,
             revision: p.revision(),
             open: p.snapshot.open_comp(),
@@ -707,6 +722,46 @@ impl KernelAdapter {
                 return Ok(reply);
             }
             "edit.mutateAbort" => HistoryCall::Rollback.into(),
+            // v1–3's `scene3d.edit`: the Studio command MCP's edit_3d runs, as
+            // one undoable edit; `data.result` names the layer it made or changed.
+            "scene3d.edit" => {
+                let selection = p.selection.layers().to_vec();
+                let before = wire(&realized(&p));
+                let batch = match pm_mcp::scene3d::batch(
+                    &p.snapshot,
+                    &args["args"],
+                    &selection,
+                    time,
+                    &pm_scene3d::geometry::NoAssets,
+                ) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        return Ok(
+                            json!({"value":{"ok":false,"message":error.message},"publication":self.publication()?}),
+                        );
+                    }
+                };
+                let label = args["meta"]["label"].as_str().unwrap_or("Edit 3D layers");
+                let mut reply = self.execute(
+                    txid,
+                    EditCall::Apply {
+                        body: WriteBody::Commands(batch.commands),
+                        base_revision: None,
+                        label: Some(label.to_owned()),
+                    }
+                    .into(),
+                )?;
+                if reply["value"]["ok"] == true {
+                    let after = wire(&realized(&*self.published()?));
+                    let id = pm_mcp::scene3d::result_id(&before, &after, &args["args"], &selection);
+                    let layer = id
+                        .clone()
+                        .or_else(|| args["args"]["target"].as_str().map(str::to_owned))
+                        .or_else(|| selection.first().cloned());
+                    reply["value"]["data"] = json!({"result":{"id":id,"layerId":layer}});
+                }
+                return Ok(reply);
+            }
             "edit.apply" | "edit.dispatch" => {
                 let commands = match self.plan(args, &p, time) {
                     Ok(commands) => commands.unwrap_or_default(),
@@ -772,9 +827,26 @@ impl KernelAdapter {
                     args["x"].as_f64().ok_or(Error::Invalid("pick x"))?,
                     args["y"].as_f64().ok_or(Error::Invalid("pick y"))?,
                     time,
-                    &Default::default(),
+                    &pm_kernel::queries::PickOptions {
+                        include_locked: args["includeLocked"] == true,
+                    },
                 );
                 Ok(hit.map_or(Value::Null, |hit| json!(hit.layer_id)))
+            }
+            // `scene3d.describe`: the open composition's evaluated scene, as
+            // MCP's 3D inspection builds it.
+            Some("scene3d.describe") => {
+                let document = wire(&realized(&p));
+                let mut ev = pm_mcp::inspection::Evaluation::new(&document);
+                pm_mcp::scene3d::evaluated_scene(&document, time, &mut ev)
+                    .map_err(|e| Error::Host(e.message))
+            }
+            // The inspector's `@param` annotations, as the kernel parses them.
+            Some("shader.parameters") => {
+                let code = model(&args["code"]).to_js_string();
+                Ok(wire(&pm_model::Value::Array(
+                    pm_kernel::commands::shader::parameters(&code),
+                )))
             }
             method => Err(Error::Host(format!(
                 "{} is not attached",

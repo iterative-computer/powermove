@@ -95,6 +95,8 @@ enum Input {
     Viewport(f32, f32, f32),
     Realm(Writer, RealmEnvelope),
     Moved,
+    /// The viewer presented a frame; the latest waits in `presented`.
+    Presented,
     Run(String, Value),
     Panel(String, bool),
     Place(String, Option<[f32; 4]>),
@@ -170,6 +172,8 @@ struct Shared {
     wake: Arc<dyn Fn() + Send + Sync>,
     /// Running exports' realms and their pages.
     exports: Mutex<export::Exports>,
+    /// The window's effect clipboard, for every realm generation.
+    effects: crate::EffectsSlot,
 }
 impl Shared {
     fn update(&self, change: impl FnOnce(&mut Published)) {
@@ -525,6 +529,7 @@ pub struct ExtensionHost {
     profile: PathBuf,
     transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
     moved: Arc<AtomicU8>,
+    presented: Arc<Mutex<Option<Value>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl ExtensionHost {
@@ -544,9 +549,11 @@ impl ExtensionHost {
             reader: AtomicU64::new(0),
             wake: config.wake.clone(),
             exports: Mutex::default(),
+            effects: Arc::default(),
         });
         let transport = Arc::new(Mutex::new(None));
         let moved = Arc::new(AtomicU8::new(0));
+        let presented = Arc::new(Mutex::new(None));
         let writer = Writer {
             realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
             generation: GENERATION,
@@ -565,6 +572,8 @@ impl ExtensionHost {
             inbox: inbox.clone(),
             transport: transport.clone(),
             moved: moved.clone(),
+            presented: presented.clone(),
+            shell: serde_json::Map::new(),
             restarts: 0,
             asking: None,
             asking_culprit: None,
@@ -591,6 +600,7 @@ impl ExtensionHost {
             profile,
             transport,
             moved,
+            presented,
             worker: Some(worker),
         }
     }
@@ -687,10 +697,22 @@ impl ExtensionHost {
             }
         });
     }
+    /// The window's effect clipboard for its extensions' inspector service.
+    pub fn set_effects(&self, hook: Option<crate::EffectsHook>) {
+        *self.shared.effects.lock().unwrap() = hook;
+    }
     /// The shell's current tool (`{tool}`) or viewer navigation
     /// (`{zoom, pan, fit}`), which the `tool` and `viewer` services report.
     pub fn shell_state(&self, state: Value) {
         let _ = self.inbox.send(Input::Shell(state));
+    }
+    /// The viewer presented a frame (`{time, version, quality, viewport}`):
+    /// the realm hears `frame:rendered`, then redraws `overlay`. Cheap enough
+    /// for every frame; a busy realm hears only the latest.
+    pub fn frame_presented(&self, frame: Value) {
+        if self.presented.lock().unwrap().replace(frame).is_none() {
+            let _ = self.inbox.send(Input::Presented);
+        }
     }
     /// Where override asks for this realm go, from any thread.
     pub fn raster_inbox(&self) -> RasterInbox {
@@ -893,6 +915,9 @@ struct Owner {
     inbox: Sender<Input>,
     transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
     moved: Arc<AtomicU8>,
+    presented: Arc<Mutex<Option<Value>>>,
+    /// Every shell fact the services report, replayed into a rebuilt realm.
+    shell: serde_json::Map<String, Value>,
     restarts: usize,
     /// The task the user is being asked about, so one hang asks once at a time.
     /// The task the D11 sheet asks about, and the extension running it.
@@ -1083,7 +1108,16 @@ impl Owner {
                 self.eval(&format!("__compat.answer({token},{value})"));
             }
             Input::Shell(state) => {
+                if let Value::Object(facts) = &state {
+                    self.shell.extend(facts.clone());
+                }
                 self.eval(&format!("__compat.shellState({state})"));
+            }
+            Input::Presented => {
+                let frame = self.presented.lock().unwrap().take();
+                if let Some(frame) = frame {
+                    self.eval(&format!("__compat.presented({frame})"));
+                }
             }
             Input::Rasters(batch, wire) => {
                 let ask = match &wire["ask"] {
@@ -1807,6 +1841,7 @@ impl Owner {
         }
         host.set_frames(self.config.frames.clone());
         host.set_rasters(self.config.rasters.clone());
+        host.set_effects(Some(self.shared.effects.clone()));
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         crate::boot_realm(&realm, &host, "")?;
@@ -1863,10 +1898,18 @@ impl Owner {
         self.publish_records();
         self.publish_store();
         let records = self.realm_plan();
+        self.replay_window();
+        self.eval(&format!("__compat.boot({records})"));
+    }
+    /// A new realm learns the window it lives in before anything activates.
+    fn replay_window(&mut self) {
         if let Some((width, height, scale)) = self.viewport {
             self.eval(&format!("__compat.viewport({width},{height},{scale})"));
         }
-        self.eval(&format!("__compat.boot({records})"));
+        if !self.shell.is_empty() {
+            let shell = Value::Object(self.shell.clone());
+            self.eval(&format!("__compat.shellState({shell})"));
+        }
     }
     /// The trusted records the window realm is about to run: its wrappers
     /// report their code identity from them (the disk render cache keys
@@ -2026,9 +2069,7 @@ impl Owner {
             Ok(()) => {
                 self.publish_records();
                 let records = self.realm_plan();
-                if let Some((width, height, scale)) = self.viewport {
-                    self.eval(&format!("__compat.viewport({width},{height},{scale})"));
-                }
+                self.replay_window();
                 self.eval(&format!("__compat.boot({records})"));
             }
             Err(error) => self.shared.update(|p| {
@@ -3012,6 +3053,227 @@ mod tests {
         assert_eq!(answer_of(&answered, 77, Duration::from_secs(1)), json!(6));
         assert_eq!(*rendered.lock().unwrap(), vec![frozen.revision()]);
         cancel.store(true, Ordering::Release);
+    }
+    /// D7 through the host: each `frame:rendered` a bound presenter hears
+    /// carries the pixels of that frame (its time, its revision), not of the
+    /// playhead or a newer project; a realm behind the frame catches up
+    /// first, and a frame the project moved past is dropped.
+    #[test]
+    fn presenter_frames_carry_the_pixels_of_the_frame_they_name() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "presenter",
+            &[(
+                "index.ts",
+                "export default function activate(api: any){
+                  const canvas: any = document.createElement('canvas'); canvas.width = 2; canvas.height = 1;
+                  api.render.gl.init(canvas);
+                  const heard: any[] = [];
+                  api.events.on('frame:rendered', (f: any) => {
+                    const p = canvas.getContext('2d').getImageData(1, 0, 1, 1).data;
+                    heard.push([f.time, f.version, p[0], p[1]]);
+                    api.storage.set('heard', heard) }) }",
+            )],
+        );
+        // Each frame is filled with (revision, time × 10): what it was drawn from.
+        let drawn: Arc<Mutex<Vec<(u64, f64)>>> = Arc::default();
+        let log = drawn.clone();
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let revision = frame.published.as_ref().ok_or("no publication")?.revision();
+            log.lock().unwrap().push((revision, frame.time));
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, frame.width, frame.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let px = [revision as u8, (frame.time * 10.).round() as u8, 0, 255];
+            let pixels = px.repeat((frame.width * frame.height) as usize);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
+            Ok(png)
+        });
+        let fixture = Fixture::start_full(
+            root,
+            crate::initial()["document"].clone(),
+            None,
+            frames.into(),
+        );
+        fixture.until("activation", |host| host.is_ready());
+        let heard = |count: usize| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let heard = fixture
+                    .kernel
+                    .state()
+                    .settings
+                    .get("ext.presenter")
+                    .map(|v| {
+                        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(v))
+                            .unwrap()["heard"]
+                            .clone()
+                    });
+                if let Some(Value::Array(heard)) = heard
+                    && heard.len() >= count
+                {
+                    return heard;
+                }
+                assert!(Instant::now() < deadline, "{count} frames heard");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let first = fixture.kernel.published("window").unwrap().revision();
+        // Playing: the frame's time, not the playhead's (0).
+        fixture
+            .host
+            .frame_presented(json!({"time": 1.5, "version": first, "quality": 1}));
+        assert_eq!(heard(1)[0], json!([1.5, first, first, 15]));
+        // An edit the realm has not received: the frame is of the new revision.
+        let edit = pm_kernel::Call::Transact {
+            label: Some("Set Work Area".into()),
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                pm_kernel::CompCommand::SetWorkArea {
+                    comp: None,
+                    start: Some(0.5),
+                    end: None,
+                },
+            )]),
+            expected_revision: None,
+        };
+        fixture
+            .kernel
+            .call_blocking("window", Request::new(pm_kernel::Caller::native(), edit))
+            .unwrap();
+        let next = fixture.kernel.published("window").unwrap().revision();
+        assert!(next > first);
+        fixture
+            .host
+            .frame_presented(json!({"time": 2.0, "version": next, "quality": 1}));
+        assert_eq!(heard(2)[1], json!([2, next, next, 20]));
+        // A frame the viewer drew before the edit, presented after it: dropped.
+        fixture
+            .host
+            .frame_presented(json!({"time": 2.5, "version": first, "quality": 1}));
+        fixture
+            .host
+            .frame_presented(json!({"time": 3.0, "version": next, "quality": 1}));
+        assert_eq!(heard(3)[2], json!([3, next, next, 30]));
+        assert!(!drawn.lock().unwrap().iter().any(|(_, t)| *t == 2.5));
+    }
+    /// A window realm's capture draws the publication the realm holds, so
+    /// an edit the kernel takes while the realm waits never leaves it asked
+    /// for a revision it cannot reach (it used to retry to the 60 s deadline,
+    /// frozen). The renderer stands in for the app's `frame_renderer` and
+    /// `JobOverrides`: the kernel's project when given none, a look's exact
+    /// ask while that is the kernel's current one, else the job route.
+    #[test]
+    fn a_window_capture_draws_the_realms_own_revision_when_an_edit_lands_meanwhile() {
+        type Wiring = Arc<Mutex<Option<(RasterInbox, Answers, KernelHandle)>>>;
+        let wiring: Wiring = Arc::default();
+        let rendered: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+        let (w, r) = (wiring.clone(), rendered.clone());
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let (inbox, answered, kernel) = w.lock().unwrap().clone().unwrap();
+            let before = kernel.published("window").unwrap();
+            // The person renames t1 while the realm waits for this frame.
+            let rename = pm_kernel::Call::Transact {
+                label: Some("Rename".into()),
+                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                    pm_kernel::LayerCommand::Set {
+                        layer_id: "t1".into(),
+                        patch: pm_kernel::commands::layers::LayerPatch {
+                            name: Some("Renamed meanwhile".into()),
+                            ..Default::default()
+                        },
+                    },
+                )]),
+                expected_revision: None,
+            };
+            kernel
+                .call_blocking("window", Request::new(pm_kernel::Caller::native(), rename))
+                .map_err(|e| e.to_string())?;
+            let published = frame
+                .published
+                .clone()
+                .or_else(|| kernel.published("window"))
+                .unwrap();
+            let now = kernel.published("window").unwrap();
+            r.lock()
+                .unwrap()
+                .push((published.revision(), before.revision()));
+            let comp = published.snapshot.render_comp();
+            let needs = json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}]);
+            let started = Instant::now();
+            for batch in 80.. {
+                if Arc::ptr_eq(&now, &published) {
+                    let ask = json!({"revision": published.revision(), "exact": true});
+                    inbox.ask(batch, needs.clone(), ask);
+                } else {
+                    inbox.export("capture-1", published.clone(), Arc::default())?;
+                    inbox.ask(batch, needs.clone(), json!({"job":"capture-1"}));
+                }
+                // A number is a drawn width; anything else is "ask again".
+                if answer_of(&answered, batch, Duration::from_secs(5)).is_number() {
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(3) {
+                    return Err("the waiting realm never reached the frame's revision".into());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0, 0, 255, 255])
+                .unwrap();
+            Ok(png)
+        });
+        let capturer = "export default function activate(){
+            globalThis.capture = () => { globalThis.PM.renderFrameTo(0, 1, 1) } }";
+        let (fixture, answered) = export_window(
+            &[("spy", SPY), ("capturer", capturer)],
+            "window",
+            Some(frames),
+        );
+        *wiring.lock().unwrap() = Some((
+            fixture.host.raster_inbox(),
+            answered.clone(),
+            fixture.kernel.clone(),
+        ));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        let started = Instant::now();
+        fixture
+            .host
+            .raster_inbox()
+            .ask(5, needs(&fixture), json!({"revision": live}));
+        // t1's override captured a frame of the realm's own project, its t1
+        // answered inline by the waiting realm, and then drew itself.
+        assert_eq!(answer_of(&answered, 5, Duration::from_secs(20)), json!(6));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let rendered = rendered.lock().unwrap().clone();
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(
+            rendered[0].0, rendered[0].1,
+            "the frame is the realm's revision"
+        );
+        assert!(
+            answered
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(b, a)| *b >= 80 && *a == json!(6)),
+            "the capture's t1 was drawn by the waiting realm"
+        );
     }
     #[test]
     fn an_extension_that_runs_in_the_window_but_not_for_the_export_fails_it_by_name() {

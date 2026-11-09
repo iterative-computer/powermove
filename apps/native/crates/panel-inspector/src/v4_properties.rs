@@ -79,6 +79,10 @@ impl V4Adapter {
         );
         Ok(handle)
     }
+    /// The layers `handle` was made for (it never follows a new selection).
+    pub fn selection(&self, handle: &str) -> Option<std::sync::Arc<[String]>> {
+        self.entries.get(handle).map(|e| e.selection.clone())
+    }
     pub fn dispose(&mut self, handle: &str) {
         self.entries.remove(handle);
     }

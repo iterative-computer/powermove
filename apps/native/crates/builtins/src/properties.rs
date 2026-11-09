@@ -479,6 +479,10 @@ impl Properties {
         }
         Ok(out)
     }
+    /// The layers a row's handle edits.
+    pub fn layers_of(&self, handle: &str) -> Option<std::sync::Arc<[String]>> {
+        self.adapter.selection(handle)
+    }
     pub fn valid(&self, handle: &str, channels: &[String]) -> bool {
         self.handles
             .iter()
