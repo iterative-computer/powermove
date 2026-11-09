@@ -246,6 +246,11 @@ pub enum KernelEvent {
     Durability {
         message: String,
     },
+    /// A request failed with an internal error (a contained panic); the
+    /// kernel keeps serving. Hosts show it in the Error Log.
+    Fault {
+        message: String,
+    },
 }
 
 /// A realm's mailbox entry.
@@ -748,394 +753,439 @@ fn emit(shared: &Shared, event: KernelEvent) {
         .retain(|s| s.send(event.clone()).is_ok());
 }
 
+/// The actor loop's own state between messages.
+#[derive(Default)]
+struct Turns {
+    /// Deferred replies (external undo running in another realm).
+    deferred: HashMap<(String, u64), Reply<Result<Ack, KernelFailure>>>,
+    pro_clocks: HashMap<String, (u64, Option<String>, bool, u64)>,
+    pro_clock_token: u64,
+}
+
 fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
-    // Deferred replies (external undo running in another realm).
-    let mut deferred: HashMap<(String, u64), Reply<Result<Ack, KernelFailure>>> = HashMap::new();
-    let mut pro_clocks: HashMap<String, (u64, Option<String>, bool, u64)> = HashMap::new();
-    let mut pro_clock_token = 0u64;
+    let mut turns = Turns::default();
     for msg in rx {
-        // Prepare and execute in this same actor turn: no snapshot/read/write
-        // race, and all writes retain the ordinary publication/event paths.
-        let msg = match msg {
-            Msg::ProClock {
-                project,
-                document,
-                comp_id,
-                available,
-                reply,
-            } => {
-                let valid = kernel.project(&project).is_some_and(|p| {
-                    p.store().doc_id() == document
-                        && p.store()
-                            .root()
-                            .is_some_and(|root| crate::model::open_comp_id(root) == comp_id)
-                });
-                let token = pro_clock_token.checked_add(1).filter(|_| valid);
-                if let Some(token) = token {
-                    pro_clock_token = token;
-                    pro_clocks.insert(project, (document, comp_id, available, token));
-                }
-                reply(token);
-                continue;
-            }
-            Msg::ProEditing {
-                project,
-                request,
-                reply,
-            } => {
-                let clock = pro_clocks
-                    .get(&project)
-                    .and_then(|(doc, comp, available, token)| {
-                        let current_comp = kernel
-                            .project(&project)
-                            .and_then(|p| p.store().root())
-                            .and_then(crate::model::open_comp_id);
-                        (*doc == request.document && *available && *comp == current_comp)
-                            .then_some(*token)
-                    });
-                match crate::pro_editing::prepare(&kernel, &project, request, clock) {
-                    Ok(crate::pro_editing::Prepared::Call(request)) => Msg::Call {
-                        project,
-                        request,
-                        source_finish: None,
-                        reply: Box::new(move |v| {
-                            reply(v.map(crate::pro_editing::ProReply::Document))
-                        }),
-                    },
-                    Ok(crate::pro_editing::Prepared::SourceEdit { request, finish }) => {
-                        let state = shared.clone();
-                        Msg::Call {
-                            project,
-                            request,
-                            source_finish: Some(finish),
-                            reply: Box::new(move |v| {
-                                reply(v.map(|ack| crate::pro_editing::ProReply::SourceEdit {
-                                    ack,
-                                    state_revision: state.state.lock().expect("state").revision,
-                                }))
-                            }),
-                        }
-                    }
-                    Ok(crate::pro_editing::Prepared::State(tx)) => Msg::State {
-                        tx,
-                        reply: Box::new(move |v| reply(v.map(crate::pro_editing::ProReply::State))),
-                    },
-                    Ok(crate::pro_editing::Prepared::Inspection(v)) => {
-                        reply(Ok(crate::pro_editing::ProReply::Inspection(v)));
-                        continue;
-                    }
-                    Ok(crate::pro_editing::Prepared::Declined) => {
-                        reply(Ok(crate::pro_editing::ProReply::Declined));
-                        continue;
-                    }
-                    Err(e) => {
-                        reply(Err(e));
-                        continue;
-                    }
-                }
-            }
-            other => other,
-        };
-        match msg {
-            Msg::ProEditing { .. } | Msg::ProClock { .. } => unreachable!("prepared above"),
-            Msg::Profile { call, reply } => reply(kernel.profile(call)),
-            Msg::PrepareExport {
-                session,
-                document,
-                path,
-                reply,
-            } => {
-                reply(kernel.prepare_session_export(session, document, path));
-            }
-            Msg::PrepareSave {
-                session,
-                path,
-                replace,
-                document,
-                reply,
-            } => {
-                let id = session.project.clone();
-                let result = if document.is_some_and(|expected| {
-                    kernel
-                        .project(&id)
-                        .is_none_or(|p| p.store().doc_id() != expected)
-                }) {
-                    Err(KernelFailure::Storage(
-                        "The document was closed or replaced; the save was not applied".into(),
-                    ))
-                } else {
-                    kernel.prepare_session_save(session, path, replace)
-                };
-                let revision = publish(&mut kernel, &shared, &id);
-                reply(result);
-                if let Some(revision) = revision {
-                    emit(
-                        &shared,
-                        KernelEvent::Published {
-                            project: id,
-                            revision,
-                        },
-                    );
-                }
-            }
-            Msg::FinishSave { completion, reply } => {
-                let result = kernel.finish_session_save(completion);
-                let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
-                for id in &ids {
-                    publish(&mut kernel, &shared, id);
-                }
-                reply(result);
-                for id in ids {
-                    emit(
-                        &shared,
-                        KernelEvent::Published {
-                            revision: kernel.project(&id).unwrap().store().revision(),
-                            project: id,
-                        },
-                    );
-                }
-            }
-            Msg::State { tx, reply } => {
-                let result = kernel.state_transaction(tx);
-                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
-                let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
-                for id in ids {
-                    publish(&mut kernel, &shared, &id);
-                }
-                let events = result
-                    .as_ref()
-                    .ok()
-                    .map(|a| (a.revision, a.changes.clone()));
-                reply(result);
-                if let Some((revision, changes)) = events {
-                    for change in changes {
-                        emit(&shared, KernelEvent::StateChanged { revision, change });
-                    }
-                }
-            }
-            Msg::Shell { call, reply } => {
-                let before: Vec<_> = kernel.projects().map(str::to_owned).collect();
-                let result = kernel.shell(call);
-                let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
-                shared
-                    .published
-                    .lock()
-                    .expect("published")
-                    .retain(|id, _| ids.contains(id));
-                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
-                for id in &ids {
-                    publish(&mut kernel, &shared, id);
-                }
-                reply(result);
-                for id in &ids {
-                    if !before.contains(id) {
-                        emit(
-                            &shared,
-                            KernelEvent::Opened {
-                                project: id.clone(),
-                            },
-                        );
-                    } else if let Some(p) = kernel.project(id) {
-                        emit(
-                            &shared,
-                            KernelEvent::Published {
-                                project: id.clone(),
-                                revision: p.store().revision(),
-                            },
-                        );
-                    }
-                }
-                for id in before {
-                    if !ids.contains(&id) {
-                        emit(&shared, KernelEvent::Closed { project: id });
-                    }
-                }
-            }
-            Msg::Call {
-                project,
-                request,
-                source_finish,
-                reply,
-            } => {
-                let actor_started = std::time::Instant::now();
-                let before_state = kernel.state().clone();
-                let before_selection = kernel
-                    .project(&project)
-                    .map(|p| p.store().selection().clone());
-                let mut handled = match kernel.handle(&project, request) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        reply(Err(e));
-                        continue;
-                    }
-                };
-                if let Some(finish) = source_finish {
-                    crate::pro_editing::finish_source(&mut kernel, &project, finish, &mut handled);
-                }
-                if before_state.revision != kernel.state().revision {
-                    *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
-                }
-                let workspace_changed = kernel
-                    .project(&project)
-                    .map(|p| p.workspace().clone())
-                    .filter(|ws| {
-                        shared
-                            .published
-                            .lock()
-                            .expect("published")
-                            .get(&project)
-                            .is_some_and(|p| &p.workspace != ws)
-                    });
-                // Publication boundary: publish, then answer, then events.
-                let revision = publish_timed(&mut kernel, &shared, &project, Some(actor_started));
-                let (outbox, notices) = match kernel.project_mut(&project) {
-                    Some(p) => (p.take_outbox(), p.take_notices()),
-                    None => (Vec::new(), Vec::new()),
-                };
-                match (handled.reply, handled.deferred) {
-                    (Some(ack), _) => reply(Ok(ack)),
-                    (None, Some(ticket)) => {
-                        deferred.insert((project.clone(), ticket), reply);
-                    }
-                    (None, None) => {}
-                }
-                for (ticket, ack) in handled.resolved {
-                    if let Some(r) = deferred.remove(&(project.clone(), ticket)) {
-                        r(Ok(ack));
-                    }
-                }
-                {
-                    let realms = shared.realms.lock().expect("realms");
-                    for message in outbox {
-                        let writer = match &message {
-                            RealmMessage::RunExternal { writer, .. }
-                            | RealmMessage::Cleanup { writer, .. } => *writer,
-                        };
-                        if let Some(mailbox) = realms.get(&writer) {
-                            let _ = mailbox.send(RealmEnvelope {
-                                project: project.clone(),
-                                message,
-                            });
-                        }
-                    }
-                }
-                if let Some(revision) = revision {
-                    emit(
-                        &shared,
-                        KernelEvent::Published {
-                            project: project.clone(),
-                            revision,
-                        },
-                    );
-                }
-                if let Some(selection) = kernel
-                    .project(&project)
-                    .map(|p| p.store().selection().clone())
-                    && before_selection.as_ref() != Some(&selection)
-                {
-                    emit(
-                        &shared,
-                        KernelEvent::SelectionChanged {
-                            project: project.clone(),
-                            selection,
-                        },
-                    );
-                }
-                if let Some(workspace) = workspace_changed {
-                    emit(
-                        &shared,
-                        KernelEvent::WorkspaceChanged {
-                            project: project.clone(),
-                            workspace,
-                        },
-                    );
-                }
-                if before_state.revision != kernel.state().revision {
-                    if before_state.ui.get(&project) != kernel.state().ui.get(&project) {
-                        emit(
-                            &shared,
-                            KernelEvent::StateChanged {
-                                revision: kernel.state().revision,
-                                change: crate::state::StateChange::Ui {
-                                    project: project.clone(),
-                                },
-                            },
-                        );
-                    }
-                    for key in before_state
-                        .settings
-                        .keys()
-                        .chain(kernel.state().settings.keys())
-                        .collect::<std::collections::BTreeSet<_>>()
-                    {
-                        if before_state.settings.get(key) != kernel.state().settings.get(key) {
-                            emit(
-                                &shared,
-                                KernelEvent::StateChanged {
-                                    revision: kernel.state().revision,
-                                    change: crate::state::StateChange::Setting {
-                                        key: key.clone(),
-                                        value: kernel.state().settings.get(key).cloned(),
-                                    },
-                                },
-                            );
-                        }
-                    }
-                }
-                for notice in notices {
-                    emit(
-                        &shared,
-                        KernelEvent::Notice {
-                            project: project.clone(),
-                            notice,
-                        },
-                    );
-                }
-                if let Some(d) = kernel.durability() {
-                    for message in d.take_errors() {
-                        emit(&shared, KernelEvent::Durability { message });
-                    }
-                }
-            }
-            Msg::Open {
-                project,
-                source,
-                reply,
-            } => {
-                let result = kernel.open(&project, *source);
-                if result.is_ok() {
-                    publish(&mut kernel, &shared, &project);
-                }
-                reply(result.clone());
-                if result.is_ok() {
-                    emit(&shared, KernelEvent::Opened { project });
-                }
-            }
-            Msg::Close { project, reply } => {
-                let closed = kernel.close(&project);
-                if closed {
-                    shared.published.lock().expect("published").remove(&project);
-                }
-                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
-                reply(closed);
-                if closed {
-                    emit(&shared, KernelEvent::Closed { project });
-                }
-            }
-            Msg::Recover {
-                project,
-                current_base,
-                base_document,
-                reply,
-            } => reply(kernel.recover(&project, current_base.as_deref(), base_document.as_ref())),
-            Msg::Sync { reply } => {
-                kernel.sync_all();
-                reply(());
-            }
-            Msg::Shutdown => break,
+        let shutdown = matches!(msg, Msg::Shutdown);
+        // A panic in one call must not take the kernel (and every open
+        // project's unsaved work) down with it: that call's reply is dropped
+        // (its caller sees `None`), the fault is reported, and the next
+        // message is served. Journals already hold every acknowledged edit.
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            step(&mut kernel, &shared, &mut turns, msg)
+        }));
+        if let Err(panic) = turn {
+            fault(&shared, panic.as_ref());
+        }
+        if shutdown {
+            break;
         }
     }
     kernel.sync_all();
+}
+
+/// Reports a contained panic and clears lock poison so later turns work.
+fn fault(shared: &Shared, panic: &(dyn std::any::Any + Send)) {
+    shared.published.clear_poison();
+    shared.state.clear_poison();
+    shared.subscribers.clear_poison();
+    shared.realms.clear_poison();
+    let detail = panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown cause".into());
+    emit(
+        shared,
+        KernelEvent::Fault {
+            message: format!("An internal error stopped one request: {detail}"),
+        },
+    );
+}
+
+fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) {
+    let Turns {
+        deferred,
+        pro_clocks,
+        pro_clock_token,
+    } = turns;
+    // Prepare and execute in this same actor turn: no snapshot/read/write
+    // race, and all writes retain the ordinary publication/event paths.
+    let msg = match msg {
+        Msg::ProClock {
+            project,
+            document,
+            comp_id,
+            available,
+            reply,
+        } => {
+            let valid = kernel.project(&project).is_some_and(|p| {
+                p.store().doc_id() == document
+                    && p.store()
+                        .root()
+                        .is_some_and(|root| crate::model::open_comp_id(root) == comp_id)
+            });
+            let token = pro_clock_token.checked_add(1).filter(|_| valid);
+            if let Some(token) = token {
+                *pro_clock_token = token;
+                pro_clocks.insert(project, (document, comp_id, available, token));
+            }
+            reply(token);
+            return;
+        }
+        Msg::ProEditing {
+            project,
+            request,
+            reply,
+        } => {
+            let clock = pro_clocks
+                .get(&project)
+                .and_then(|(doc, comp, available, token)| {
+                    let current_comp = kernel
+                        .project(&project)
+                        .and_then(|p| p.store().root())
+                        .and_then(crate::model::open_comp_id);
+                    (*doc == request.document && *available && *comp == current_comp)
+                        .then_some(*token)
+                });
+            match crate::pro_editing::prepare(kernel, &project, request, clock) {
+                Ok(crate::pro_editing::Prepared::Call(request)) => Msg::Call {
+                    project,
+                    request,
+                    source_finish: None,
+                    reply: Box::new(move |v| reply(v.map(crate::pro_editing::ProReply::Document))),
+                },
+                Ok(crate::pro_editing::Prepared::SourceEdit { request, finish }) => {
+                    let state = shared.clone();
+                    Msg::Call {
+                        project,
+                        request,
+                        source_finish: Some(finish),
+                        reply: Box::new(move |v| {
+                            reply(v.map(|ack| crate::pro_editing::ProReply::SourceEdit {
+                                ack,
+                                state_revision: state.state.lock().expect("state").revision,
+                            }))
+                        }),
+                    }
+                }
+                Ok(crate::pro_editing::Prepared::State(tx)) => Msg::State {
+                    tx,
+                    reply: Box::new(move |v| reply(v.map(crate::pro_editing::ProReply::State))),
+                },
+                Ok(crate::pro_editing::Prepared::Inspection(v)) => {
+                    reply(Ok(crate::pro_editing::ProReply::Inspection(v)));
+                    return;
+                }
+                Ok(crate::pro_editing::Prepared::Declined) => {
+                    reply(Ok(crate::pro_editing::ProReply::Declined));
+                    return;
+                }
+                Err(e) => {
+                    reply(Err(e));
+                    return;
+                }
+            }
+        }
+        other => other,
+    };
+    match msg {
+        Msg::ProEditing { .. } | Msg::ProClock { .. } => unreachable!("prepared above"),
+        Msg::Profile { call, reply } => reply(kernel.profile(call)),
+        Msg::PrepareExport {
+            session,
+            document,
+            path,
+            reply,
+        } => {
+            reply(kernel.prepare_session_export(session, document, path));
+        }
+        Msg::PrepareSave {
+            session,
+            path,
+            replace,
+            document,
+            reply,
+        } => {
+            let id = session.project.clone();
+            let result = if document.is_some_and(|expected| {
+                kernel
+                    .project(&id)
+                    .is_none_or(|p| p.store().doc_id() != expected)
+            }) {
+                Err(KernelFailure::Storage(
+                    "The document was closed or replaced; the save was not applied".into(),
+                ))
+            } else {
+                kernel.prepare_session_save(session, path, replace)
+            };
+            let revision = publish(kernel, shared, &id);
+            reply(result);
+            if let Some(revision) = revision {
+                emit(
+                    shared,
+                    KernelEvent::Published {
+                        project: id,
+                        revision,
+                    },
+                );
+            }
+        }
+        Msg::FinishSave { completion, reply } => {
+            let result = kernel.finish_session_save(completion);
+            let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+            for id in &ids {
+                publish(kernel, shared, id);
+            }
+            reply(result);
+            for id in ids {
+                emit(
+                    shared,
+                    KernelEvent::Published {
+                        revision: kernel.project(&id).unwrap().store().revision(),
+                        project: id,
+                    },
+                );
+            }
+        }
+        Msg::State { tx, reply } => {
+            let result = kernel.state_transaction(tx);
+            *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+            let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+            for id in ids {
+                publish(kernel, shared, &id);
+            }
+            let events = result
+                .as_ref()
+                .ok()
+                .map(|a| (a.revision, a.changes.clone()));
+            reply(result);
+            if let Some((revision, changes)) = events {
+                for change in changes {
+                    emit(shared, KernelEvent::StateChanged { revision, change });
+                }
+            }
+        }
+        Msg::Shell { call, reply } => {
+            let before: Vec<_> = kernel.projects().map(str::to_owned).collect();
+            let result = kernel.shell(call);
+            let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+            shared
+                .published
+                .lock()
+                .expect("published")
+                .retain(|id, _| ids.contains(id));
+            *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+            for id in &ids {
+                publish(kernel, shared, id);
+            }
+            reply(result);
+            for id in &ids {
+                if !before.contains(id) {
+                    emit(
+                        shared,
+                        KernelEvent::Opened {
+                            project: id.clone(),
+                        },
+                    );
+                } else if let Some(p) = kernel.project(id) {
+                    emit(
+                        shared,
+                        KernelEvent::Published {
+                            project: id.clone(),
+                            revision: p.store().revision(),
+                        },
+                    );
+                }
+            }
+            for id in before {
+                if !ids.contains(&id) {
+                    emit(shared, KernelEvent::Closed { project: id });
+                }
+            }
+        }
+        Msg::Call {
+            project,
+            request,
+            source_finish,
+            reply,
+        } => {
+            let actor_started = std::time::Instant::now();
+            let before_state = kernel.state().clone();
+            let before_selection = kernel
+                .project(&project)
+                .map(|p| p.store().selection().clone());
+            let mut handled = match kernel.handle(&project, request) {
+                Ok(h) => h,
+                Err(e) => {
+                    reply(Err(e));
+                    return;
+                }
+            };
+            if let Some(finish) = source_finish {
+                crate::pro_editing::finish_source(kernel, &project, finish, &mut handled);
+            }
+            if before_state.revision != kernel.state().revision {
+                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+            }
+            let workspace_changed = kernel
+                .project(&project)
+                .map(|p| p.workspace().clone())
+                .filter(|ws| {
+                    shared
+                        .published
+                        .lock()
+                        .expect("published")
+                        .get(&project)
+                        .is_some_and(|p| &p.workspace != ws)
+                });
+            // Publication boundary: publish, then answer, then events.
+            let revision = publish_timed(kernel, shared, &project, Some(actor_started));
+            let (outbox, notices) = match kernel.project_mut(&project) {
+                Some(p) => (p.take_outbox(), p.take_notices()),
+                None => (Vec::new(), Vec::new()),
+            };
+            match (handled.reply, handled.deferred) {
+                (Some(ack), _) => reply(Ok(ack)),
+                (None, Some(ticket)) => {
+                    deferred.insert((project.clone(), ticket), reply);
+                }
+                (None, None) => {}
+            }
+            for (ticket, ack) in handled.resolved {
+                if let Some(r) = deferred.remove(&(project.clone(), ticket)) {
+                    r(Ok(ack));
+                }
+            }
+            {
+                let realms = shared.realms.lock().expect("realms");
+                for message in outbox {
+                    let writer = match &message {
+                        RealmMessage::RunExternal { writer, .. }
+                        | RealmMessage::Cleanup { writer, .. } => *writer,
+                    };
+                    if let Some(mailbox) = realms.get(&writer) {
+                        let _ = mailbox.send(RealmEnvelope {
+                            project: project.clone(),
+                            message,
+                        });
+                    }
+                }
+            }
+            if let Some(revision) = revision {
+                emit(
+                    shared,
+                    KernelEvent::Published {
+                        project: project.clone(),
+                        revision,
+                    },
+                );
+            }
+            if let Some(selection) = kernel
+                .project(&project)
+                .map(|p| p.store().selection().clone())
+                && before_selection.as_ref() != Some(&selection)
+            {
+                emit(
+                    shared,
+                    KernelEvent::SelectionChanged {
+                        project: project.clone(),
+                        selection,
+                    },
+                );
+            }
+            if let Some(workspace) = workspace_changed {
+                emit(
+                    shared,
+                    KernelEvent::WorkspaceChanged {
+                        project: project.clone(),
+                        workspace,
+                    },
+                );
+            }
+            if before_state.revision != kernel.state().revision {
+                if before_state.ui.get(&project) != kernel.state().ui.get(&project) {
+                    emit(
+                        shared,
+                        KernelEvent::StateChanged {
+                            revision: kernel.state().revision,
+                            change: crate::state::StateChange::Ui {
+                                project: project.clone(),
+                            },
+                        },
+                    );
+                }
+                for key in before_state
+                    .settings
+                    .keys()
+                    .chain(kernel.state().settings.keys())
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    if before_state.settings.get(key) != kernel.state().settings.get(key) {
+                        emit(
+                            shared,
+                            KernelEvent::StateChanged {
+                                revision: kernel.state().revision,
+                                change: crate::state::StateChange::Setting {
+                                    key: key.clone(),
+                                    value: kernel.state().settings.get(key).cloned(),
+                                },
+                            },
+                        );
+                    }
+                }
+            }
+            for notice in notices {
+                emit(
+                    shared,
+                    KernelEvent::Notice {
+                        project: project.clone(),
+                        notice,
+                    },
+                );
+            }
+            if let Some(d) = kernel.durability() {
+                for message in d.take_errors() {
+                    emit(shared, KernelEvent::Durability { message });
+                }
+            }
+        }
+        Msg::Open {
+            project,
+            source,
+            reply,
+        } => {
+            let result = kernel.open(&project, *source);
+            if result.is_ok() {
+                publish(kernel, shared, &project);
+            }
+            reply(result.clone());
+            if result.is_ok() {
+                emit(shared, KernelEvent::Opened { project });
+            }
+        }
+        Msg::Close { project, reply } => {
+            let closed = kernel.close(&project);
+            if closed {
+                shared.published.lock().expect("published").remove(&project);
+            }
+            *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+            reply(closed);
+            if closed {
+                emit(shared, KernelEvent::Closed { project });
+            }
+        }
+        Msg::Recover {
+            project,
+            current_base,
+            base_document,
+            reply,
+        } => reply(kernel.recover(&project, current_base.as_deref(), base_document.as_ref())),
+        Msg::Sync { reply } => {
+            kernel.sync_all();
+            reply(());
+        }
+        Msg::Shutdown => {}
+    }
 }
 
 // ── the UI's synchronous query mirror ───────────────────────────────────────

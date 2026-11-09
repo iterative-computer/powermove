@@ -188,3 +188,34 @@ fn shutdown_closes_pending_handles() {
         "a stopped kernel answers None, never hangs"
     );
 }
+
+#[test]
+fn a_panic_in_one_request_is_contained_and_reported() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    block_on(kernel.open("P", OpenSource::Untitled(parse(PROJECT).unwrap())))
+        .unwrap()
+        .unwrap();
+    let events = kernel.subscribe();
+    // A host callback runs on the kernel thread; one that panics stops only
+    // its own turn.
+    kernel.call_with("P", Request::new(Caller::native(), opacity(30.0)), |_| {
+        panic!("host callback failed")
+    });
+    let fault = loop {
+        match events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fault event")
+        {
+            KernelEvent::Fault { message } => break message,
+            _ => continue,
+        }
+    };
+    assert!(fault.contains("host callback failed"), "{fault}");
+    // The kernel still serves every project afterwards.
+    let ack = kernel
+        .call_blocking("P", Request::new(Caller::native(), opacity(60.0)))
+        .unwrap();
+    assert_eq!(kernel.published("P").unwrap().revision(), ack.revision);
+    assert!(block_on(kernel.close("P")).unwrap());
+}
