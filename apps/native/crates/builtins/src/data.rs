@@ -138,10 +138,11 @@ impl Backend {
         if self.model.is_none() {
             let accounts = self.native.agent_link.accounts_revision();
             let stamp = format!(
-                "{}:{accounts}:{}:{}",
+                "{}:{accounts}:{}:{}:{}",
                 self.kernel.state().revision,
                 self.native.facts["cloud"]["revision"],
-                self.native.facts["provider"]["revision"]
+                self.native.facts["provider"]["revision"],
+                self.native.facts["agentClients"]["revision"]
             );
             if self.native.stamp != stamp {
                 self.native.stamp = stamp;
@@ -152,7 +153,7 @@ impl Backend {
         }
         let published = published.ok_or("project closed")?;
         let stamp = format!(
-            "{}:{}:{}:{}:{:?}:{}:{}:{}",
+            "{}:{}:{}:{}:{:?}:{}:{}:{}:{}",
             published.snapshot.doc_id,
             published.revision(),
             published.metadata_revision,
@@ -160,7 +161,8 @@ impl Backend {
             published.selection.primary(),
             self.native.agent_link.accounts_revision(),
             self.native.facts["cloud"]["revision"],
-            self.native.facts["provider"]["revision"]
+            self.native.facts["provider"]["revision"],
+            self.native.facts["agentClients"]["revision"]
         );
         if self.native.stamp != stamp {
             self.native.stamp = stamp;

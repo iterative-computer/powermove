@@ -50,6 +50,15 @@ impl Controller {
                 crate::providers::open(window, cx)
             }
             "providerDisconnect" => crate::providers::disconnect(cx),
+            "agentClientsCopy" => crate::agent_clients::copy_setup(cx),
+            command
+                if command.starts_with("agentClientAdd.")
+                    || command.starts_with("agentClientRemove.") =>
+            {
+                let (verb, id) = command.split_once('.').unwrap_or_default();
+                let window = self.account_window(cx);
+                crate::agent_clients::request(id.into(), verb == "agentClientAdd", window, cx)
+            }
             "cloudRememberOn" => crate::cloud::set_remember(true, cx),
             "cloudRememberOff" => crate::cloud::set_remember(false, cx),
             "cloudDeleteAccount" => {

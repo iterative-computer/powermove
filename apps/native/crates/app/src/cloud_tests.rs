@@ -7,7 +7,10 @@ use pm_services::surfaces::{
     Flight,
     agent_auth::{Account, BrowserAuth, CloudReply, CloudTask, CloudWork, Secret},
 };
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone, Default)]
 struct Memory(Arc<Mutex<Option<Vec<u8>>>>);
@@ -452,4 +455,62 @@ fn a_model_provider_is_discovered_tested_and_saved_with_its_key_in_the_vault() {
     host.disconnect().unwrap();
     assert!(host.saved().is_none());
     assert_eq!(host.saved_key(&endpoint).as_deref(), Some(MODEL_KEY));
+}
+
+#[test]
+fn agent_apps_get_powermove_added_and_removed_in_their_own_settings_only() {
+    use crate::agent_clients::{ProfileConsent, change, registration};
+    use pm_services::surfaces::client_consent::{Answer, ConsentStore, STORE_KEY};
+    let home = tempfile::tempdir().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let applications = home.path().join("Applications");
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    std::fs::create_dir_all(home.path().join("Library/Application Support/Claude")).unwrap();
+    // A hand-made server in Claude's settings must survive.
+    let claude = home
+        .path()
+        .join("Library/Application Support/Claude/claude_desktop_config.json");
+    std::fs::write(
+        &claude,
+        r#"{"mcpServers":{"mine":{"command":"/usr/bin/true"}}}"#,
+    )
+    .unwrap();
+    let app = PathBuf::from("/Applications/Powermove.app/Contents/MacOS/powermove-native");
+    let r = registration(profile.path(), home.path(), &applications, app).unwrap();
+    let state = |r: &pm_mcp::registration::Registration, id: &str| {
+        r.inspect()["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(state(&r, "cursor"), "available");
+    assert_eq!(state(&r, "codex"), "not-installed");
+    assert_eq!(
+        change(&r, "cursor", true).unwrap(),
+        "Restart Cursor to use it."
+    );
+    let cursor: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join(".cursor/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        cursor["mcpServers"]["powermove"]["args"][0],
+        "--powermove-mcp"
+    );
+    assert_eq!(state(&r, "cursor"), "connected");
+    change(&r, "claude-desktop", true).unwrap();
+    let claude: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&claude).unwrap()).unwrap();
+    assert!(claude["mcpServers"]["mine"].is_object());
+    assert!(claude["mcpServers"]["powermove"].is_object());
+    assert_eq!(change(&r, "cursor", false).unwrap(), "Removed.");
+    assert_eq!(state(&r, "cursor"), "available");
+    // Claude's question is answered once per profile.
+    let mut store = ProfileConsent(profile.path().to_owned());
+    assert!(store.record_once(STORE_KEY, Answer::Added).unwrap().fresh);
+    let again = store.record_once(STORE_KEY, Answer::Declined).unwrap();
+    assert!(!again.fresh);
+    assert_eq!(again.answer, Answer::Added);
 }

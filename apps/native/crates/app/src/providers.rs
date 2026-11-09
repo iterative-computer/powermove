@@ -271,9 +271,13 @@ pub fn init(profile: PathBuf, cx: &mut App) {
 }
 fn changed(cx: &mut App) {
     cx.global_mut::<Provider>().revision += 1;
-    for editor in crate::entry::editors(cx) {
-        editor.update(cx, |c, cx| c.update_builtins(cx));
-    }
+    // Deferred: a command arrives inside its editor's update, and every
+    // editor (that one too) republishes Settings.
+    cx.defer(|cx| {
+        for editor in crate::entry::editors(cx) {
+            editor.update(cx, |c, cx| c.update_builtins(cx));
+        }
+    });
 }
 /// Settings › Accounts reads this through the built-in facts. No key.
 pub fn fact(cx: &App) -> Value {

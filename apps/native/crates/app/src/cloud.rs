@@ -555,9 +555,13 @@ pub fn fact(cx: &App) -> Value {
 /// Every editor republishes its built-ins, so Settings shows the change.
 fn changed(cx: &mut App) {
     cx.global_mut::<Cloud>().revision += 1;
-    for editor in crate::entry::editors(cx) {
-        editor.update(cx, |c, cx| c.update_builtins(cx));
-    }
+    // Deferred: a command arrives inside its editor's update, and every
+    // editor (that one too) republishes Settings.
+    cx.defer(|cx| {
+        for editor in crate::entry::editors(cx) {
+            editor.update(cx, |c, cx| c.update_builtins(cx));
+        }
+    });
 }
 
 /// Settings › Accounts › Sign In…: the first step's sheet on `window`.

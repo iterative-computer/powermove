@@ -102,6 +102,7 @@ impl Backend {
         }
         rows.extend(self.subscription_rows());
         rows.extend(provider_rows(&self.native.facts["provider"]));
+        rows.extend(agent_client_rows(&self.native.facts["agentClients"]));
         rows
     }
     fn subscription_rows(&self) -> Vec<Value> {
@@ -479,6 +480,27 @@ impl Backend {
                     .push(("command".into(), json!({ "name": name })));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            Some("row")
+                if action["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("agents.")) =>
+            {
+                let id = action["id"].as_str().unwrap_or_default();
+                let client = id.strip_prefix("agents.").unwrap_or_default();
+                let name = match action["action"].as_str() {
+                    Some("agents.add") => format!("agentClientAdd.{client}"),
+                    Some("agents.remove") => format!("agentClientRemove.{client}"),
+                    Some("agents.copy") => "agentClientsCopy".into(),
+                    _ => return Err("Unknown agent app action".into()),
+                };
+                if !client.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
+                    return Err("Unknown agent app".into());
+                }
+                self.native
+                    .platform
+                    .push(("command".into(), json!({ "name": name })));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             Some("write") if action["id"] == "account.remember" => {
                 let on = action["value"]
                     .as_bool()
@@ -797,6 +819,63 @@ pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
     }
     rows
 }
+/// Settings › Accounts › Other Agent Apps (main's AgentClientsSettings): one
+/// row per agent app on this Mac with Add Powermove / Remove, then Copy Setup
+/// for any other app.
+pub(crate) fn agent_client_rows(agents: &Value) -> Vec<Value> {
+    let Some(clients) = agents["clients"].as_array() else {
+        return Vec::new();
+    };
+    let busy = agents["busy"].as_str();
+    let mut rows = Vec::new();
+    for client in clients.iter().filter(|c| c["state"] != "not-installed") {
+        let id = client["id"].as_str().unwrap_or_default();
+        let custom = client["custom"] == true;
+        let note = agents["notes"][id].as_str();
+        let detail = note
+            .map(str::to_owned)
+            .unwrap_or_else(|| match client["state"].as_str() {
+                Some("unreadable") => {
+                    "Its settings can’t be edited automatically. Use Copy Setup below.".into()
+                }
+                _ if custom => "Powermove is set up in this app.".into(),
+                _ => client["detail"].as_str().unwrap_or_default().into(),
+            });
+        let mut row = json!({"id":format!("agents.{id}"),"section":"accounts","group":"Other Agent Apps",
+            "label":client["name"],"detail":detail,"disabled":busy.is_some()});
+        let working = busy == Some(id);
+        match (client["state"].as_str(), custom) {
+            (Some("connected"), false) => {
+                row["control"] = json!("action");
+                row["action"] = json!("agents.remove");
+                row["actionLabel"] = json!(if working { "Removing…" } else { "Remove" });
+            }
+            (Some("available"), _) => {
+                row["control"] = json!("action");
+                row["action"] = json!("agents.add");
+                row["actionLabel"] = json!(if working {
+                    "Adding…"
+                } else {
+                    "Add Powermove"
+                });
+            }
+            (Some("connected"), true) => {
+                row["control"] = json!("status");
+                row["value"] = json!("Added");
+            }
+            _ => {
+                row["control"] = json!("status");
+                row["value"] = json!("");
+            }
+        }
+        rows.push(row);
+    }
+    rows.push(json!({"id":"agents.other","section":"accounts","group":"Other Agent Apps",
+        "label":"Any Other Agent","control":"action","action":"agents.copy",
+        "actionLabel":if agents["notes"]["other"] == "Copied." { "Copied" } else { "Copy Setup" },
+        "detail":"Paste into any app that supports MCP servers, such as Cline, Roo Code or Kiro. It runs on that app’s own plan."}));
+    rows
+}
 fn number(value: &Value, min: f64, max: f64) -> Result<f64, String> {
     value
         .as_f64()
@@ -973,5 +1052,25 @@ mod provider_tests {
         assert_eq!(out[5]["actionLabel"], "Change…");
         assert_eq!(out[6]["action"], "provider.disconnect");
         assert!(!out.iter().any(|r| r.to_string().contains("secret")));
+    }
+}
+#[cfg(test)]
+mod agent_client_tests {
+    use super::agent_client_rows;
+    use serde_json::json;
+    #[test]
+    fn agent_app_rows_offer_add_remove_and_copy_setup() {
+        let rows = agent_client_rows(&json!({"revision":1,"clients":[
+            {"id":"cursor","name":"Cursor","detail":"Your Cursor plan.","state":"available","custom":false},
+            {"id":"codex","name":"Codex","detail":"","state":"not-installed","custom":false},
+            {"id":"claude-desktop","name":"Claude","detail":"","state":"connected","custom":false},
+            {"id":"vscode","name":"VS Code","detail":"","state":"connected","custom":true}],
+            "notes":{"claude-desktop":"Quit and reopen Claude to use it."}}));
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0]["actionLabel"], "Add Powermove");
+        assert_eq!(rows[1]["action"], "agents.remove");
+        assert_eq!(rows[1]["detail"], "Quit and reopen Claude to use it.");
+        assert_eq!(rows[2]["value"], "Added");
+        assert_eq!(rows[3]["action"], "agents.copy");
     }
 }
