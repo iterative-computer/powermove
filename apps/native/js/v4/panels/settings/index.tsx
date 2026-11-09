@@ -672,12 +672,16 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
                       selected={model.active === section}
                       tabIndex={-1}
                       metadata={{ symbol: sectionCopy[section].symbol }}
-                      style={
-                        model.query.trim() &&
+                      style={{
+                        // The neutral on state, as tabs and segments.
+                        ...(model.active === section
+                          ? { background: t("colors.fill_strong") }
+                          : {}),
+                        ...(model.query.trim() &&
                         !model.matches.sections.has(section)
                           ? { color: t("colors.muted") }
-                          : {}
-                      }
+                          : {}),
+                      }}
                       onSelect={() => model.select(section)}
                     />
                   ))}
