@@ -1,5 +1,11 @@
 # Extension compatibility on the engine
 
+> **Implementation map historical.** The `apps/desktop` and pm-node paths
+> below were removed; the `pm-render` and `pm-protocol` parts are current. The
+> native app's compatibility host is described in
+> [compat-host.md](../native/compat-host.md) and
+> [compat-realm.md](../native/compat-realm.md).
+
 Extensions written against today's app (apiVersion 1 to 3) run unchanged
 with "Use New Engine" on: the same API answers, the same events, and the
 same pixels from a `raster` override. This note describes each

@@ -116,8 +116,9 @@ it (export frames still decode on the caller's thread, with `DecodePurpose::Expo
   look-ahead.
 - **Memory.** Every renderer starts with the 64 MiB frame cache it had
   before (`pm_render::media::DEFAULT_FRAME_CACHE`): export jobs, `pm-cli`,
-  and headless renders read each frame once and keep it there. Only the
-  viewer's renderer (the presenter's composer) takes a share of the
+  and headless renders read each frame once and keep it there, as does the
+  native viewer. Only the Electron viewer's renderer (the presenter's
+  composer, removed with that app) took a share of the
   engine's lease: a quarter of the lease, between 64 and 512 MiB, never more than the lease has left
   after the viewer's surface pools (`pm_node::present::viewer_frame_cache`).
   The presenter reserves it in the lease ledger as `frameCache`, so usage

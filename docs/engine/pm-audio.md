@@ -842,13 +842,13 @@ bun install && bun run --cwd apps/desktop build
 cargo test --release -p pm-audio --test legacy_parity -- --nocapture   # PM_AUDIO_PARITY=<capture dir> picks one
 ```
 
-The source monitor's decoded-PCM probe,
-`cargo build --manifest-path engine/Cargo.toml --release -p pm-node --example source_monitor_pcm`, renders
+The source monitor's decoded-PCM probe (pm-node's `source_monitor_pcm`
+example, removed with the Electron app) rendered
 `<source-read-path> <output.f32le> <rate>` (the frozen browser rendition when an
 asset has one) through the same isolated unity-gain source document as live
-`SourceAudio`, then the real `MixGraph` and `Mixer` offline. Output is
-headerless interleaved stereo little-endian float32; stderr reports the frame
-count. `e2e/engine-source-media.spec.ts` compares it with Chromium's
+`SourceAudio`, then the real `MixGraph` and `Mixer` offline. Output was
+headerless interleaved stereo little-endian float32; stderr reported the frame
+count. `e2e/engine-source-media.spec.ts` compared it with Chromium's
 `decodeAudioData` of the same bytes.
 
 ## Tests
@@ -872,7 +872,7 @@ pm-electron-lock cargo run --release -p pm-audio --example device_probe   # open
   devices: a 1 kHz bed stays at 999.9 to 1000.0 Hz, bursts land within 0.02 ms of the
   line's instant for their media), `a_rate_change_continues_from_what_is_heard` (1× → −1×
   starts on the heard sample, within 0.1 ms).
-- `pm-node`: the presenter's host-clock play around (`present/clock.rs`).
+- `pm-engine-service`: the viewer's host-clock play around (`clock.rs`).
 - Renderer: `engine-connection/engine-connection.test.ts` (J/K/L, play around, scrub
   switch, lines at any rate), `engine-connection/audio.test.ts` (meters, solo, peaks,
   routing `PM.Audio`), the keymap tests (J/K/L ahead of the After Effects keys, declining

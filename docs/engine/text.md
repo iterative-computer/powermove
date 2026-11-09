@@ -1,5 +1,11 @@
 # pm-text and the font registry
 
+> **Implementation map historical.** pm-bridge, pm-node and Electron main's
+> font wiring were removed. The registry, layout and subsetting below are
+> current in `pm-text`; the native app's font service is `pm_text::host`
+> (main-thread broker) with `pm_render::text::host::RenderFonts`
+> ([engine-service.md](../native/engine-service.md)).
+
 Design notes for `engine/crates/pm-text`, the font registry export in
 `engine/crates/pm-bridge`, the interactive engine's font service
 (`engine/crates/pm-node/src/fonts`), and their wiring in Electron main

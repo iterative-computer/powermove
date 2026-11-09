@@ -8,14 +8,14 @@ physical playback continuity, scrub latency, or speaker/display synchronization.
 ## API and ownership
 
 `apps/native/crates/engine-service` is a native-workspace member through the
-existing `crates/*` glob. It depends on `pm-node` with default features disabled:
-its public Rust audio/clock/font modules are reused; no napi entrypoint is built.
-The initial package did not change engine, kernel, shell, spike or vendor source.
-Slice 2 below also updates the owned S3 harness and minimal app wiring.
+existing `crates/*` glob. It owns the viewer's audio link (`audio`), transport
+clock (`clock`), media catalog (`media`) and QoS (`qos`). Fonts come from
+`pm_text::host` (the main-thread `FontService` broker) and
+`pm_render::text::host::RenderFonts`.
 
 - Create `Gpu` and `EngineService::start` on a worker. Inject
   `service.metal_device()` into GPUI (P-DEVICE). `start_with_fonts` accepts an
-  existing `pm_node::fonts::render::RenderFonts`; the main-thread host must keep
+  existing `pm_render::text::host::RenderFonts`; the main-thread host must keep
   servicing that broker. `fonts_changed()` invalidates paused viewers.
 - On main, `layers::configure_layer(MainThreadMarker, layer, device)` configures
   the caller's retained CAMetalLayer: RGBA16Float, EDR, extended-linear Display
@@ -96,13 +96,14 @@ unverified in this package.
 
 ## Audio and exports
 
-The service directly reuses `pm_node::present::audio::AudioLink` (which owns
-`pm_audio::Playback`) and `present::clock::TransportClock`: lazy device warm-up,
-30 ms project-update throttle, asynchronous controls, output-latency timestamps,
-loop entry, epochs and host-clock fallback. An audible start holds picture time
-until a new audio epoch arrives. Silent compositions use the host clock. Pause
-and seek cannot adopt the previous run's device epoch. The inherited audio-start
-timeout is used; fallback is visible in status.
+The service's `audio::AudioLink` (which owns `pm_audio::Playback`) and
+`clock::TransportClock` provide lazy device warm-up, 30 ms project-update
+throttle, asynchronous controls, output-latency timestamps, loop entry, epochs
+and host-clock fallback. An audible start holds picture time until a new audio
+epoch arrives. Silent compositions use the host clock; an empty document or an
+unresolved composition also leaves nothing to hear but is reported as the
+viewer's status error. Pause and seek cannot adopt the previous run's device
+epoch. The inherited audio-start timeout is used; fallback is visible in status.
 
 `jobs::ExportRequest::new` freezes the kernel document/revision, `JobSpec::Export`,
 media catalog and destination. A worker calls `ExportHandle::start(executable,

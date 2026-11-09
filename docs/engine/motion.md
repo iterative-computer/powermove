@@ -68,8 +68,8 @@ invalid key keeps today's count.
 
 Wiring: `RenderRequest::from_frame_request` maps contract 2's `motion_blur`;
 `pm-export` passes `Export` or `AlphaExport` when the export's motion-blur setting is
-on; the viewer's `Composer` (pm-node) passes `PreviewPlaying` for timed frames and
-`PreviewPaused` otherwise (`Composer::set_playing`).
+on; the native viewer (`pm-engine-service` `render.rs`) passes `PreviewPlaying`
+while playing and `PreviewPaused` otherwise.
 
 ### Video in blurred samples (a legacy defect)
 

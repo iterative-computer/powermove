@@ -1,5 +1,11 @@
 # The production frame bridge
 
+> **Historical (Electron app).** The frame bridge, its presenter, the C′
+> prototype and the Electron pages were removed. The native viewer draws
+> into its own CAMetalLayer ([engine-service.md](../native/engine-service.md));
+> `pm-gpu`'s `bridge_out` keeps the IOSurface surfaces and display transform.
+> The measurements below are dated evidence.
+
 Design notes and measurements for the frame bridge (plan section 18, with
 section 26 amendments 4 and 5; contracts 2 and 3). It productionizes spike
 S1 (`docs/engine/spikes/S1.md`). Everything runs

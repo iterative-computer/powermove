@@ -1,5 +1,10 @@
 # The headless document host (Phase 3c, lane L5)
 
+> **Historical (Electron app).** The TypeScript document host was removed;
+> the native kernel is document authority ([kernel.md](../native/kernel.md)),
+> with [mcp.md](../native/mcp.md) and [cli.md](../native/cli.md) for agents
+> and headless use.
+
 Design notes for `apps/desktop/src/engine/` (plan sections 6, 21, and 22; contract 15;
 amendments 21 and 22). The document stays TypeScript (`server/mcp.ts:26-27`): a
 document host runs the editor's own model, history, editing, agent harness,

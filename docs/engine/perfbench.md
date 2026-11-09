@@ -1,5 +1,11 @@
 # Deterministic performance counters, benches, ratchets, and the 120 Hz rig
 
+> **Partly historical.** `pm-perfbench`, its ratchets and the pm-node
+> presenter counters were removed with the Electron app. The pm-perf counters
+> and the instrumented wgpu fork are current; native measurements use
+> `pm-engine-service --bench` ([engine-service.md](../native/engine-service.md))
+> and [tools/perf-gate](../../tools/perf-gate/README.md).
+
 The owner's goal (2026-10-22): make the engine measurably and permanently
 faster than today's WebGL app while staying pixel-identical. Wall-clock time on
 this shared Mac is noisy (1-minute load 6 to 60 from other lanes), so this lane
