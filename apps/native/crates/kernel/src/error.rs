@@ -22,8 +22,8 @@ pub enum CommandError {
     Locked { layer_id: String, name: String },
     /// A value that must be finite (and within a range) was not.
     InvalidValue { what: &'static str, reason: String },
-    /// The property is animated or driven by an expression; the first command
-    /// lane (static values only) refuses instead of guessing a keyframe.
+    /// The property is animated or driven by an expression; a static-value
+    /// command refuses instead of guessing a keyframe.
     Animated { layer_id: String, channel: String },
     /// The property carries a hand-edit marker and the origin may not
     /// overwrite it (`preserveHandEdits` in the old app).

@@ -455,7 +455,7 @@ impl DocumentStore {
         self.file.path.as_deref()
     }
 
-    /// The embedded media catalog (the media lane adds imports here).
+    /// The embedded media catalog; imports add to it.
     pub fn media(&self) -> &MediaTable {
         &self.file.media
     }
@@ -557,7 +557,7 @@ impl DocumentStore {
         }
     }
 
-    /// Selects keyframes by id (the timeline lane owns key identity).
+    /// Selects keyframes by id.
     pub fn select_keys<I, S>(&mut self, ids: I)
     where
         I: IntoIterator<Item = S>,
@@ -1812,7 +1812,6 @@ impl DocumentStore {
         self.set_state_token(token);
     }
 
-    /// The current document (shared, immutable).
     pub(crate) fn current(&self) -> &Arc<Document> {
         &self.current
     }

@@ -60,8 +60,7 @@ fn fill(q: &mut QueryContext) -> bool {
     let Some(fonts) = FONTS.get() else {
         return false;
     };
-    let Ok(report) = serde_json::from_str::<serde_json::Value>(&q.font_report())
-    else {
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(&q.font_report()) else {
         return false;
     };
     let misses: Vec<_> = serde_json::from_value(report["misses"].clone()).unwrap_or_default();

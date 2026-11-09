@@ -25,7 +25,7 @@ pub struct CaptureRequest {
     pub times: Vec<f64>,
     pub width: u32,
 }
-/// A later engine lane supplies real image content (MCP base64 image blocks).
+/// Renders a project's frames as MCP base64 image blocks.
 pub trait EngineHook: Send + Sync {
     fn capture(&self, request: &CaptureRequest) -> Result<Value>;
     fn capture_snapshot(

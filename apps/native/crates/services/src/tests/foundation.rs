@@ -268,4 +268,3 @@ fn font_registry_change_invalidates_previously_cached_family_list() {
     assert_eq!(fonts.families().unwrap(), Some(vec!["New Family".into()]));
     assert_eq!(fonts.hook.reads, 2);
 }
-

@@ -935,8 +935,6 @@ impl McpSession {
             None
         } else {
             let root = host.profile.join("mcp-runs").join(&run_id);
-            // The runtime/sandbox lane will populate the complete API pack and
-            // extension baseline. No executable scripting is enabled in P1.
             for name in ["extensions", "api", "artifacts", "inputs"] {
                 std::fs::create_dir_all(root.join(name))?;
             }

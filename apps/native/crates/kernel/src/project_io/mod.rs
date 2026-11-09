@@ -295,8 +295,7 @@ pub struct Envelope {
     /// `history` exactly as read. Written back unchanged when it could not be
     /// imported and this session recorded no undo step.
     pub history: Option<Value>,
-    /// `ws` (the workspace snapshot), kept verbatim until the shell lane
-    /// replaces it with [`Envelope::workspace`].
+    /// `ws` (the workspace snapshot), kept verbatim.
     pub workspace: Option<Value>,
     /// Every other member, kept verbatim (a newer app's fields survive).
     pub extra: Map,

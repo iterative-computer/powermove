@@ -64,7 +64,6 @@ impl Selection {
         self.layers.first().map(String::as_str)
     }
 
-    /// Selected keyframe ids.
     pub fn keys(&self) -> &[String] {
         &self.keys
     }

@@ -558,7 +558,7 @@ pub(crate) fn publish(
 // ── version backups (`ProjectFiles.backup` / `retain`) ─────────────────────
 
 /// Where and how many previous versions to keep. The old app kept them in
-/// `<userData>/Backups/<projectId>/`; the shell lane chooses the directory.
+/// `<userData>/Backups/<projectId>/`; the caller chooses the directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupPolicy {
     pub directory: PathBuf,

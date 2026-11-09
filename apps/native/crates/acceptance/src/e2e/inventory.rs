@@ -1,4 +1,4 @@
-//! Kept separate from the acceptance lane's 396-file inventory.
+//! Declaration-level ledger, separate from the 396-file catalog.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,8 +53,7 @@ pub fn bindings() -> Vec<Binding> {
     serde_json::from_str(include_str!("traceability.json")).expect("native check links")
 }
 
-/// Validate the ledger against the acceptance lane's existing file-level
-/// catalog. No planned test, helper regex match or post-tag case becomes a pass.
+/// Validate the ledger against the file-level catalog. No planned test, helper regex match or post-tag case becomes a pass.
 pub fn validate() -> Result<(), String> {
     let frozen = frozen();
     let catalog = crate::catalog::Catalog::embedded()?;
