@@ -287,14 +287,17 @@ impl Host {
                 if let Some(c) = camera {
                     r.scene.camera = c;
                 }
+                let lighting_or_materials_changed=materials.is_some()||lights.is_some();
                 if let Some(m) = materials {
                     r.scene.materials = m;
                 }
                 if let Some(l) = lights {
                     r.scene.lights = l;
                 }
+                if lighting_or_materials_changed {
                 // Small material/light arrays can be rebuilt without touching meshes or BLAS.
                 let metadata = Scene {
+                    instances:vec![], scatters:vec![], terrains:vec![],
                     world: r.scene.world.clone(),
                     objects: vec![],
                     materials: r.scene.materials.clone(),
@@ -312,6 +315,8 @@ impl Host {
                 r.prepared.lights = metadata.lights;
                 let light_rows = r.prepared.lights.len() * 4;
                 r.prepared.sdata[..light_rows].copy_from_slice(&metadata.sdata[..light_rows]);
+                r.refresh_world();
+                }
                 self.revision += 1;
                 json!({"revision":self.revision,"time":time})
             }
@@ -369,7 +374,7 @@ impl Host {
             Command::Bounds { layer } => {
                 if let Some(r) = &self.resident {
                     let bounds = (0..r.transforms.len())
-                        .filter(|&i| layer.as_ref().is_none_or(|l| &r.identities[i].layer == l))
+                        .filter(|&i| layer.as_ref().is_none_or(|l| &r.identities[r.object_indices[i]].layer == l))
                         .map(|i| r.object_bounds(i))
                         .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
                     bounds

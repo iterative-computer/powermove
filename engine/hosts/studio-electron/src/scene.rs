@@ -43,6 +43,9 @@ pub struct ResidentScene {
     pub top_nodes: usize,
     local_bounds: Vec<(Vec3, Vec3)>,
     roots: Vec<u32>,
+    pub object_indices: Vec<usize>,
+    instance_layers: Vec<Option<u32>>,
+    world_data: Vec<[f32;4]>,
 }
 
 fn point(m: Mat4, p: Vec3) -> Vec3 {
@@ -91,6 +94,8 @@ impl ResidentScene {
             o.mesh.indices = b.indices.typed(binary)?;
         }
         validate(&scene)?;
+        scene=scene.expanded()?;
+        validate(&scene)?;
         let identities = if identities.is_empty() {
             (0..scene.objects.len())
                 .map(|i| Identity {
@@ -111,7 +116,10 @@ impl ResidentScene {
             return Err("identities must match object count".into());
         }
         // One local-space BLAS per object, with stable offsets.
-        let top_nodes = scene.objects.len().max(1) + 1;
+        let object_indices:Vec<usize>=if scene.instances.is_empty(){(0..scene.objects.len()).collect()}else{scene.instances.iter().map(|i|i.object).collect()};
+        let transforms=if scene.instances.is_empty(){vec![Mat4::IDENTITY;scene.objects.len()]}else{scene.instances.iter().map(pm_studio::geometry::matrix).collect()};
+        let instance_layers=if scene.instances.is_empty(){vec![None;scene.objects.len()]}else{scene.instances.iter().map(|i|i.layer).collect()};
+        let top_nodes = object_indices.len().max(1) + 1;
         let mut prepared = scene.clone_without_objects().prepare();
         prepared.positions.clear();
         prepared.tris.clear();
@@ -121,6 +129,7 @@ impl ResidentScene {
         let mut local_bounds = Vec::new();
         for (i, o) in scene.objects.iter().enumerate() {
             let one = Scene {
+                world: Default::default(),
                 objects: vec![o.clone()],
                 layers: Some(vec![
                     scene
@@ -157,8 +166,12 @@ impl ResidentScene {
             }
             local_bounds.push(o.mesh.bounds());
         }
+        let world_data=scene.world.pack(&prepared.lights);
         let mut r = Self {
-            transforms: vec![Mat4::IDENTITY; scene.objects.len()],
+            transforms,
+            object_indices,
+            instance_layers,
+            world_data,
             scene,
             identities,
             prepared,
@@ -206,6 +219,7 @@ impl ResidentScene {
         self.prepared.sdata.truncate(self.prepared.lights.len() * 4);
         self.placements.clear();
         for i in order.into_iter().map(|i| i as usize) {
+            let source=self.object_indices[i];
             let m = self.transforms[i];
             let inv = m.inverse();
             let n = Mat3::from_mat4(inv.transpose());
@@ -222,25 +236,30 @@ impl ResidentScene {
                     nr[0][r],
                     nr[1][r],
                     nr[2][r],
-                    if r == 0 { roots[i] as f32 } else { 0. },
+                    match r {0=>roots[source] as f32,2=>self.instance_layers[i].map_or(0.,|l|(l+1) as f32),_=>0.},
                 ]);
             }
             for r in 0..3 {
                 self.prepared.sdata.push([mw[0][r], mw[1][r], mw[2][r], 0.]);
             }
             self.placements.push(RtPlacement {
-                geometry: i,
-                triangle_offset: self.geometries[i].first_vertex / 3,
+                geometry: source,
+                triangle_offset: self.geometries[source].first_vertex / 3,
                 transform: [
                     mw[0][0], mw[1][0], mw[2][0], mw[3][0], mw[0][1], mw[1][1], mw[2][1], mw[3][1],
                     mw[0][2], mw[1][2], mw[2][2], mw[3][2],
                 ],
             });
         }
-        self.prepared.sdata.extend(self.scene.world.pack(&self.prepared.lights));
+        self.prepared.sdata.extend_from_slice(&self.world_data);
+    }
+    pub fn refresh_world(&mut self) {
+        self.world_data=self.scene.world.pack(&self.prepared.lights);
+        self.prepared.sdata.truncate(self.prepared.lights.len()*4+self.placements.len()*9);
+        self.prepared.sdata.extend_from_slice(&self.world_data);
     }
     pub fn object_bounds(&self, i: usize) -> (Vec3, Vec3) {
-        let (a, b) = self.local_bounds[i];
+        let (a, b) = self.local_bounds[self.object_indices[i]];
         (0..8)
             .map(|k| {
                 point(
@@ -278,7 +297,8 @@ impl ResidentScene {
             .normalize();
         let mut best = f32::MAX;
         let mut hit = None;
-        for (i, o) in self.scene.objects.iter().enumerate() {
+        for (i, &source) in self.object_indices.iter().enumerate() {
+            let o=&self.scene.objects[source];
             let inv = self.transforms[i].inverse();
             let ro = inv.transform_point3(eye);
             let rd = inv.transform_vector3(d);
@@ -318,7 +338,7 @@ impl ResidentScene {
                     * (ns[0] * (1. - u - v) + ns[1] * u + ns[2] * v);
                 let n = n.normalize();
                 hit = Some(
-                    serde_json::json!({"layer":self.identities[i].layer,"part":self.identities[i].part,"object":i,"point":p.to_array(),"normal":n.to_array(),"distance":distance}),
+                    serde_json::json!({"layer":self.identities[source].layer,"part":self.identities[source].part,"object":source,"point":p.to_array(),"normal":n.to_array(),"distance":distance}),
                 );
             }
         }
@@ -331,6 +351,7 @@ trait Metadata {
 impl Metadata for Scene {
     fn clone_without_objects(&self) -> Scene {
         Scene {
+            instances:vec![], scatters:vec![], terrains:vec![],
             world: self.world.clone(),
             objects: vec![],
             materials: self.materials.clone(),
@@ -347,7 +368,8 @@ impl Metadata for Scene {
 }
 pub fn validate(s: &Scene) -> Result<(), String> {
     s.world.validate()?;
-    if s.objects.is_empty() || s.objects.len() > 65535 {
+    for i in &s.instances {i.validate(s.objects.len())?;}
+    if s.objects.len() > 65535 {
         return Err("scene needs 1–65535 objects".into());
     }
     if s.materials.is_empty() {

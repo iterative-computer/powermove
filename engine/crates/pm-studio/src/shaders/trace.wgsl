@@ -317,8 +317,8 @@ fn sample_hg(axis:vec3f,g:f32)->vec3f {
 }
 fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
   var e=vec3f(0.);
-  if(P.counts.x>0u){let li=choose_light();let l=sample_light(light_at(li),p);
-    if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li));}}
+  if(P.counts.x>0u){let li=choose_light(p);let l=sample_light(light_at(li),p);
+    if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li,p));}}
   if(map_count()>0u){let d=sample_environment_direction();let pdf=environment_pdf(d);
     if(pdf>0.){e+=environment(d)*transmittance(p,d,BIG)*phase_hg(dot(rd,d),g)/pdf;}}
   return e;
@@ -383,13 +383,34 @@ fn cdf_search(base:u32,count:u32,u:f32)->u32 {
   while(lo<hi){let mid=(lo+hi)/2u;if(world_row(base+mid).x<u){lo=mid+1u;}else{hi=mid;}}
   return lo;
 }
-fn light_selection_pdf(i:u32)->f32 {
-  if(!world_on()){return 1./max(f32(P.counts.x),1.);}
-  return world_row(u32(world_row(4u).z)+i).y;
+fn light_tree_importance(index:u32,p:vec3f)->f32 {
+  let base=u32(world_row(4u).w)+3u*index;let a=world_row(base);let b=world_row(base+1u);let power=world_row(base+2u);
+  let d=max(max(a.xyz-p,p-b.xyz),vec3f(0.));let extent=b.xyz-a.xyz;
+  return max(1e-20,power.x/max(dot(d,d)+0.25*dot(extent,extent),1e-6)+power.y);
 }
-fn choose_light()->u32 {
+fn light_tree_left_probability(index:u32,p:vec3f)->f32 {
+  let base=u32(world_row(4u).w)+3u*index;let left=u32(world_row(base).w);let right=u32(world_row(base+1u).w);
+  let a=light_tree_importance(left,p);let b=light_tree_importance(right,p);
+  // Uniform mixture avoids starvation due to a loose bound or rounding.
+  return clamp(a/(a+b),0.001,0.999);
+}
+fn light_selection_pdf(i:u32,p:vec3f)->f32 {
+  if(!world_on()){return 1./max(f32(P.counts.x),1.);}
+  let c=world_row(4u);let leaf=world_row(u32(c.z)+i);
+  if(c.w<=0.){return leaf.y;}
+  var node=u32(leaf.z);var pdf=1.;
+  while(node!=0u){let parent=u32(world_row(u32(c.w)+3u*node+2u).z);let probability=light_tree_left_probability(parent,p);
+    let left=u32(world_row(u32(c.w)+3u*parent).w);pdf*=select(1.-probability,probability,node==left);node=parent;}
+  return pdf;
+}
+fn choose_light(p:vec3f)->u32 {
   if(!world_on()){return min(u32(rnd()*f32(P.counts.x)),P.counts.x-1u);}
-  return cdf_search(u32(world_row(4u).z),P.counts.x,rnd());
+  let c=world_row(4u);if(c.w<=0.){return cdf_search(u32(c.z),P.counts.x,rnd());}
+  var node=0u;
+  loop {let base=u32(c.w)+3u*node;let a=world_row(base);let b=world_row(base+1u);
+    if(b.w<0.){return u32(a.w);}
+    node=select(u32(b.w),u32(a.w),rnd()<light_tree_left_probability(node,p));}
+  return 0u;
 }
 fn sample_environment_direction()->vec3f {
   let wh=vec2u(world_row(0u).zw);let count=wh.x*wh.y;
@@ -731,7 +752,7 @@ fn cosine_dir(n: vec3f, u: vec2f) -> vec3f {
 fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit: bool) -> vec3f {
   let count = P.counts.x;
   if (count == 0u) { return vec3f(0.0); }
-  let li = choose_light();
+  let li = choose_light(p);
   let l = light_at(li);
   let s = sample_light(l, p);
   if (s.pdf <= 0.0 || all(s.radiance <= vec3f(0.0))) { return vec3f(0.0); }
@@ -751,7 +772,7 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   var t = vec3f(1.0);
   if (P.opts.y == 0u && l.u.w >= 0.0 && (floor_hit || (u32(m.policy.y) & 2u) != 0u)) { t = transmittance(p, s.dir, s.dist); }
   if (all(t <= vec3f(0.0))) { return vec3f(0.0); }
-  let pl = s.pdf * light_selection_pdf(li);
+  let pl = s.pdf * light_selection_pdf(li,p);
   let mis = pl * pl / (pl * pl + pb * pb);
   return f * t * s.radiance * mis / pl;
 }
@@ -859,7 +880,8 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   }
   if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w); }
   m.spec.x = max(m.spec.x, 0.002);
-  return Surface(p, n, ng, uv, m, u32(t.uv2m.w));
+  let layer_override=sdata[instance_base+5u].w;
+  return Surface(p, n, ng, uv, m, select(u32(t.uv2m.w),u32(max(layer_override-1.,0.)),layer_override>0.));
 }
 
 fn hash2(c: vec2f) -> vec2f {
@@ -1010,7 +1032,7 @@ fn path(px: vec2f) -> Sample {
           let e = light_emit(l, ro + rd * tl, rd);
           var mis = 1.0;
           if (last_pdf > 0.0) {
-            let pl = light_pdf(l, ro, rd, tl) * light_selection_pdf(i);
+            let pl = light_pdf(l, ro, rd, tl) * light_selection_pdf(i,ro);
             mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
           }
           s.radiance += tp * e * mis;
@@ -1032,7 +1054,7 @@ fn path(px: vec2f) -> Sample {
           if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x && chain != 2 && chain != 3) {
             var mis = 1.0;
             if (last_pdf > 0.0) {
-              let pl = light_pdf(l, ro, rd, BIG) * light_selection_pdf(i);
+              let pl = light_pdf(l, ro, rd, BIG) * light_selection_pdf(i,ro);
               mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
             }
             s.radiance += tp * l.radiance.xyz * mis;

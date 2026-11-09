@@ -216,6 +216,8 @@ impl World {
         let weights:Vec<f64>=lights.iter().map(|l|light_power(l).max(1e-12)).collect();
         let sum=weights.iter().sum::<f64>().max(1e-30);let mut cdf=0.;
         for (i,w) in weights.iter().enumerate() {cdf+=w/sum;data.push([if i+1==weights.len(){1.}else{cdf as f32},(w/sum) as f32,0.,0.]);}
+        let cdf=data[4][2] as usize;
+        append_light_tree(&mut data,lights,cdf);
         let s=self.adaptive; data[5]=[u32::from(s.enabled) as f32,s.min_samples as f32,s.relative_error,s.absolute_error];data
     }
 }
@@ -262,15 +264,49 @@ pub fn validate_packed(data:&[[f32;4]], light_count:usize)->Result<(),String> {
     let w=integer(data[0][2],4096)?;let h=integer(data[0][3],2048)?;
     if (w==0)!=(h==0){return Err("invalid environment dimensions".into());}
     let pixels=w*h;let volumes=integer(data[4][1],32)?;
-    if data[1][3]!=6. || data[4][0]!= (6+pixels*2) as f32 || data[4][2]!=(6+pixels*2+volumes*3) as f32 || data.len()!=6+pixels*2+volumes*3+light_count {return Err("invalid environment trailer ranges".into());}
+    if data[1][3]!=6. || data[4][0]!= (6+pixels*2) as f32 || data[4][2]!=(6+pixels*2+volumes*3) as f32 || data.len()!=6+pixels*2+volumes*3+light_count+if data[4][3]>0.{3*(2*light_count).saturating_sub(1)}else{0} {return Err("invalid environment trailer ranges".into());}
     if data.iter().flatten().any(|x|!x.is_finite()) || data[2][3]<0. || data[3][2]<0. || data[3][3]<=0. || data[3][0].abs()>0.95 || !color_valid(v3(data[2][0],data[2][1],data[2][2])) {return Err("invalid environment trailer values".into());}
     for (base,count) in [(6+pixels,pixels),(data[4][2] as usize,light_count)] {
         let mut previous=0.;for i in 0..count {let p=data[base+i];if p[0]<previous||p[0]>1.||p[1]<0.{return Err("invalid environment CDF".into());}previous=p[0];}
         if count>0 && previous!=1.{return Err("environment CDF must end at one".into());}
+    }
+    if data[4][3]>0. {
+        if light_count<=8 || data[4][3]!=(6+pixels*2+volumes*3+light_count) as f32 {return Err("invalid light tree offset".into());}
+        let base=data[4][3] as usize;let nodes=light_count*2-1;
+        for i in 0..nodes {
+            let a=data[base+i*3];let b=data[base+i*3+1];let c=data[base+i*3+2];
+            let parent=integer(c[2],nodes-1)?;if (i==0 && parent!=0)||(i>0 && parent>=i){return Err("cyclic light tree parent".into());}
+            if c[0]<0.||c[1]<0.{return Err("negative light tree power".into());}
+            if b[3]<0. {integer(a[3],light_count-1)?;}else{let l=integer(a[3],nodes-1)?;let r=integer(b[3],nodes-1)?;if l<=i||r<=i {return Err("cyclic light tree".into());}}
+        }
     }
     for i in 0..volumes {
         let at=data[4][0] as usize+i*3;
         if data[at+1][3]<0. || data[at+1][..3].iter().any(|x|*x<=0.)||data[at+2][3].abs()>0.95||!color_valid(v3(data[at+2][0],data[at+2][1],data[at+2][2])) {return Err("invalid packed volume".into());}
     }
     Ok(())
+}
+
+/// Balanced spatial light hierarchy. Each node stores bounds, finite/infinite
+/// power and parent. Leaf indices in the CDF allow O(log N) reverse PMF lookup.
+fn append_light_tree(data:&mut Vec<[f32;4]>,lights:&[GpuLight],cdf:usize) {
+    if lights.len()<=8{return;}
+    let base=data.len();data[4][3]=base as f32;
+    fn bounds(l:&GpuLight)->(Vec3,Vec3){
+        let p=v3(l.pos[0],l.pos[1],l.pos[2]);
+        if l.pos[3]==3. {return (Vec3::ZERO,Vec3::ZERO);}
+        let r=if l.pos[3]==0. {v3(l.u[0].abs()+l.v[0].abs(),l.u[1].abs()+l.v[1].abs(),l.u[2].abs()+l.v[2].abs())}else{Vec3::splat(l.u[0])};(p-r,p+r)
+    }
+    fn build(data:&mut Vec<[f32;4]>,lights:&[GpuLight],indices:&mut[usize],base:usize,cdf:usize,parent:usize)->usize {
+        let index=(data.len()-base)/3;data.extend([[0.;4];3]);
+        let(mut lo,mut hi)=(Vec3::splat(f32::MAX),Vec3::splat(f32::MIN));let mut finite=0.;let mut infinite=0.;
+        for &i in indices.iter(){let(a,b)=bounds(&lights[i]);lo=lo.min(a);hi=hi.max(b);let p=light_power(&lights[i]).max(1e-12);if lights[i].pos[3]==3.{infinite+=p;}else{finite+=p;}}
+        let(left,right)=if indices.len()==1 {data[cdf+indices[0]][2]=index as f32;(indices[0] as f32,-1.)}else{
+            let extent=hi-lo;let axis=if extent.x>=extent.y&&extent.x>=extent.z{0}else if extent.y>=extent.z{1}else{2};
+            indices.sort_unstable_by(|&a,&b|lights[a].pos[axis].total_cmp(&lights[b].pos[axis]).then(a.cmp(&b)));
+            let mid=indices.len()/2;let(a,b)=indices.split_at_mut(mid);let left=build(data,lights,a,base,cdf,index);let right=build(data,lights,b,base,cdf,index);(left as f32,right as f32)
+        };
+        let at=base+index*3;data[at]=lo.to4(left);data[at+1]=hi.to4(right);data[at+2]=[finite as f32,infinite as f32,parent as f32,0.];index
+    }
+    build(data,lights,&mut(0..lights.len()).collect::<Vec<_>>(),base,cdf,0);
 }

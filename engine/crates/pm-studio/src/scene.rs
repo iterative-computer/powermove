@@ -132,6 +132,12 @@ pub struct Object {
 pub struct Scene {
     #[serde(default)]
     pub world: crate::environment::World,
+    #[serde(default)]
+    pub instances: Vec<crate::scatter::Instance>,
+    #[serde(default)]
+    pub scatters: Vec<crate::scatter::Scatter>,
+    #[serde(default)]
+    pub terrains: Vec<crate::terrain::Terrain>,
     pub objects: Vec<Object>,
     pub materials: Vec<Material>,
     pub lights: Vec<Softbox>,
@@ -152,6 +158,7 @@ pub struct Scene {
 
 /// What the GPU reads, flattened.
 pub struct Prepared {
+    pub instancing: Option<crate::geometry::Instancing>,
     /// Corner positions only (what intersection reads), 3 per triangle.
     pub positions: Vec<[f32; 4]>,
     pub tris: Vec<GpuTri>,
@@ -219,6 +226,8 @@ impl GpuLight {
 
 impl Scene {
     pub fn prepare(&self) -> Prepared {
+        if !self.terrains.is_empty() || !self.scatters.is_empty() {return self.expanded().expect("validated environment geometry").prepare();}
+        if !self.instances.is_empty() {return crate::geometry::prepare(self);}
         let mut corners = Vec::new();
         let mut raw = Vec::new();
         let mut positions_raw = Vec::new();
@@ -281,7 +290,7 @@ impl Scene {
         sdata.extend([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
         sdata.extend([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
         sdata.extend(self.world.pack(&lights));
-        Prepared { positions, tris, nodes, materials, lights, sdata }
+        Prepared { instancing:None, positions, tris, nodes, materials, lights, sdata }
     }
 
     pub fn triangle_count(&self) -> usize {
@@ -443,7 +452,7 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         let up = v3(0.0, 1.0, 0.0);
         lights.push(Softbox::for_highlight(target + v3(-30.0, 0.0, 20.0), up, camera.position, 600.0, 700.0, 380.0, Vec3::splat(3.0)));
     }
-    Some(Scene { world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
+    Some(Scene { instances:vec![], scatters:vec![], terrains:vec![], world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
 }
 
 /// An original abstract wallpaper for the display: soft ribbons of blue and

@@ -7,6 +7,9 @@
 
 pub mod bvh;
 pub mod environment;
+pub mod terrain;
+pub mod scatter;
+pub mod geometry;
 pub mod gpu;
 pub mod math;
 pub mod mesh;

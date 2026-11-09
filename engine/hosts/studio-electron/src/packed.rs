@@ -98,6 +98,7 @@ impl View {
         let c = &self.camera;
         let pos = v(c.position);
         Scene {
+            instances:vec![], scatters:vec![], terrains:vec![],
             world: Default::default(),
             objects: vec![],
             materials: vec![],
@@ -202,6 +203,7 @@ impl PackedScene {
             })
             .collect();
         let prepared = Prepared {
+            instancing:None,
             positions,
             tris,
             nodes,

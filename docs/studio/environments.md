@@ -83,3 +83,46 @@ once rendered; screenshots and local logs are kept under
 Physical references: [Bruneton and Neyret's atmosphere model](https://ebruneton.github.io/precomputed_atmospheric_scattering/),
 [PBRT transmittance](https://www.pbr-book.org/4ed/Volume_Scattering/Transmittance),
 and [HG phase functions](https://www.pbr-book.org/4ed/Volume_Scattering/Phase_Functions).
+
+## Terrain and instancing contract
+
+`Scene.instances`, `Scene.scatters` and `Scene.terrains` default to empty arrays.
+With no explicit instances, each object has its usual identity placement. A
+nonempty `instances` array is the full placement list: source objects become
+prototypes and only the listed placements render. Every placement is
+`{object, position:{x,y,z}, rotation:{x,y,z}, scale:{x,y,z}, layer:null}`.
+`object` indexes `Scene.objects`; rotation is degrees applied X, then Y, then Z;
+scale defaults to (1,1,1), position/rotation to zero. Optional numeric `layer`
+overrides the prototype's layer for output masks. Positive scale only.
+
+Each scatter is `{objects:[0],seed:1,count:100,density:1,terrain:null,
+surface:null,center:{x:0,y:0,z:0},size:[100,100],scale:[0.8,1.2],
+rotation:[0,360],min_height:-1e9,max_height:1e9,max_slope:60,exclusions:[]}`.
+`objects` selects prototypes; `count` is the number of candidates (maximum
+one million), and density (0..1), height/slope and exclusion rejection can
+reduce the accepted count. The sequence remains stable when filtering changes.
+A candidate uses uniform yaw and uniform isotropic scale in the requested
+ranges. `terrain` indexes `Scene.terrains`, `surface` indexes a mesh (area-weighted
+triangle sampling); both null means a flat rectangle. Supply only one source.
+`size` is the X/Z sampling rectangle for flat/terrain scatter. Each exclusion
+is `{center:{x,y,z},radius}` and excludes an X/Z disc. Slopes use degrees from
++Y; height is world Y. Scattered models stay upright; normal alignment, collision
+avoidance and variable density maps are not implemented.
+
+Each terrain is `{center:{x:0,y:0,z:0},size:[100,100],resolution:64,
+amplitude:10,frequency:0.02,octaves:5,seed:1,ridged:false,heights:[],
+material:0,layers:[]}`. Resolution is 2..512 quads per side. Empty heights uses
+seeded fBm/ridged value noise. Otherwise supply `(resolution+1)²` normalized
+row-major grayscale values; height is center.y + amplitude × value. Load/resize
+an image outside the scene contract before sending heights. Material layers
+are ordered `{material,min_height,max_height,min_slope,max_slope}` regions;
+the first matching triangle center/face slope wins, otherwise base material.
+These are discrete regions, not blended splat materials. Terrain gets smooth
+vertex normals. Scatter evaluates the actual piecewise planar mesh grid, so
+instances do not hover over an independently evaluated noise function.
+
+`Scene::expanded()` resolves terrain/scatter once. Shared source vertices and
+one BLAS per prototype remain resident; the TLAS and nine-vec4 transform rows
+scale with placements. Both the standalone renderer and native scene protocol
+use this path. Transform patches address placement input order when explicit
+instances are present. Maximum one million total placements; no LOD or paging.

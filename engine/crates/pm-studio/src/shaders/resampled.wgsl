@@ -16,7 +16,7 @@ fn direct_candidate(li: u32, sample_seed: u32, p: vec3f, n: vec3f, v: vec3f, m: 
   if (s.pdf > 0.0) {
     if (floor_hit) { let nl = max(dot(n, s.dir), 0.0); f = vec3f(P.env_horizon.w * nl / PI); pb = nl / PI; }
     else { f = eval_reflect(m, n, v, s.dir); pb = pdf_reflect(m, w, n, v, s.dir); }
-    let pl = s.pdf * light_selection_pdf(li);
+    let pl = s.pdf * light_selection_pdf(li,p);
     f *= s.radiance * (pl * pl / max(pl * pl + pb * pb, 1e-20)) / max(s.pdf,1e-20);
   }
   let importance = max(dot(f, vec3f(0.2126,0.7152,0.0722)), 0.0);
@@ -29,10 +29,10 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   var total_weight = 0.0; var candidates = 0u;
   let fresh=select(2u,4u,P.counts.x>8u);
   for (var j = 0u; j < fresh; j++) {
-    let li = choose_light();
+    let li = choose_light(p);
     let rs = pcg(seed); seed = pcg(rs);
     let c = direct_candidate(li,rs,p,n,v,m,w,floor_hit);
-    let weight = c.importance / max(light_selection_pdf(li),1e-20);
+    let weight = c.importance / max(light_selection_pdf(li,p),1e-20);
     total_weight += weight; candidates++;
     if (weight > 0.0 && rnd()*total_weight < weight) { chosen_light=li;chosen_seed=rs;chosen_target=c.importance; }
   }
