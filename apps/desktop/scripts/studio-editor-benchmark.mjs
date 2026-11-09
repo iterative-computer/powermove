@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {mkdir,mkdtemp,readFile,writeFile,rm,cp} from 'node:fs/promises';
 import {constants} from 'node:fs';
+import {statfsSync} from 'node:fs';
+import {gzip as gzipCallback} from 'node:zlib';
+import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,15 +19,19 @@ import {flipFuses,FuseVersion,FuseV1Options} from '@electron/fuses';
 const desktop=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const command=(file,args)=>execFileSync(file,args,{encoding:'utf8',maxBuffer:8*1024*1024}).trim();
 const safeCommand=(file,args)=>{try{return command(file,args);}catch{return 'unavailable';}};
+const gzip=promisify(gzipCallback);
+const freeDiskBytes=()=>{const s=statfsSync('/');return s.bavail*s.bsize;};
 function processes() {return command('/bin/ps',['-axo','pid=,ppid=,rss=,comm=']).split('\n').map(line=>line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean).map(m=>({pid:+m[1],parent:+m[2],rssMiB:+m[3]/1024,name:m[4]}));}
-function machine(owned=new Set()) {
- const rows=processes();
+function competingProcesses(owned=new Set()) {
  let listed='';try{listed=command('/usr/bin/pgrep',['-fl','playwright|Electron|cargo|rustc|pm-studio-host']);}catch(error){if(error.status!==1)throw error;}
- const active=listed.split('\n').map(line=>line.match(/^(\d+)\s+(.+)$/)).filter(Boolean).map(m=>({pid:+m[1],name:m[2].slice(0,200)})).filter(p=>!owned.has(p.pid)&&!p.name.includes('chrome_crashpad_handler'));
+ return listed.split('\n').map(line=>line.match(/^(\d+)\s+(.+)$/)).filter(Boolean).map(m=>({pid:+m[1],name:m[2].slice(0,200)})).filter(p=>!owned.has(p.pid)&&!p.name.includes('chrome_crashpad_handler')&&!owned.has(Number(safeCommand('/bin/ps',['-p',String(p.pid),'-o','ppid=']))));
+}
+function machine(owned=new Set()) {
+ const rows=processes(),active=competingProcesses(owned);
  return {date:new Date().toISOString(),host:os.cpus()[0]?.model,ramGiB:os.totalmem()/1024**3,os:safeCommand('/usr/bin/sw_vers',['-productVersion']),
   power:safeCommand('/usr/bin/pmset',['-g','batt']),powerSettings:safeCommand('/usr/bin/pmset',['-g','custom']),thermal:safeCommand('/usr/bin/pmset',['-g','therm']),
   swap:safeCommand('/usr/sbin/sysctl',['vm.swapusage']),pressure:safeCommand('/usr/bin/memory_pressure',['-Q']),disk:safeCommand('/usr/sbin/diskutil',['info','/']).split('\n').find(l=>l.includes('Container Free Space'))?.trim(),
-  active,quiet:active.length===0,processes:rows};
+  active,quiet:active.length===0,freeDiskBytes:freeDiskBytes(),processes:rows};
 }
 function processTree(state,pid) {
  const owned=new Set([pid]);let changed=true;
@@ -33,7 +40,8 @@ function processTree(state,pid) {
 }
 function memorySample(pid) {
  const state={processes:processes(),swap:safeCommand('/usr/sbin/sysctl',['vm.swapusage'])},tree=processTree(state,pid),hosts=tree.rows.filter(p=>p.name.endsWith('/pm-studio-host'));
- return {at:Date.now(),rssMiB:tree.rows.reduce((n,p)=>n+p.rssMiB,0),hostMiB:hosts.reduce((n,p)=>n+p.rssMiB,0),maxHostMiB:Math.max(0,...hosts.map(p=>p.rssMiB)),processes:tree.rows,swap:state.swap};
+ tree.owned.add(process.pid);const active=competingProcesses(tree.owned);
+ return {at:Date.now(),rssMiB:tree.rows.reduce((n,p)=>n+p.rssMiB,0),hostMiB:hosts.reduce((n,p)=>n+p.rssMiB,0),maxHostMiB:Math.max(0,...hosts.map(p=>p.rssMiB)),processes:tree.rows,swap:state.swap,active,quiet:active.length===0,freeDiskBytes:freeDiskBytes()};
 }
 function measurementState(pid) {
  const state=machine(),owned=processTree(state,pid).owned;owned.add(process.pid);
@@ -172,8 +180,9 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
  if(config.fixtures===path.join(studioCargoTarget(),'release/studio-environments'))execFileSync(process.env.CARGO??path.join(os.homedir(),'.cargo/bin/cargo'),['build','--manifest-path',path.resolve(desktop,'../../engine/Cargo.toml'),'--target-dir',studioCargoTarget(),'--release','--locked','-p','pm-studio','--features','oidn,metalfx,yardstick','--bin','studio-environments'],{env:{...process.env,CARGO_BUILD_JOBS:'2',CARGO_INCREMENTAL:'0',CARGO_PROFILE_RELEASE_DEBUG:'0'},stdio:['ignore','ignore','pipe']});
  assert(config.evidence.startsWith('/tmp/')||config.evidence.startsWith('/private/tmp/'),'Evidence must stay in a temporary directory');
  const sourceState=command('git',['status','--porcelain']);
- const initial=machine(new Set([process.pid])),report={date:initial.date,commit:command('git',['rev-parse','HEAD']),dirty:!!sourceState,changedFiles:sourceState.split('\n').filter(Boolean),harnessSha256:createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex'),acceptanceEligible:!config.diagnostic&&initial.quiet,config,machine:initial,rows:[],errors:[]};
+ const initial=machine(new Set([process.pid])),report={date:initial.date,commit:command('git',['rev-parse','HEAD']),dirty:!!sourceState,changedFiles:sourceState.split('\n').filter(Boolean),harnessSha256:createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex'),aiRuntimePinned:!!process.env.CODEX_BINARY,acceptanceEligible:!config.diagnostic&&initial.quiet,config,machine:initial,rows:[],errors:[]};
  if(!config.diagnostic)assert(initial.quiet,`Quiet-machine gate blocked by ${initial.active.map(p=>`${p.pid} ${p.name}`).join(', ')}`);
+ assert(initial.freeDiskBytes>6100000000,'Benchmark needs more than 6.1 GB free disk');
  const temporary=await mkdtemp(path.join(os.tmpdir(),'pm-p4-editor-')),profile=path.join(temporary,'profile');await mkdir(profile);await writeFile(path.join(profile,'onboarding-v1.json'),'{"version":1}\n');
  const env={...process.env,POWERMOVE_USER_DATA:profile,POWERMOVE_BACKGROUND_TEST:'0',POWERMOVE_DEVTOOLS:'0'};for(const k of ['ELECTRON_RUN_AS_NODE','POWERMOVE_STUDIO_HOST','PM_STUDIO_TEST_WEBGPU','STUDIO_LIVE_SCALE','STUDIO_ADAPTIVE_LIVE','STUDIO_NO_RT','STUDIO_NO_RIS','STUDIO_NO_METALFX','STUDIO_NO_SHARED_TEXTURE'])delete env[k];
  let app,ownedProcess,memoryTimer,memoryPending,watchdog,lastProgress=Date.now();const save=()=>{lastProgress=Date.now();return writeFile(path.join(config.evidence,'editor-results.json'),JSON.stringify(report,null,2)+'\n');};
@@ -202,7 +211,7 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   await installProbe(page);
   report.window=await app.evaluate(({BrowserWindow,app,screen})=>({packaged:app.isPackaged,windows:BrowserWindow.getAllWindows().map(w=>({visible:w.isVisible(),minimized:w.isMinimized(),bounds:w.getBounds()})),displays:screen.getAllDisplays().map(d=>({size:d.size,scaleFactor:d.scaleFactor,refreshHz:d.displayFrequency})),electron:process.versions.electron}));
   assert(report.window.windows.some(w=>w.visible&&!w.minimized),'A normal visible window is required');
-  const hz=report.window.displays[0]?.refreshHz||60;report.memory=[];memoryTimer=setInterval(()=>{if(memoryPending)return;memoryPending=(async()=>{const sample=memorySample(pid);const gpu=await page.evaluate(()=>[...new Map((window.PM.Studio?.diagnostics?.()??[]).filter(j=>j.backend==='native-studio').map(j=>[j.hostPid??j.session,{pid:j.hostPid,currentMiB:j.native?.host?.gpuAllocatedMiB??0,peakMiB:j.native?.host?.peakGpuMiB??0}])).values()]);sample.gpu=gpu;sample.gpuMiB=gpu.reduce((n,g)=>n+g.currentMiB,0);report.memory.push(sample);})().catch(error=>report.errors.push(`memory sampler: ${error}`)).finally(()=>{memoryPending=null;});},2000);
+  const hz=report.window.displays[0]?.refreshHz||60;report.memory=[];memoryTimer=setInterval(()=>{if(memoryPending)return;memoryPending=(async()=>{const sample=memorySample(pid);const gpu=await page.evaluate(()=>[...new Map((window.PM.Studio?.diagnostics?.()??[]).filter(j=>j.backend==='native-studio').map(j=>[j.hostPid??j.session,{pid:j.hostPid,currentMiB:j.native?.host?.gpuAllocatedMiB??0,peakMiB:j.native?.host?.peakGpuMiB??0}])).values()]);sample.gpu=gpu;sample.gpuMiB=gpu.reduce((n,g)=>n+g.currentMiB,0);report.memory.push(sample);if(sample.freeDiskBytes<6050000000||!config.diagnostic&&!sample.quiet){report.errors.push(sample.freeDiskBytes<6050000000?'Disk reserve fell below 6.05 GB':'Another lane became active during the benchmark');ownedProcess.kill('SIGTERM');}})().catch(error=>report.errors.push(`memory sampler: ${error}`)).finally(()=>{memoryPending=null;});},2000);
   for(const name of config.scenes){
    const before=machine(),owned=processTree(before,pid).owned;owned.add(process.pid);const state=machine(owned),row={name,machine:state,runs:[]};delete row.machine.processes;report.rows.push(row);await save();
    if(!config.diagnostic)assert(state.quiet,'Another lane became active before measurement');
@@ -219,9 +228,10 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
      for(const kind of ['drag','playback']){
       const machineBefore=measurementState(pid);if(!config.diagnostic)assert(machineBefore.quiet,'Another lane became active before measurement');
       let cdp,clock;if(config.profile){cdp=await page.context().newCDPSession(page);await cdp.send('Profiler.enable');await cdp.send('Profiler.setSamplingInterval',{interval:1000});clock=await page.evaluate(()=>performance.now());await cdp.send('Profiler.start');}
-      const raw=await interval(page,kind,config.seconds);
+      const intervalEpochStart=Date.now(),raw=await interval(page,kind,config.seconds),intervalEpochEnd=Date.now();
       if(cdp){const profile=await cdp.send('Profiler.stop');await writeFile(path.join(config.evidence,`${name}-${run}-${kind}.cpuprofile`),JSON.stringify({...profile,rendererClockAtStart:clock}));await cdp.detach();}
-      const machineAfter=measurementState(pid);await writeFile(path.join(config.evidence,`${name}-${run}-${kind}.json`),JSON.stringify(raw));result[kind]={...summarize(raw,hz),machineBefore,machineAfter};if(!config.diagnostic)assert(machineAfter.quiet,'Another lane became active during measurement');await nativeReady(page);
+      const machineAfter=measurementState(pid);await memoryPending;const during=report.memory.filter(s=>s.at>=intervalEpochStart&&s.at<=intervalEpochEnd),machineDuring={polls:during.length,quiet:during.every(s=>s.quiet),active:during.flatMap(s=>s.active.map(p=>({at:s.at,...p})))};
+      raw.machineDuring=machineDuring;await writeFile(path.join(config.evidence,`${name}-${run}-${kind}.json.gz`),await gzip(JSON.stringify(raw),{level:1}));result[kind]={...summarize(raw,hz),machineBefore,machineAfter,machineDuring};if(!config.diagnostic)assert(machineAfter.quiet&&machineDuring.quiet,'Another lane became active during measurement');await nativeReady(page);
      }
      row.runs.push(result);await save();console.log(name,JSON.stringify({run,drag:{...result.drag,machineBefore:undefined,machineAfter:undefined},playback:{...result.playback,machineBefore:undefined,machineAfter:undefined}}));
     }
