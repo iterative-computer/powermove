@@ -128,6 +128,12 @@ const modules = [
   "svelte/store",
   "svelte/transition",
 ];
+// The compiler admits exactly these imports; the realms provide them.
+const { ADAPTED_MODULES } = await import(join(root, "src/module-graph.ts"));
+await writeFile(
+  join(output, "runtime-modules.txt"),
+  ["powermove", ...modules, ...Object.keys(ADAPTED_MODULES)].join("\n"),
+);
 const moduleImports = modules
   .map((name, index) => `import * as m${index} from ${JSON.stringify(name)};`)
   .join("\n");
@@ -203,6 +209,7 @@ import * as helpers from ${JSON.stringify(join(root, "src/frozen/kernel/editor-h
 ${moduleImports}
 import {definitionSnapshots} from ${JSON.stringify(join(root, "src/definitions.ts"))};
 import {panelStyle} from ${JSON.stringify(join(root, "src/panels.ts"))};
+import {linkRequest} from ${JSON.stringify(join(root, "src/module-graph.ts"))};
 const pure=new Set(${JSON.stringify(pure)});
 const powermove=Object.fromEntries(Object.keys(helpers).map(name=>[name,pure.has(name)?helpers[name]:(...args)=>{
   StoreCompat.report?.('permission','powermove.'+name);
@@ -211,7 +218,7 @@ const powermove=Object.fromEntries(Object.keys(helpers).map(name=>[name,pure.has
 }]));
 const registry=list=>({entries:()=>(list??[]).map(item=>({id:item.id,ownerId:"store",item}))});
 const definitions=({effects,transitions,layers})=>definitionSnapshots({effects:registry(effects),transitions:registry(transitions),layerTypes:registry(layers),ownerOrigin:()=>"store"});
-globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,definitions,panelStyle,RemoteDOM,runtimeModules:{powermove,${moduleTable}}};`;
+globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,definitions,panelStyle,RemoteDOM,linkRequest,runtimeModules:{powermove,${moduleTable}}};`;
 await write(
   "store.js",
   await Bun.build({
