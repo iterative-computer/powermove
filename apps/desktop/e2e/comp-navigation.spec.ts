@@ -29,15 +29,20 @@ test('double-clicking a pre-comp bar opens it; the viewer path steps back up and
   await session.openEditor();
   const { page } = session;
   const ids = await precompProject(page);
+  await page.evaluate(id=>{
+    const PM=(window as any).PM;PM.L(id).from=3;PM.L(id).dur=7;
+    PM.touch();PM.setTime(5,{raw:true,force:true});
+  },ids.layer);
   await expect(crumbs(page)).toHaveText(['Untitled']);
   await expect(page.locator('#viewer-path [aria-current="page"]')).toHaveText('Untitled');
 
   const bar = await page.evaluate(() => {
     const PM = (window as any).PM, t = PM.Kernel.services.get('timeline'), r = t.cv.getBoundingClientRect();
-    return { x: r.left + t.gut + 120, y: r.top + t.ruler + t.row / 2 - t.scrollY };
+    return { x: r.left + t.gut + (3.5-t.scrollT)*t.pps, y: r.top + t.ruler + t.row / 2 - t.scrollY };
   });
   await page.mouse.dblclick(bar.x, bar.y);
   await expect.poll(() => page.evaluate(() => (window as any).PM.Comps.active())).toBe(ids.child);
+  expect(await page.evaluate(()=>(window as any).PM.time)).toBe(2);
   // The bar's double-click opened it without moving or trimming the layer.
   await expect(crumbs(page)).toHaveText(['Untitled', 'Pre-comp 1']);
   await expect(page.locator('#viewer-path [aria-current="page"]')).toHaveText('Pre-comp 1');
@@ -51,17 +56,22 @@ test('double-clicking a pre-comp bar opens it; the viewer path steps back up and
   expect(geometry.stageTop).toBeGreaterThanOrEqual(geometry.headBottom - 0.5);
   expect(geometry.height).toBeGreaterThan(20);
 
+  await page.evaluate(()=>(window as any).PM.setTime(3.25,{raw:true,force:true}));
   await page.locator('#viewer-path button.viewer-crumb', { hasText: 'Untitled' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.Comps.active())).toBe(ids.root);
+  expect(await page.evaluate(()=>(window as any).PM.time)).toBe(188/30);
   // Pre-comp 1 stays, dimmed, to the right so you can step back down.
   await expect(crumbs(page)).toHaveText(['Untitled', 'Pre-comp 1']);
   await expect(page.locator('#viewer-path .viewer-crumb.ahead')).toHaveText('Pre-comp 1');
+  await page.evaluate(()=>(window as any).PM.setTime(4.5,{raw:true,force:true}));
   await page.locator('#viewer-path .viewer-crumb.ahead').click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.Comps.active())).toBe(ids.child);
+  expect(await page.evaluate(()=>(window as any).PM.time)).toBe(1.5);
 
   // The timeline tabs still work and agree with the path.
   await page.locator(`.tl-comp-tab[data-comp-id="${ids.root}"]`).dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => page.evaluate(() => (window as any).PM.Comps.active())).toBe(ids.root);
+  expect(await page.evaluate(()=>(window as any).PM.time)).toBe(4.5);
   await expect(page.locator('#viewer-path [aria-current="page"]')).toHaveText('Untitled');
 
   // Double-clicking the pre-comp in the viewer opens it too, even on its
@@ -69,6 +79,7 @@ test('double-clicking a pre-comp bar opens it; the viewer path steps back up and
   const center = await page.evaluate(() => { const r = document.querySelector('#gl')!.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
   await page.mouse.dblclick(center.x, center.y);
   await expect.poll(() => page.evaluate(() => (window as any).PM.Comps.active())).toBe(ids.child);
+  expect(await page.evaluate(()=>(window as any).PM.time)).toBe(1.5);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 

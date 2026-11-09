@@ -3,7 +3,7 @@ import { trackExportMedia } from './export-media';
 import { staticEffectSupported, trackStaticEffects, type StaticMaskProgram } from './static-effects';
 
 const record = (value: any) => value && typeof value === 'object' && !Array.isArray(value);
-const builtinMask = (mask: any) => record(mask) && ['rect', 'ellipse'].includes(mask.shape)
+export const staticMaskSupported = (mask: any) => record(mask) && ['rect', 'ellipse'].includes(mask.shape)
   && mask.on === true && ['add', 'subtract'].includes(mask.mode) && record(mask.p)
   && (mask.path == null || record(mask.path) && record(mask.path.p) && Array.isArray(mask.path.vertices)
     && mask.path.vertices.every((vertex: any) => record(vertex) && record(vertex.p)));
@@ -11,7 +11,8 @@ const builtinMask = (mask: any) => record(mask) && ['rect', 'ellipse'].includes(
 /** Built-in artwork with no temporal inputs can share captured pixels. Images
  * require an explicit source check; other media and renderers stay per-frame. */
 export function staticExportPlan(project: any, motionBlur: boolean, imageEligible?: (layer: any) => boolean,
-  effectEligible?: (effect: any) => boolean, maskEligible?: (mask: any) => boolean) {
+  effectEligible?: (effect: any) => boolean, maskEligible?: (mask: any) => boolean,
+  sources?: { precomp?: (layer: any) => boolean; matte?: (layer: any) => boolean }) {
   const edges = new Set<number>();
   let blur = false;
   const constant = (value: any, seen = new Set<object>()): boolean => {
@@ -25,11 +26,12 @@ export function staticExportPlan(project: any, motionBlur: boolean, imageEligibl
     if(layer.effectSpace==='source')return null;
     if (layer.type === 'audio') continue;
     const supported = ['solid', 'shape', 'text', 'null', 'group'].includes(layer.type)
-      || layer.type === 'image' && imageEligible?.(layer);
+      || layer.type === 'image' && imageEligible?.(layer)
+      || layer.type === 'precomp' && sources?.precomp?.(layer);
     if (!supported
         || layer.fx != null && (!Array.isArray(layer.fx) || !layer.fx.every((effect: any) => effectEligible?.(effect)))
         || layer.transitionIn || layer.transitionOut
-        || layer.threeD || layer.matteSource
+        || layer.threeD || (layer.matteSource || layer.matteSources?.length) && !sources?.matte?.(layer)
         || layer.masks != null && (!Array.isArray(layer.masks) || !layer.masks.every((mask: any) => maskEligible?.(mask)))
         || layer.d?.animators?.length || !constant(layer)) return null;
     const from = Number(layer.from), end = from + Number(layer.dur);
@@ -114,7 +116,7 @@ export function trackStaticExport(PM: any, motionBlur: boolean) {
         // bitmap can become available without another animation/project edit.
         plan = staticExportPlan(project, motionBlur,
           layer => typeof layer.d?.asset === 'string' && !!layer.d.asset,
-          effect => staticEffectSupported(effect?.type), builtinMask);
+          effect => staticEffectSupported(effect?.type), staticMaskSupported);
         effectIds = plan ? [...ids] : [];
         maskPrograms = plan ? [...maskKeys] : [];
         generation++;

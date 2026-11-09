@@ -93,3 +93,73 @@ test('static artwork on multiple material slots is captured and uploaded once ac
   expect(result.errors).toEqual([]);expect(result.captures).toBe(1);expect(result.uploads).toBe(1);
   expect(result.frames).toBe(60);expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+for(const sourceType of ['precomp','composition','group'])test(`retains clipped imported artwork used as a ${sourceType} material without losing edits or animation`,async({session},testInfo)=>{
+  test.setTimeout(120_000);await session.openEditor();
+  const result=await session.page.evaluate(async({bytes,sourceType})=>{
+    const PM=(window as any).PM;PM.pause();PM.AutomaticPreview?.cancel?.();
+    PM.replaceProject(PM.mkProject({w:320,h:180,fps:30,dur:4}));
+    const api=PM.Kernel.api('clipped-material-performance'),main=PM.proj.compId,size=512;
+    const compId=PM.Comps.create({name:'Imported frame',w:size,h:size,fps:30,dur:4},{open:true});
+    const make=(id:string,type:string,d:any,x:number,y:number)=>{
+      const layer=PM.mkLayer(type,{from:0,dur:4,d,p:{'position.x':x,'position.y':y}});layer.id=id;PM.proj.layers.push(layer);return layer;
+    };
+    const artwork=make('artwork','group',{},0,0);
+    const mask=PM.mkMask('rect',PM.proj);
+    mask.p.x.v=mask.p.y.v=size/2;mask.p.w.v=mask.p.h.v=size;mask.p.feather.v=0;
+    artwork.masks=[mask];artwork.fx=[PM.mkEffect('invert',undefined,artwork)];
+    const paper=make('paper','shape',{shape:'rect',w:size,h:size,color:'#FFFFFF'},size/2,size/2);paper.group=artwork.id;
+    // Figma frame clipping uses track mattes, including a stack of nested clips.
+    for(let i=0;i<12;i++){
+      const clip=make(`clip-${i}`,'shape',{shape:'rect',w:100,h:80,radius:12,color:'#FFFFFF'},60+i%4*128,70+Math.floor(i/4)*128);
+      const paint=make(`tile-${i}`,'shape',{shape:'ellipse',w:128,h:100,color:'#E5484D'},clip.p['position.x'].v,clip.p['position.y'].v);
+      clip.group=paint.group=artwork.id;paint.matteSource=clip.id;paint.matteMode='alpha';
+      paint.matteSources=[{source:clip.id,mode:'alpha'}];
+    }
+    const title=make('title','text',{text:'Material artwork',fontSize:24,color:'#202020'},200,470);title.group=artwork.id;
+    const bitmap=await createImageBitmap(new ImageData(new Uint8ClampedArray([20,180,90,255]),1,1));
+    PM.assets.map.set('tile-image',{id:'tile-image',kind:'image',el:bitmap,w:1,h:1});
+    const image=make('image','image',{asset:'tile-image',w:64,h:64},460,460);image.group=artwork.id;
+    PM.proj.layers.reverse();PM.touch();PM.Comps.open(main);
+    let source:any;
+    if(sourceType==='group'){
+      PM.proj.layers.push(...PM.proj.comps[compId].layers);PM.proj.comps[compId].layers=[];artwork.on=false;source={layerId:artwork.id};
+    }else if(sourceType==='precomp'){
+      const frame=make('frame','precomp',{comp:compId,w:size,h:size},0,0);frame.on=false;source={layerId:frame.id};
+    }else source={compositionId:compId};
+    PM.touch();api.scene3d.edit({operation:'add_camera',camera:{p:{x:0,y:0,z:3}}});
+    const imported=await PM.cmd('3d.import-obj',new File([new Uint8Array(bytes)],'two-materials.glb',{type:'model/gltf-binary'}));
+    if(!imported.ok)throw new Error(imported.message);
+    const model=PM.proj.layers.find((layer:any)=>layer.d?.data?.object).id;
+    for(const slot of ['color','emissive']){
+      const applied=api.scene3d.setMaterialMap(model,null,slot,source);if(!applied.ok)throw new Error(applied.message);
+    }
+    await document.fonts.ready;
+    PM.GL.renderToPixels(0,320,180,{transparent:true,mblur:false});PM.bus.emit('fonts');
+    const original=PM.GL.renderMaterialComposition;let captures=0;const captureTimes:number[]=[],frames:number[]=[];
+    PM.GL.renderMaterialComposition=(...args:any[])=>{
+      captures++;const start=performance.now();try{return original(...args);}finally{captureTimes.push(performance.now()-start);}
+    };
+    const draw=(time:number)=>{const start=performance.now();const pixels=PM.GL.renderToPixels(time,320,180,{transparent:true,mblur:false});frames.push(performance.now()-start);return pixels;};
+    const hash=(pixels:Uint8Array)=>{let n=0;for(const b of pixels)n=(Math.imul(n,31)+b)|0;return n;};
+    try{
+      const first=hash(draw(0));for(let i=1;i<30;i++)draw(i/30);
+      for(let i=0;i<5;i++){
+        PM.Edit.apply({type:'set_property',target:model,path:'rotation.y',value:i});draw(i/30);
+      }
+      const staticCaptures=captures;
+      // A descendant edit must replace the retained pixels, including through a precomp.
+      const sourceComp=sourceType==='group'?PM.proj:PM.proj.comps[compId];
+      const tile=sourceComp.layers.find((l:any)=>l.id==='tile-0');tile.d.color='#0044FF';PM.touch();draw(.5);
+      const editedCaptures=captures;
+      tile.p['position.x'].kf=[PM.KF(0,tile.p['position.x'].v),PM.KF(1,tile.p['position.x'].v+100)];PM.touch();
+      draw(.5);const a=hash(draw(.6)),b=hash(draw(.8));
+      return {staticCaptures,editedCaptures,animatedCaptures:captures-editedCaptures,animatedChanged:a!==b,first,
+        captureMs:captureTimes.reduce((a,b)=>a+b,0),medianMs:frames.slice(1,30).sort((a,b)=>a-b)[14],errors:[...PM.GL.errors.entries()]};
+    }finally{PM.GL.renderMaterialComposition=original;}
+  },{bytes:[...twoMaterialGlb()],sourceType});
+  await testInfo.attach(`${sourceType}-performance`,{body:Buffer.from(JSON.stringify(result,null,2)),contentType:'application/json'});
+  expect(result.errors).toEqual([]);expect(result.staticCaptures).toBe(1);expect(result.editedCaptures).toBe(2);
+  expect(result.animatedCaptures).toBe(3);expect(result.animatedChanged).toBe(true);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

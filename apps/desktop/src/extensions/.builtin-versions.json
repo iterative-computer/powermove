@@ -24,8 +24,8 @@
     "treeSha": "b69ac96e7ade6661dde9b596b903a48bf1592ff0"
   },
   "timeline": {
-    "version": "1.4.4",
-    "treeSha": "2902e879e360f7ef049030a3836af01b2833577d"
+    "version": "1.4.5",
+    "treeSha": "bd7b33f25d1febd7823da39ab696b068f5ed83e6"
   },
   "toolbar": {
     "version": "1.0.2",
@@ -36,7 +36,7 @@
     "treeSha": "5c9bb6ea0faddf0d8c66006789c120adebb18802"
   },
   "viewer": {
-    "version": "1.0.32",
-    "treeSha": "a535f324f7173bf620a90fca9a1356fab1649379"
+    "version": "1.0.33",
+    "treeSha": "f07f5af0238388273c7205ed82d7fadfe0e99d2c"
   }
 }

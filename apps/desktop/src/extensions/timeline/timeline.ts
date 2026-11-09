@@ -4754,7 +4754,7 @@ function onDbl(e: any) {
 }
 function openPrecomp(L: any): boolean {
   if (L?.type !== 'precomp' || !L.d?.comp) return false;
-  api.commands.run('openComposition', L.d.comp);
+  api.commands.run('openComposition', L.d.comp, L.id);
   return true;
 }
 /* Double-clicking a key opens the value editor, for the whole selection when

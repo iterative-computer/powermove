@@ -1,3 +1,4 @@
+import {materialStaticPlan} from './material-static';
 import {afterEach,expect,it,vi} from 'vitest';
 import * as THREE from 'three';
 import {makePM} from '../../legacy/__tests__/make-pm';
@@ -143,4 +144,78 @@ it('retains static group textures but observes descendant edits, animation and e
   const rig=PM.mkLayer('null');rig.id='rig';rig.p.rotation.kf=[PM.KF(0,0),PM.KF(2,90)];paint.parent=rig.id;PM.proj.layers.push(rig);PM.touch();
   expect(compositionTextureFrame(PM,receiver,map,2)).not.toBe(compositionTextureFrame(PM,receiver,map,1));
   clearCompositionTextures(PM);
+});
+
+it('reuses static precomp materials across nested clocks but respects child entrances, trims and edits',()=>{
+  const {PM,comp,paint,receiver,map,capture}=editor('precomp');
+  const innerId=PM.Comps.create({name:'Nested artwork',w:64,h:64,fps:24,dur:10},{open:false});
+  const inner=PM.proj.comps[innerId],child=PM.mkLayer('shape');child.id='child';child.from=1;child.dur=2;inner.layers.push(child);
+  paint.d={comp:innerId,w:64,h:64,speed:2,trim:0};
+  const before=compositionTextureFrame(PM,receiver,map,.1);
+  expect(compositionTextureFrame(PM,receiver,map,.2)).toBe(before);
+  const during=compositionTextureFrame(PM,receiver,map,.6);
+  expect(during).not.toBe(before);expect(compositionTextureFrame(PM,receiver,map,1)).toBe(during);
+  expect(compositionTextureFrame(PM,receiver,map,1.6)).not.toBe(during);
+  expect(capture).toHaveBeenCalledTimes(3);
+  child.d.color='#00FF00';PM.touch();expect(compositionTextureFrame(PM,receiver,map,.6)).not.toBe(during);
+  paint.d.trim=1;PM.touch();expect(compositionTextureFrame(PM,receiver,map,.1)).not.toBe(before);
+  child.p.rotation.expr='time';PM.touch();
+  expect(compositionTextureFrame(PM,receiver,map,.6)).not.toBe(compositionTextureFrame(PM,receiver,map,.7));
+  child.p.rotation.expr=null;child.type='precomp';child.d={comp:comp.id};PM.touch();
+  expect(compositionTextureFrame(PM,receiver,map,.6)).not.toBe(compositionTextureFrame(PM,receiver,map,.7));
+  clearCompositionTextures(PM);
+});
+
+it('invalidates clipped source pixels for external matte animation, matte stacks and linked program changes',()=>{
+  const {PM,comp,paint,receiver,map,capture}=editor();
+  const matte=PM.mkLayer('shape');matte.id='matte';matte.from=0;matte.dur=10;comp.layers.push(matte);
+  paint.matteSources=[{source:matte.id,mode:'alpha'}];
+  const program={pr:{}},gl={isContextLost:()=>false,getUniformLocation:vi.fn(()=>null)};
+  PM.GL.gl=gl;PM.GL.progs=new Map([['trackMatte',program]]);PM.GL.errors=new Map();
+  const first=compositionTextureFrame(PM,receiver,map,.5);
+  expect(compositionTextureFrame(PM,receiver,map,.6)).toBe(first);expect(capture).toHaveBeenCalledOnce();
+  PM.GL.progs.set('trackMatte',{pr:{}});const replaced=compositionTextureFrame(PM,receiver,map,.6);
+  expect(replaced).not.toBe(first);
+  receiver.d={rotation:12};PM.touch();expect(compositionTextureFrame(PM,receiver,map,.7)).toBe(replaced);
+  PM.GL.progs.delete('trackMatte');const unavailable=compositionTextureFrame(PM,receiver,map,.7);
+  expect(compositionTextureFrame(PM,receiver,map,.8)).not.toBe(unavailable);
+  PM.GL.progs.set('trackMatte',program);
+  expect(compositionTextureFrame(PM,receiver,map,.9)).not.toBe(first);
+  // This matte is outside the selected group's subtree but still drives it.
+  const group=PM.mkLayer('group');group.id='clipped-group';paint.group=group.id;
+  PM.proj.layers.push(group,paint,matte);comp.layers=[];PM.touch();
+  const groupMap={layerId:group.id},still=compositionTextureFrame(PM,receiver,groupMap,1);
+  expect(compositionTextureFrame(PM,receiver,groupMap,2)).toBe(still);
+  matte.p.rotation.kf=[PM.KF(0,0),PM.KF(2,90)];PM.touch();
+  expect(compositionTextureFrame(PM,receiver,groupMap,1)).not.toBe(compositionTextureFrame(PM,receiver,groupMap,2));
+  clearCompositionTextures(PM);
+});
+
+it('starts retaining a nested image when decoding finishes and observes bitmap replacement without edits',()=>{
+  class Bitmap {width=64;height=64;}
+  vi.stubGlobal('ImageBitmap',Bitmap);
+  const {PM,paint,receiver,map,capture}=editor('precomp');
+  const innerId=PM.Comps.create({name:'Image artwork',w:64,h:64,fps:30,dur:10},{open:false});
+  const image=PM.mkLayer('image');image.id='image';image.from=0;image.dur=10;image.d.asset='bitmap';PM.proj.comps[innerId].layers.push(image);
+  paint.d={comp:innerId,w:64,h:64};
+  const pending=compositionTextureFrame(PM,receiver,map,0);
+  expect(compositionTextureFrame(PM,receiver,map,1)).not.toBe(pending);
+  const asset={kind:'image',el:new Bitmap()};PM.assets.map.set('bitmap',asset);
+  const decoded=compositionTextureFrame(PM,receiver,map,2);
+  expect(compositionTextureFrame(PM,receiver,map,3)).toBe(decoded);
+  asset.el=new Bitmap();expect(compositionTextureFrame(PM,receiver,map,3)).not.toBe(decoded);
+  expect(capture).toHaveBeenCalledTimes(4);clearCompositionTextures(PM);
+});
+
+it('builds a reused nested composition only once per static check',()=>{
+  const {PM,comp,paint}=editor('precomp');
+  const innerId=PM.Comps.create({name:'Repeated',w:64,h:64,dur:10},{open:false});
+  const inner=PM.proj.comps[innerId],shape=PM.mkLayer('shape');inner.layers=[shape];
+  paint.d={comp:innerId,w:64,h:64,speed:1,trim:0};
+  comp.layers=Array.from({length:50},(_,i)=>({...paint,id:'instance'+i}));
+  const read=vi.fn(()=>64);Object.defineProperty(inner,'w',{get:read});
+  const first=materialStaticPlan(PM,comp).plan!;
+  expect(first).not.toBeNull();expect(read.mock.calls.length).toBeLessThan(10);
+  const key=first.key(1);expect(first.key(1)).toBe(key);
+  shape.d.color='#FF0000';PM.touch();expect(materialStaticPlan(PM,comp).plan!.content).not.toBe(first.content);
 });

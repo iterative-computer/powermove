@@ -1,12 +1,13 @@
-import { compositionById, compositionContains, materialOwner, materialLayerStatus, materialSourceLayers, type MaterialMap } from './material-maps';
+import { compositionById, compositionContains, materialOwner, materialLayerStatus, type MaterialMap } from './material-maps';
 import { sourceTime } from '../../legacy/core/retiming';
-import { staticExportPlan } from '../../legacy/core/static-export';
+import { trackStaticEffects } from '../../legacy/core/static-effects';
+import { materialStaticPlan } from './material-static';
 import { materialTextureLimit, materialTextureSize, type MaterialTextureSize } from './material-resolution';
 
 export interface CompositionTextureFrame {pixels:Uint8Array<ArrayBuffer>;width:number;height:number;key:string;hasAlpha?:boolean}
-type StaticPlan = {key:ReturnType<typeof staticExportPlan>;images:any[];sources:unknown[];version:number};
-type TextureCache = {frames:Map<string,CompositionTextureFrame>;plans:Map<string,StaticPlan>;versions:Map<string,{signature:string;version:number}>;
-  nextVersion:number;bytes:number;stamp:unknown[];editStamp:unknown[];dispose:()=>void};
+type StaticPlan = {source:ReturnType<typeof materialStaticPlan>['plan'];images:any[];sources:unknown[];version:number;renderStamp:unknown};
+type TextureCache = {frames:Map<string,CompositionTextureFrame>;plans:Map<string,StaticPlan>;versions:Map<string,{signature:string;version:number;renderStamp?:unknown}>;
+  effects:Map<string,ReturnType<typeof trackStaticEffects>>;nextVersion:number;bytes:number;stamp:unknown[];editStamp:unknown[];dispose:()=>void};
 const caches=new WeakMap<object,TextureCache>();
 const rendering=new WeakMap<object,Set<string>>();
 const frameContents=new WeakMap<CompositionTextureFrame,string>();
@@ -19,7 +20,8 @@ function textureCache(PM:any):TextureCache {
     const clear=()=>{frames.clear();plans.clear();if(cache)cache.bytes=0;};
     const offs=[PM.bus?.on?.('project',()=>plans.clear()),...['assets','fonts','quality'].map(event=>PM.bus?.on?.(event,clear)),
       ...['extensions:changed','theme:changed'].map(event=>PM.Kernel?.events?.on?.(event,clear))];
-    cache={frames,plans,versions:new Map(),nextVersion:0,bytes:0,stamp:[],editStamp:[],dispose:()=>{for(const off of offs)if(typeof off==='function')off();else off?.dispose?.();}};
+    const effects=new Map<string,ReturnType<typeof trackStaticEffects>>();
+    cache={frames,plans,versions:new Map(),effects,nextVersion:0,bytes:0,stamp:[],editStamp:[],dispose:()=>{for(const tracker of effects.values())tracker.dispose();for(const off of offs)if(typeof off==='function')off();else off?.dispose?.();}};
     caches.set(PM,cache);
   }
   const fonts=typeof document==='undefined'?undefined:document.fonts;
@@ -37,36 +39,40 @@ function sourceFrameKey(PM:any,cache:TextureCache,sample:NonNullable<ReturnType<
     return [asset,el,el?.width,el?.height,asset?.w,asset?.h,asset?.url,asset?.format,asset?.imageSequence];
   });
   if(!plan){
-    const layers=sample.sourceLayerId?materialSourceLayers(sample.comp,sample.sourceLayerId):sample.comp.layers;
-    if(sample.sourceLayerId && layers.some((layer:any)=>layer.type==='group')){
-      // External parent rigs affect child placement too. Include their channels
-      // in the static plan so an animated rig cannot freeze a group texture.
-      const byId=new Map<string,any>(sample.comp.layers.map((layer:any)=>[layer.id,layer])),seen=new Set(layers.map((layer:any)=>layer.id));
-      for(let i=0;i<layers.length;i++)for(const id of [layers[i].parent,layers[i].group])if(id&&!seen.has(id)&&byId.has(id)){seen.add(id);layers.push(byId.get(id));}
-    }
-    const images=layers.filter((layer:any)=>layer.type==='image');
-    // Only immutable, decoded bitmaps may be retained across time. Mutable
-    // canvases, video, expressions, effects and unknown renderers stay exact.
-    const key=staticExportPlan({...sample.comp,layers},false,layer=>{
-      const asset=PM.assets?.get?.(layer.d?.asset),el=asset?.el;
-      return asset?.kind==='image' && !asset.imageSequence && asset.format!=='svg'
-        && typeof ImageBitmap!=='undefined' && el instanceof ImageBitmap && el.width>0 && el.height>0;
-    });
+    const {plan:source,images}=materialStaticPlan(PM,sample.comp,sample.sourceLayerId);
+    // Even an unavailable image must be observed so decoding can enable reuse.
     let version=0;
-    if(key){
+    let renderStamp:unknown;
+    if(source){
       // Recheck source content after edits, but keep its pixels when only the
       // receiving model/camera changed. Never stringify the scene per frame.
-      const comp=sample.comp,signature=JSON.stringify([comp.w,comp.h,comp.fps,comp.dur,comp.bg,comp.backgroundFill,layers]);
+      const signature=JSON.stringify(source.content);
       const previous=cache.versions.get(id);
       version=previous?.signature===signature?previous.version:++cache.nextVersion;
-      cache.versions.delete(id);cache.versions.set(id,{signature,version});
+      renderStamp=previous?.renderStamp;
+      cache.versions.delete(id);cache.versions.set(id,{signature,version,renderStamp});
       if(cache.versions.size>64)cache.versions.delete(cache.versions.keys().next().value!);
     }
-    plan={key,images,sources:imageSources(images),version};cache.plans.set(id,plan);
+    plan={source,images,sources:imageSources(images),version,renderStamp};cache.plans.set(id,plan);
   }
   const sources=imageSources(plan.images);
   if(!same(plan.sources,sources)){cache.frames.clear();cache.bytes=0;cache.plans.delete(id);return sourceFrameKey(PM,cache,sample);}
-  const timeKey=plan.key?.(sample.time);
+  if(plan.source && (plan.source.effects.length || plan.source.programs.length)){
+    let tracker=cache.effects.get(id);
+    if(!tracker){
+      tracker=trackStaticEffects(PM);cache.effects.set(id,tracker);
+      if(cache.effects.size>64){const oldest=cache.effects.keys().next().value!;cache.effects.get(oldest)!.dispose();cache.effects.delete(oldest);}
+    }
+    const stamp=tracker.capture(plan.source.effects,plan.source.programs);
+    if(stamp!==plan.renderStamp){
+      if(plan.renderStamp!==undefined)plan.version=++cache.nextVersion;
+      plan.renderStamp=stamp;
+      const version=cache.versions.get(id);
+      if(version){version.version=plan.version;version.renderStamp=stamp;}
+    }
+    if(!stamp)return sample.contentKey;
+  }
+  const timeKey=plan.source?.key(sample.time);
   return timeKey==null?sample.contentKey:`${id}:${plan.version}:${timeKey}`;
 }
 /** Source comps are sampled on their own frame grid, after the model's time mapping. */
