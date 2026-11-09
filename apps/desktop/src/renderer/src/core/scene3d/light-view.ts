@@ -138,3 +138,14 @@ export function lightViewerGuides(PM: any, layerId: string, time: number, rect: 
   }
   return out;
 }
+
+/** The sun direction and height (degrees) that put the sun under a viewer
+ * point given as composition fractions (0..1): the ray from the view camera
+ * through that point, read as a direction in the sky. */
+export function sunAnglesFromViewer(PM: any, time: number, u: number, v: number, view: LightViewCamera='viewer'): { azimuth: number; elevation: number } | null {
+  if(![u,v].every(Number.isFinite))return null;
+  const ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2(u*2-1,1-v*2),cameraFor(PM,time,view));
+  const d=ray.ray.direction.clone().normalize();if(!d.toArray().every(Number.isFinite))return null;
+  const elevation=Math.asin(Math.max(-1,Math.min(1,d.y)))*180/Math.PI;
+  return { azimuth: Math.round(Math.atan2(d.x,d.z)*1800/Math.PI)/10, elevation: Math.round(Math.max(-10,elevation)*10)/10 };
+}

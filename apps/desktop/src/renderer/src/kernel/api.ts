@@ -380,6 +380,8 @@ export interface Scene3DAPI {
   lightViewerState(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerState|null;
   /** Convert pointer coordinates into native Position on a camera-facing plane. */
   lightPositionFromViewer(layerId:string,time:number,pointer:Point2D,rect:Scene3DViewerRect,view?:LightViewCamera):Point3D|null;
+  /** Sun direction and height (degrees) that place a World's sun under a viewer point, given as composition fractions. */
+  sunFromViewer(u:number,v:number,time?:number):{azimuth:number;elevation:number}|null;
   /** Projected spot cone rims, aim point and point-light range for viewer drawing. */
   lightViewerGuides(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerGuides|null;
   listMaterials(layerId:string):import('../core/scene3d/material-maps').SourceMaterialInfo[];
@@ -413,6 +415,8 @@ export interface Scene3DAPI {
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
+  /** After Effects' Front, Back, Left, Right, Top and Bottom views: the Free View looks along that axis. The shot's camera is unchanged. */
+  lookFrom(side:'front'|'back'|'left'|'right'|'top'|'bottom'):void;
   getNavigationMode():'select'|'orbit'|'pan'|'dolly';
   setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
   onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;

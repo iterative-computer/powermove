@@ -14,7 +14,7 @@
     field: FieldSpec;
     channel: SceneChannel | null;
   } = $props();
-  const { Row, NumField, SliderField, ColorField, ToggleField } = untrack(() => api.ui.controls);
+  const { Row, NumField, SliderField, ColorField, ToggleField, SelectField } = untrack(() => api.ui.controls);
 
   const prop = $derived(channel as unknown as Parameters<PowermoveAPI['anim']['evP']>[1] | null);
   const value = $derived((ui.version, ui.time, prop ? api.anim.evP(layer, prop, ui.time, path) : null));
@@ -60,6 +60,9 @@
     {/snippet}
     {#if field.kind === 'color'}
       <ColorField {api} get={() => value} {edit} label={field.label} />
+    {:else if field.kind === 'select'}
+      <SelectField {api} get={() => String(value)} options={(field.options ?? []).map(o => ({ v: String(o.v), label: o.label }))}
+        edit={{ ...edit, command: (next: unknown) => (edit as any).command(typeof field.options?.[0]?.v === 'number' ? Number(next) : next) } as ControlEditBinding} label={field.label} />
     {:else if field.kind === 'toggle'}
       <ToggleField {api} get={() => value} {edit} label={field.label} />
     {:else}

@@ -202,9 +202,8 @@ shells. Verify with `render_frames`: agent frames always use the Final tier.
 Main's layer document, timeline, material sources, parts, Front/Bevel/Side/Back
 surfaces, native controls and agent operation shapes remain the editing API.
 The checklist and verified limitations are in
-[`docs/studio/parity.md`](../../../docs/studio/parity.md). HDRI lighting,
-Substance SBSAR, FBX animation, camera iris controls, simultaneous views and
-user-exportable render passes still require implementation. Studio does not
+[`docs/studio/parity.md`](../../../docs/studio/parity.md). Substance SBSAR, FBX animation and simultaneous (2-up/4-up) views still
+require implementation. Studio does not
 claim Blender Cycles parity.
 
 Imported glTF models using additional physical-material texture maps, texture
@@ -212,14 +211,47 @@ transforms or secondary UV sets still have an appearance-parity gap. The six
 standard image slots exposed in Powermove's Materials UI are supported; the
 extended import cases are listed separately in the checklist.
 
+## Building environments
+
+- **Add 3D Layer** (viewer or timeline context menu, or the palette) has
+  **World** (choose a sky), **Terrain**, **Scatter** (choose what to copy,
+  then what to cover; terrain first), **Fog Volume**, and **Ambient** and
+  **Environment** lights.
+- **World** (select the World layer, or the camera, whose panel shows the
+  same World): sky thumbnails (Clear noon, Golden hour, Overcast, Blue hour,
+  Night); **Environment** Sky, Image (an HDR/EXR or picture, a composition or
+  a layer) or None; the sun on a small dome (drag it, or use the arrow keys;
+  Shift moves 10°); Sun height, direction, strength, Haze, Clouds, Intensity,
+  Rotation, Visible to camera; and **Atmosphere** height fog. With the World
+  selected, dragging the sky in the viewer puts the sun under the pointer.
+- **Terrain** arrives as rolling hills with grass, rock on steep slopes and
+  light grass on top. In a composition without a sky or camera it also adds a
+  golden-hour World and a camera that frames it, in one Undo. Shape buttons
+  (Rolling hills, Mountains, Dunes, Nearly flat), **Shape from** (generated
+  or a height image/layer/composition) and each ground cover's limits.
+- **Scatter**: Copies of, Over, New variation, Count, Density, size and turn
+  ranges, slope and height limits.
+- **Material Options** (After Effects' wording) on models and on every 3D
+  solid, footage, text, shape and pre-comp layer; extruded text and shapes
+  show them with Front/Bevel/Side/Back.
+- **Lens** (camera panel): Iris shape, rotation, roundness and aspect ratio.
+- **Shots** (group of models): Exploded view with a spread, and Turntable.
+- **Views**: the viewer's navigation menu looks from the Front, Left, Top,
+  Back, Right or Bottom (Free View; the shot is unchanged).
+- **Export ▸ Images ▸ PNG sequence ▸ Render passes**: Beauty, Depth, Normal,
+  Albedo, Object ID, Material ID and Shadow as 16-bit PNGs.
+
+Every value above has a keyframe diamond and a Timeline row with the same
+name.
+
 ## Environment document and agent contract
 
 A composition can own one **World** layer. Fog Volume, Terrain and Scatter are
 also ordinary timeline layers. They use the existing `powermove.3d.object`
 definition with, respectively, `object.world`, `object.fog`, `object.terrain` or
 `object.scatter` data. The source plane is a serialization placeholder; World,
-fog and scatter do not render that plane. This contract adds no inspector or
-menu UI. A UI can use `api.scene3d.edit` with the same operations as agents.
+fog and scatter do not render that plane. The interface (below) uses
+`api.scene3d.edit` with the same operations as agents.
 World belongs to the composition's layer stack, independently of which camera
 is active. Disabling/deleting its layer disables/removes that world. A dedicated
 Environment light's world is used when there is no enabled World layer.
@@ -356,8 +388,9 @@ Agents can call `export_video` with `format:"png"` and `passes`:
 
 Programmatic callers can use `PM.Export.run({format:'png',passes:[...],...})`.
 `PM.Export.renderPasses(time,width,height,passes)` is an async iterator of
-`{pass,blob,metadata}` for hosts that own delivery. No export UI controls are
-added. Authenticated agents receive a unique output folder without a dialog;
+`{pass,blob,metadata}` for hosts that own delivery. In the Export dialog,
+Images ▸ PNG sequence shows **Render passes** checkboxes for compositions with
+3D layers. Authenticated agents receive a unique output folder without a dialog;
 normal interactive exports retain the existing destination chooser.
 
 All pass files are genuine **RGBA16 PNG**, from floating GPU buffers, with no

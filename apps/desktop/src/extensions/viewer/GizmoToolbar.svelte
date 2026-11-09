@@ -30,11 +30,15 @@
     {id:'editor',label:'Free View',title:'Free View — Look around the 3D scene without moving the camera. Middle-drag or Option-drag to orbit; your render doesn’t change'},
   ];
   const viewOptions=[{v:'select',label:'Select'},{v:'orbit',label:'Orbit'},{v:'pan',label:'Pan'},{v:'dolly',label:'Dolly'},
-    {v:'frame-selection',label:'Frame Selection'},{v:'frame-all',label:'Frame All'}];
+    {v:'frame-selection',label:'Frame Selection'},{v:'frame-all',label:'Frame All'},
+    /* After Effects' 3D View angles, for the Free View. */
+    {v:'look-front',label:'Front'},{v:'look-left',label:'Left'},{v:'look-top',label:'Top'},
+    {v:'look-back',label:'Back'},{v:'look-right',label:'Right'},{v:'look-bottom',label:'Bottom'}];
   /* Navigating always happens in the Free View. Picking a navigation tool
      switches to it visibly, rather than a gesture doing it by surprise. */
   const navigate=(next:unknown)=>{
     if(next==='frame-selection'||next==='frame-all'){api.scene3d.setView('editor');api.scene3d.frame(next==='frame-selection');return false;}
+    if(typeof next==='string'&&next.startsWith('look-')){api.scene3d.lookFrom(next.slice(5) as Parameters<typeof api.scene3d.lookFrom>[0]);return false;}
     if(next!=='select'&&api.scene3d.getView()!=='editor')api.scene3d.setView('editor');
     return true;
   };
@@ -48,7 +52,7 @@
 {:else}
 <Segmented label="3D preview" options={[{id:"fast",label:"Fast"},{id:"quality",label:"Quality"}]} value={preview} onChange={next=>api.scene3d.studio.setPreview(next as typeof preview)} />
 <Segmented label="3D view" options={views} value={view} onChange={next=>api.scene3d.setView(next as typeof view)} />
-<div style="width:96px" title="3D navigation — Orbit, pan or dolly the Free View, or frame the scene. F frames the selection, Home frames everything. Your camera and render don’t change">
+<div style="width:96px" title="3D navigation — Orbit, pan or dolly the Free View, frame the scene, or look from the Front, Left, Top, Back, Right or Bottom. F frames the selection, Home frames everything. Your camera and render don’t change">
   <SelectField {api} label="3D navigation" get={()=>navigation} edit={{mode:'local',label:'3D navigation',set:(next:unknown)=>api.scene3d.setNavigationMode(next as typeof navigation)}} options={viewOptions}
     onChange={navigate} />
 </div>

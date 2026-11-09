@@ -2,7 +2,7 @@ import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-d
 import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
 import { createMaterialThumbnails } from './material-thumbnails';
 import { readMaterialProperties } from './material-properties';
-import {lightViewerState,lightPositionFromViewer,lightViewerGuides} from './light-view';
+import {lightViewerState,lightPositionFromViewer,lightViewerGuides,sunAnglesFromViewer} from './light-view';
 import {canAssignMaterialMap,listModelMaterials,listValidMaterialCompositions,listEligibleMaterialLayers,materialLayerLinks} from './material-maps';
 import * as THREE from 'three';
 import { MATERIAL_PRESETS, SHOT_TYPES, surfaceAt, highlightPlacement } from '../studio/operations';
@@ -11,7 +11,7 @@ import { MATERIAL_PRESETS, SHOT_TYPES, surfaceAt, highlightPlacement } from '../
 const highlightDrags = new Map<string,{x:number;y:number;z:number;tx:number;ty:number;tz:number}>();
 import { studioProgress, studioPreview, setStudioPreview, onStudioPreview } from '../studio';
 import { studioSwatch } from '../studio/swatch';
-import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
+import {getViewportMode,setViewportMode,onViewportChange,lookFrom} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
 import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } from './schema';
@@ -75,9 +75,11 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     getMode:getGizmoMode,setMode:setGizmoMode,getSpace:getGizmoSpace,setSpace:setGizmoSpace,onGizmoChange:listener=>({dispose:onGizmoState(listener)}),createGizmo:element=>createSceneGizmo(PM,element,time=>compositionRuntime(PM,time)),createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
     lightViewerState:(layerId,time,rect,view)=>lightViewerState(PM,layerId,time,rect,view),
     lightPositionFromViewer:(layerId,time,pointer,rect,view)=>lightPositionFromViewer(PM,layerId,time,pointer,rect,view),
+    sunFromViewer:(u,v,time)=>sunAnglesFromViewer(PM,time ?? PM.time,u,v),
     lightViewerGuides:(layerId,time,rect,view)=>lightViewerGuides(PM,layerId,time,rect,view),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
+    lookFrom:side=>{navigation?.cancel();lookFrom(PM,side);},
     getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>{if(mode!=='select')setLightTool(PM,{on:false});setNavigationMode(PM,mode);},
     onNavigationChange:listener=>({dispose:onNavigationMode(PM,listener)}),
     createNavigation:element=>(navigation=createSceneNavigation(PM,element)),

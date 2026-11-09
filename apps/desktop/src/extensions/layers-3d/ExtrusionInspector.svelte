@@ -4,6 +4,7 @@
   import type { SceneUiState } from './scene-state.svelte';
   import SceneField from './SceneField.svelte';
   import SurfaceMaterials from './SurfaceMaterials.svelte';
+  import MaterialOptionsRows from './MaterialOptionsRows.svelte';
   import {
     BEVEL_STYLES, GEOMETRY_FIELDS, GEOMETRY_TIPS, QUALITY_OPTIONS, geometryChannel, geometryPath, isExtruded,
     setExtruded, setGeometryChoice, type BevelStyle
@@ -15,6 +16,8 @@
   let { api, ui, layerId }: { api: PowermoveAPI; ui: SceneUiState; layerId: string } = $props();
   const { Row, Section, ToggleField, SelectField } = untrack(() => api.ui.controls);
 
+  /* The layer object keeps its identity across edits; read its options through ui.version. */
+  const materialOptionsOf = (l: any): any => (ui.version, l?.d?.materialOptions);
   const layer = $derived((ui.version, api.model.layer(layerId)) as Layer | null);
   const extruded = $derived((ui.version, isExtruded(layer)));
   const flat = $derived((ui.version, !(layer as any)?.threeD));
@@ -101,7 +104,7 @@
       </div>
     {/if}
   </div>
-  {#if extruded}<SurfaceMaterials {api} {ui} {layer} />{/if}
+  {#if extruded}<SurfaceMaterials {api} {ui} {layer} /><MaterialOptionsRows {api} {ui} {layer} options={materialOptionsOf(layer)} fallback={(key) => key === 'castsShadows' ? 'on' : true} heading={false} />{/if}
 {/if}
 
 <style>

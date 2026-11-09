@@ -34,9 +34,25 @@ export type TerrainData=z.output<typeof terrainSchema>;
 export type ScatterData=z.output<typeof scatterSchema>;
 export type MaterialOptionsData=z.output<typeof materialOptionsSchema>;
 export const isEnvironmentNode=(node:any)=>!!(node?.world || node?.fog || node?.terrain || node?.scatter);
+/** Timeline names, matching the inspector's rows (After Effects' wording for Material Options). */
+const GROUP_LABELS:Record<string,string>={world:'World',fog:'Fog Volume',terrain:'Terrain',scatter:'Scatter',materialOptions:'Material Options'};
+const CHANNEL_LABELS:Record<string,Record<string,string>>={
+  world:{intensity:'Intensity',rotation:'Rotation',visible:'Visible to Camera',metersPerUnit:'Meters per Unit',elevation:'Sun Height',azimuth:'Sun Direction',haze:'Haze',sunIntensity:'Sun Strength',sunRadius:'Sun Size',overcast:'Clouds',
+    fogDensity:'Fog',fogColor:'Fog Color',fogAnisotropy:'Fog Forward Glow',fogBaseHeight:'Fog Base',fogHeightFalloff:'Fog Falloff',fogDistance:'Fog Distance',adaptive:'Adaptive Sampling',minSamples:'Minimum Samples',relativeError:'Relative Error',absoluteError:'Absolute Error'},
+  fog:{shape:'Shape',width:'Width',height:'Height',depth:'Depth',density:'Density',color:'Color',anisotropy:'Forward Glow'},
+  terrain:{width:'Width',depth:'Depth',resolution:'Resolution',amplitude:'Height',frequency:'Feature Size',octaves:'Detail',seed:'Variation',ridged:'Ridges'},
+  region:{minHeight:'Above',maxHeight:'Below',minSlope:'Steeper Than',maxSlope:'Flatter Than',color:'Color',roughness:'Roughness',metalness:'Metalness'},
+  scatter:{count:'Count',density:'Density',seed:'Variation',scaleMin:'Smallest',scaleMax:'Largest',rotationMin:'Turn From',rotationMax:'Turn To',minHeight:'Above',maxHeight:'Below',minSlope:'Steeper Than',maxSlope:'Flatter Than'},
+  materialOptions:{castsShadows:'Casts Shadows',acceptsShadows:'Accepts Shadows',acceptsLights:'Accepts Lights',appearsInReflections:'Appears in Reflections'}
+};
 export function environmentProperties(node:any):any[]{
   const out:any[]=[];
-  const collect=(p:any,prefix:string)=>{for(const [key,prop] of Object.entries<any>(p??{}))if(prop && Array.isArray(prop.kf))out.push({key:`${prefix}.${key}`,prop,label:key,group:prefix});};
+  const collect=(p:any,prefix:string)=>{
+    const region=/^terrain\.region(\d)$/.exec(prefix);
+    const labels=CHANNEL_LABELS[region?'region':prefix] ?? {};
+    const group=region?`Ground Cover ${Number(region[1])+1}`:GROUP_LABELS[prefix] ?? prefix;
+    for(const [key,prop] of Object.entries<any>(p??{}))if(prop && Array.isArray(prop.kf))out.push({key:`${prefix}.${key}`,prop,label:labels[key] ?? key,group});
+  };
   for(const kind of Object.keys(ENVIRONMENT_SCHEMAS))collect(node?.[kind]?.p,kind);
   for(const [i,region] of (node?.terrain?.regions??[]).entries())collect(region.p,`terrain.region${i}`);
   return out;

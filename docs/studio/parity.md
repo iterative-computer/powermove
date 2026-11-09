@@ -83,7 +83,7 @@ all of them already exist in Powermove.
 | Front / Bevel / Side / Back | Yes for extruded text/shapes | Distinct materials per triangle group | Verified |
 | Camera depth of field/focus | No | Studio thin lens from source branch | Kept |
 | Camera iris controls | No | Keyframeable blade count, rotation, roundness, aspect; shared uniform aperture sampling | Verified |
-| Multiple views | Single camera/free view, no simultaneous panels | Preserve navigation; multi-view UI required | Gap |
+| Multiple views | Single camera/free view, no simultaneous panels | Front/Left/Top/Back/Right/Bottom angles for the Free View; simultaneous 2/4-up panels still required | Partial |
 | glTF embedded animation | Yes | Pose evaluation before tracing | Kept |
 | FBX with embedded animation | No | Importer required | Gap |
 | 2D layers casting shadows onto 3D | No; native-plane casts explicitly disabled | Native 3D planes cast alpha shadows and support receiving light/shadows through Material Options | Verified |
@@ -162,7 +162,8 @@ visual grading; this table does not claim full source-material fidelity.
 
 The audit's AE targets include features absent on main. They remain explicit
 gaps rather than being counted as regressions. Environment/world, fog, terrain and scatter authoring now have document and
-agent contracts; their inspector/menu UI is a separate lane. Geometry
+agent contracts and inspector/menu UI (Add 3D Layer, World, Fog Volume,
+Terrain, Scatter, Material Options, iris and Export render passes). Geometry
 instancing avoids rebuilding a BLAS for every repeated model.
 
 Baseline and Studio PNGs live outside Git at
@@ -247,8 +248,8 @@ precision. Captures and captions are outside Git in
 
 Remaining implementation limits are explicit:
 
-- No new environment/material/iris/pass-selection UI is included in this data
-  lane. The existing edit API is ready for that UI.
+- Simultaneous multi-view panels (AE 2-up/4-up) are not implemented; the
+  Free View has AE's six axis angles instead.
 - Fog boxes use world axis-aligned bounding extents when rotated. Sphere
   non-uniform scale uses its largest axis.
 - Reflection visibility excludes all secondary camera paths, including

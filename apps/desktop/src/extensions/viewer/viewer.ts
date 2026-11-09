@@ -1802,6 +1802,31 @@ function bindStage(stage: any, inner: any): () => void {
     const x=e.clientX-rect.left+16,y=e.clientY-rect.top+18;
     lightHud.style.left=`${Math.min(x,rect.width-lightHud.offsetWidth-6)}px`;lightHud.style.top=`${Math.min(y,rect.height-lightHud.offsetHeight-6)}px`;
   };
+  const selectedSky=():any=>{
+    const ids=api.selection.layers();if(ids.length!==1)return null;
+    const layer:any=api.model.layer(ids[0]!),world=layer?.d?.data?.object?.world;
+    return world && world.mode==='sky' && !layer.lock ? layer : null;
+  };
+  const sunDrag=(event:PointerEvent):boolean=>{
+    const world=selectedSky();if(!world || !api.scene3d?.sunFromViewer)return false;
+    const comp=api.model.curComp(),start=pointerComp(event);
+    if(api.scene3d.lights?.surface?.(start.x/comp.w,start.y/comp.h))return false;
+    api.edit.begin('Move sun',{origin:'canvas'});
+    const place=(e:PointerEvent)=>{
+      const q=pointerComp(e),angles=api.scene3d.sunFromViewer(q.x/comp.w,q.y/comp.h);if(!angles)return;
+      const time=api.transport.time();
+      api.edit.apply([
+        {type:'set_property',target:world.id,path:'world.azimuth',value:angles.azimuth,time,mode:'auto',preserveHandEdits:false},
+        {type:'set_property',target:world.id,path:'world.elevation',value:angles.elevation,time,mode:'auto',preserveHandEdits:false}
+      ] as any,{origin:'canvas'});
+      api.transport.invalidate();
+    };
+    place(event);setStageCursor('grabbing');
+    const up=()=>{window.removeEventListener('pointermove',place);window.removeEventListener('pointerup',up);setStageCursor('default');
+      const result=api.edit.commit('Move sun');if(!result.ok)api.ui.toast(result.message,{error:true});};
+    window.addEventListener('pointermove',place);window.addEventListener('pointerup',up);
+    return true;
+  };
   let lightPointer:{clientX:number;clientY:number}|null=null;
   const lightToolOn=()=>!!api.scene3d?.lights?.getTool().on;
   listen(stage,'pointerdown',guarded((event:any)=>{
@@ -1855,6 +1880,10 @@ function bindStage(stage: any, inner: any): () => void {
         return;
       }
     }
+    /* With the World selected, dragging the sky puts the sun under the
+       pointer (one Undo). Clicks on models still select them. */
+    if(event.button===0 && !event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && !lightToolOn()
+      && api.scene3d?.getNavigationMode?.()==='select' && sunDrag(event)){event.preventDefault();event.stopImmediatePropagation();return;}
     if(sceneGizmo?.active())return;
     /* Orbit, pan and dolly move only the Free View. In the Active Camera
        view a middle-drag pans and the wheel scrolls exactly as in a 2D
