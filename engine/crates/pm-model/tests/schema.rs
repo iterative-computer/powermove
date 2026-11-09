@@ -37,6 +37,23 @@ fn read_json(path: &Path) -> Value {
     parse(&text).unwrap_or_else(|e| panic!("{}: {e:?}", path.display()))
 }
 
+/// Real web-player scenes: v1's onboarding scene and the website hero.
+fn web_scenes() -> Vec<(String, Value)> {
+    [
+        (
+            "scenes/onboarding",
+            manifest().join("tests/fixtures/scenes/onboarding.json"),
+        ),
+        (
+            "scenes/www-hero",
+            repo().join("apps/www/static/hero/scene.json"),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, path)| (name.to_owned(), read_json(&path)))
+    .collect()
+}
+
 fn sorted_files(dir: &Path, extension: &str) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
@@ -70,12 +87,8 @@ fn project_fixtures() -> Vec<(String, Value)> {
             project_of(&read_json(&path)).clone(),
         ));
     }
-    for rel in [
-        "apps/desktop/src/renderer/public/onboarding/scene.json",
-        "apps/www/static/hero/scene.json",
-    ] {
-        let scene = read_json(&repo().join(rel));
-        out.push((rel.to_owned(), scene.get("project").unwrap().clone()));
+    for (name, scene) in web_scenes() {
+        out.push((name, scene.get("project").unwrap().clone()));
     }
     for path in sorted_files(&manifest().join("tests/fixtures/containers"), "pmv") {
         let bytes = std::fs::read(&path).unwrap();
@@ -110,7 +123,7 @@ fn fixture_inventory_is_complete() {
             .count()
     };
     assert_eq!(count("corpus/"), 35);
-    assert_eq!(count("apps/"), 2);
+    assert_eq!(count("scenes/"), 2);
     assert!(count("containers/") >= 8, "{}", count("containers/"));
     assert!(count("vectors/") >= 2);
 }
@@ -141,12 +154,8 @@ fn whole_files_round_trip() {
             assert_lossless::<SavedDocument>(&path.display().to_string(), &container.document);
         }
     }
-    for rel in [
-        "apps/desktop/src/renderer/public/onboarding/scene.json",
-        "apps/www/static/hero/scene.json",
-    ] {
-        let scene = read_json(&repo().join(rel));
-        let typed = assert_lossless::<WebScene>(rel, &scene);
+    for (name, scene) in web_scenes() {
+        let typed = assert_lossless::<WebScene>(&name, &scene);
         assert_eq!(typed.format.unwrap().as_str(), Some("powermove-web"));
     }
 }

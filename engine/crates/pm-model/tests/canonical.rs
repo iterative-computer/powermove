@@ -18,10 +18,6 @@ fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn repo() -> PathBuf {
-    manifest().join("../../..")
-}
-
 fn vectors() -> Value {
     parse(include_str!("vectors/canonical-vectors.json")).unwrap()
 }
@@ -45,38 +41,9 @@ fn hash_or_null(v: &Value) -> Value {
     Value::from(canonical_hash(v))
 }
 
-/// The array literal assigned to `name` in a TypeScript source file.
-fn ts_string_array(source: &str, name: &str) -> Vec<String> {
-    let start = source
-        .find(name)
-        .unwrap_or_else(|| panic!("{name} not found"));
-    let rest = &source[start..];
-    let open = rest.find('[').unwrap();
-    let close = rest.find(']').unwrap();
-    rest[open + 1..close]
-        .split(',')
-        .map(|s| s.trim().trim_matches('\'').trim_matches('"').to_owned())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 #[test]
-fn comp_fields_match_both_typescript_lists() {
+fn comp_fields_match_the_v1_vectors() {
     let expected: Vec<String> = COMP_FIELDS.iter().map(|s| s.to_string()).collect();
-    let compositions = std::fs::read_to_string(
-        repo().join("apps/desktop/src/renderer/src/legacy/core/compositions.ts"),
-    )
-    .unwrap();
-    assert_eq!(
-        ts_string_array(&compositions, "export const COMP_FIELDS"),
-        expected
-    );
-    let canonical_json =
-        std::fs::read_to_string(repo().join("apps/desktop/src/shared/canonical-json.ts")).unwrap();
-    assert_eq!(
-        ts_string_array(&canonical_json, "export const CANONICAL_COMP_FIELDS"),
-        expected
-    );
     let from_vectors: Vec<String> = vectors()
         .get("compFields")
         .unwrap()
