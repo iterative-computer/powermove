@@ -482,11 +482,21 @@ impl SurfaceView {
         let unit = view.unit.clone();
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
+            // A value the panel's host set (`metadata.hostValue`) replaces
+            // the text even mid-edit; nothing else does.
+            let host = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("hostValue"))
+                .and_then(Value::as_u64);
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
-                f.set_value(&value, cx);
+                match host {
+                    Some(revision) => f.set_value_from_host(&value, revision, cx),
+                    None => f.set_value(&value, cx),
+                }
             });
             return;
         }

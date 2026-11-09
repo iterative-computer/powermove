@@ -14,7 +14,8 @@ pub mod store_preparation;
 pub mod surfaces;
 pub use checkpoint::Checkpoint;
 pub use delta::{
-    Conflict, ConflictKind, DeltaPrepared, delta, delta_if_changed, delta_media, delta_store,
+    Conflict, ConflictKind, DeltaPrepared, WaitingFolder, allow_folders, delta, delta_if_changed,
+    delta_media, delta_store, waiting_folders,
 };
 pub use disk::LowDisk;
 
@@ -198,6 +199,10 @@ pub struct State {
     /// Snapshot id of the media pass that describes the library now.
     #[serde(default)]
     pub latest_pass: Option<String>,
+    /// That pass's base hash: a later pass over the same snapshot (folders
+    /// allowed since) has the same snapshot and another base.
+    #[serde(default)]
+    pub latest_pass_base: Option<String>,
     /// The person's answer about originals in folders macOS guards.
     #[serde(default)]
     pub folder_access: Option<source_access::Choice>,
@@ -432,6 +437,7 @@ fn run_inner(
             conflicts: BTreeSet::new(),
             source_stamp: None,
             latest_pass: None,
+            latest_pass_base: None,
             folder_access: None,
             folder_outcomes: Default::default(),
         };
@@ -538,6 +544,7 @@ fn run_inner(
     publish(&native, &state)?;
     if !state.completed.contains(&Step::Media) {
         state.latest_pass = Some(pass.snapshot.clone());
+        state.latest_pass_base = Some(pass.base_hash.clone());
         finish(&native, &mut state, Step::Media, &mut hook)?;
     }
     if !state.completed.contains(&Step::LocalStorage) {

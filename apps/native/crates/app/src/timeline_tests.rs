@@ -956,12 +956,12 @@ fn clips_are_accessible_elements_that_a_press_selects(cx: &mut TestAppContext) {
             let list = tree
                 .nodes
                 .iter()
-                .find(|(_, n)| n.role() == Role::List && n.label() == Some("Timeline tracks"))
+                .find(|(_, n)| n.role() == Role::ListBox && n.label() == Some("Timeline tracks"))
                 .map(|(_, n)| n.children().to_vec())
                 .expect("the tracks list");
             tree.nodes
                 .iter()
-                .filter(|(id, n)| list.contains(id) && n.role() == Role::ListItem)
+                .filter(|(id, n)| list.contains(id) && n.role() == Role::ListBoxOption)
                 .map(|(id, n)| {
                     let bounds = window.a11y_node_bounds(*id);
                     (

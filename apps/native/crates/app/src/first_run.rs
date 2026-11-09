@@ -1046,14 +1046,20 @@ impl Library {
         };
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            if let Err(error) = pm_first_launch::delta_media(&config, |_| Ok(())) {
+            let result = pm_first_launch::delta_media(&config, |_| Ok(()));
+            if let Err(error) = &result {
                 eprintln!("Bringing in new media stopped: {error:#}");
-                let _ = tx.send_blocking(());
             }
+            let _ = tx.send_blocking(result.is_ok());
         });
-        cx.spawn(async move |_| {
-            if rx.recv().await.is_ok() {
-                log.borrow_mut().tell("Library", LATER_FAILED);
+        cx.spawn(async move |cx| {
+            match rx.recv().await {
+                Ok(true) => {
+                    // Protected folders it couldn't open show in Settings › Media.
+                    cx.update(crate::pro_media::MediaPassDone::bump);
+                }
+                Ok(false) => log.borrow_mut().tell("Library", LATER_FAILED),
+                Err(_) => {}
             }
         })
         .detach();

@@ -991,6 +991,17 @@ impl Builtins {
             }
         }
     }
+    /// The Project panel lists only missing files from its next request; the
+    /// media sequence moves so it asks again at the next publication. Takes
+    /// every panel's locks: call it on a worker, as `update_media` is.
+    pub fn show_missing_media(&self) {
+        for entry in self.broker.all_entries() {
+            let backend = entry.lock().unwrap().backend.clone();
+            let mut backend = backend.lock().unwrap();
+            backend.native.show_missing = true;
+            backend.native.media_sequence += 1;
+        }
+    }
     /// Admit worker-owned originals, then await the actor's durable outcome.
     /// A metadata-only StoredAsset is never sufficient for live admission.
     pub fn admit_media(

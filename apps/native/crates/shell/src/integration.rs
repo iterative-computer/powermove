@@ -63,6 +63,12 @@ pub trait Integration {
     fn status_trailing(&self, _cx: &App) -> String {
         String::new()
     }
+    /// A problem the person can press to see (`2 files offline`), in
+    /// `danger` before the format facts; empty for none.
+    fn status_alert(&self, _cx: &App) -> String {
+        String::new()
+    }
+    fn status_alert_pressed(&self, _window: &mut gpui::Window, _cx: &mut App) {}
     fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);
 }
 pub type Factory = Rc<dyn Fn(Rc<RefCell<Host>>, &mut Window, &mut App) -> Rc<dyn Integration>>;

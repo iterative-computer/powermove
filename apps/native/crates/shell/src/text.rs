@@ -18,6 +18,9 @@ pub struct TextField {
     tokens: pm_design::Tokens,
     /// A composer's last submitted text, cleared once the model empties it.
     submitted: Option<String>,
+    /// The newest host replacement this field took (see
+    /// [`Self::set_value_from_host`]).
+    host_value: u64,
 }
 impl EventEmitter<TextEvent> for TextField {}
 impl TextField {
@@ -76,6 +79,7 @@ impl TextField {
             unit: None,
             tokens,
             submitted: None,
+            host_value: 0,
         }
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
@@ -104,6 +108,22 @@ impl TextField {
     pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
         self.slot.set_font_size(tokens.typography.body as f64);
         self.tokens = tokens;
+    }
+    /// The panel marks a value its host set (`metadata.hostValue`, rising
+    /// with each one): that value replaces the text even while the person is
+    /// editing, once. Anything else, such as a late answer to their own
+    /// typing, never replaces what they typed.
+    pub fn set_value_from_host(&mut self, value: &str, revision: u64, cx: &mut Context<Self>) {
+        if revision > self.host_value {
+            self.host_value = revision;
+            if self.slot.is_editing() && self.slot.value() != value {
+                self.slot.replace_value(value);
+                self.value = value.into();
+                cx.notify();
+                return;
+            }
+        }
+        self.set_value(value, cx);
     }
     pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
         // A sent message leaves the composer once the model has taken it,

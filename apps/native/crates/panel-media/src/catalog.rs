@@ -81,6 +81,19 @@ pub enum Availability {
         download: Download,
     },
 }
+impl Availability {
+    /// The file can't be played from here: offline, changed, failed or still
+    /// in the cloud (the Project panel's Missing, the status line's offline count).
+    pub fn is_missing(&self) -> bool {
+        matches!(
+            self,
+            Availability::Offline
+                | Availability::Changed { .. }
+                | Availability::Failed(_)
+                | Availability::Cloud { .. }
+        )
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Download {
     Stored,

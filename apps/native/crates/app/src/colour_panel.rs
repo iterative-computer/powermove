@@ -41,12 +41,21 @@ define_class!(
             let changed = colour.filter(|c| Some(c) != self.ivars().seeded.as_ref());
             let _ = self.ivars().tx.try_send(changed);
         }
+        /// The editor that asked closed: the panel goes with it.
+        #[unsafe(method(parentClosed:))]
+        fn parent_closed(&self, _: &NSNotification) {
+            let mtm = MainThreadMarker::new().unwrap();
+            NSColorPanel::sharedColorPanel(mtm).close();
+        }
     }
 );
 thread_local! { static WATCH: RefCell<Option<Retained<Watch>>> = const { RefCell::new(None) }; }
-/// Shows the panel; resolves when the person closes it, with the colour if they
-/// changed it.
-pub fn choose(initial: Option<u32>) -> async_channel::Receiver<Option<String>> {
+/// Shows the panel over the editor window that asked; resolves when the person
+/// closes it (or that window closes), with the colour if they changed it.
+pub fn choose(
+    initial: Option<u32>,
+    parent: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
+) -> async_channel::Receiver<Option<String>> {
     let mtm = MainThreadMarker::new().unwrap();
     let (tx, rx) = async_channel::bounded(1);
     let panel = NSColorPanel::sharedColorPanel(mtm);
@@ -73,8 +82,23 @@ pub fn choose(initial: Option<u32>) -> async_channel::Receiver<Option<String>> {
             Some(&NSString::from_str("NSWindowWillCloseNotification")),
             Some(panel.as_ref() as &AnyObject),
         );
+        if let Some(parent) = &parent {
+            centre.addObserver_selector_name_object(
+                watch.as_ref() as &AnyObject,
+                sel!(parentClosed:),
+                Some(&NSString::from_str("NSWindowWillCloseNotification")),
+                Some(parent.as_ref() as &AnyObject),
+            );
+        }
     }
-    panel.makeKeyAndOrderFront(None);
+    // The system panel floats over every app by default (P-CHILD).
+    panel.setFloatingPanel(false);
+    gpui_macos::child_window::apply(&panel);
+    // The shared panel moves to whichever editor asked last.
+    if let Some(parent) = &parent {
+        gpui_macos::child_window::attach(&panel, parent);
+    }
+    gpui_macos::child_window::show(&panel, true);
     rx
 }
 /// The system loupe. `None` when the person cancels with Escape.
@@ -101,9 +125,10 @@ pub fn menu(
         serde_json::json!({"label":"Colors…"}),
         serde_json::json!({"label":"Sample from Screen"}),
     ];
+    let parent = editor_window(window);
     crate::v4_native::menu(window, &options, cx, move |index, cx| {
         let chosen = match index {
-            Some(0) => choose(initial),
+            Some(0) => choose(initial, parent),
             Some(1) => sample(),
             _ => return,
         };
@@ -114,6 +139,16 @@ pub fn menu(
         })
         .detach();
     });
+}
+/// The AppKit window behind a GPUI window.
+fn editor_window(window: &gpui::Window) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    let view = unsafe { &*(handle.ns_view.as_ptr() as *const objc2_app_kit::NSView) };
+    view.window()
 }
 /// Installed families, for the font menu.
 pub fn font_families() -> Vec<String> {

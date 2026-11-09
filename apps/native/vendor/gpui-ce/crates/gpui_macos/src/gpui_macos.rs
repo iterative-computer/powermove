@@ -25,6 +25,7 @@ mod wgpu_renderer;
 #[cfg(feature = "wgpu")]
 use wgpu_renderer as renderer;
 
+pub mod child_window;
 pub mod composition;
 mod composition_accessibility;
 mod composition_accessibility_order;

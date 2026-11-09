@@ -198,6 +198,56 @@ pub fn format_facts(dimensions: [f64; 2], fps: f64) -> String {
         dimensions[1].round()
     )
 }
+/// `1 file`, `3 files`.
+pub fn file_count(count: usize) -> String {
+    if count == 1 {
+        "1 file".into()
+    } else {
+        format!("{count} files")
+    }
+}
+fn refused(f: &pm_first_launch::WaitingFolder) -> bool {
+    f.outcome == pm_first_launch::source_access::Outcome::Denied
+}
+/// Whether macOS can still ask about any of `folders` (one it refused it
+/// won't ask about again).
+pub fn askable(folders: &[pm_first_launch::WaitingFolder]) -> bool {
+    folders.iter().any(|f| !refused(f))
+}
+/// The explanation before Powermove opens the folders (Settings › Media).
+pub fn folder_access_prompt(folders: &[pm_first_launch::WaitingFolder]) -> String {
+    let named = |refused_ones: bool| {
+        folders
+            .iter()
+            .filter(|f| refused(f) == refused_ones)
+            .map(|f| format!("{} ({})", f.name, file_count(f.files)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut text = Vec::new();
+    if askable(folders) {
+        text.push(format!(
+            "Some originals are in folders macOS protects: {}. When you continue, macOS asks once for each folder; allow it so Powermove can bring the files in.",
+            named(false)
+        ));
+    }
+    if folders.iter().any(refused) {
+        text.push(format!(
+            "macOS refused {}. If you've since allowed Powermove in System Settings › Privacy & Security › Files and Folders, continuing checks again; otherwise those files stay offline.",
+            named(true)
+        ));
+    }
+    text.push("Your original app and files stay unchanged.".into());
+    text.join(" ")
+}
+/// The status line's offline files, as a person counts them; empty for none.
+pub fn offline_summary(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => "1 file offline".into(),
+        n => format!("{n} files offline"),
+    }
+}
 pub fn status_line(dirty: bool, saved_path: bool, layers: usize, keyframes: usize) -> String {
     let counts = format!(
         "{} · {}",
@@ -215,8 +265,8 @@ pub fn status_line(dirty: bool, saved_path: bool, layers: usize, keyframes: usiz
 mod tests {
     // Not `super::*`: gpui's `test` attribute macro would shadow `#[test]`.
     use super::{
-        CHANNELS, channel_label, display_value, fit_scale, kind_name, needs_frame_outline,
-        parse_background, status_line, zoom_title,
+        CHANNELS, channel_label, display_value, file_count, fit_scale, folder_access_prompt,
+        kind_name, needs_frame_outline, offline_summary, parse_background, status_line, zoom_title,
     };
 
     #[test]
@@ -269,6 +319,30 @@ mod tests {
         assert!(needs_frame_outline(parse_background("#ffffff80"), 0x0e0e0e));
         assert_eq!(parse_background("#abc"), Some(0xaabbcc));
         assert_eq!(parse_background("transparent"), None);
+    }
+
+    #[test]
+    fn the_folder_prompt_names_each_folder_and_what_macos_will_ask() {
+        assert_eq!(file_count(1), "1 file");
+        let folder = |name: &str, files| pm_first_launch::WaitingFolder {
+            path: format!("/x/{name}").into(),
+            name: name.into(),
+            files,
+            outcome: pm_first_launch::source_access::Outcome::Pending,
+        };
+        let text = folder_access_prompt(&[folder("Downloads", 3), folder("Desktop", 1)]);
+        assert!(
+            text.contains("Downloads (3 files), Desktop (1 file)"),
+            "{text}"
+        );
+        assert!(text.contains("macOS asks once for each folder"), "{text}");
+    }
+
+    #[test]
+    fn offline_files_read_as_a_person_counts_them() {
+        assert_eq!(offline_summary(0), "");
+        assert_eq!(offline_summary(1), "1 file offline");
+        assert_eq!(offline_summary(2), "2 files offline");
     }
 
     #[test]

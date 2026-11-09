@@ -1,9 +1,10 @@
-import { useLayoutEffect, useState } from "preact/hooks";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
   EmptyState,
   List,
   SegmentedControl,
   TextField,
+  PushButton,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -145,6 +146,15 @@ export function ProjectView(props: ProjectViewProps) {
     throw new RangeError("Invalid native media grid layout");
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  // The host set the filter (the status line's missing files clear the
+  // search): the field follows that query, and only a newer one. Answers to
+  // the person's own typing, however late, never replace what they typed.
+  const hostFilter = useRef(0);
+  useLayoutEffect(() => {
+    if (!view || view.host_filter <= hostFilter.current) return;
+    hostFilter.current = view.host_filter;
+    setQuery(view.query);
+  }, [view?.host_filter]);
   const [hovered, setHovered] = useState<string | null>(null);
   const [rename, setRename] = useState("");
   const [crumbFocus, setCrumbFocus] = useState(0);
@@ -162,10 +172,15 @@ export function ProjectView(props: ProjectViewProps) {
     );
     if (folder) setRename(itemName(folder));
   }, [view?.renaming]);
-  const filter = (value: string) => {
+  const filter = (value: string, missingOnly = !!view?.missing_only) => {
     setQuery(value);
     input({
-      Filter: { query: value, kind: null, missing_only: false, proxy: null },
+      Filter: {
+        query: value,
+        kind: null,
+        missing_only: missingOnly,
+        proxy: null,
+      },
     });
   };
   const invoke = (command: import("./contract").Command) =>
@@ -630,6 +645,7 @@ export function ProjectView(props: ProjectViewProps) {
             label="Search media"
             title="Search media"
             value={query}
+            metadata={{ hostValue: hostFilter.current }}
             id="media-search"
             binding={native.searchBinding}
             focusRequest="media-search"
@@ -638,6 +654,34 @@ export function ProjectView(props: ProjectViewProps) {
             }}
             onKeyDown={searchEscape}
             preventDefault={{ keydown: ["Escape"] }}
+          />
+        </div>
+      ) : null}
+      {view?.missing_only ? (
+        <div
+          style={{
+            height: token("metrics.row"),
+            paddingLeft: token("metrics.inset"),
+            paddingRight: token("metrics.inset"),
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <text
+            role="status"
+            style={{
+              color: token("colors.danger"),
+              fontSize: token("typography.minimum"),
+            }}
+          >
+            Missing files only
+          </text>
+          <PushButton
+            label="Show All"
+            title="Show all media"
+            onClick={() => filter(query, false)}
           />
         </div>
       ) : null}

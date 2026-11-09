@@ -1511,6 +1511,29 @@ impl crate::session::Controller {
     }
 
     /// The open project's asset ids.
+    /// Project files that can't be played from here (the Project panel's
+    /// Missing), for the status line.
+    pub(crate) fn offline_count(&self) -> usize {
+        let Some(pm_model::NodeKind::Object(assets)) = self
+            .published
+            .as_ref()
+            .and_then(|p| p.snapshot.root())
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.kind())
+        else {
+            return 0;
+        };
+        self.builtins
+            .media_runtime
+            .missing(assets.keys().filter_map(|k| k.as_str()))
+    }
+    /// The status line's offline count, pressed: the Project panel lists the
+    /// missing files.
+    pub(crate) fn show_offline_media(&mut self, cx: &mut gpui::Context<Self>) {
+        self.host.borrow().send_command("panel:show:assets", vec![]);
+        self.builtins.show_missing = true;
+        self.update_builtins(cx);
+    }
     pub(crate) fn project_assets(&self) -> Vec<String> {
         self.published
             .as_ref()
@@ -1554,6 +1577,11 @@ impl crate::session::Controller {
         serde_json::json!({
             "rows": rows,
             "location": self.pro_media.location().to_string_lossy(),
+            "folders": self.waiting_folders.iter().map(|f| serde_json::json!({
+                "name": f.name,
+                "files": f.files,
+                "refused": f.outcome == pm_first_launch::source_access::Outcome::Denied,
+            })).collect::<Vec<_>>(),
             "used": usage.map(|u| serde_json::json!({
                 "proxies": bytes(u.proxies),
                 "optimized": bytes(u.optimized),
@@ -1562,6 +1590,84 @@ impl crate::session::Controller {
         })
     }
 
+    fn first_launch_config(&self) -> Option<pm_first_launch::Config> {
+        Some(pm_first_launch::Config {
+            electron_profile: self.electron.clone()?,
+            native_profile: self.profile.clone(),
+        })
+    }
+    /// Reads which guarded folders kept originals out (metadata only, off the
+    /// main thread), for Settings › Media.
+    pub(crate) fn refresh_waiting_folders(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(config) = self.first_launch_config() else {
+            return;
+        };
+        let read = cx
+            .background_executor()
+            .spawn(async move { pm_first_launch::waiting_folders(&config) });
+        cx.spawn(async move |this, cx| {
+            let folders = read.await.unwrap_or_default();
+            let _ = this.update(cx, |v, cx| {
+                if v.waiting_folders != folders {
+                    v.waiting_folders = folders;
+                    v.update_builtins(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Settings › Media › Allow Access… / Check Again…: explains macOS's prompt
+    /// (or, for folders macOS refused, where to allow them) first, then opens
+    /// the folders and brings their originals in. A folder allowed in System
+    /// Settings since opens now; one still refused stays refused, unasked.
+    fn allow_waiting_folders(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(config) = self.first_launch_config() else {
+            return;
+        };
+        let folders = self.waiting_folders.clone();
+        if folders.is_empty() {
+            return;
+        }
+        let window = self.host.borrow().window.clone();
+        let rx = crate::platform::choice(
+            &window,
+            if crate::panels::askable(&folders) {
+                "Allow Access to Your Media"
+            } else {
+                "Check Folder Access Again"
+            },
+            &crate::panels::folder_access_prompt(&folders),
+            &["Continue", "Not Now"],
+        );
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await != Ok(0) {
+                return;
+            }
+            let paths: Vec<_> = folders.iter().map(|f| f.path.clone()).collect();
+            let result = cx
+                .background_executor()
+                .spawn(async move { pm_first_launch::allow_folders(&config, &paths, |_| Ok(())) })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(pm_first_launch::Outcome::Complete { not_reached: 0, .. }) => {
+                        "Your media from those folders came across.".into()
+                    }
+                    Ok(pm_first_launch::Outcome::Complete { not_reached, .. }) => format!(
+                        "{} still couldn’t be opened.",
+                        crate::panels::file_count(not_reached)
+                    ),
+                    Ok(_) => "Quit the original app, then try again.".into(),
+                    Err(_) => "Your media couldn’t be brought in. Try again.".into(),
+                };
+                v.media_refresh.reset();
+                v.refresh_media(cx);
+                v.refresh_waiting_folders(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     /// A Settings › Media write or action (`media.settings`).
     pub(crate) fn media_settings(
         &mut self,
@@ -1601,6 +1707,7 @@ impl crate::session::Controller {
                 .detach();
             }
             Some("media.reveal") => crate::platform::reveal(&self.pro_media.location()),
+            Some("media.folders") => self.allow_waiting_folders(cx),
             Some("media.clear") => {
                 let rx = crate::platform::choice(
                     &window,
@@ -2269,5 +2376,16 @@ mod tests {
         }
         assert!(prefs.creates_on_import(3840, 2160, 8));
         assert!(!prefs.creates_on_import(1920, 1080, 10));
+    }
+}
+
+/// Counts finished media passes; editors read the protected folders again.
+#[derive(Default)]
+pub(crate) struct MediaPassDone(u64);
+impl gpui::Global for MediaPassDone {}
+impl MediaPassDone {
+    pub(crate) fn bump(cx: &mut gpui::App) {
+        let n = cx.try_global::<Self>().map_or(0, |d| d.0) + 1;
+        cx.set_global(Self(n));
     }
 }

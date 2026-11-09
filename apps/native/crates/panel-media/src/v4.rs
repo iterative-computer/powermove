@@ -32,6 +32,14 @@ pub struct Projection {
     pub drop_target: Option<DropTarget>,
     pub external_drag: bool,
     pub composition_count: usize,
+    /// Only missing files are listed (the status line's offline count).
+    pub missing_only: bool,
+    /// The search the model applies, so the field shows what the host set.
+    pub query: String,
+    /// Moves each time the host, not the panel, set the filter (the status
+    /// line's missing files): the panel's search field takes `query` then,
+    /// and only then, even while the person is typing in it.
+    pub host_filter: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DropTarget {
@@ -49,8 +57,30 @@ pub struct ProjectBridge {
     offset: usize,
     limit: usize,
     document: Option<(String, u64)>,
+    host_filter: u64,
 }
 impl ProjectBridge {
+    /// The host's own filter (the status line's missing files): from the top
+    /// folder, marked so the panel's search field follows it.
+    pub fn apply_host_filter(
+        &mut self,
+        c: &Catalog,
+        r: &dyn MediaRuntime,
+        filter: crate::Filter,
+    ) -> Result<(), Error> {
+        for input in [Input::OpenFolder(None), Input::Filter(filter)] {
+            self.request(
+                c,
+                r,
+                Request {
+                    owner: c.stamp.clone(),
+                    action: Action::Input(input),
+                },
+            )?;
+        }
+        self.host_filter += 1;
+        Ok(())
+    }
     pub fn refresh(&mut self, catalog: &Catalog, runtime: &dyn MediaRuntime) -> Vec<crate::Effect> {
         let old_folder = self.panel.folder.clone();
         let document = (catalog.stamp.project.clone(), catalog.stamp.document);
@@ -83,6 +113,9 @@ impl ProjectBridge {
                 .map(|folder| DropTarget { folder }),
             external_drag: self.panel.file_drop_active(),
             composition_count: c.compositions.len(),
+            missing_only: self.panel.filter.missing_only,
+            query: self.panel.filter.query.clone(),
+            host_filter: self.host_filter,
         })
     }
     pub fn request(

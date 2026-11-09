@@ -39,8 +39,8 @@ use objc2_app_kit::{
     NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEventModifierFlags, NSEventType,
     NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy,
     NSVisualEffectMaterial, NSVisualEffectState, NSWindow as Objc2NSWindow,
-    NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWindowButton as Objc2NSWindowButton, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
@@ -122,7 +122,6 @@ unsafe fn objc_string(value: ObjcId) -> String {
 trait Objc2WindowMessages {
     unsafe fn setStyleMask_(self, value: NSWindowStyleMask);
     unsafe fn setFrame_display_(self, value: Objc2NSRect, display: Bool);
-    unsafe fn makeKeyAndOrderFront_(self, sender: ObjcId);
     unsafe fn makeFirstResponder_(self, responder: ObjcId) -> Bool;
     unsafe fn occlusionState(self) -> NSWindowOcclusionState;
     unsafe fn screen(self) -> ObjcId;
@@ -143,14 +142,12 @@ trait Objc2WindowMessages {
     unsafe fn addSubview_(self, view: ObjcId);
     unsafe fn setLevel_(self, level: NSInteger);
     unsafe fn setAcceptsMouseMovedEvents_(self, value: Bool);
-    unsafe fn setCollectionBehavior_(self, value: NSWindowCollectionBehavior);
     unsafe fn drain(self);
     unsafe fn setDelegate_(self, delegate: ObjcId);
     unsafe fn close(self);
     unsafe fn setContentSize_(self, value: NSSize);
     unsafe fn setContentMinSize_(self, value: NSSize);
     unsafe fn setMovable_(self, value: Bool);
-    unsafe fn orderFront_(self, sender: ObjcId);
     unsafe fn mouseLocationOutsideOfEventStream(self) -> Objc2NSPoint;
     unsafe fn requestUserAttention_(self, value: NSRequestUserAttentionType) -> NSInteger;
     unsafe fn isKeyWindow(self) -> Bool;
@@ -171,9 +168,6 @@ impl Objc2WindowMessages for ObjcId {
     }
     unsafe fn setFrame_display_(self, value: Objc2NSRect, display: Bool) {
         let _: () = msg_send![self, setFrame: value, display: display];
-    }
-    unsafe fn makeKeyAndOrderFront_(self, sender: ObjcId) {
-        let _: () = msg_send![self, makeKeyAndOrderFront: sender];
     }
     unsafe fn makeFirstResponder_(self, responder: ObjcId) -> Bool {
         msg_send![self, makeFirstResponder: responder]
@@ -221,9 +215,6 @@ impl Objc2WindowMessages for ObjcId {
     unsafe fn setAcceptsMouseMovedEvents_(self, value: Bool) {
         let _: () = msg_send![self, setAcceptsMouseMovedEvents: value];
     }
-    unsafe fn setCollectionBehavior_(self, value: NSWindowCollectionBehavior) {
-        let _: () = msg_send![self, setCollectionBehavior: value];
-    }
     unsafe fn drain(self) {
         let _: () = msg_send![self, drain];
     }
@@ -241,9 +232,6 @@ impl Objc2WindowMessages for ObjcId {
     }
     unsafe fn setMovable_(self, value: Bool) {
         let _: () = msg_send![self, setMovable: value];
-    }
-    unsafe fn orderFront_(self, sender: ObjcId) {
-        let _: () = msg_send![self, orderFront: sender];
     }
     unsafe fn mouseLocationOutsideOfEventStream(self) -> Objc2NSPoint {
         msg_send![self, mouseLocationOutsideOfEventStream]
@@ -295,10 +283,6 @@ const VIEW_HEIGHT_SIZABLE: NSUInteger = 1 << 4;
 // WindowLevel const value ref: https://docs.rs/core-graphics2/0.4.1/src/core_graphics2/window_level.rs.html
 #[allow(non_upper_case_globals)]
 const NSNormalWindowLevel: NSInteger = 0;
-#[allow(non_upper_case_globals)]
-const NSFloatingWindowLevel: NSInteger = 3;
-#[allow(non_upper_case_globals)]
-const NSPopUpWindowLevel: NSInteger = 101;
 #[allow(non_upper_case_globals)]
 const NSTrackingMouseEnteredAndExited: NSUInteger = 0x01;
 #[allow(non_upper_case_globals)]
@@ -824,7 +808,7 @@ unsafe fn apply_simple_fullscreen_plan(
         // Changing the style mask makes AppKit resign the window's key status and
         // first responder, so keyboard input stops reaching the editor. Re-make the
         // window key and restore the GPUI view as first responder.
-        native_window.makeKeyAndOrderFront_(NIL);
+        present(native_window, true);
         native_window.makeFirstResponder_(native_view);
     }
 }
@@ -1223,6 +1207,7 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
+            parent: requested_parent,
             ..
         }: WindowParams,
         cursor_visible: Arc<AtomicBool>,
@@ -1439,15 +1424,20 @@ impl MacWindow {
             let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let main_window: ObjcId = msg_send![app, mainWindow];
             let mut sheet_parent = None;
+            // Powermove P-SHEET/P-CHILD: the window that asked, if it named one.
+            let requested: ObjcId = match requested_parent {
+                Some(rwh::RawWindowHandle::AppKit(handle)) => {
+                    let view = handle.ns_view.as_ptr() as ObjcId;
+                    msg_send![view, window]
+                }
+                _ => NIL,
+            };
 
             match kind {
                 WindowKind::Normal | WindowKind::Floating => {
-                    if kind == WindowKind::Floating {
-                        // Let the window float keep above normal windows.
-                        native_window.setLevel_(NSFloatingWindowLevel);
-                    } else {
-                        native_window.setLevel_(NSNormalWindowLevel);
-                    }
+                    // Powermove P-CHILD: a floating window is a child window
+                    // (below), never at the global floating level.
+                    native_window.setLevel_(NSNormalWindowLevel);
                     native_window.setAcceptsMouseMovedEvents_(Bool::new(true));
 
                     if let Some(tabbing_identifier) = tabbing_identifier {
@@ -1475,17 +1465,18 @@ impl MacWindow {
                     let _: () =
                         msg_send![native_view, addTrackingArea: tracking_area.autorelease()];
 
-                    native_window.setLevel_(NSPopUpWindowLevel);
                     let _: () = msg_send![
                         native_window,
                         setAnimationBehavior: NSWindowAnimationBehaviorUtilityWindow
                     ];
-                    native_window.setCollectionBehavior_(
-                        NSWindowCollectionBehavior::CanJoinAllSpaces
-                            | NSWindowCollectionBehavior::FullScreenAuxiliary,
-                    );
                 }
                 WindowKind::Dialog => {
+                    // Powermove P-SHEET: the window that asked, else the main one.
+                    let main_window = if requested.is_null() {
+                        main_window
+                    } else {
+                        requested
+                    };
                     if !main_window.is_null() {
                         let parent = {
                             let active_sheet: ObjcId = msg_send![main_window, attachedSheet];
@@ -1499,6 +1490,28 @@ impl MacWindow {
                             msg_send![parent, beginSheet: native_window, completionHandler: NIL];
                         sheet_parent = Some(parent);
                     }
+                }
+            }
+            // Powermove P-CHILD: pop-ups and floating windows belong to their
+            // app: normal level, over the window that asked (else the main
+            // one) as its child, hidden while the app isn't active.
+            if matches!(
+                kind,
+                WindowKind::Floating | WindowKind::PopUp | WindowKind::AnchoredPopup(_)
+            ) {
+                let window = &*(native_window as *const objc2_app_kit::NSWindow);
+                let parent = if requested.is_null() {
+                    main_window
+                } else {
+                    requested
+                };
+                if !parent.is_null() && parent != native_window {
+                    crate::child_window::attach(
+                        window,
+                        &*(parent as *const objc2_app_kit::NSWindow),
+                    );
+                } else {
+                    crate::child_window::apply(window);
                 }
             }
 
@@ -1528,16 +1541,14 @@ impl MacWindow {
                         // Ensure the window is visible immediately after adding the tab, since the tab bar is updated with a new entry at this point.
                         // Note: Calling orderFront here can break fullscreen mode (makes fullscreen windows exit fullscreen), so only do this if the main window is not fullscreen.
                         if !main_window_is_fullscreen {
-                            let _: () = msg_send![native_window, orderFront: NIL];
+                            present(native_window, false);
                         }
                     }
                 }
             }
 
-            if focus && show {
-                native_window.makeKeyAndOrderFront_(NIL);
-            } else if show {
-                native_window.orderFront_(NIL);
+            if show {
+                present(native_window, focus);
             }
 
             // Set the initial position of the window to the specified origin.
@@ -1619,12 +1630,24 @@ impl MacWindow {
     }
 }
 
+/// Powermove P-CHILD: every way GPUI shows a window (open, activate,
+/// set_visible) goes through `child_window::present`: nothing an inactive app
+/// shows lands above other apps.
+unsafe fn present(native_window: ObjcId, key: bool) {
+    crate::child_window::present(
+        unsafe { &*(native_window as *const objc2_app_kit::NSWindow) },
+        key,
+    );
+}
+
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
+        // A child window queued to show on activation never shows once closed.
+        unsafe { crate::child_window::forget(&*(window as *const objc2_app_kit::NSWindow)) };
         this.frame_source.take();
         if let Some(link) = this.ca_display_link.take() {
             unsafe {
@@ -1714,7 +1737,7 @@ impl PlatformWindow for MacWindow {
             unsafe {
                 let native_window = context as ObjcId;
                 let _: () = msg_send![native_window, moveTabToNewWindow:NIL];
-                let _: () = msg_send![native_window, makeKeyAndOrderFront: NIL];
+                present(native_window, true);
             }
         }
 
@@ -1922,9 +1945,7 @@ impl PlatformWindow for MacWindow {
         executor
             .spawn(async move {
                 if !closed.load(Ordering::Acquire) {
-                    unsafe {
-                        let _: () = msg_send![window, makeKeyAndOrderFront: NIL];
-                    }
+                    unsafe { present(window, true) };
                 }
             })
             .detach();
@@ -2075,8 +2096,11 @@ impl PlatformWindow for MacWindow {
                 if !closed.load(Ordering::Acquire) {
                     unsafe {
                         if visible {
-                            let _: () = msg_send![window, orderFront: NIL];
+                            present(window, false);
                         } else {
+                            crate::child_window::forget(
+                                &*(window as *const objc2_app_kit::NSWindow),
+                            );
                             let _: () = msg_send![window, orderOut: NIL];
                         }
                     }
