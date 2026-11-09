@@ -1,8 +1,8 @@
 //! Linux test process only. Uses a real kernel actor with synthetic projects;
 //! worker blocking waits here are never used by the production bridge.
 use pm_kernel::{Caller, HistoryCall, KernelActor, KernelConfig, OpenSource};
+use pm_panel_media::v4::{ProjectBridge, Request};
 use pm_panel_media::{Availability, Catalog, MediaRuntime, RuntimeState, Stamp};
-use pm_project_panel_check::bridge::{ProjectBridge, Request};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,

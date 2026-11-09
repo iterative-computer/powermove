@@ -1,6 +1,7 @@
 use pm_kernel::DocumentStore;
+use pm_panel_media::v4::*;
 use pm_panel_media::*;
-use pm_project_panel_check::{accessibility, bridge::*};
+use pm_project_panel_check::accessibility;
 fn setup() -> (Catalog, ProjectBridge) {
     let root = pm_model::json::parse(r#"{"compId":"c","compName":"Main","w":640,"h":360,"dur":20,"fps":30,"assets":{"a":{"id":"a","name":"A.mov","kind":"video"}},"assetFolders":{"f":{"id":"f","name":"Shots"}},"layers":[],"comps":{}}"#).unwrap();
     let c = Catalog::new("P".into(), DocumentStore::new_untitled(root).snapshot()).unwrap();

@@ -1,7 +1,7 @@
 //! Worker presentation adapter. Native hosts provide font shaping and capsule
 //! measurement; Linux inspection uses an explicitly synthetic metric double.
-use crate::bridge::Projection;
 use pm_design::Tokens;
+use pm_panel_media::v4::Projection;
 use pm_panel_media::{
     Availability, Download, ItemId, RowData,
     render::{Badge, CardRecipe, Error, TextMetrics, middle_truncate},

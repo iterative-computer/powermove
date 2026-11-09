@@ -1,5 +1,3 @@
-//! Worker adapters shared by the native runtime and Linux contract tests.
+//! Reference renderer and accessibility projection for the Project panel's conformance tools.
 pub mod accessibility;
-pub mod bridge;
-
 pub mod render;

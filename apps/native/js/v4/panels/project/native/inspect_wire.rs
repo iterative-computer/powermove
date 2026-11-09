@@ -1,6 +1,6 @@
 //! Test-only inspection of the real validator and AccessKit projection.
 use pm_design::{Accessibility, Scheme, Tokens};
-use pm_project_panel_check::{accessibility, bridge};
+use pm_project_panel_check::accessibility;
 use pm_surface::{
     Surface,
     kit::{Layout, Panel, focus_order},
@@ -75,36 +75,38 @@ fn main() {
                         }
                     }
                 }
-                let cards =
-                    serde_json::from_value::<bridge::Projection>(envelope["projection"].clone())
-                        .ok()
-                        .map(|view| {
-                            pm_project_panel_check::render::prepare(
-                                &view,
-                                pm_project_panel_check::render::Grid {
-                                    width: 300.,
-                                    columns: 2,
-                                    row_height: 160.,
-                                },
-                                &Tokens::new(Scheme::Dark, Accessibility::default()),
-                                &SyntheticMetrics,
-                                disabled,
-                                &unknown_loading,
-                                &hovered,
-                            )
-                            .expect("synthetic media geometry")
-                        });
-                let enriched =
-                    serde_json::from_value::<bridge::Projection>(envelope["projection"].clone())
-                        .ok()
-                        .map(|view| {
-                            accessibility::ProjectAccessibility::prepare(
-                                &surface,
-                                &view,
-                                &Layout::new(),
-                                None,
-                            )
-                        });
+                let cards = serde_json::from_value::<pm_panel_media::v4::Projection>(
+                    envelope["projection"].clone(),
+                )
+                .ok()
+                .map(|view| {
+                    pm_project_panel_check::render::prepare(
+                        &view,
+                        pm_project_panel_check::render::Grid {
+                            width: 300.,
+                            columns: 2,
+                            row_height: 160.,
+                        },
+                        &Tokens::new(Scheme::Dark, Accessibility::default()),
+                        &SyntheticMetrics,
+                        disabled,
+                        &unknown_loading,
+                        &hovered,
+                    )
+                    .expect("synthetic media geometry")
+                });
+                let enriched = serde_json::from_value::<pm_panel_media::v4::Projection>(
+                    envelope["projection"].clone(),
+                )
+                .ok()
+                .map(|view| {
+                    accessibility::ProjectAccessibility::prepare(
+                        &surface,
+                        &view,
+                        &Layout::new(),
+                        None,
+                    )
+                });
                 let tree = enriched
                     .as_ref()
                     .map(|ax| &ax.tree)
