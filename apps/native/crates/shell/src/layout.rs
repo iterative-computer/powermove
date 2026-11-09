@@ -790,7 +790,12 @@ impl Layout {
             .find(id)
             .ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
         let mut next = self.clone();
-        next.docks[di].groups[gi].tabs.remove(ti);
+        let g = &mut next.docks[di].groups[gi];
+        g.tabs.remove(ti);
+        // The showing tab keeps showing when a tab before it closes.
+        if ti < g.active {
+            g.active -= 1;
+        }
         next.commit(self)
     }
     /// Shows a panel: activates its tab and reopens its dock, or adds it back to

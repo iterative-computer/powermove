@@ -41,7 +41,9 @@ pub struct Editor {
     maximized_panel: Option<String>,
     /// Tabs of panels whose owner went away for a moment (an extension
     /// reloading), and where they were: the panel returns there.
-    parked: HashMap<String, DropTarget>,
+    /// Parked panels: where each goes back, and the tab that was showing in
+    /// its stack if it wasn't that panel, which shows again when it returns.
+    parked: HashMap<String, (DropTarget, Option<String>)>,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -345,11 +347,22 @@ impl Editor {
                 return true;
             }
             ("panel", "show") => match self.parked.remove(rest) {
-                Some(place) if self.layout.find(rest).is_none() => {
+                // Coming back (an extension's panels re-register at launch) puts
+                // it in its place without taking the stack's showing tab.
+                Some((place, showing)) if self.layout.find(rest).is_none() => {
                     let mut next = self.layout.clone();
                     next.show_panel(rest)
                         .and_then(|_| next.move_panel_to(rest, place))
-                        .map(|_| self.layout = next)
+                        .map(|_| {
+                            if let Some((dock, group, tab)) = showing.and_then(|id| next.find(&id))
+                                && next
+                                    .find(rest)
+                                    .is_some_and(|(d, g, _)| (d, g) == (dock, group))
+                            {
+                                next.docks[dock].groups[group].active = tab;
+                            }
+                            self.layout = next
+                        })
                         .or_else(|_| self.layout.show_panel(rest))
                 }
                 _ => self.layout.show_panel(rest),
@@ -363,13 +376,15 @@ impl Editor {
                 Some((dock, group, index)) => {
                     // A tab alone in its stack takes the stack with it; it
                     // comes back as a stack in the same position.
-                    let alone = self.layout.docks[dock].groups[group].tabs.len() == 1;
+                    let stack = &self.layout.docks[dock].groups[group];
+                    let alone = stack.tabs.len() == 1;
+                    let showing = Some(stack.tabs[stack.active].clone()).filter(|t| t != rest);
                     let place = if alone {
                         DropTarget::Split { dock, group }
                     } else {
                         DropTarget::Tab { dock, group, index }
                     };
-                    self.parked.insert(rest.to_owned(), place);
+                    self.parked.insert(rest.to_owned(), (place, showing));
                     self.layout.close_panel(rest)
                 }
                 None => Ok(()),
@@ -1942,6 +1957,65 @@ mod keyboard_tests {
         }
     }
 
+    /// At launch an extension's panels park while its realm starts, then come
+    /// back: in their places, with the stack still showing what it showed.
+    #[::core::prelude::v1::test]
+    fn returning_extension_panels_keep_the_stack_showing_its_tab() {
+        crate::layout::set_contributed_panels(
+            77,
+            [
+                ("ext.pexels".to_owned(), "Pexels".to_owned()),
+                ("ext.voice".to_owned(), "Voiceover".to_owned()),
+            ],
+        );
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, cx| {
+                // Saved layout: both extension tabs ahead of Properties, which shows.
+                for id in ["ext.pexels", "ext.voice"] {
+                    assert!(v.shell_command(&format!("panel:show:{id}"), cx));
+                    assert!(v.shell_command(&format!("panel:group:{id}:inspector"), cx));
+                }
+                let (d, g, _) = v.layout.find("inspector").unwrap();
+                let tab = |v: &Editor, id: &str| v.layout.find(id).unwrap().2;
+                v.layout.docks[d].groups[g].active = tab(v, "inspector");
+                let showing = |v: &Editor| {
+                    let stack = &v.layout.docks[d].groups[g];
+                    stack.tabs[stack.active].clone()
+                };
+                assert_eq!(showing(v), "inspector");
+                for id in ["ext.pexels", "ext.voice"] {
+                    assert!(v.shell_command(&format!("panel:park:{id}"), cx));
+                    assert_eq!(showing(v), "inspector", "parking {id}");
+                }
+                for id in ["ext.voice", "ext.pexels"] {
+                    assert!(v.shell_command(&format!("panel:show:{id}"), cx));
+                    assert!(v.layout.find(id).is_some());
+                    assert_eq!(
+                        showing(v),
+                        "inspector",
+                        "{id} came back without taking the tab"
+                    );
+                }
+                // Asking for a panel still shows it.
+                assert!(v.shell_command("panel:show:ext.pexels", cx));
+                assert_eq!(showing(v), "ext.pexels");
+            })
+            .unwrap();
+        crate::layout::set_contributed_panels(77, []);
+    }
     #[::core::prelude::v1::test]
     fn panels_cycle_both_ways_and_skip_closed_panels() {
         let mut cx = app();
