@@ -41,6 +41,20 @@ impl Scene {
     /// Explicit instances replace the implicit identity placement of each object.
     pub fn expanded(&self) -> Result<Self, String> {
         let mut s = self.clone();
+        let mut displaced_triangles = 0usize;
+        for d in &self.displacements {
+            let mesh = s
+                .objects
+                .get_mut(d.object)
+                .ok_or("displacement source out of range")?;
+            d.validate(self.objects.len(), &mesh.mesh)?;
+            displaced_triangles += mesh.mesh.indices.len() * 4usize.pow(d.subdivision);
+            if displaced_triangles > 2_000_000 {
+                return Err("scene displacement exceeds two million triangles".into());
+            }
+            mesh.mesh = d.apply(&mesh.mesh);
+        }
+        s.displacements.clear();
         for t in &self.terrains {
             t.validate(self.materials.len())?;
         }
@@ -57,7 +71,8 @@ impl Scene {
                     .collect();
             }
             for scatter in &self.scatters {
-                s.instances.extend(scatter.generate(self));
+                let generated = scatter.generate(&s);
+                s.instances.extend(generated);
             }
             let mut layers = s
                 .layers
@@ -108,6 +123,7 @@ pub fn prepare(s: &Scene) -> Prepared {
     metadata.instances.clear();
     metadata.terrains.clear();
     metadata.scatters.clear();
+    metadata.displacements.clear();
     // The actual world is packed exactly once, after all placements.
     let world = std::mem::take(&mut metadata.world);
     let mut out = metadata.prepare();

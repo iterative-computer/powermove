@@ -117,3 +117,32 @@ it('roundtrips a world without adding a second generated sun', () => {
   expect(roundtrip.scene.extra_lights).toHaveLength(0);
   expect(compileSceneDescription(roundtrip).scene.lightCount).toBe(1);
 });
+import { displaceMesh } from './displacement';
+it('subdivides shared edges and displaces real geometry', () => {
+  const source = {
+    positions: [
+      { x: 0, y: 0, z: 0 },
+      { x: 1, y: 0, z: 0 },
+      { x: 0, y: 0, z: 1 },
+    ],
+    normals: Array.from({ length: 3 }, () => ({ x: 0, y: 1, z: 0 })),
+    uvs: [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+    ] as [number, number][],
+    indices: [[0, 2, 1]] as [number, number, number][],
+  };
+  const mesh = displaceMesh(source, {
+    object: 0,
+    width: 2,
+    height: 2,
+    values: [1, 1, 1, 1],
+    strength: 2,
+    subdivision: 2,
+  });
+  expect(mesh.indices).toHaveLength(16);
+  expect(mesh.positions).toHaveLength(15);
+  expect(mesh.positions.every((p) => p.y === 1)).toBe(true);
+  expect(mesh.normals.every((n) => n.y === 1)).toBe(true);
+});

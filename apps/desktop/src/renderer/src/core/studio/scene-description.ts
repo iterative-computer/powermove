@@ -92,7 +92,9 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
 export function viewFromDescription(document: StudioSceneDescription, aspect: number): StudioView {
   const s = document.scene, c = s.camera, o = document.camera_options;
   const position = new THREE.Vector3(...tuple(c.position)), target = new THREE.Vector3(...tuple(c.target));
-  const forward = target.clone().sub(position).normalize(), right = forward.clone().cross(new THREE.Vector3(...tuple(o.up))).normalize(), up = right.clone().cross(forward).normalize();
+  const forward=target.clone().sub(position).normalize(),right=forward.clone().cross(new THREE.Vector3(...tuple(o.up))).normalize();
+  if(right.lengthSq()<1e-12){if(Math.abs(forward.y)>.9999)right.set(1,0,0);else right.crossVectors(forward,Math.abs(forward.z)<.9?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0)).normalize();}
+  const up=right.clone().cross(forward).normalize();
   return {
     camera: { position: tuple(c.position), forward: forward.toArray() as [number, number, number], right: right.toArray() as [number, number, number], up: up.toArray() as [number, number, number], tanY: o.projection === 'orthographic' ? o.ortho_height / 2 : Math.tan(c.fov * Math.PI / 360), aspect, lensRadius: c.f_stop > 0 ? c.focal_mm / (200 * c.f_stop) : 0, focus: c.focus ? position.distanceTo(new THREE.Vector3(...tuple(c.focus))) : position.distanceTo(target), orthographic: o.projection === 'orthographic', near: o.near, far: o.far },
     exposure: s.exposure, backdrop: tuple(s.backdrop), backdropOpaque: document.environment_options.backdrop_opaque, shadowCatcher: s.shadow_catcher, shadows: document.environment_options.shadows, floorY: document.environment_options.floor_y,

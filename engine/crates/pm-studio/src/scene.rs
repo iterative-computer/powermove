@@ -117,6 +117,12 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// An orthonormal camera frame, including views straight up/down at a sky.
+    pub fn basis(&self)->(Vec3,Vec3,Vec3){
+        let forward=(self.target-self.position).normalize();let side=forward.cross(Vec3::Y);
+        let right=if side.length()<1e-6 {v3(1.,0.,0.)}else{side.normalize()};
+        (forward,right,right.cross(forward).normalize())
+    }
     pub fn lens(position: Vec3, target: Vec3, focal_mm: f32, f_stop: f32) -> Self {
         Camera { position, target, fov: 2.0 * (12.0f32 / focal_mm).atan().to_degrees(), f_stop, focus: None, focal_mm }
     }
@@ -138,6 +144,8 @@ pub struct Scene {
     pub scatters: Vec<crate::scatter::Scatter>,
     #[serde(default)]
     pub terrains: Vec<crate::terrain::Terrain>,
+    #[serde(default)]
+    pub displacements: Vec<crate::displacement::Displacement>,
     pub objects: Vec<Object>,
     pub materials: Vec<Material>,
     pub lights: Vec<Softbox>,
@@ -226,7 +234,7 @@ impl GpuLight {
 
 impl Scene {
     pub fn prepare(&self) -> Prepared {
-        if !self.terrains.is_empty() || !self.scatters.is_empty() {return self.expanded().expect("validated environment geometry").prepare();}
+        if !self.terrains.is_empty() || !self.scatters.is_empty() || !self.displacements.is_empty() {return self.expanded().expect("validated environment geometry").prepare();}
         if !self.instances.is_empty() {return crate::geometry::prepare(self);}
         let mut corners = Vec::new();
         let mut raw = Vec::new();
@@ -332,6 +340,7 @@ fn studio(target: Vec3) -> (Vec<Softbox>, (Vec3, Vec3)) {
 
 /// Scenes for Phase 0. `t` animates in [0, 1).
 pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
+    if let Some(scene)=crate::corpus::scene(name){return Some(scene);}
     let hex = FINISHES.iter().find(|(n, _)| *n == finish).map(|f| f.1).unwrap_or(FINISHES[0].1);
     let mut materials = vec![
         Material::anodized(hex),                       // 0 body
@@ -452,7 +461,7 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         let up = v3(0.0, 1.0, 0.0);
         lights.push(Softbox::for_highlight(target + v3(-30.0, 0.0, 20.0), up, camera.position, 600.0, 700.0, 380.0, Vec3::splat(3.0)));
     }
-    Some(Scene { instances:vec![], scatters:vec![], terrains:vec![], world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
+    Some(Scene { instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![], world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
 }
 
 /// An original abstract wallpaper for the display: soft ribbons of blue and
@@ -492,6 +501,10 @@ pub fn screen_wallpaper(w: u32, h: u32, t: f32) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sky_cameras_keep_an_orthonormal_frame_at_the_poles(){
+        for target in [Vec3::Y,-Vec3::Y,v3(1.,2.,3.)]{let c=Camera::lens(Vec3::ZERO,target,50.,0.);let(f,r,u)=c.basis();assert!((f.length()-1.).abs()<1e-6);assert!((r.length()-1.).abs()<1e-6);assert!((u.length()-1.).abs()<1e-6);assert!(f.dot(r).abs()<1e-6&&f.dot(u).abs()<1e-6&&r.dot(u).abs()<1e-6);}
+    }
     #[test]
     fn a_highlight_light_reflects_into_the_eye() {
         let point = v3(10.0, 0.0, -5.0);

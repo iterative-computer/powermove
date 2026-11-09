@@ -228,6 +228,21 @@ impl EnvironmentMap {
             .decode()
             .map_err(|e| e.to_string())?
             .to_rgb32f();
+        // Bound both the HDR pixels and their CDF on a 16 GB machine. The
+        // prepared packet also contains geometry and instance rows.
+        let scale = (2048. / image.width() as f32)
+            .min(1024. / image.height() as f32)
+            .min(1.);
+        let image = if scale < 1. {
+            image::imageops::resize(
+                &image,
+                (image.width() as f32 * scale).round().max(1.) as u32,
+                (image.height() as f32 * scale).round().max(1.) as u32,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            image
+        };
         let (width, height) = image.dimensions();
         let map = Self {
             width,
@@ -241,12 +256,12 @@ impl EnvironmentMap {
     pub fn validate(&self) -> Result<(), String> {
         if self.width == 0
             || self.height == 0
-            || self.width > 4096
-            || self.height > 2048
+            || self.width > 2048
+            || self.height > 1024
             || self.pixels.len() != self.width as usize * self.height as usize
         {
             return Err(
-                "environment map must contain width × height pixels, at most 4096 × 2048".into(),
+                "environment map must contain width × height pixels, at most 2048 × 1024".into(),
             );
         }
         if !self.rotation.is_finite()
@@ -540,6 +555,22 @@ mod tests {
         assert!(c.z > c.x, "Rayleigh sky must be blue: {c:?}");
     }
     #[test]
+    fn changing_sun_disc_size_keeps_integrated_power() {
+        let a = Sky {
+            sun_radius: 0.1,
+            ..Default::default()
+        }
+        .sun()
+        .unwrap();
+        let b = Sky {
+            sun_radius: 1.,
+            ..Default::default()
+        }
+        .sun()
+        .unwrap();
+        assert!((light_power(&a) / light_power(&b) - 1.).abs() < 1e-4);
+    }
+    #[test]
     fn map_pdf_integrates_to_one_including_poles() {
         let mut m = EnvironmentMap {
             width: 16,
@@ -618,8 +649,8 @@ pub fn validate_packed(data: &[[f32; 4]], light_count: usize) -> Result<(), Stri
             Ok(v as usize)
         }
     };
-    let w = integer(data[0][2], 4096)?;
-    let h = integer(data[0][3], 2048)?;
+    let w = integer(data[0][2], 2048)?;
+    let h = integer(data[0][3], 1024)?;
     if (w == 0) != (h == 0) {
         return Err("invalid environment dimensions".into());
     }
@@ -791,10 +822,18 @@ fn append_light_tree(data: &mut Vec<[f32; 4]>, lights: &[GpuLight], cdf: usize) 
 }
 
 /// True only for a validated optional trailer carrying nonzero extinction.
-pub fn packed_has_media(data:&[[f32;4]],lights:usize,instances:usize)->bool {
-    let base=lights*4+instances*9;
-    if data.len()<base+6 || data[base][0]!=735031. {return false;}
-    if data[base+2][3]>0.{return true;}
-    let offset=data[base+4][0] as usize;let count=data[base+4][1] as usize;
-    (0..count.min(32)).any(|i|data.get(base+offset+i*3+1).is_some_and(|v|v[3]>0.))
+pub fn packed_has_media(data: &[[f32; 4]], lights: usize, instances: usize) -> bool {
+    let base = lights * 4 + instances * 9;
+    if data.len() < base + 6 || data[base][0] != 735031. {
+        return false;
+    }
+    if data[base + 2][3] > 0. {
+        return true;
+    }
+    let offset = data[base + 4][0] as usize;
+    let count = data[base + 4][1] as usize;
+    (0..count.min(32)).any(|i| {
+        data.get(base + offset + i * 3 + 1)
+            .is_some_and(|v| v[3] > 0.)
+    })
 }

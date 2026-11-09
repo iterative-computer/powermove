@@ -85,6 +85,7 @@ pub struct Scatter {
     pub rotation: [f32; 2],
     pub min_height: f32,
     pub max_height: f32,
+    pub min_slope: f32,
     pub max_slope: f32,
     pub exclusions: Vec<Exclusion>,
 }
@@ -108,6 +109,7 @@ impl Default for Scatter {
             rotation: [0., 360.],
             min_height: -1e9,
             max_height: 1e9,
+            min_slope: 0.,
             max_slope: 60.,
             exclusions: vec![],
         }
@@ -127,6 +129,7 @@ impl Scatter {
             || self.scale[1] < self.scale[0]
             || self.max_height < self.min_height
             || !(0. ..=90.).contains(&self.max_slope)
+            || !(0. ..=self.max_slope).contains(&self.min_slope)
             || self.exclusions.iter().any(|e| {
                 !e.radius.is_finite()
                     || e.radius < 0.
@@ -189,12 +192,19 @@ impl Scatter {
             } else {
                 let x = self.center.x + (r[1] - 0.5) * self.size[0];
                 let z = self.center.z + (r[2] - 0.5) * self.size[1];
+                if terrain.is_some_and(|t| {
+                    (x - t.center.x).abs() > t.size[0] * 0.5
+                        || (z - t.center.z).abs() > t.size[1] * 0.5
+                }) {
+                    continue;
+                }
                 let (y, n) = terrain.map_or((self.center.y, Vec3::Y), |t| t.sample(x, z));
                 (v3(x, y, z), n)
             };
             if p.y < self.min_height
                 || p.y > self.max_height
                 || n.y.clamp(-1., 1.).acos().to_degrees() > self.max_slope
+                || n.y.clamp(-1., 1.).acos().to_degrees() < self.min_slope
                 || self.exclusions.iter().any(|e| {
                     let d = p - e.center;
                     d.x * d.x + d.z * d.z < e.radius * e.radius

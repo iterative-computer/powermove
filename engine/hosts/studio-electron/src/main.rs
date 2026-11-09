@@ -188,9 +188,7 @@ impl Host {
         let sdata = append(bytemuck::cast_slice(&p.sdata));
         let texture=self.screen.as_ref().map(|(w,h,layers,data)|json!({"width":w,"height":h,"layers":layers,"bytes":append(data)}));
         let camera = r.scene.camera;
-        let forward = (camera.target - camera.position).normalize();
-        let right = forward.cross(pm_studio::math::Vec3::Y).normalize();
-        let up = right.cross(forward);
+        let (forward,right,up)=camera.basis();
         let tan_y = (camera.fov.to_radians() * 0.5).tan();
         let (lo, hi) = r.bounds();
         let center = (lo + hi) * 0.5;
@@ -302,7 +300,7 @@ impl Host {
                 if lighting_or_materials_changed {
                 // Small material/light arrays can be rebuilt without touching meshes or BLAS.
                 let metadata = Scene {
-                    instances:vec![], scatters:vec![], terrains:vec![],
+                    instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![],
                     world: r.scene.world.clone(),
                     objects: vec![],
                     materials: r.scene.materials.clone(),

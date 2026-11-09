@@ -8,8 +8,10 @@
 pub mod bvh;
 pub mod environment;
 pub mod terrain;
+pub mod displacement;
 pub mod scatter;
 pub mod geometry;
+pub mod corpus;
 pub mod gpu;
 pub mod math;
 pub mod mesh;

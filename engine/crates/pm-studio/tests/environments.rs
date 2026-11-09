@@ -33,6 +33,7 @@ fn world_scene() -> Scene {
         instances: vec![],
         scatters: vec![],
         terrains: vec![],
+        displacements: vec![],
     }
 }
 fn center_mean(r: &mut Renderer) -> f32 {
@@ -90,6 +91,14 @@ fn white_furnace_and_absorbing_fog_match_energy() {
         (mean - (-0.4f32).exp()).abs() < 0.03,
         "Beer local box expected exp(-.4), got {mean}"
     );
+    s.world.volumes[0].shape = VolumeShape::Sphere;
+    r.set_scene(&s, &s.prepare());
+    r.trace(1024, 4, true, 1000000);
+    let mean = center_mean(&mut r);
+    assert!(
+        (mean - (-0.4f32).exp()).abs() < 0.03,
+        "Beer local sphere expected exp(-.4), got {mean}"
+    );
 }
 #[test]
 fn adaptive_stops_constant_pixels_and_resets() {
@@ -107,13 +116,22 @@ fn adaptive_stops_constant_pixels_and_resets() {
     assert!(r.sample_counts().iter().all(|n| *n == 4.));
 }
 #[test]
-fn shared_blas_instances_render_in_both_traversal_paths() {
+fn shared_blas_and_displacement_render_in_both_traversal_paths() {
     let mut r = Renderer::new(32, 32).expect("GPU");
     let mut s = world_scene();
     s.objects.push(Object {
         mesh: mesh::sphere(Vec3::ZERO, 0.5, 16, 32),
         material: 0,
     });
+    s.displacements = vec![pm_studio::displacement::Displacement {
+        object: 0,
+        width: 2,
+        height: 2,
+        values: vec![0., 1., 1., 0.],
+        strength: 0.15,
+        mid_level: 0.5,
+        subdivision: 1,
+    }];
     s.instances = vec![
         pm_studio::scatter::Instance {
             position: v3(-0.65, 0., 0.),
@@ -192,5 +210,28 @@ fn live_fog_retains_scattering_when_the_environment_is_hidden() {
     assert!(
         mean > 0.5,
         "hidden dome must retain visible fog scattering, got {mean}"
+    );
+}
+
+#[test]
+fn live_height_fog_matches_closed_form_optical_depth() {
+    let mut r = Renderer::new(32, 32).expect("GPU");
+    let mut s = world_scene();
+    s.camera.position = Vec3::ZERO;
+    s.camera.target = v3(0., 1., -1.);
+    s.camera.fov = 1.;
+    s.world.atmosphere.density = 0.1;
+    s.world.atmosphere.height_falloff = 0.5;
+    s.world.atmosphere.distance = 10.;
+    s.world.atmosphere.color = Vec3::ZERO;
+    r.set_scene(&s, &s.prepare());
+    r.live = true;
+    r.trace(4, 3, true, 1000000);
+    let rate = 0.5 / std::f32::consts::SQRT_2;
+    let expected = (-0.1 * (1. - (-rate * 10.).exp()) / rate).exp();
+    let got = center_mean(&mut r);
+    assert!(
+        (got - expected).abs() < 0.01,
+        "height fog expected {expected}, got {got}"
     );
 }

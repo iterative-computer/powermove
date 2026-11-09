@@ -94,8 +94,11 @@ impl ResidentScene {
             o.mesh.indices = b.indices.typed(binary)?;
         }
         validate(&scene)?;
+        let source_objects=scene.objects.len();
         scene=scene.expanded()?;
         validate(&scene)?;
+        let mut identities=identities;
+        if !identities.is_empty() && identities.len()==source_objects {for i in source_objects..scene.objects.len(){identities.push(Identity{layer:i.to_string(),part:format!("terrain-{i}")});}}
         let identities = if identities.is_empty() {
             (0..scene.objects.len())
                 .map(|i| Identity {
@@ -287,9 +290,7 @@ impl ResidentScene {
     pub fn pick(&self, x: f32, y: f32, width: u32, height: u32) -> Option<serde_json::Value> {
         let c = self.scene.camera;
         let eye = GVec3::new(c.position.x, c.position.y, c.position.z);
-        let f = (GVec3::new(c.target.x, c.target.y, c.target.z) - eye).normalize();
-        let right = f.cross(GVec3::Y).normalize();
-        let up = right.cross(f);
+        let (f,right,up)=c.basis();let f=GVec3::from(f.to_array());let right=GVec3::from(right.to_array());let up=GVec3::from(up.to_array());
         let ty = (c.fov.to_radians() * 0.5).tan();
         let d = (f + right * ((x + 0.5) / width as f32 * 2. - 1.) * ty * width as f32
             / height as f32
@@ -351,7 +352,7 @@ trait Metadata {
 impl Metadata for Scene {
     fn clone_without_objects(&self) -> Scene {
         Scene {
-            instances:vec![], scatters:vec![], terrains:vec![],
+            instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![],
             world: self.world.clone(),
             objects: vec![],
             materials: self.materials.clone(),

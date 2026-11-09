@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { displaceMesh } from './displacement';
 import type { StudioMesh, StudioSceneDescription, StudioVec3 } from '../scene3d/studio-backend';
 export type StudioInstance = {
   object: number;
@@ -33,6 +34,7 @@ export type StudioScatter = Partial<{
   rotation: [number, number];
   min_height: number;
   max_height: number;
+  min_slope: number;
   max_slope: number;
   exclusions: { center: StudioVec3; radius: number }[];
 }>;
@@ -193,6 +195,7 @@ export function generateScatter(input: StudioScatter, scene: StudioSceneDescript
     rotation: [0, 360] as [number, number],
     min_height: -1e9,
     max_height: 1e9,
+    min_slope: 0,
     max_slope: 60,
     exclusions: [] as NonNullable<StudioScatter['exclusions']>,
     ...input,
@@ -205,6 +208,9 @@ export function generateScatter(input: StudioScatter, scene: StudioSceneDescript
     s.objects.some((i) => !scene.objects[i]) ||
     s.density < 0 ||
     s.density > 1 ||
+    s.min_slope < 0 ||
+    s.max_slope > 90 ||
+    s.min_slope > s.max_slope ||
     s.scale[0] <= 0 ||
     s.scale[1] < s.scale[0] ||
     (s.terrain !== null && s.surface !== null)
@@ -254,10 +260,19 @@ export function generateScatter(input: StudioScatter, scene: StudioSceneDescript
       const x = s.center.x + (r[1]! - 0.5) * s.size[0],
         z = s.center.z + (r[2]! - 0.5) * s.size[1],
         sample = terrain ? sampleTerrain(terrain, x, z) : { height: s.center.y, normal: new THREE.Vector3(0, 1, 0) };
+      if (terrain) {
+        const settings = terrainSettings(terrain);
+        if (
+          Math.abs(x - settings.center.x) > settings.size[0] * 0.5 ||
+          Math.abs(z - settings.center.z) > settings.size[1] * 0.5
+        )
+          continue;
+      }
       p = new THREE.Vector3(x, sample.height, z);
       n = sample.normal;
     }
     if (
+      (Math.acos(clamp(n.y, -1, 1)) * 180) / Math.PI < s.min_slope ||
       p.y < s.min_height ||
       p.y > s.max_height ||
       (Math.acos(clamp(n.y, -1, 1)) * 180) / Math.PI > s.max_slope ||
@@ -276,7 +291,7 @@ export function generateScatter(input: StudioScatter, scene: StudioSceneDescript
 }
 export function expandEnvironmentGeometry(document: StudioSceneDescription): StudioSceneDescription {
   const source = document.scene;
-  if (!source.terrains?.length && !source.scatters?.length) return document;
+  if (!source.terrains?.length && !source.scatters?.length && !source.displacements?.length) return document;
   const objects = [...source.objects],
     layers = source.layers?.slice() ?? source.objects.map((_, i) => i),
     ids = [...document.object_ids],
@@ -284,8 +299,18 @@ export function expandEnvironmentGeometry(document: StudioSceneDescription): Stu
   const instances = source.instances?.length
     ? [...source.instances]
     : objects.map((_, object) => ({ object }) as StudioInstance);
+  let displacedTriangles = 0;
+  for (const displacement of source.displacements ?? []) {
+    const object = objects[displacement.object];
+    if (!object) throw new Error('Invalid displacement source');
+    displacedTriangles += object.mesh.indices.length * 4 ** (displacement.subdivision ?? 0);
+    if (displacedTriangles > 2000000) throw new Error('Scene displacement exceeds two million triangles');
+    if (ids[displacement.object]?.vertex_colors?.length && (displacement.subdivision ?? 0) > 0)
+      throw new Error('Bake vertex colors to a texture before subdividing displacement');
+    objects[displacement.object] = { ...object, mesh: displaceMesh(object.mesh, displacement) };
+  }
   for (const scatter of source.scatters ?? [])
-    for (const instance of generateScatter(scatter, source)) instances.push(instance);
+    for (const instance of generateScatter(scatter, { ...source, objects })) instances.push(instance);
   for (const terrain of source.terrains ?? [])
     for (const object of terrainMeshes(terrain)) {
       const index = objects.length,
@@ -301,6 +326,6 @@ export function expandEnvironmentGeometry(document: StudioSceneDescription): Stu
     ...document,
     object_ids: ids,
     layer_ids: layerIds,
-    scene: { ...source, objects, layers, instances, scatters: [], terrains: [] },
+    scene: { ...source, objects, layers, instances, scatters: [], terrains: [], displacements: [] },
   };
 }

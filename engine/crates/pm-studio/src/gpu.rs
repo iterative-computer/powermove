@@ -1,6 +1,5 @@
 //! The GPU side: one path-tracing pipeline, resolve, denoise and pack.
 
-use crate::math::Vec3;
 use crate::scene::{Prepared, Scene};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
@@ -570,9 +569,7 @@ impl Renderer {
     /// Camera, backdrop and environment only (no geometry upload).
     pub fn set_camera(&mut self, scene: &Scene) {
         let c = &scene.camera;
-        let fwd = (c.target - c.position).normalize();
-        let right = fwd.cross(Vec3::Y).normalize();
-        let up = right.cross(fwd).normalize();
+        let (fwd,right,up)=c.basis();
         let tan_y = (c.fov.to_radians() * 0.5).tan();
         let aspect = self.width as f32 / self.height as f32;
         let lens_radius = if c.f_stop > 0.0 { c.focal_mm / (2.0 * c.f_stop) } else { 0.0 };

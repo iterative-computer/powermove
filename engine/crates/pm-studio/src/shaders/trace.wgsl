@@ -283,6 +283,22 @@ fn medium_at(p:vec3f)->Medium {
   if(sigma<=0.){return Medium(0.,vec3f(0.),0.);}
   return Medium(sigma,albedo/sigma,g/sigma);
 }
+// At a real collision, select one overlapping medium by extinction. Carrying
+// its albedo and phase yields the exact sum of colored HG scattering kernels;
+// averaging HG anisotropy would change the shape of that mixture.
+fn sample_medium(p:vec3f)->Medium {
+  let combined=medium_at(p);if(combined.sigma<=0.){return combined;}
+  var choice=rnd()*combined.sigma;let fog=world_row(2u);let h=world_row(3u);
+  let global=fog.w*exp(-max(p.y-h.y,0.)*h.z);
+  if(choice<global){return Medium(combined.sigma,fog.xyz,h.x);}choice-=global;
+  let config=world_row(4u);
+  for(var i=0u;i<u32(config.y);i++){
+    let at=u32(config.x)+3u*i;let center=world_row(at);let size=world_row(at+1u);let color=world_row(at+2u);let q=p-center.xyz;
+    var inside=all(abs(q)<=size.xyz);if(center.w>0.5){inside=dot(q,q)<=size.x*size.x;}
+    if(inside){if(choice<size.w){return Medium(combined.sigma,color.xyz,color.w);}choice-=size.w;}
+  }
+  return combined;
+}
 fn medium_majorant()->f32 {
   if(!world_on()){return 0.;}
   var m=world_row(2u).w;let c=world_row(4u);
@@ -1012,14 +1028,22 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
 
 // The sun disc as seen along an escaping ray (no MIS: used where light
 // sampling cannot reach, such as mirror reflections).
-fn sun_seen(d: vec3f) -> vec3f {
-  var e = vec3f(0.0);
-  for (var i = 0u; i < P.counts.x; i++) {
-    let l = light_at(i);
-    if (light_kind(l) == 3u && dot(d, normalize(l.pos.xyz)) >= l.u.x) { e += l.radiance.xyz; }
-  }
+fn sun_contribution(i:u32,p:vec3f,d:vec3f,bsdf_pdf:f32)->vec3f {
+  let l=light_at(i);
+  if(light_kind(l)!=3u || dot(d,normalize(l.pos.xyz))<l.u.x){return vec3f(0.);}
+  var mis=1.;if(bsdf_pdf>0.){let pl=light_pdf(l,p,d,BIG)*light_selection_pdf(i,p);mis=bsdf_pdf*bsdf_pdf/(bsdf_pdf*bsdf_pdf+pl*pl);}
+  return l.radiance.xyz*mis;
+}
+fn sun_radiance(p:vec3f,d:vec3f,bsdf_pdf:f32)->vec3f {
+  var e=vec3f(0.);
+  if(!world_on() || world_row(4u).w<=0.){for(var i=0u;i<P.counts.x;i++){e+=sun_contribution(i,p,d,bsdf_pdf);}return e;}
+  let base=u32(world_row(4u).w);var stack:array<u32,32>;var size=1u;stack[0]=0u;
+  while(size>0u){size-=1u;let index=stack[size];if(world_row(base+3u*index+2u).y<=0.){continue;}
+    let a=world_row(base+3u*index);let b=world_row(base+3u*index+1u);
+    if(b.w<0.){e+=sun_contribution(u32(a.w),p,d,bsdf_pdf);}else{stack[size]=u32(a.w);stack[size+1u]=u32(b.w);size+=2u;}}
   return e;
 }
+fn sun_seen(d:vec3f)->vec3f {return sun_radiance(vec3f(0.),d,0.);}
 
 struct Sample { radiance: vec3f, bg: vec3f, normal: vec3f, depth: f32, void_hit: f32, emit: vec3f, object: u32 }
 
@@ -1084,7 +1108,7 @@ fn path(px: vec2f) -> Sample {
       }else{
         let event=medium_event(ro,rd,segment);
         if(event>=0.){
-          let point=ro+rd*event;let med=medium_at(point);tp*=med.albedo;
+          let point=ro+rd*event;let med=sample_medium(point);tp*=med.albedo;
           s.radiance+=tp*medium_direct(point,rd,med.g);
           // Phase-sampled direct emitters are not added again: NEE above handles
           // those, while following segments still carry indirect surface light.
@@ -1108,18 +1132,8 @@ fn path(px: vec2f) -> Sample {
         let pe=environment_pdf(rd);
         var mis=1.;if(last_pdf>0. && pe>0.){mis=last_pdf*last_pdf/(last_pdf*last_pdf+pe*pe);}
         if(chain!=3){s.radiance += tp * environment(rd) * ambient_response * mis;}
-        // The sun disc, weighted against light sampling.
-        for (var i = 0u; i < P.counts.x; i++) {
-          let l = light_at(i);
-          if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x && chain != 2 && chain != 3) {
-            var mis = 1.0;
-            if (last_pdf > 0.0) {
-              let pl = light_pdf(l, ro, rd, BIG) * light_selection_pdf(i,ro);
-              mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
-            }
-            s.radiance += tp * l.radiance.xyz * mis;
-          }
-        }
+        // The infinite-light branches avoid scanning every practical on misses.
+        if(chain!=2 && chain!=3){s.radiance+=tp*sun_radiance(ro,rd,last_pdf);}
       }
       return s;
     }

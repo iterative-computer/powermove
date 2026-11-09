@@ -22,7 +22,9 @@ Its fields (all optional, defaults below) are:
   sky background/dome lighting when both are provided; the sky's sun still
   contributes. `EnvironmentMap::load` decodes Radiance HDR/RGBE and OpenEXR.
   Decode files before sending evaluated scene data; no local file paths cross
-  the rendering boundary. Maximum 4096×2048. Visibility affects camera rays
+  the rendering boundary. Maximum 2048×1024; the Rust loader downsizes larger files to this
+  budget. Floats use linear sRGB/Rec.709 primaries; convert other EXR working
+  color spaces at import. Visibility affects camera rays
   only; reflections and illumination remain.
 - `atmosphere`: `{density:0, color:{x:0.9,y:0.9,z:0.9}, anisotropy:0,
   base_height:0, height_falloff:0, distance:10000}`. Extinction at point y is
@@ -108,7 +110,7 @@ overrides the prototype's layer for output masks. Positive scale only.
 
 Each scatter is `{objects:[0],seed:1,count:100,density:1,terrain:null,
 surface:null,center:{x:0,y:0,z:0},size:[100,100],scale:[0.8,1.2],
-rotation:[0,360],min_height:-1e9,max_height:1e9,max_slope:60,exclusions:[]}`.
+rotation:[0,360],min_height:-1e9,max_height:1e9,min_slope:0,max_slope:60,exclusions:[]}`.
 `objects` selects prototypes; `count` is the number of candidates (maximum
 one million), and density (0..1), height/slope and exclusion rejection can
 reduce the accepted count. The sequence remains stable when filtering changes.
@@ -161,3 +163,28 @@ the existing prepared-patch fallback. Camera edits preserve the native placement
 cache and temporal history; changing projection, lighting or output policy resets
 history. Browser diagnostics explicitly wait for queued GPU work before pixel
 readback. A lost browser device also discards its compiled pipeline cache.
+
+## Geometric displacement
+
+`Scene.displacements` defaults to `[]`. Each entry is
+`{object,width,height,values,strength,mid_level:0.5,subdivision:0}`. The target
+is a source object, not an individual placement. `values` is width×height
+normalized grayscale, first row at UV v=0. Clamped bilinear lookup offsets
+vertices along their source normals by `(height-mid_level)*strength`, in scene
+units. Subdivision levels 0..5 share edge midpoints; area-weighted shading
+normals are rebuilt after displacement. Limits: one million output triangles
+per displaced prototype and two million displaced triangles per scene.
+Displacement is real geometry, affecting silhouettes, shadows, picking, BLAS
+and both backends. Scatter on a mesh uses the displaced source surface.
+
+This is CPU preparation on source edits, not adaptive GPU microdisplacement.
+Use continuous height maps across UV seams. The browser adapter rejects
+subdivision of vertex-colored source data until those colors are baked to a
+texture; UV/normal attributes are interpolated, vertex-color extras are not.
+The landscape fixture displaces one shared rock prototype before scattering.
+
+Fog-heavy native Live scenes start at one third of output width/height (640×360
+tracing for 1920×1080 output), then use MetalFX or the portable temporal filter.
+This fixed initial budget avoids mid-drag target/scaler reallocations. The
+`STUDIO_LIVE_SCALE` diagnostic override still applies. Refine/Final trace the
+requested dimensions. Sky-only scenes keep the existing Live budget.

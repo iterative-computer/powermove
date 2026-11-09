@@ -226,8 +226,8 @@ export function packWorld(world: StudioWorld, lights: ArrayLike<number>): Float3
     map &&
     (map.width < 1 ||
       map.height < 1 ||
-      map.width > 4096 ||
-      map.height > 2048 ||
+      map.width > 2048 ||
+      map.height > 1024 ||
       map.pixels.length !== map.width * map.height)
   )
     throw new Error('Invalid environment map size');
