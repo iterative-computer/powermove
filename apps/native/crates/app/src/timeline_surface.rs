@@ -1828,9 +1828,30 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 letter_spacing: None,
             };
             let font_size = px(op.font_size as f32);
-            let line = window
-                .text_system()
-                .shape_line(text.clone().into(), font_size, &[run]);
+            let shape = |text: String, window: &mut Window| {
+                let run = TextRun {
+                    len: text.len(),
+                    ..run.clone()
+                };
+                window
+                    .text_system()
+                    .shape_line(text.into(), font_size, &[run])
+            };
+            let mut line = shape(text.clone(), window);
+            // A clip's name ends in an ellipsis inside the clip, as in every NLE,
+            // keeping the same padding on the right as on the left.
+            if op.detail["truncate"] == "tail" {
+                let room = px(
+                    (b.width - (t.metrics.inset - t.metrics.inner_radius) as f64).max(0.) as f32,
+                );
+                if line.width > room {
+                    let Some(fitted) = fit_tail(text, |s| shape(s.into(), window).width <= room)
+                    else {
+                        return;
+                    };
+                    line = shape(fitted, window);
+                }
+            }
             let height = font_size * t.typography.dense_leading;
             let y = b.y + (b.height - f32::from(height) as f64) / 2.;
             let _ = line.paint(
@@ -1854,6 +1875,22 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         ),
         None => draw(window, cx),
     }
+}
+/// The longest start of `text` that, with a trailing ellipsis, `fits`; none when
+/// not even one character does.
+pub(crate) fn fit_tail(text: &str, mut fits: impl FnMut(&str) -> bool) -> Option<String> {
+    let ends: Vec<usize> = text.char_indices().map(|(i, c)| i + c.len_utf8()).collect();
+    let candidate = |n: usize| format!("{}…", text[..ends[n - 1]].trim_end());
+    let (mut keep, mut over) = (0, ends.len());
+    while keep + 1 < over {
+        let mid = (keep + over) / 2;
+        if fits(&candidate(mid)) {
+            keep = mid;
+        } else {
+            over = mid;
+        }
+    }
+    (keep > 0).then(|| candidate(keep))
 }
 fn point_of(value: &serde_json::Value) -> Option<(f64, f64)> {
     Some((value.get(0)?.as_f64()?, value.get(1)?.as_f64()?))

@@ -1008,3 +1008,22 @@ fn clips_are_accessible_elements_that_a_press_selects(cx: &mut TestAppContext) {
         "a reused view keeps its accessible elements"
     );
 }
+
+#[::core::prelude::v1::test]
+fn a_long_clip_name_ends_in_an_ellipsis_that_fits() {
+    let fits = |room: usize| move |s: &str| s.chars().count() <= room;
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Interview A", fits(6)).as_deref(),
+        Some("Inter…")
+    );
+    // Trailing spaces never sit before the ellipsis.
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Interview A", fits(11)).as_deref(),
+        Some("Interview…")
+    );
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Ünïcödé", fits(3)).as_deref(),
+        Some("Ün…")
+    );
+    assert_eq!(crate::timeline_surface::fit_tail("Clip", fits(1)), None);
+}
