@@ -112,6 +112,9 @@ fn realize_op(op: &Op, open: Option<&str>) -> Option<Value> {
 
 /// What the realm last saw.
 struct Sent {
+    /// The publication itself: the realm's captures draw it (see
+    /// [`KernelAdapter::capture_publication`]).
+    published: Arc<Published>,
     document_id: u64,
     revision: u64,
     open: Option<String>,
@@ -194,9 +197,18 @@ impl KernelAdapter {
         adapter.pinned_storage = Some(storage);
         adapter
     }
-    /// The publication an export realm reads; `None` for a window's realm.
-    pub fn frozen_publication(&self) -> Option<Arc<Published>> {
-        self.frozen.clone()
+    /// An export's realm.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.is_some()
+    }
+    /// The project this realm holds: an export realm's frozen publication, a
+    /// window realm's last one received. Its captures draw this, so the
+    /// override answers they ask of the waiting realm are at its own revision
+    /// even when the kernel has moved on (`None`: nothing received yet).
+    pub fn capture_publication(&self) -> Option<Arc<Published>> {
+        self.frozen
+            .clone()
+            .or_else(|| self.sent.as_ref().map(|s| s.published.clone()))
     }
     fn published(&self) -> Result<Arc<Published>> {
         if let Some(frozen) = &self.frozen {
@@ -245,6 +257,7 @@ impl KernelAdapter {
         let publication = json!({"revision":p.revision(),"document":wire(&document),
             "selection":selection,"workspace":workspace(&p.workspace),"facts":Self::facts(&p)});
         self.sent = Some(Sent {
+            published: p.clone(),
             document_id: p.snapshot.doc_id,
             revision: p.revision(),
             open: p.snapshot.open_comp(),
@@ -289,6 +302,7 @@ impl KernelAdapter {
         text.push_str(&rest[1..]);
         drop(document);
         self.sent = Some(Sent {
+            published: p.clone(),
             document_id: p.snapshot.doc_id,
             revision: p.revision(),
             open: p.snapshot.open_comp(),
@@ -334,6 +348,7 @@ impl KernelAdapter {
             out["events"] = json!(events);
         }
         self.sent = Some(Sent {
+            published: p.clone(),
             document_id: p.snapshot.doc_id,
             revision: p.revision(),
             open: p.snapshot.open_comp(),

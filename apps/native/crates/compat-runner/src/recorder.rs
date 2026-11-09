@@ -406,7 +406,7 @@ impl NativeHost {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopped = stop.clone();
         *self.nested.lock().unwrap() = Some(tx.clone());
-        let published = self.kernel.lock().unwrap().frozen_publication();
+        let published = self.kernel.lock().unwrap().capture_publication();
         std::thread::Builder::new()
             .name("pm-compat-capture".into())
             .spawn(move || {
@@ -1647,7 +1647,7 @@ impl HostProxy for NativeHost {
         request: FetchRequest,
         cancel: Cancellation,
     ) -> Result<Box<dyn HostRequest>> {
-        if self.kernel.lock().unwrap().frozen_publication().is_some()
+        if self.kernel.lock().unwrap().is_frozen()
             && !matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD")
         {
             return Err(Error::Host(format!(

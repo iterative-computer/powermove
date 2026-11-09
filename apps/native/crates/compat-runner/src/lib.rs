@@ -150,8 +150,9 @@ pub struct FrameRequest<'a> {
     pub motion_blur: bool,
     /// True once the realm's task is stopped or past its host deadline.
     pub stop: &'a (dyn Fn() -> bool + Sync),
-    /// An export realm's frozen publication: the frame is of that project,
-    /// not the window's (`None`: the window's project now).
+    /// The project the asking realm holds (an export realm's frozen one, a
+    /// window realm's last received): the frame is of it, so the realm can
+    /// answer its overrides while it waits (`None`: the kernel's project now).
     pub published: Option<Arc<pm_kernel::Published>>,
 }
 /// A layer's base raster (`render.raster`, today's `PM.raster` before any

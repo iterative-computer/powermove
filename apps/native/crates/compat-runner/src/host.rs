@@ -3046,6 +3046,105 @@ mod tests {
         assert_eq!(*rendered.lock().unwrap(), vec![frozen.revision()]);
         cancel.store(true, Ordering::Release);
     }
+    /// A window realm's capture draws the publication the realm holds, so
+    /// an edit the kernel takes while the realm waits never leaves it asked
+    /// for a revision it cannot reach (it used to retry to the 60 s deadline,
+    /// frozen). The renderer stands in for the app's `frame_renderer` and
+    /// `JobOverrides`: the kernel's project when given none, a look's exact
+    /// ask while that is the kernel's current one, else the job route.
+    #[test]
+    fn a_window_capture_draws_the_realms_own_revision_when_an_edit_lands_meanwhile() {
+        type Wiring = Arc<Mutex<Option<(RasterInbox, Answers, KernelHandle)>>>;
+        let wiring: Wiring = Arc::default();
+        let rendered: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+        let (w, r) = (wiring.clone(), rendered.clone());
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let (inbox, answered, kernel) = w.lock().unwrap().clone().unwrap();
+            let before = kernel.published("window").unwrap();
+            // The person renames t1 while the realm waits for this frame.
+            let rename = pm_kernel::Call::Transact {
+                label: Some("Rename".into()),
+                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                    pm_kernel::LayerCommand::Set {
+                        layer_id: "t1".into(),
+                        patch: pm_kernel::commands::layers::LayerPatch {
+                            name: Some("Renamed meanwhile".into()),
+                            ..Default::default()
+                        },
+                    },
+                )]),
+                expected_revision: None,
+            };
+            kernel
+                .call_blocking("window", Request::new(pm_kernel::Caller::native(), rename))
+                .map_err(|e| e.to_string())?;
+            let published = frame
+                .published
+                .clone()
+                .or_else(|| kernel.published("window"))
+                .unwrap();
+            let now = kernel.published("window").unwrap();
+            r.lock()
+                .unwrap()
+                .push((published.revision(), before.revision()));
+            let comp = published.snapshot.render_comp();
+            let needs = json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}]);
+            let started = Instant::now();
+            for batch in 80.. {
+                if Arc::ptr_eq(&now, &published) {
+                    let ask = json!({"revision": published.revision(), "exact": true});
+                    inbox.ask(batch, needs.clone(), ask);
+                } else {
+                    inbox.export("capture-1", published.clone(), Arc::default())?;
+                    inbox.ask(batch, needs.clone(), json!({"job":"capture-1"}));
+                }
+                // A number is a drawn width; anything else is "ask again".
+                if answer_of(&answered, batch, Duration::from_secs(5)).is_number() {
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(3) {
+                    return Err("the waiting realm never reached the frame's revision".into());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0, 0, 255, 255])
+                .unwrap();
+            Ok(png)
+        });
+        let capturer = "export default function activate(){
+            globalThis.capture = () => { globalThis.PM.renderFrameTo(0, 1, 1) } }";
+        let (fixture, answered) = export_window(
+            &[("spy", SPY), ("capturer", capturer)],
+            "window",
+            Some(frames),
+        );
+        *wiring.lock().unwrap() = Some((
+            fixture.host.raster_inbox(),
+            answered.clone(),
+            fixture.kernel.clone(),
+        ));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        let started = Instant::now();
+        fixture.host.raster_inbox().ask(5, needs(&fixture), json!({"revision": live}));
+        // t1's override captured a frame of the realm's own project, its t1
+        // answered inline by the waiting realm, and then drew itself.
+        assert_eq!(answer_of(&answered, 5, Duration::from_secs(20)), json!(6));
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        let rendered = rendered.lock().unwrap().clone();
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].0, rendered[0].1, "the frame is the realm's revision");
+        assert!(
+            answered.lock().unwrap().iter().any(|(b, a)| *b >= 80 && *a == json!(6)),
+            "the capture's t1 was drawn by the waiting realm"
+        );
+    }
     #[test]
     fn an_extension_that_runs_in_the_window_but_not_for_the_export_fails_it_by_name() {
         let flaky = "export default function activate(api: any){
