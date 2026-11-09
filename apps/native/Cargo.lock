@@ -4715,9 +4715,6 @@ name = "pm-compat-host"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
- "gpui-ce",
- "gpui_ce_macos",
- "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-graphics",
@@ -4726,7 +4723,6 @@ dependencies = [
  "objc2-web-kit",
  "pm-remote-dom",
  "pm-store-host",
- "raw-window-handle",
  "serde",
  "serde_json",
  "url",

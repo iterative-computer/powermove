@@ -25,13 +25,10 @@ struct Inbox {
     feedback: mpsc::SyncSender<Value>,
 }
 impl SyncHandler for Inbox {
-    fn call(&self, _: &RequestContext, _: &str, _: Value) -> Result<Value> {
-        Err(Error::Forbidden)
-    }
     fn event(&self, event: HostEvent) {
         self.events.borrow_mut().push(event);
     }
-    fn remote_dom(&self, _: &RequestContext, payload: Value) -> Result<()> {
+    fn remote_dom(&self, payload: Value) -> Result<()> {
         self.feedback
             .try_send(payload)
             .map_err(|error| match error {
@@ -66,10 +63,8 @@ fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     host.attach(
         1,
         PanelSlot {
-            id: 1,
             bounds: rect,
             clip: rect,
-            reading_order: 0,
         },
     )?;
     host.present(rect)?;
@@ -138,7 +133,6 @@ fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 app.sendEvent(&event);
             }
             app.updateWindows();
-            host.tick();
             let events = std::mem::take(&mut *inbox.events.borrow_mut());
             for event in events {
                 match event {

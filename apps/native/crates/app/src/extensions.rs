@@ -6,7 +6,7 @@ use gpui::{prelude::*, *};
 use objc2::MainThreadMarker;
 use pm_compat_host::{
     DomPanelHost, Error as PageError, HostEvent, MacDomHost, PanelSlot, PanelSpec, Rect,
-    RequestContext, Result as PageResult, StoreDataStores, SyncHandler, Trust,
+    Result as PageResult, StoreDataStores, SyncHandler, Trust,
 };
 use pm_compat_runner::{
     host::{ExtensionHost, HostConfig},
@@ -68,14 +68,11 @@ struct PageEvents {
     wake: Rc<dyn Fn()>,
 }
 impl SyncHandler for PageEvents {
-    fn call(&self, _: &RequestContext, _: &str, _: Value) -> PageResult<Value> {
-        Err(PageError::Forbidden)
-    }
     fn event(&self, event: HostEvent) {
         self.events.borrow_mut().push(event);
         (self.wake)();
     }
-    fn remote_dom(&self, _: &RequestContext, payload: Value) -> PageResult<()> {
+    fn remote_dom(&self, payload: Value) -> PageResult<()> {
         match &*self.host.lock().unwrap() {
             Some(sender) if sender.send(payload).is_ok() => Ok(()),
             _ => Err(PageError::StaleGeneration),
@@ -447,7 +444,7 @@ impl Controller {
                 self.apply_contributions(&contributions, cx);
             }
         }
-        self.present_page(cx);
+        self.present_page();
     }
     /// The realm's questions for AppKit. Each answer returns through the inbox.
     fn extension_request(&mut self, request: Value, cx: &mut Context<Self>) {
@@ -1599,10 +1596,8 @@ impl Controller {
                 let _ = host.attach(
                     PAGE_PANEL,
                     PanelSlot {
-                        id: PAGE_PANEL,
                         bounds: viewport,
                         clip: viewport,
-                        reading_order: 1,
                     },
                 );
                 let _ = host.present(viewport);
@@ -1646,7 +1641,7 @@ impl Controller {
         });
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {
-                if this.update(cx, |v, cx| v.present_page(cx)).is_err() {
+                if this.update(cx, |v, _| v.present_page()).is_err() {
                     break;
                 }
             }
@@ -1729,7 +1724,7 @@ impl Controller {
             host.set_panel(id, false);
         }
     }
-    fn present_page(&mut self, cx: &mut Context<Self>) {
+    fn present_page(&mut self) {
         let Some(host) = &self.extensions.host else {
             return;
         };
@@ -1737,12 +1732,9 @@ impl Controller {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
                     HostEvent::Ready { .. } => page.ready = true,
-                    HostEvent::CompositionChanged => cx.notify(),
                     HostEvent::ProcessTerminated => page.ready = false,
-                    HostEvent::Recovered { .. } => page.ready = true,
                     HostEvent::Failure(code) => eprintln!("extension page: {code}"),
                     HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),
-                    _ => (),
                 }
             }
             if !page.ready {

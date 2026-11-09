@@ -21,13 +21,10 @@ mod mac {
     };
     struct Page(mpsc::Sender<Value>, RefCell<Vec<HostEvent>>);
     impl SyncHandler for Page {
-        fn call(&self, _: &RequestContext, _: &str, _: Value) -> Result<Value> {
-            Err(Error::Forbidden)
-        }
         fn event(&self, event: HostEvent) {
             self.1.borrow_mut().push(event);
         }
-        fn remote_dom(&self, _: &RequestContext, payload: Value) -> Result<()> {
+        fn remote_dom(&self, payload: Value) -> Result<()> {
             self.0.send(payload).map_err(|_| Error::StaleGeneration)
         }
     }
@@ -92,10 +89,8 @@ mod mac {
         web.attach(
             1,
             PanelSlot {
-                id: 1,
                 bounds: viewport,
                 clip: viewport,
-                reading_order: 0,
             },
         )?;
         web.present(viewport)?;
@@ -127,7 +122,6 @@ mod mac {
             ) {
                 app.sendEvent(&event);
             }
-            web.tick();
             for event in page.1.borrow_mut().drain(..) {
                 match event {
                     HostEvent::Ready { .. } => ready = true,
@@ -257,10 +251,8 @@ mod mac {
         web.attach(
             1,
             PanelSlot {
-                id: 1,
                 bounds: viewport,
                 clip: viewport,
-                reading_order: 0,
             },
         )?;
         web.present(viewport)?;
@@ -291,7 +283,6 @@ mod mac {
             ) {
                 app.sendEvent(&event);
             }
-            web.tick();
             for event in page.1.borrow_mut().drain(..) {
                 match event {
                     HostEvent::Ready { .. } => ready = true,
