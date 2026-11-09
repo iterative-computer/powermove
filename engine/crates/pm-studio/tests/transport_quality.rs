@@ -204,3 +204,53 @@ fn rough_white_dielectric_preserves_layer_energy() {
         "a white diffuse base must retain energy below its specular layer, got {actual}"
     );
 }
+
+#[test]
+fn photon_irradiance_is_unchanged_by_an_index_matched_sheet() {
+    let mut scene = receiver();
+    // The camera stays below the transparent sheet. IOR=1 cannot focus, tint,
+    // or reflect light: photon and direct estimators must give the same energy.
+    let mut sheet = scene.objects[0].mesh.clone();
+    for p in &mut sheet.positions {
+        p.y = 1.;
+    }
+    scene.materials.push(Material {
+        ior: 1.,
+        ..Material::glass(Vec3::splat(1.), 0.)
+    });
+    scene.objects.push(Object {
+        mesh: sheet,
+        material: 1,
+    });
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    for (height, slope) in [(0., 0.), (0.013, 0.), (0.032, 0.4), (-0.015, -0.7)] {
+        let mut tilted = scene.clone();
+        for object in &mut tilted.objects {
+            for p in &mut object.mesh.positions {
+                p.y += height + slope * p.x;
+            }
+            for n in &mut object.mesh.normals {
+                *n = v3(-slope, 1., 0.).normalize();
+            }
+        }
+        tilted.camera.position.y += height;
+        tilted.camera.target.y += height;
+        r.set_scene(&tilted, &tilted.prepare());
+        r.trace(256, 4, true, 1000000);
+        let pixels = r.linear_beauty();
+        let actual = (8..16)
+            .flat_map(|y| (8..16).map(move |x| (y * 24 + x) * 4))
+            .map(|i| pixels[i])
+            .sum::<f32>()
+            / 64.;
+        let expected = 0.7 / std::f32::consts::PI / (1f32 + slope * slope).sqrt();
+        eprintln!(
+            "index-matched photon sheet at {height}, slope {slope}: {actual}, target {expected}"
+        );
+        assert!(
+            (actual / expected - 1.).abs() < 0.08,
+            "photon surface energy: {actual} != {expected}"
+        );
+    }
+}

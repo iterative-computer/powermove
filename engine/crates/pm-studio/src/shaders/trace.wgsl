@@ -996,7 +996,7 @@ fn catcher_ratio(p: vec3f) -> f32 {
   }
   if (free <= 0.0) { return 1.0; }
   // Focused light on the studio floor brightens it past the backdrop.
-  if (P.caustic.z > 0.5 && P.opts.x == 0u) { lit += dot(caustic_at(p), vec3f(0.333)); }
+  if (P.caustic.z > 0.5 && P.opts.x == 0u) { lit += dot(caustic_at(p, vec3f(0.,1.,0.)), vec3f(0.333)); }
   return lit / free;
 }
 
@@ -1244,7 +1244,7 @@ fn path(px: vec2f) -> Sample {
       let n = vec3f(0.0, 1.0, 0.0);
       let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0), vec4f(1.0, 7.0, 0.0, 0.0), vec4f(-1.0, -1.0, -1.0, 1.0));
       s.radiance += tp * sample_lights(p + n * ray_epsilon(), n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
-      if (photons_on) { s.radiance += tp * P.env_horizon.w / PI * caustic_at(p); }
+      if (photons_on) { s.radiance += tp * P.env_horizon.w / PI * caustic_at(p, vec3f(0.,1.,0.)); }
       tp *= P.env_horizon.w;
       ro = p + n * ray_epsilon();
       rd = cosine_dir(n, rnd2());
@@ -1291,7 +1291,7 @@ fn path(px: vec2f) -> Sample {
     if (w.trans < 0.999) { s.radiance += tp * (sample_lights(p, n, v, m, w, false)+sample_environment(p,n,v,m,w)); }
     // Caustics: light focused onto this surface by glass or mirrors.
     if (photons_on && w.diff > 0.0) {
-      s.radiance += tp * m.base.xyz * (1.0 - m.base.w) * (1.0 - m.spec.w) / PI * caustic_at(sf.p);
+      s.radiance += tp * m.base.xyz * (1.0 - m.base.w) * (1.0 - m.spec.w) / PI * caustic_at(sf.p, n);
     }
     // Russian roulette after the third bounce.
     if (b >= 3u) {
@@ -1482,38 +1482,48 @@ fn deposit(p: vec3f, flux: vec3f) {
     let i = u32(s);
     add_f32(i, flux.x); add_f32(i + 1u, flux.y); add_f32(i + 2u, flux.z);
     atomicAdd(&grid[i + 4u], 1u);
+    let local = p / cell_size(level) - (vec3f(cell_of(p,level)) + 0.5);
+    add_f32(i + 5u, local.x); add_f32(i + 6u, local.y); add_f32(i + 7u, local.z);
   }
 }
-// Irradiance at `p` from one level: a tent filter over the 27 cells around
-// it. w: photons found.
-fn gather(p: vec3f, level: i32) -> vec4f {
+// Surface density uses a bilinear tent in the receiver's dominant-axis
+// projection. Each projected bin represents size² / |n_major| surface area.
+// Unlike a normalized 3D stencil, this partitions unity on a flat receiver:
+// translating the grid or tilting the surface cannot absorb photon energy.
+// The stored centroid rejects deposits on a nearby, separate parallel surface.
+fn gather(p: vec3f, n: vec3f, level: i32) -> vec4f {
   let size = cell_size(level);
   let c = cell_of(p, level);
+  let axis = select(select(2u, 1u, abs(n.y) > abs(n.z)), 0u, abs(n.x) > max(abs(n.y),abs(n.z)));
+  let major = max(abs(n[axis]), 1e-6);
   var sum = vec3f(0.0);
-  var wsum = 0.0;
   var count = 0.0;
   for (var z = -1; z <= 1; z++) { for (var y = -1; y <= 1; y++) { for (var x = -1; x <= 1; x++) {
-    let cc = c + vec3i(x, y, z);
-    let centre = (vec3f(cc) + 0.5) * size;
-    let w = max(0.0, 1.0 - length(centre - p) / (1.8 * size));
-    wsum += w;
-    if (w <= 0.0) { continue; }
-    let s = cell_slot(cc, level, false);
-    if (s < 0) { continue; }
-    let i = u32(s);
-    sum += w * vec3f(bitcast<f32>(atomicLoad(&grid[i])), bitcast<f32>(atomicLoad(&grid[i + 1u])), bitcast<f32>(atomicLoad(&grid[i + 2u])));
-    count += f32(atomicLoad(&grid[i + 4u]));
+    let cc = c + vec3i(x,y,z);
+    let centre = vec3f(cc) + 0.5;
+    var kernel = max(vec3f(0.), vec3f(1.) - abs(centre - p/size));
+    kernel[axis] = 1.;
+    let w = kernel.x * kernel.y * kernel.z;
+    if (w <= 0.) { continue; }
+    let slot = cell_slot(cc,level,false);
+    if (slot < 0) { continue; }
+    let i = u32(slot);
+    let photons = f32(atomicLoad(&grid[i+4u]));
+    if (photons <= 0.) { continue; }
+    let local = vec3f(bitcast<f32>(atomicLoad(&grid[i+5u])),bitcast<f32>(atomicLoad(&grid[i+6u])),bitcast<f32>(atomicLoad(&grid[i+7u]))) / photons;
+    if (abs(dot((centre + local)*size-p,n)) > 0.5*size) { continue; }
+    sum += w * vec3f(bitcast<f32>(atomicLoad(&grid[i])),bitcast<f32>(atomicLoad(&grid[i+1u])),bitcast<f32>(atomicLoad(&grid[i+2u])));
+    count += w * photons;
   } } }
-  // Flux per photon emitted, over the area one cell covers.
-  return vec4f(sum / max(wsum, 1e-6) / (P.caustic.y * size * size), count);
+  return vec4f(sum * major / (P.caustic.y * size * size), count);
 }
 // Caustic irradiance at `p`: the fine level where photons are dense enough
 // to be smooth, blending to the coarse level where they are sparse.
-fn caustic_at(p: vec3f) -> vec3f {
+fn caustic_at(p: vec3f, n: vec3f) -> vec3f {
   if (P.caustic.y <= 0.0) { return vec3f(0.0); }
-  let fine = gather(p, 0);
+  let fine = gather(p, n, 0);
   if (fine.w >= 96.0) { return fine.xyz; }
-  let coarse = gather(p, 1);
+  let coarse = gather(p, n, 1);
   if (coarse.w < 8.0) { return vec3f(0.0); }
   return mix(coarse.xyz, fine.xyz, fine.w / 96.0);
 }
@@ -1536,7 +1546,7 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
   if (kind == 0u) {
     ro = l.pos.xyz + l.u.xyz * (u.x * 2.0 - 1.0) + l.v.xyz * (u.y * 2.0 - 1.0);
     rd = cosine_dir(rect_normal(l), rnd2());
-    flux = l.radiance.xyz * abs(l.u.w) * PI;
+    flux = light_emit(l, ro, -rd) * abs(l.u.w) * PI;
   } else if (kind == 3u) {
     let dir = normalize(l.pos.xyz);
     let tb = basis(dir);
