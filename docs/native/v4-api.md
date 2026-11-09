@@ -325,8 +325,8 @@ instead of legacy live `api/get/edit` closures. Row label association uses conte
 Disclosure, Segmented and Menu have tested state/navigation behavior. Native
 field descriptors preserve typed values/options, precision, unit, bounds, mixed
 state and original binding identity. Pure tagged numeric arithmetic and colour
-math (sRGB/P3/HSV/HSL/OKLab/OKLCH, alpha and authored hex storage) are retained and
-covered by tagged-derived tests. Colour-space logic does not choose UI colours.
+math (sRGB/P3/HSV/HSL/OKLab/OKLCH, alpha and authored hex storage) are the frozen
+v1–3 control modules, re-exported unchanged, and covered by tagged-derived tests. Colour-space logic does not choose UI colours.
 
 These are semantic component ports and headless control state machines, **not a
 claim that every original picker UI/control interaction is rendered**. Native
@@ -339,20 +339,12 @@ surfaces, composition layout, and motion using `pm-design` and
 `docs/native/design/`. Current components are neutral semantic placeholders with
 no new visual defaults. All future visual output remains provisional until review.
 
-## Compiler aliases and development boot (rank 7)
+## Compiler and development boot (rank 7)
 
-`compilerAliases` and `compilerOptions` are public immutable exports. The compiler
-must apply exact module mappings before resolving imports:
-
-```ts
-{
-  "powermove/ui": "powermove-v4/ui",
-  "powermove/hooks": "powermove-v4/hooks",
-  "powermove/jsx-runtime": "powermove-v4/jsx-runtime",
-  "powermove/jsx-dev-runtime": "powermove-v4/jsx-dev-runtime"
-}
-// jsx: 'react-jsx', jsxImportSource: 'powermove-v4'
-```
+Extensions compile with the automatic JSX runtime and the `powermove` import
+source (`crates/runtime-v8/src/compiler.rs`), and import `powermove/ui`,
+`powermove/hooks`, `powermove/jsx-runtime` and the other published names, which
+link to the shipped runtime modules.
 
 Development host startup must happen in this order (separate module loading is
 intentional; a static extension import can run before the startup body):
