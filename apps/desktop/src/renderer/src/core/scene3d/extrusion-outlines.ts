@@ -12,15 +12,35 @@ import { readExtrusion } from './extrusion-data';
 
 export const geometryDivisions=(quality:string)=>quality==='draft'?4:quality==='high'?20:10;
 function commandContours(commands:any[],divisions:number):Point[][] {
-  const paths:THREE.Path[]=[];let current=new THREE.Path();
+  // Fixed samples per curve multiply with bevel rings. Inter's many short
+  // curves could exceed 500k vertices for an ordinary High-quality title.
+  // Subdivide by a layer-pixel error bound instead, retaining actual detail.
+  const tolerance=divisions>=20?.125:divisions>=10?.25:.75;
+  const paths:Point[][]=[];let current:Point[]=[],at:Point=[0,0];
+  const midpoint=(a:Point,b:Point):Point=>[(a[0]+b[0])/2,(a[1]+b[1])/2];
+  const distance=(p:Point,a:Point,b:Point)=>{
+    const dx=b[0]-a[0],dy=b[1]-a[1],length=dx*dx+dy*dy;
+    const t=length?Math.max(0,Math.min(1,((p[0]-a[0])*dx+(p[1]-a[1])*dy)/length)):0;
+    return Math.hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy);
+  };
+  const curve=(points:Point[],depth=0):void=>{
+    const a=points[0]!,b=points.at(-1)!;
+    if(depth>=12 || points.slice(1,-1).every(p=>distance(p,a,b)<=tolerance)){current.push(b);return;}
+    const left=[a],right=[b];let row=points;
+    while(row.length>1){row=row.slice(1).map((p,i)=>midpoint(row[i]!,p));left.push(row[0]!);right.unshift(row.at(-1)!);}
+    curve(left,depth+1);curve(right,depth+1);
+  };
   for(const c of commands){
-    if(c.type==='M'){current=new THREE.Path();paths.push(current);current.moveTo(c.x,c.y);}
-    else if(c.type==='L')current.lineTo(c.x,c.y);
-    else if(c.type==='Q')current.quadraticCurveTo(c.x1,c.y1,c.x,c.y);
-    else if(c.type==='C')current.bezierCurveTo(c.x1,c.y1,c.x2,c.y2,c.x,c.y);
-    else if(c.type==='Z')current.closePath();
+    if(c.type==='Z'){if(current.length)at=current[0]!;continue;}
+    const end:Point=[c.x,c.y];
+    if(![...end,c.x1 ?? 0,c.y1 ?? 0,c.x2 ?? 0,c.y2 ?? 0].every(Number.isFinite))throw new Error('Font outline contains non-finite coordinates');
+    if(c.type==='M'){current=[end];paths.push(current);}
+    else if(c.type==='L')current.push(end);
+    else if(c.type==='Q')curve([at,[c.x1,c.y1],end]);
+    else if(c.type==='C')curve([at,[c.x1,c.y1],[c.x2,c.y2],end]);
+    at=end;
   }
-  return paths.map(p=>p.getPoints(divisions).map(p=>[p.x,p.y] as Point));
+  return paths;
 }
 export function fontOutlines(font:Font,d:any,divisions=10):Outline[]{
   const size=Math.max(1,Number(d.size)||16),variation=Object.fromEntries(Object.entries<any>(d).filter(([k])=>/^fontAxis\..{4}$/.test(k)).map(([k,v])=>[k.slice(9),v]));

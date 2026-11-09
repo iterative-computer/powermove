@@ -2,6 +2,7 @@ import { channelValues } from './environment-data';
 import { environmentImage,environmentImageKey,terrainSettings,makeTerrain,syncEnvironmentGraph } from './environment-render';
 import { disposeStudioSplats } from '../studio/splat-raster';
 import { buildExtrusionGeometry } from './extrusion-geometry';
+import { reportLayerFailure } from './layer-diagnostic';
 import { EXTRUSION_SURFACES } from './extrusion-data';
 import type { ExtrusionMeshSample } from './extrusion-render';
 import { applyMaterialProperties } from './material-properties';
@@ -283,8 +284,15 @@ export class SceneRuntime {
     }
     let nativeVertices=0;
     for(const sample of extrusions){
-      this.syncExtrusion(sample);nativeVertices+=(this.objects.get(sample.id) as THREE.Mesh).geometry.getAttribute('position').count;
-      if(nativeVertices>500000)throw new Error('Native 3D artwork exceeds the 500,000 vertex composition budget; reduce geometry quality');
+      try {
+        this.syncExtrusion(sample);
+        const count=(this.objects.get(sample.id) as THREE.Mesh).geometry.getAttribute('position').count;
+        if(nativeVertices+count>500000)throw new Error('Native 3D artwork exceeds the 500,000 vertex composition budget; reduce geometry quality');
+        nativeVertices+=count;
+      } catch(error) {
+        const mesh=this.objects.get(sample.id);if(mesh)this.remove(sample.id,mesh);
+        reportLayerFailure(this,sample.id,'mesh preparation',error);
+      }
     }
     // Attach after every object exists, independently of document ordering.
     for (const node of data.objects) {

@@ -7,12 +7,14 @@ import type { MaterialPropertyValues } from './material-properties';
 import type { CompositionTextureFrame } from './composition-textures';
 import { world3D } from '../../legacy/core/space-3d';
 import { sizeAnchorOffset } from '../../legacy/core/size-anchor';
+import { reportLayerFailure } from './layer-diagnostic';
 export interface ExtrusionMeshSample extends ExtrusionOutlineSample {
   plane?:CompositionTextureFrame;id:string;name:string;matrix:THREE.Matrix4;opacity:number;surfaces:Partial<Record<ExtrusionSurface,{maps:MaterialMaps;values:Partial<MaterialPropertyValues>&{color?:string}}>>;
 }
 export function compositionExtrusions(PM:any,comp:any,time:number):ExtrusionMeshSample[]{
   const out:ExtrusionMeshSample[]=[],bridge=nativeSceneBridge(comp);
   for(const layer of comp.layers || [])if((isExtrudedLayer(layer) || isShared3DPlane(comp,layer)) && (PM.active?PM.active(layer,time):layer.on!==false)){
+    try {
     let sample= isExtrudedLayer(layer)?layerExtrusionOutlines(PM,layer,time):null;
     let plane:CompositionTextureFrame|undefined;
     if(isShared3DPlane(comp,layer)){
@@ -33,6 +35,7 @@ export function compositionExtrusions(PM:any,comp:any,time:number):ExtrusionMesh
     const matrix=bridge.clone().multiply(new THREE.Matrix4().fromArray(world3D(PM,layer,time)))
       .multiply(new THREE.Matrix4().makeTranslation(offset.x,offset.y,0)).multiply(new THREE.Matrix4().makeScale(1,-1,-1));
     out.push({...sample,plane,id:layer.id,name:layer.name,matrix,opacity:PM.worldOpacity?PM.worldOpacity(layer,time):1,surfaces});
+    } catch(error) { reportLayerFailure(PM,layer.id,'outline preparation',error); }
   }
   return out;
 }

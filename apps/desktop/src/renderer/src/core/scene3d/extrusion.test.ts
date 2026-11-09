@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { fontOutlines,shapeOutlines,layerExtrusionOutlines } from './extrusion-outlines';
 import { buildExtrusionGeometry,resolveContours } from './extrusion-geometry';
 import { EXTRUSION_DEFAULTS,isExtrudedLayer,parseExtrusion } from './extrusion-data';
-import { installExtrusionFont, requestExtrusionFont } from './extrusion-fonts';
+import { installExtrusionFont, requestExtrusionFont, prepareExtrusionFonts } from './extrusion-fonts';
 import { compositionRuntime,compositionDepthIds,disposeSceneRuntimes } from './service';
 import { makePM } from '../../legacy/__tests__/make-pm';
 import { makeScene3DAPI } from './api';
@@ -26,6 +26,19 @@ function editor(){
   return {PM,api};
 }
 describe('native text and shape extrusion',()=>{
+  it('keeps valid artwork when another layer has an unreadable font', async()=>{
+    const {PM,api}=editor(),log=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    vi.stubGlobal('queryLocalFonts',async()=>[]);
+    try {
+      api.setExtrusion('box',{enabled:true,depth:30});
+      PM.Edit.apply({type:'set_content',target:'title',patch:{font:'Missing font regression'}});
+      api.setExtrusion('title',{enabled:true,depth:40});
+      await expect(prepareExtrusionFonts(PM,PM.proj,0)).resolves.toBeUndefined();
+      const runtime=compositionRuntime(PM);
+      expect(runtime.objects.has('box')).toBe(true);expect(runtime.objects.has('title')).toBe(false);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('"title"'));
+    } finally {log.mockRestore();vi.unstubAllGlobals();disposeSceneRuntimes(PM);}
+  });
   it('keeps the 3D switch off when editing saved extrusion settings until Extrude is explicitly enabled',()=>{
     const {PM,api}=editor();
     expect(api.setExtrusion('title',{enabled:true,depth:40}).ok).toBe(true);

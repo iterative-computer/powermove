@@ -3,6 +3,7 @@ import { finishBlas, finishBlasInWorker, finishGeometryInWorker, WORKER_TRIANGLE
 import { partKeyOf, partsRoot } from '../scene3d/model-parts';
 import { gather, geometryPayload } from './gather';
 import { buildBvh } from './bvh';
+import { reportLayerFailure } from '../scene3d/layer-diagnostic';
 
 /*
  * Turns the three.js graph the scene runtime already maintains (primitives,
@@ -140,6 +141,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0) | (m.userData?.studioReflections===false?32:0), m.alphaTest ?? 0, 0,
       layer(m.roughnessMap), layer(m.metalnessMap), layer(m.aoMap), m.normalScale?.x ?? 1,
     ];
+    if(!values.every(v=>Number.isFinite(Math.fround(v))))throw new Error('Material contains non-finite values');
     const fingerprint=values.join(',');i=materialValues.get(fingerprint);
     if(i===undefined){i=materials.length/STUDIO_MATERIAL_FLOATS;materials.push(...values);materialValues.set(fingerprint,i);}
     materialIndex.set(key,i);return i;
@@ -151,6 +153,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean; color?:[number,number,number]; layerOverride?:number; primaryVisible:boolean }[] = [];
   let pending = 0, total = 0;
   for (const { mesh, id } of meshes) {
+    try {
     const g = mesh.geometry as THREE.BufferGeometry;
     const posAttr = g.getAttribute('position');
     if (!posAttr) continue;
@@ -210,12 +213,14 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     const instanced=mesh as THREE.InstancedMesh,count=instanced.isInstancedMesh?instanced.count:1;
     for(let instance=0;instance<count;instance++){
       const world=mesh.matrixWorld.clone();if(instanced.isInstancedMesh){const local=new THREE.Matrix4();instanced.getMatrixAt(instance,local);world.multiply(local);}
+      if(!world.elements.every(v=>Number.isFinite(Math.fround(v))) || Math.abs(world.determinant())<1e-20){reportLayerFailure(mesh,id,'instance preparation','Invalid or singular mesh transform');continue;}
       const color=instanced.isInstancedMesh && instanced.instanceColor?new THREE.Color().fromBufferAttribute(instanced.instanceColor,instance):null;
       const layerName=mesh.userData.studioInstanceLayerNames?.[instance];let layerOverride:number|undefined;
       if(layerName){layerOverride=objectIndex.get(layerName);if(layerOverride===undefined){layerOverride=objects.length;objects.push(layerName);objectIndex.set(layerName,layerOverride);}}
       instances.push({blas,world,part,layerOverride,primaryVisible:!background?.hiddenPrimary?.has(id) && mesh.userData.studioPrimaryVisible!==false,castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,...(color?{color:color.toArray() as [number,number,number]}:{})});
       bounds.union(blas.bounds.clone().applyMatrix4(world));
     }
+    } catch(error) { reportLayerFailure(mesh,id,'scene extraction',error); }
   }
   if (pending) return { pending, total };
   // Geometry in layout order (stable across frames while meshes do not change).

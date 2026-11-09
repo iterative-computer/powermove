@@ -31,7 +31,8 @@ vi.mock('electron', () => ({
     send: electronMocks.send,
     sendSync: electronMocks.sendSync
   },
-  webUtils: { getPathForFile: electronMocks.getPathForFile }
+  webUtils: { getPathForFile: electronMocks.getPathForFile },
+  sharedTexture: undefined
 }));
 
 await import('./index');

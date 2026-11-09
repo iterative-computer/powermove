@@ -213,6 +213,7 @@ describe('registerCodexIpc', () => {
       IPC.codexAnswer,
       IPC.codexCancel,
       IPC.codexCancelTask,
+      IPC.codexMessageTask,
       IPC.codexFixPrompt,
       IPC.codexRebasePrompt,
       IPC.codexUpdateFork,

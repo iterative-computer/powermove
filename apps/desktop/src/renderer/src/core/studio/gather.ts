@@ -42,9 +42,11 @@ export function gather(mesh: THREE.Mesh, g: THREE.BufferGeometry, mi: number[], 
       const c = t * 9, s = t * 24;
       for (let j = 0; j < 3; j++) {
         const v = index ? index.getX(k + j) : k + j;
+        if(!Number.isInteger(v) || v<0 || v>=posAttr.count)throw new Error('Mesh index is outside its vertex buffer');
         const deformed=(mesh as THREE.SkinnedMesh).isSkinnedMesh || mesh.morphTargetInfluences?.some(v=>v!==0);
         const point=deformed?mesh.getVertexPosition(v,new THREE.Vector3()):null;
         const x = point?.x ?? posAttr.getX(v), y = point?.y ?? posAttr.getY(v), z = point?.z ?? posAttr.getZ(v);
+        if(![x,y,z].every(v=>Number.isFinite(Math.fround(v))))throw new Error('Mesh contains non-finite positions');
         p[j * 3] = x; p[j * 3 + 1] = y; p[j * 3 + 2] = z;
         corners[c + j * 3] = x; corners[c + j * 3 + 1] = y; corners[c + j * 3 + 2] = z;
         if (x < lx) lx = x; if (y < ly) ly = y; if (z < lz) lz = z;
@@ -52,12 +54,14 @@ export function gather(mesh: THREE.Mesh, g: THREE.BufferGeometry, mi: number[], 
         if (nrm) {
           const posed=(mesh as THREE.SkinnedMesh).isSkinnedMesh || g.morphAttributes.normal?.length?posedNormal(mesh,g,v,nrm):null;
           const nx = posed?.x ?? nrm.getX(v), ny = posed?.y ?? nrm.getY(v), nz = posed?.z ?? nrm.getZ(v), l = Math.hypot(nx, ny, nz) || 1;
+          if(![nx,ny,nz].every(Number.isFinite))throw new Error('Mesh contains non-finite normals');
           shading[s + j * 4] = nx / l; shading[s + j * 4 + 1] = ny / l; shading[s + j * 4 + 2] = nz / l;
         }
         uv[j * 2] = uvA ? uvA.getX(v) : 0; uv[j * 2 + 1] = uvA ? uvA.getY(v) : 0;
+        if(![uv[j*2],uv[j*2+1]].every(v=>Number.isFinite(Math.fround(v!))))throw new Error('Mesh contains non-finite texture coordinates');
       }
       const ax = p[3]! - p[0]!, ay = p[4]! - p[1]!, az = p[5]! - p[2]!, bx = p[6]! - p[0]!, by = p[7]! - p[1]!, bz = p[8]! - p[2]!;
-      if (!nrm) {
+      if (!nrm || [0,1,2].some(j=>Math.hypot(...shading.subarray(s+j*4,s+j*4+3))<1e-8)) {
         // Faceted normals.
         const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx, l = Math.hypot(nx, ny, nz) || 1;
         for (let j = 0; j < 3; j++) { shading[s + j * 4] = nx / l; shading[s + j * 4 + 1] = ny / l; shading[s + j * 4 + 2] = nz / l; }

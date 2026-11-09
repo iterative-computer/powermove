@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildBvh } from './bvh';
 import { extractScene } from './extract';
 
@@ -38,6 +38,29 @@ describe('Studio BVH', () => {
 });
 
 describe('Studio scene extraction', () => {
+  it.each(['position', 'normal', 'uv', 'material', 'index'] as const)('isolates invalid %s data and logs a layer diagnostic', fault => {
+    const scene = new THREE.Scene();
+    const good = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()); good.userData.sceneId = 'good';
+    const bad = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()); bad.userData.sceneId = 'bad';
+    if (fault === 'material') bad.material.roughness = NaN;
+    else if (fault === 'index') bad.geometry.index!.setX(0, 100_000);
+    else bad.geometry.getAttribute(fault).setX(0, NaN);
+    scene.add(good, bad);
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const extracted = extractScene(scene, () => true, env);
+      expect(extracted.triangles).toBe(12);
+      expect(extracted.instanceCount).toBe(1);
+      expect([...extracted.positions, ...extracted.materials, ...extracted.sdata].every(Number.isFinite)).toBe(true);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('"bad"'));
+      extractScene(scene, () => true, env);
+      expect(log).toHaveBeenCalledTimes(1);
+      if (fault === 'material') bad.material.roughness = .5;
+      else if (fault === 'index') bad.geometry.index!.setX(0, 0);
+      else { bad.geometry.dispose(); bad.geometry = new THREE.BoxGeometry(); }
+      expect(extractScene(scene, () => true, env).triangles).toBe(24);
+    } finally { log.mockRestore(); good.geometry.dispose(); bad.geometry.dispose(); }
+  });
   it('bakes meshes to world space with their materials, maps and object ids', () => {
     const scene = new THREE.Scene();
     const box = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshStandardMaterial({ color: '#ff0000', metalness: 1, roughness: 0.25 }));

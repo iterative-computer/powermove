@@ -5,6 +5,7 @@ import { sourceTime } from '../../legacy/core/retiming';
 import { layerMaterialMaps } from './material-maps';
 import { materialCompositionSample } from './composition-textures';
 import { styleDescriptor } from '../../typography/font-catalog';
+import { reportLayerFailure } from './layer-diagnostic';
 
 // fontkit v2 accepts Uint8Array in browsers; its community types still say Buffer.
 const decode=create as unknown as (bytes:Uint8Array,name?:string)=>Font|import('fontkit').FontCollection;
@@ -71,10 +72,10 @@ export async function prepareExtrusionFonts(PM:any,project:any,time:number,seen=
     // A layer-as-material supplies its flat source artwork; it needs no mesh.
     if(!sourceLayerId && isExtrudedLayer(layer) && layer.type==='text'){
       const entry=requestExtrusionFont(PM,resolveContent(PM,layer,time));
-      pending.push(Promise.resolve(entry.pending).then(()=>{if(entry.error)throw new Error(entry.error);}));
+      pending.push(Promise.resolve(entry.pending).then(()=>{if(entry.error)reportLayerFailure(PM,layer.id,'font preparation',entry.error);}));
       for(const range of layer.d.styles || []){
         const d=resolveContent(PM,layer,time),style=Object.fromEntries(Object.entries<any>(range.p || {}).map(([key,prop])=>[key,PM.evP?.(layer,prop,time,`ts.${range.id}.${key}`) ?? prop.v]));
-        const styled=requestExtrusionFont(PM,{...d,...style});pending.push(Promise.resolve(styled.pending).then(()=>{if(styled.error)throw new Error(styled.error);}));
+        const styled=requestExtrusionFont(PM,{...d,...style});pending.push(Promise.resolve(styled.pending).then(()=>{if(styled.error)reportLayerFailure(PM,layer.id,'font preparation',styled.error);}));
       }
     }
     if(layer.type==='precomp'){

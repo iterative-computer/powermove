@@ -6,7 +6,10 @@ export type Point=[number,number];
 export interface Outline {outer:Point[];holes:Point[][];color?:string;opacity?:number}
 export interface OutlineBounds {x0:number;y0:number;x1:number;y1:number}
 const SCALE=1024;
-const intPath=(points:Point[])=>points.map(([X,Y])=>({X:Math.round(X*SCALE),Y:Math.round(Y*SCALE)}));
+const intPath=(points:Point[])=>points.map(([X,Y])=>{
+  if(!Number.isFinite(X+Y) || Math.max(Math.abs(X),Math.abs(Y))>1e9)throw new Error('Outline contains invalid coordinates');
+  return {X:Math.round(X*SCALE),Y:Math.round(Y*SCALE)};
+});
 const points=(path:ClipperLib.Path):Point[]=>path.map(p=>[p.X/SCALE,p.Y/SCALE]);
 /** Clipper resolves self intersections with the same nonzero rule as Canvas,
  * retaining compound holes rather than filling them with a guessed fan. */
@@ -54,6 +57,7 @@ export function buildExtrusionGeometry(outlines:Outline[],options:ExtrusionValue
   const steps=options.bevelStyle==='angular'?1:options.quality==='draft'?3:options.quality==='high'?12:6;
   const w=Math.max(1e-5,bounds.x1-bounds.x0),h=Math.max(1e-5,bounds.y1-bounds.y0);
   const vertex=(surface:number,p:number[],normal:number[],uv:number[],color:THREE.Color,defaultColor=true,opacity=1)=>{
+    if(![...p,...normal,...uv,color.r,color.g,color.b,opacity].every(Number.isFinite))throw new Error('Extrusion contains non-finite vertex data');
     if(++vertexCount>500000)throw new Error('Extrusion exceeds the 500,000 vertex geometry budget; reduce quality or text length');
     defaults[surface]!.push(defaultColor?1:0);positions[surface]!.push(...p);normals[surface]!.push(...normal);uvs[surface]!.push(...uv);colors[surface]!.push(color.r,color.g,color.b,opacity);
   };

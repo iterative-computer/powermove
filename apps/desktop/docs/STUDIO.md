@@ -90,6 +90,12 @@ pixels. Repeated geometry shares its BVH, including imported glTF instances;
 transform changes rebuild the small instance hierarchy rather than geometry.
 The maximum usable scene also depends on the GPU's buffer and memory limits.
 
+Extruded text samples font curves by their visible detail, including variable
+font instances. High-quality Inter titles no longer exhaust the artwork budget
+just because the font uses many short curves. An unreadable font, oversized
+extrusion or invalid mesh/material skips that layer and logs its layer ID;
+other layers keep rendering.
+
 ## Gaussian splats
 
 Captured scenes and products (3D Gaussian Splatting `.ply`, or `.splat`)
