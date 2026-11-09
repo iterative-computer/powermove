@@ -1717,16 +1717,19 @@ impl Render for TimelineSurface {
             .relative()
             .size_full()
             .cursor(self.cursor)
-            .role(Role::List)
+            .role(Role::ListBox)
             .aria_label("Timeline tracks")
-            // Each clip is an element VoiceOver and agents can find and press; a
-            // Press clicks its centre, the same path as the pointer.
+            // Each clip is a selectable option VoiceOver and agents can find and
+            // press (macOS: static text in a list, which AX walkers that skip
+            // groups still report); a Press clicks its centre, the same path as
+            // the pointer.
             .a11y_synthetic_children(move |children| {
+                children.parent_node().set_multiselectable();
                 let Some((origin, frame)) = shown.borrow_mut().take() else {
                     return;
                 };
                 for clip in frame.clip_nodes() {
-                    let mut node = gpui::accesskit::Node::new(Role::ListItem);
+                    let mut node = gpui::accesskit::Node::new(Role::ListBoxOption);
                     node.set_label(clip.label());
                     node.set_selected(clip.selected);
                     node.add_action(gpui::AccessibleAction::Click);
