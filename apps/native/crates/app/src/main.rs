@@ -53,6 +53,7 @@ mod ticket;
 mod timeline_surface;
 #[cfg(test)]
 mod timeline_tests;
+mod updates;
 mod v4_compile;
 mod v4_control;
 mod v4_native;
@@ -308,6 +309,9 @@ fn main() -> Result<()> {
                     .or_else(|| launch.take().map(entry::Pending::File));
                 entity.update(cx, |v, cx| v.initialize(opening, cx));
                 entry::register(&entity, window.window_handle(), cx);
+                if let Some(ns) = platform::ns_window(window) {
+                    updates::after_launch(profile.clone(), ns, cx);
+                }
                 perf_gate::install(&entity, cx);
                 Rc::new(session::Bridge(entity))
             }
