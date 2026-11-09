@@ -193,7 +193,7 @@ function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: stri
       retainCapture(capture,captureKey,frame,job.backend.id);
     }
     // One current frame for each layer/tier; release superseded transport buffers.
-    const prefix = `${request.layer}:${request.tier}:`;
+    const prefix = `${request.layer ?? ''}:${request.tier}:`;
     for (const [oldKey, old] of job.frames) if (oldKey.startsWith(prefix) && oldKey !== key) { old.release?.(); job.frames.delete(oldKey); }
     job.frames.set(key, frame); job.completedGeneration=generation; job.samples = Math.max(job.samples, request.tier === 'refine' ? frame.samples : 0); state(PM).backend=job.backend.id;state(PM).frameSamples=frame.samples;state(PM).frames++;
   };

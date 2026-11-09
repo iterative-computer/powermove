@@ -20,7 +20,7 @@ Main baseline: `d7e9f9205`. Studio source: local `new-3d-system` (`b81b94c66`).
 | glTF/GLB (including mesh instances), OBJ import | Yes | Imported hierarchy converted to triangle instances | Verified |
 | Embedded glTF animation/skinning | Yes, animation mixer at layer time | Evaluate deformed geometry before tracing | Kept |
 | glTF source material names/indexes, vertex colors and six standard texture slots | Yes | Material per geometry group, stable original index | Verified |
-| Extended glTF texture transforms, secondary UVs and physical-material maps | Yes through three.js GLTFLoader/physical materials | Standard color/normal/roughness/metalness/emissive/AO slots work; extra clearcoat/transmission/thickness/sheen/specular/iridescence/anisotropy maps and UV transforms are not yet sampled | Gap |
+| Extended glTF sampling, texture transforms and physical-material maps | Yes through three.js GLTFLoader/physical materials | Standard color/normal/roughness/metalness/emissive/AO slots work; extra clearcoat/transmission/thickness/sheen/specular/iridescence/anisotropy maps and UV transforms are not yet sampled | Gap |
 | Imported parts tree, picking and selection | Yes | Keep main part picking and transport stable part IDs | Verified |
 | Part position/rotation/scale/visibility offsets | Yes, sparse pt.KEY.FIELD channels | Evaluated part world matrices | Verified |
 | Parent/group transforms, anchors, opacity and solo | Yes | Main world matrices and compositor | Verified |
@@ -108,10 +108,10 @@ all of them already exist in Powermove.
 
 ## Verification
 
-The WebGPU baseline passed all 53 targeted 3D Electron checks in one serial
-run. The combined native integration also covers the main editor, source
-materials, masked compositing, camera projection, shutter samples and real
-shared-texture transfers; native film validation uses the same export path.
+The combined branch passes **55 3D Electron checks**: 53 non-film cases in
+one serial run, plus the two export films in a separate run. The extended film
+uses the corrected Final quality through nested shot compositions. The earlier
+WebGPU baseline also passed its complete 53-case matrix.
 
 Checklist totals: **59 verified**, **4 kept**, **0 pending**, **11 gaps**.
 
@@ -125,7 +125,7 @@ Checklist totals: **59 verified**, **4 kept**, **0 pending**, **11 gaps**.
   instancing: 38 Electron checks pass. `scene3d*.spec.ts`, `studio-parity`,
   `studio-camera`, `studio-compositing`, `studio-instances`.
 - Geometry/material extraction, document operations, migration, async backends
-  and final-frame preparation: 281 unit checks pass across 31 files, including
+  and final-frame preparation: 282 unit checks pass across 31 files, including
   native process/transport recovery.
 - Studio quality, deterministic Final, temporal Live, caustics and denoising:
   five Electron checks pass in `studio.spec.ts`.
@@ -136,6 +136,10 @@ Checklist totals: **59 verified**, **4 kept**, **0 pending**, **11 gaps**.
   regression check; shutter times reuse a backend session.
 - Rust: 22 library, host and GPU checks pass with OIDN and MetalFX enabled.
 - Type checking has zero errors; one existing IconCropper accessibility warning.
+- The native Electron harness confirms hardware ray tracing, Live
+  `sharedTexture`, empty-scene handling, GPU picks and native/WebGPU pixel
+  parity. Killing its host recovers through WebGPU in 47.5 ms in this run.
+- Desktop build and built-in version checks pass; staged secret scans pass.
 
 Viewer and export use the same Studio compositor. three.js remains for model
 loading, pose evaluation, geometry, picking and controls; it no longer draws

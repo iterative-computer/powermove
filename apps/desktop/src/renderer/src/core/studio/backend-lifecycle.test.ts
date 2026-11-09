@@ -63,4 +63,11 @@ describe('Studio backend lifecycle',()=>{
   studioLayer(PM,runtime,64,64,'model',new Set(['model','other']),true,runtime.camera);await studioIdle(PM);
   expect(dispose).toHaveBeenCalledOnce();
  });
+ it('releases old combined-layer frames used by legacy mesh extensions',async()=>{
+  const release=vi.fn();
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async()=>({source:document.createElement('canvas'),width:64,height:64,samples:64,version:'combined',release}),dispose:()=>{}} as unknown as StudioBackend));
+  const {PM,runtime}=fixture(),draw=(time:number)=>studioLayer(PM,runtime,64,64,'',new Set(['model']),true,runtime.camera,undefined,time);
+  draw(0);await studioIdle(PM);draw(0);await studioIdle(PM);draw(1);await studioIdle(PM);
+  expect(release).toHaveBeenCalledOnce();
+ });
 });
