@@ -1738,10 +1738,25 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
                             store.request(needs, spec.moment == policy::Moment::Playing);
                         }
+                        if let Some(recorder) = &recorder {
+                            recorder.record(serde_json::json!({
+                                "refused": e.to_string(),
+                                "time": spec.time.get(),
+                                "at": trace::now(),
+                            }));
+                        }
                         if let Some(r) = runtime.get_mut(&id) {
                             let now = trace::now();
                             r.refusals = r.refusals.saturating_add(1);
-                            r.not_before = now + drawable_retry(r.refusals - 1);
+                            // A playing frame retries at once each tick: a
+                            // backoff doubled up to 1 s held playback for a
+                            // second after a few refusals (a shader compiling).
+                            r.not_before = now
+                                + if spec.moment == policy::Moment::Playing {
+                                    RETRY_SECONDS
+                                } else {
+                                    drawable_retry(r.refusals - 1)
+                                };
                             // Retried for good, but never silently: past a few
                             // seconds the viewer says what it waits for.
                             let since = *r.waiting_since.get_or_insert(now);
