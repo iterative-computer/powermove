@@ -1228,6 +1228,13 @@ impl Builtins {
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.write({},{})", json!(handle), value))
     }
+    /// The layers a Properties row's binding handle in `panel` edits.
+    pub fn bound_layers(&self, panel: &str, handle: &str) -> Option<std::sync::Arc<[String]>> {
+        let entry = self.broker.entries.lock().unwrap().get(panel)?.clone();
+        let entry = entry.lock().unwrap();
+        let backend = entry.backend.lock().unwrap();
+        backend.native.properties.layers_of(handle)
+    }
     pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {
         std::mem::take(&mut *self.broker.platform.lock().unwrap())
     }

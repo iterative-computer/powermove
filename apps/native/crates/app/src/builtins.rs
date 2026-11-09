@@ -606,6 +606,11 @@ impl Controller {
             if id == "timeline" {
                 outline.bind(view.downgrade());
             }
+            if id == "inspector"
+                && let Some(layer) = self.extensions.focus_text.take()
+            {
+                view.update(cx, |v, cx| v.focus_text(layer, cx));
+            }
             self.builtins.views.insert(id.into(), view);
         }
         let view = self.builtins.views.get(id)?.clone();

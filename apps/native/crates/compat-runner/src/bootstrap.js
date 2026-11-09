@@ -894,11 +894,12 @@ globalThis.__compat = {
       refresh: () => this.panels?.refresh(PowermoveCompat.SECTIONS_PANEL),
       body: null,
       syncs: [],
-      // As main: select the layer and bring its text into view to type in.
+      // As main: select the layer, then its text field in Properties takes
+      // the keyboard with the text selected.
       focusText: (layer) => {
         if (!layer?.id) return;
         this.realm.PM.selectLayers([layer.id]);
-        call("ui.request", { kind: "panel", id: "inspector", open: true });
+        call("ui.request", { kind: "focusText", layer: String(layer.id) });
       },
       copySelectedEffects: notAttached("copySelectedEffects"),
       clearEffectClipboard: notAttached("clearEffectClipboard"),

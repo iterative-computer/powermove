@@ -635,3 +635,70 @@ fn status_nodes_announce_when_they_appear_or_change_never_on_open() {
         ["3 layers selected"]
     );
 }
+/// v1's `inspector.focusText(layer)`: asked while another text layer is
+/// still selected, Properties waits for the text row bound to that layer
+/// (never the other's), and gives up after a moment. The AppKit field's
+/// focus and selection need a real window (checked on screen).
+#[gpui::test]
+fn focus_text_waits_for_the_text_row_of_its_own_layer(cx: &mut TestAppContext) {
+    let text = |id: &str, text: &str| {
+        format!(
+            r##"{{"id":"{id}","type":"text","name":"{id}","from":0,"dur":2,"on":true,"p":{{"opacity":{{"v":100,"kf":[]}},"x":{{"v":10,"kf":[]}},"y":{{"v":20,"kf":[]}},"sx":{{"v":100,"kf":[]}},"sy":{{"v":100,"kf":[]}},"r":{{"v":0,"kf":[]}}}},"d":{{"text":"{text}"}},"fx":[]}},"##
+        )
+    };
+    let project = project_json(1).replace(
+        r#""layers":["#,
+        &format!(r#""layers":[{}{}"#, text("t1", "Hello"), text("t2", "Other")),
+    );
+    let rig = rig_project("inspector", &project);
+    let select = |id: &str| {
+        rig.kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::SelectionCall::Layers {
+                        ids: vec![id.into()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        for (_, ticket) in rig.runtime.publish() {
+            let ticket = ticket.unwrap();
+            while ticket.try_take().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+    select("t2");
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let row = |view: &Entity<SurfaceView>, vcx: &mut VisualTestContext| {
+        view.read_with(vcx, |v, _| v.focus_text_row())
+    };
+    view.update(&mut vcx, |v, cx| v.focus_text("t1".into(), cx));
+    assert_eq!(row(&view, &mut vcx), None, "t2's text row is not t1's");
+    select("t1");
+    let publish = |view: &Entity<SurfaceView>, vcx: &mut VisualTestContext| {
+        for p in rig.runtime.take_publications() {
+            view.update(vcx, |v, cx| v.publish(p, cx));
+        }
+    };
+    publish(&view, &mut vcx);
+    let check = view.clone();
+    settle(cx, move |cx| check.read_with(cx, |v, _| v.focus_text_row().is_some()));
+    // Asked and never shown: forgotten after a moment, not applied later.
+    select("l0");
+    publish(&view, &mut vcx);
+    view.update(&mut vcx, |v, cx| v.focus_text("t2".into(), cx));
+    std::thread::sleep(Duration::from_millis(2100));
+    select("t2");
+    publish(&view, &mut vcx);
+    vcx.run_until_parked();
+    settle(cx, |_| false_after(50));
+    assert_eq!(row(&view, &mut vcx), None);
+}

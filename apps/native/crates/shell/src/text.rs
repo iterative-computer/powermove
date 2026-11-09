@@ -105,6 +105,12 @@ impl TextField {
         self.slot.begin_editing();
         cx.notify();
     }
+    /// Focused with all its text selected, so typing replaces it.
+    pub fn begin_editing_selecting_all(&mut self, cx: &mut Context<Self>) {
+        self.slot.begin_editing();
+        self.slot.set_selection(0, usize::MAX);
+        cx.notify();
+    }
     pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
         self.slot.set_font_size(tokens.typography.body as f64);
         self.tokens = tokens;

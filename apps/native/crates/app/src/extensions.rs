@@ -213,6 +213,8 @@ pub struct Extensions {
     stage_sent: Option<Option<[i64; 8]>>,
     /// The viewer frame last told to the realm (its stamp's sequence).
     presented: Option<u64>,
+    /// `inspector.focusText`'s layer, for Properties once its view exists.
+    pub(crate) focus_text: Option<String>,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -259,6 +261,7 @@ impl Default for Extensions {
             stage_used: false,
             stage_sent: None,
             presented: None,
+            focus_text: None,
         }
     }
 }
@@ -472,6 +475,18 @@ impl Controller {
                 self.host
                     .borrow()
                     .send_command(&format!("panel:{verb}:{id}"), vec![]);
+            }
+            // v1's `inspector.focusText`: Properties shows, and the layer's
+            // text field takes the keyboard with its text selected.
+            Some("focusText") => {
+                let layer = request["layer"].as_str().unwrap_or_default().to_owned();
+                self.host
+                    .borrow()
+                    .send_command("panel:show:inspector", vec![]);
+                match self.builtins.views.get("inspector") {
+                    Some(view) => view.update(cx, |v, cx| v.focus_text(layer, cx)),
+                    None => self.extensions.focus_text = Some(layer),
+                }
             }
             Some("confirm") => {
                 let title = request["title"].as_str().unwrap_or_default();

@@ -140,6 +140,9 @@ pub struct SurfaceView {
     latest: u64,
     shown: u64,
     requested: Option<(usize, usize)>,
+    /// A text layer whose Properties text to focus once its row shows
+    /// (`inspector.focusText`), until the moment passes.
+    focus_text: Option<(String, std::time::Instant)>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -189,6 +192,7 @@ impl SurfaceView {
             latest: 0,
             shown: 0,
             requested: None,
+            focus_text: None,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -249,6 +253,7 @@ impl SurfaceView {
                         v.publication = publication;
                         v.prepared = Rc::new(prepared);
                         v.reconcile(window, cx);
+                        v.try_focus_text(cx);
                         cx.notify();
                     }
                 })
@@ -718,6 +723,39 @@ impl SurfaceView {
             scroll.scroll_to_top_of_item(index);
             cx.notify();
         }
+    }
+    /// v1's `inspector.focusText(layer)`: the layer's text field focused
+    /// with its text selected, so typing replaces it. The selection reaches
+    /// this panel a moment after it is asked for, so this waits (two seconds
+    /// at most) for the text row bound to exactly that layer, never another's.
+    pub fn focus_text(&mut self, layer: String, cx: &mut Context<Self>) {
+        self.focus_text = Some((layer, std::time::Instant::now()));
+        self.try_focus_text(cx);
+    }
+    fn try_focus_text(&mut self, cx: &mut Context<Self>) {
+        if self
+            .focus_text
+            .as_ref()
+            .is_some_and(|(_, asked)| asked.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.focus_text = None;
+        }
+        let Some(field) = self.focus_text_row().and_then(|id| self.fields.get(&id).cloned())
+        else {
+            return;
+        };
+        self.focus_text = None;
+        field.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
+    }
+    /// The Properties text row bound to exactly the layer `focus_text` asked for.
+    pub(crate) fn focus_text_row(&self) -> Option<Id> {
+        let (layer, _) = self.focus_text.as_ref()?;
+        let id = *self.prepared.semantics.get("value:content.text")?;
+        let binding = self.prepared.node(id)?.binding.clone()?;
+        let bound = self
+            .runtime
+            .bound_layers(&self.publication.panel, &binding)?;
+        (*bound == [layer.clone()]).then_some(id)
     }
     pub fn focus_semantic(&self, semantic: &str, window: &mut Window, cx: &mut App) {
         if let Some(id) = self.prepared.semantics.get(semantic) {
