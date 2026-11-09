@@ -6,7 +6,8 @@ import { expect, repoRoot, test } from './helpers/app';
 
 /** An original, editable Studio showcase. Opt in so ordinary test runs never
  * start a long GPU job. Outputs always live outside the repository.
- * PM_SHOWCASE=stills|benchmark|mp4|prores; PM_SHOWCASE_ONLY=name filters stills.
+ * PM_SHOWCASE=stills|benchmark|mp4|prores; PM_SHOWCASE_ONLY=regex filters stills.
+ * PM_SHOWCASE_STILL_MBLUR=1 checks the same two shutter samples as the film.
  * Run with --global-timeout=7200000 for a full-resolution export. */
 test('authors and exports the original Studio showcase', async ({ session }) => {
   test.skip(!process.env.PM_SHOWCASE, 'Opt-in showcase render');
@@ -418,6 +419,17 @@ test('authors and exports the original Studio showcase', async ({ session }) => 
     });
     PM.hist.clear();
   });
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.Edit.mutate('Balance the world-shot render budget', () => {
+      for (const comp of Object.values<any>(PM.proj.comps)) if (/^0[78][ab] —/.test(comp.name)) {
+        const camera = comp.layers.find((l: any) => l.d?.data?.camera);
+        if (camera) camera.d.data.environment.samples = 8;
+      }
+      PM.touch();
+    });
+    PM.hist.clear();
+  });
   shots = await page.evaluate(shots => {
     const PM = (window as any).PM;
     return shots.map(s => ({ ...s, samples: PM.proj.comps[s.id]?.layers.find((l: any) => l.d?.data?.camera)?.d.data.environment.samples || 0 }));
@@ -430,24 +442,24 @@ test('authors and exports the original Studio showcase', async ({ session }) => 
   expect(await page.evaluate(() => (window as any).PM.Export.run({ format: 'json', reportPath: true }))).toMatchObject({ cancelled: false });
   const timings: any[] = [];
   if (mode === 'stills') {
-    for (const s of shots.filter(s => !process.env.PM_SHOWCASE_ONLY || s.name.includes(process.env.PM_SHOWCASE_ONLY))) {
+    for (const s of shots.filter(s => !process.env.PM_SHOWCASE_ONLY || new RegExp(process.env.PM_SHOWCASE_ONLY, 'i').test(s.name))) {
       for (const fraction of [.2, .72]) {
         const t = s.from + s.dur * fraction, started = Date.now();
-        const f = await page.evaluate(async ({ t, isCard }) => {
+        const f = await page.evaluate(async ({ t, mblur }) => {
           const PM = (window as any).PM; PM.agentFrameCapture = true;
           try {
             PM.Studio?.setDenoise(true); PM.Studio?.setPreview('fast');
             PM.setTime(t, { force: true });
-            try { await PM.prepareFrame(t, { width: 960, height: 540, mblur: false }); }
+            try { await PM.prepareFrame(t, { width: 960, height: 540, mblur, mbSamples: 2 }); }
             catch (error: any) { throw new Error(JSON.stringify(error.issues || { message:error.message,stack:error.stack })); }
-            const c = PM.renderFrameTo(t, 960, 540, { mblur: false });
+            const c = PM.renderFrameTo(t, 960, 540, { mblur, mbSamples: 2 });
             const status = PM.Studio.status();
             const px = c.getContext('2d').getImageData(0, 0, 960, 540).data;
             let varied = 0;
             for (let i = 0; i < px.length; i += 4) if (Math.abs(px[i] - px[0]) + Math.abs(px[i + 1] - px[1]) + Math.abs(px[i + 2] - px[2]) > 24) varied++;
             return { png: c.toDataURL('image/png'), status, varied, project: { name: PM.proj.name, layers: PM.proj.layers.length, active: PM.proj.layers.filter((l: any) => PM.active(l, t)).map((l: any) => ({ name: l.name, type: l.type, sub: PM.compOf(l)?.name })) } };
           } finally { PM.agentFrameCapture = false; }
-        }, { t, isCard: s.from >= 45 });
+        }, { t, mblur: !!process.env.PM_SHOWCASE_STILL_MBLUR });
         const file = `${s.name.replace(/[^a-zA-Z0-9]+/g, '-')}-${fraction}.png`;
         await writeFile(path.join(folder, 'stills', file), Buffer.from(f.png.split(',')[1], 'base64'));
         await writeFile(path.join(folder, 'capture-diagnostics.json'), JSON.stringify(session.diagnostics, null, 2));

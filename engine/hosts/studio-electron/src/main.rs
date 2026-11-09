@@ -912,9 +912,11 @@ mod tests {
     fn final_shutter_subsamples_keep_requested_denoising() {
         let mut host = Host::new();
         host.handle(Command::Preset { name: "chrome".into(), finish: blue(), time: 0. }, &[]).unwrap();
-        let command = serde_json::from_value(json!({"op":"render","width":64,"height":64,"tier":"final","samples":8,"reset":true,"denoise":true})).unwrap();
-        let (result, pixels) = host.handle(command, &[]).unwrap();
-        assert_eq!(result["denoiser"], "oidn");
-        assert_eq!(pixels.len(), 64 * 64 * 4);
+        for samples in [4, 8] {
+            let command = serde_json::from_value(json!({"op":"render","width":64,"height":64,"tier":"final","samples":samples,"reset":true,"denoise":true})).unwrap();
+            let (result, pixels) = host.handle(command, &[]).unwrap();
+            assert_eq!(result["denoiser"], "oidn");
+            assert_eq!(pixels.len(), 64 * 64 * 4);
+        }
     }
 }
