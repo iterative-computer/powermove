@@ -800,11 +800,8 @@ impl Layout {
     }
     /// Shows a panel: activates its tab and reopens its dock, or adds it back to
     /// the dock it occupies in this workspace's preset (else the right dock).
-    pub fn show_panel(&mut self, id: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            PANELS.contains(&id) || contributed_title(id).is_some(),
-            "Unknown panel"
-        );
+    pub fn show_panel(&mut self, id: &str, panels: &Panels) -> anyhow::Result<()> {
+        anyhow::ensure!(panels.contains(id), "Unknown panel");
         if let Some((di, gi, ti)) = self.find(id) {
             self.docks[di].groups[gi].active = ti;
             self.docks[di].collapsed = false;
@@ -1078,72 +1075,39 @@ pub fn empty_state(
         _ => ("Nothing Here", "This panel has nothing to show yet.", None),
     }
 }
-/// One window's contributed panels: id and interned title.
-type Contributed = Vec<(String, &'static str)>;
-thread_local! {
-    /// Panels contributed at runtime, per window: id and interned title, in menu
-    /// order. Layout has no window at hand, so it reads the union; each window's
-    /// extension host replaces its own list and no one else's.
-    static CONTRIBUTED: std::cell::RefCell<Vec<(u64, Contributed)>> = const { std::cell::RefCell::new(vec![]) };
+/// The panels one window offers: the built-ins, then what its extensions
+/// contribute (id, title), in Window ▸ Panels order. A contributed panel
+/// docks, tabs and persists like a built-in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Panels {
+    contributed: Vec<(String, String)>,
 }
-/// Replaces what `window` contributes. Layout, menus and palette read these like
-/// built-ins, so a contributed panel docks, tabs and persists the same way.
-pub fn set_contributed_panels(window: u64, panels: impl IntoIterator<Item = (String, String)>) {
-    CONTRIBUTED.with(|list| {
-        let mut list = list.borrow_mut();
-        let intern = |list: &[(u64, Contributed)], title: String| {
-            list.iter()
-                .flat_map(|(_, panels)| panels)
-                .find(|(_, t)| **t == *title)
-                .map(|(_, t)| *t)
-                .unwrap_or_else(|| Box::leak(title.into_boxed_str()))
-        };
-        let next: Vec<_> = panels
-            .into_iter()
-            .map(|(id, title)| {
-                let title = intern(&list, title);
-                (id, title)
-            })
-            .collect();
-        list.retain(|(owner, _)| *owner != window);
-        if !next.is_empty() {
-            list.push((window, next));
-        }
-    });
-}
-pub fn contributed_panels() -> Vec<String> {
-    CONTRIBUTED.with(|list| {
-        let list = list.borrow();
-        let mut ids: Vec<String> = vec![];
-        for (id, _) in list.iter().flat_map(|(_, panels)| panels) {
-            if !ids.contains(id) {
-                ids.push(id.clone());
+impl Panels {
+    pub fn new(contributed: Vec<(String, String)>) -> Self {
+        Self { contributed }
+    }
+    pub fn ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = PANELS.to_vec();
+        for (id, _) in &self.contributed {
+            if !ids.contains(&id.as_str()) {
+                ids.push(id);
             }
         }
         ids
-    })
-}
-fn contributed_title(id: &str) -> Option<&'static str> {
-    CONTRIBUTED.with(|list| {
-        list.borrow()
-            .iter()
-            .flat_map(|(_, panels)| panels)
-            .find(|(p, _)| p == id)
-            .map(|(_, t)| *t)
-    })
-}
-/// Built-ins, then contributions, in Window ▸ Panels order.
-pub fn all_panels() -> Vec<String> {
-    PANELS
-        .iter()
-        .map(|id| (*id).to_owned())
-        .chain(contributed_panels())
-        .collect()
-}
-pub fn panel_title(id: &str) -> &str {
-    if let Some(title) = contributed_title(id) {
-        return title;
     }
+    pub fn contains(&self, id: &str) -> bool {
+        PANELS.contains(&id) || self.contributed.iter().any(|(p, _)| p == id)
+    }
+    /// A contribution's title wins over a built-in's of the same id.
+    pub fn title<'a>(&'a self, id: &'a str) -> &'a str {
+        self.contributed
+            .iter()
+            .find(|(p, _)| p == id)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or_else(|| builtin_title(id))
+    }
+}
+fn builtin_title(id: &str) -> &str {
     match id {
         "assets" => "Project",
         "layer-effects" => "Effect Controls",
@@ -1233,21 +1197,18 @@ mod contributed_tests {
     }
     #[test]
     fn contributed_panels_dock_title_and_survive_like_builtins() {
-        set_contributed_panels(1, [("synthetic.panel".to_owned(), "Synthetic".to_owned())]);
-        assert_eq!(panel_title("synthetic.panel"), "Synthetic");
-        assert!(all_panels().iter().any(|p| p == "synthetic.panel"));
+        let panels = Panels::new(vec![("synthetic.panel".into(), "Synthetic".into())]);
+        assert_eq!(panels.title("synthetic.panel"), "Synthetic");
+        assert!(panels.ids().contains(&"synthetic.panel"));
         let mut layout = Layout::preset("edit");
-        layout.show_panel("synthetic.panel").unwrap();
+        layout.show_panel("synthetic.panel", &panels).unwrap();
         assert!(layout.open_panels().contains(&"synthetic.panel"));
         layout.validate().unwrap();
         layout.close_panel("synthetic.panel").unwrap();
         assert!(!layout.open_panels().contains(&"synthetic.panel"));
-        // One window clearing its list leaves the other's panels alone.
-        set_contributed_panels(2, [("synthetic.other".to_owned(), "Other".to_owned())]);
-        set_contributed_panels(2, []);
-        assert_eq!(panel_title("synthetic.panel"), "Synthetic");
-        set_contributed_panels(1, []);
-        assert!(layout.show_panel("synthetic.panel").is_err());
-        assert_eq!(panel_title("synthetic.panel"), "synthetic.panel");
+        // Another window's contributions are not this window's panels.
+        let other = Panels::default();
+        assert!(layout.show_panel("synthetic.panel", &other).is_err());
+        assert_eq!(other.title("synthetic.panel"), "synthetic.panel");
     }
 }

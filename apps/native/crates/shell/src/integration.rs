@@ -47,6 +47,10 @@ pub trait Integration {
     ) -> Option<Vec<crate::native::MenuEntry>> {
         Some(entries)
     }
+    /// Panels this window's extensions contribute: id and title.
+    fn contributed_panels(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     /// The native panels with a body this frame: open ones outside it are tabs

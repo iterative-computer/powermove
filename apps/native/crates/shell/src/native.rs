@@ -81,6 +81,8 @@ impl MenuEntry {
 /// Snapshot of an editor window's shell state for menus, toolbar and palette.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MenuState {
+    /// Window ▸ Panels: id and title.
+    pub panels: Vec<(String, String)>,
     pub open: Vec<String>,
     pub saved: Vec<String>,
     pub workspace: String,
@@ -636,13 +638,9 @@ fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
         }
         MenuKind::Panels => {
             menu.removeAllItems();
-            for id in crate::layout::all_panels() {
-                let item = named_item(
-                    mtm,
-                    crate::layout::panel_title(&id),
-                    &format!("panel:toggle:{id}"),
-                );
-                item.setState(if state.open.contains(&id) {
+            for (id, title) in &state.panels {
+                let item = named_item(mtm, title, &format!("panel:toggle:{id}"));
+                item.setState(if state.open.contains(id) {
                     NSControlStateValueOn
                 } else {
                     NSControlStateValueOff
@@ -1964,17 +1962,13 @@ impl Host {
     pub fn open_palette(&mut self, state: &MenuState) {
         let mut choices = self.base_choices.clone();
         choices.retain(|c| !state.disabled.contains(&c.command));
-        for id in crate::layout::all_panels() {
-            let open = state.open.contains(&id);
+        for (id, title) in &state.panels {
+            let open = state.open.contains(id);
             if open && id == "viewer" {
                 continue;
             }
             choices.push(Choice {
-                label: format!(
-                    "{} {}",
-                    if open { "Hide" } else { "Show" },
-                    crate::layout::panel_title(&id)
-                ),
+                label: format!("{} {title}", if open { "Hide" } else { "Show" }),
                 command: format!("panel:toggle:{id}"),
             });
         }

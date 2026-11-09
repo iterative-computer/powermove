@@ -294,8 +294,23 @@ impl Editor {
         })
         .detach();
     }
+    /// The panels this window offers.
+    pub fn panels(&self, cx: &App) -> layout::Panels {
+        layout::Panels::new(
+            self.integration
+                .as_ref()
+                .map(|i| i.contributed_panels(cx))
+                .unwrap_or_default(),
+        )
+    }
     fn menu_state(&self, cx: &App) -> MenuState {
+        let panels = self.panels(cx);
         MenuState {
+            panels: panels
+                .ids()
+                .into_iter()
+                .map(|id| (id.to_owned(), panels.title(id).to_owned()))
+                .collect(),
             open: self
                 .layout
                 .open_panels()
@@ -327,17 +342,18 @@ impl Editor {
             return false;
         };
         let rest = parts.next().unwrap_or("");
+        let panels = self.panels(cx);
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && rest != "viewer" {
                     self.layout.close_panel(rest)
                 } else {
-                    self.layout.show_panel(rest)
+                    self.layout.show_panel(rest, &panels)
                 }
             }
             ("panel", "activate") => {
                 // Switching a tab preserves the maximized stack.
-                let result = self.layout.show_panel(rest);
+                let result = self.layout.show_panel(rest, &panels);
                 if let Err(error) = result {
                     self.status = error.to_string();
                 } else {
@@ -351,7 +367,7 @@ impl Editor {
                 // it in its place without taking the stack's showing tab.
                 Some((place, showing)) if self.layout.find(rest).is_none() => {
                     let mut next = self.layout.clone();
-                    next.show_panel(rest)
+                    next.show_panel(rest, &panels)
                         .and_then(|_| next.move_panel_to(rest, place))
                         .map(|_| {
                             if let Some((dock, group, tab)) = showing.and_then(|id| next.find(&id))
@@ -363,9 +379,9 @@ impl Editor {
                             }
                             self.layout = next
                         })
-                        .or_else(|_| self.layout.show_panel(rest))
+                        .or_else(|_| self.layout.show_panel(rest, &panels))
                 }
-                _ => self.layout.show_panel(rest),
+                _ => self.layout.show_panel(rest, &panels),
             },
             ("panel", "close") => {
                 self.parked.remove(rest);
@@ -418,7 +434,7 @@ impl Editor {
                 match (dock, group) {
                     (Some(dock), Some(group)) => {
                         let mut next = self.layout.clone();
-                        next.show_panel(id)
+                        next.show_panel(id, &panels)
                             .and_then(|_| {
                                 next.move_panel_to(
                                     id,
@@ -837,7 +853,8 @@ impl Editor {
             .map(|p| p.rect)
     }
     /// The live arrangement in the agents' digest shape (get_panel_layout).
-    pub fn layout_digest(&self) -> serde_json::Value {
+    pub fn layout_digest(&self, cx: &App) -> serde_json::Value {
+        let panels = self.panels(cx);
         let docks: Vec<_> = self
             .layout
             .docks
@@ -847,8 +864,9 @@ impl Editor {
                     .groups
                     .iter()
                     .flat_map(|group| {
+                        let panels = &panels;
                         group.tabs.iter().enumerate().map(move |(i, id)| {
-                            serde_json::json!({"id":id,"title":crate::layout::panel_title(id),
+                            serde_json::json!({"id":id,"title":panels.title(id),
                                 "collapsed":dock.collapsed || i != group.active,
                                 "flex":group.size.is_none(),"size":group.size})
                         })
@@ -895,8 +913,9 @@ impl Editor {
     }
     /// Context menu for a panel tab (also its header). The panel's current
     /// dock carries a checkmark.
-    pub fn tab_menu_entries(&self, id: &str) -> Vec<MenuEntry> {
-        let title = layout::panel_title(id);
+    pub fn tab_menu_entries(&self, id: &str, cx: &App) -> Vec<MenuEntry> {
+        let panels = self.panels(cx);
+        let title = panels.title(id);
         let current = self
             .layout
             .docks
@@ -934,10 +953,7 @@ impl Editor {
                     *target != id && (verb != "group" || (id != "viewer" && *target != "viewer"))
                 })
                 .map(|target| {
-                    MenuEntry::item(
-                        layout::panel_title(target),
-                        format!("panel:{verb}:{id}:{target}"),
-                    )
+                    MenuEntry::item(panels.title(target), format!("panel:{verb}:{id}:{target}"))
                 })
                 .collect();
             items.push(MenuEntry::submenu(label, children));
@@ -954,7 +970,7 @@ impl Editor {
     fn tab_menu(&self, id: &str, position: Point<Pixels>, cx: &mut App) {
         let Some(h) = &self.host else { return };
         let at = (f32::from(position.x), f32::from(position.y));
-        let entries = self.tab_menu_entries(id);
+        let entries = self.tab_menu_entries(id, cx);
         let entries = match &self.integration {
             Some(integration) => integration.panel_menu(id, entries, at, cx),
             None => Some(entries),
@@ -987,18 +1003,15 @@ impl Editor {
         h.borrow()
             .context_menu(&items, f32::from(position.x), f32::from(position.y));
     }
-    fn add_menu(&self, dock: usize, group: usize, position: Point<Pixels>) {
+    fn add_menu(&self, dock: usize, group: usize, position: Point<Pixels>, cx: &App) {
         let Some(h) = &self.host else { return };
         let open = self.layout.open_panels();
-        let items: Vec<_> = layout::all_panels()
-            .iter()
-            .filter(|p| !open.contains(&p.as_str()))
-            .map(|p| {
-                MenuEntry::item(
-                    layout::panel_title(p),
-                    format!("panel:addto:{dock}:{group}:{p}"),
-                )
-            })
+        let panels = self.panels(cx);
+        let items: Vec<_> = panels
+            .ids()
+            .into_iter()
+            .filter(|p| !open.contains(p))
+            .map(|p| MenuEntry::item(panels.title(p), format!("panel:addto:{dock}:{group}:{p}")))
             .collect();
         if items.is_empty() {
             return;
@@ -1104,6 +1117,7 @@ pub fn tooltip(
 }
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let panels = self.panels(cx);
         if let Some(id) = self.integration.as_ref().and_then(|i| i.project_id(cx))
             && self.project != id
         {
@@ -1373,7 +1387,7 @@ impl Render for Editor {
             let widths: Vec<f32> = tabs
                 .iter()
                 .map(|tab| {
-                    title_width(layout::panel_title(tab), t.typography.title, w)
+                    title_width(panels.title(tab), t.typography.title, w)
                         + close_slot
                         + m.gap
                         + TAB_SPACING
@@ -1390,7 +1404,7 @@ impl Render for Editor {
                     p.focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                 })
                 .accessibility_id(format!("shell.panel.{id}"))
-                .aria_label(layout::panel_title(&id).to_string())
+                .aria_label(panels.title(&id).to_string())
                 .rounded(px(m.panel_radius))
                 .border(px(m.border))
                 .border_color(tint(edge, edge_alpha))
@@ -1444,7 +1458,7 @@ impl Render for Editor {
             let mut header = div()
                 .id(format!("header-{}-{}", p.dock, p.group))
                 .role(Role::Group)
-                .aria_label(format!("{} header", layout::panel_title(&id)))
+                .aria_label(format!("{} header", panels.title(&id)))
                 .group(group_name.clone())
                 .flex()
                 .items_center()
@@ -1504,7 +1518,7 @@ impl Render for Editor {
                     let close_id = tab.clone();
                     let closable = tab != "viewer" && multi;
                     let tab_group: SharedString = format!("tab-{tab}").into();
-                    let title = layout::panel_title(tab).to_string();
+                    let title = panels.title(tab).to_string();
                     let mut cell = div()
                         .id(format!("tab-{tab}"))
                         .group(tab_group.clone())
@@ -1609,7 +1623,7 @@ impl Render for Editor {
                         .iter()
                         .map(|&i| {
                             MenuEntry::item(
-                                layout::panel_title(&tabs[i]),
+                                panels.title(&tabs[i]),
                                 format!("panel:activate:{}", tabs[i]),
                             )
                             .checked(i == active)
@@ -1681,8 +1695,8 @@ impl Render for Editor {
                         .aria_label("Add Panel")
                         .tab_index(tabs.len() as isize)
                         .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
-                        .on_click(cx.listener(move |this, e: &ClickEvent, _, _| {
-                            this.add_menu(dock, gi, e.position())
+                        .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                            this.add_menu(dock, gi, e.position(), cx)
                         }))
                         .tooltip(tooltip(&t, "Add Panel"))
                         .ml_auto()
@@ -1852,7 +1866,7 @@ impl Render for Editor {
                     .border_color(rgb(c.separator))
                     .shadow_md()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(layout::panel_title(&drag.id).to_string()),
+                    .child(panels.title(&drag.id).to_string()),
             );
         }
         let workspace = layout::PRESETS
@@ -1986,15 +2000,38 @@ mod keyboard_tests {
 
     /// At launch an extension's panels park while its realm starts, then come
     /// back: in their places, with the stack still showing what it showed.
+    /// A window whose extensions contribute these panels.
+    struct Contributions(Vec<(String, String)>);
+    impl crate::integration::Integration for Contributions {
+        fn observe(&self, _: &mut Context<Editor>) {}
+        fn command(&self, _: &Command, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn panel(
+            &self,
+            _: &str,
+            _: crate::layout::Rect,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<AnyElement> {
+            None
+        }
+        fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
+            self.0.clone()
+        }
+        fn project_id(&self, _: &App) -> Option<String> {
+            None
+        }
+        fn status(&self, _: &App) -> String {
+            String::new()
+        }
+        fn drop_paths(&self, _: Vec<PathBuf>, _: &mut App) {}
+    }
+
+    /// At launch an extension's panels park while its realm starts, then come
+    /// back: in their places, with the stack still showing what it showed.
     #[::core::prelude::v1::test]
     fn returning_extension_panels_keep_the_stack_showing_its_tab() {
-        crate::layout::set_contributed_panels(
-            77,
-            [
-                ("ext.pexels".to_owned(), "Pexels".to_owned()),
-                ("ext.voice".to_owned(), "Voiceover".to_owned()),
-            ],
-        );
         let mut cx = app();
         let window = cx
             .open_window(size(px(1440.), px(900.)), |_, cx| {
@@ -2010,6 +2047,10 @@ mod keyboard_tests {
         cx.run_until_parked();
         window
             .update(&mut cx, |v, _, cx| {
+                v.integration = Some(Rc::new(Contributions(vec![
+                    ("ext.pexels".into(), "Pexels".into()),
+                    ("ext.voice".into(), "Voiceover".into()),
+                ])));
                 // Saved layout: both extension tabs ahead of Properties, which shows.
                 for id in ["ext.pexels", "ext.voice"] {
                     assert!(v.shell_command(&format!("panel:show:{id}"), cx));
@@ -2040,7 +2081,6 @@ mod keyboard_tests {
                 assert_eq!(showing(v), "ext.pexels");
             })
             .unwrap();
-        crate::layout::set_contributed_panels(77, []);
     }
     #[::core::prelude::v1::test]
     fn panels_cycle_both_ways_and_skip_closed_panels() {

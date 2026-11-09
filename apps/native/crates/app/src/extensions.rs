@@ -59,7 +59,6 @@ thread_local! {
 /// A theme's patches for dark and for light windows.
 type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
 /// Keys this window's list of contributed panels in the shell.
-static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Page messages enter here on AppKit's main thread, so this only enqueues.
 struct PageEvents {
@@ -147,7 +146,8 @@ fn external_link(url: &str) -> bool {
 }
 
 pub struct Extensions {
-    window: u64,
+    /// Panels this window's extensions contribute: id and title, in menu order.
+    pub contributed: Vec<(String, String)>,
     pub host: Option<ExtensionHost>,
     /// This window's raster overrides; dropped with its host.
     overrides: Option<crate::raster_overrides::Overrides>,
@@ -213,7 +213,7 @@ pub struct Extensions {
 impl Default for Extensions {
     fn default() -> Self {
         Self {
-            window: NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            contributed: Vec::new(),
             host: None,
             overrides: None,
             doc_id: None,
@@ -256,7 +256,6 @@ impl Default for Extensions {
 }
 impl Drop for Extensions {
     fn drop(&mut self) {
-        layout::set_contributed_panels(self.window, []);
         if let Some(doc_id) = self.doc_id {
             crate::mcp_services::set_resources(doc_id, None);
         }
@@ -987,7 +986,7 @@ impl Controller {
             .iter()
             .map(|(id, (title, _))| (id.clone(), title.clone()));
         let contributed: Vec<_> = panels.iter().cloned().chain(surfaces).collect();
-        layout::set_contributed_panels(self.extensions.window, contributed);
+        self.extensions.contributed = contributed;
         // New installs need a pinned Store key; until one ships there is no entry.
         let store = pm_compat_runner::store_install::available().then(|| Choice {
             label: "Install Extension from Store…".into(),

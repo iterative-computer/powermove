@@ -88,7 +88,7 @@ fn tab_menu_checks_the_current_dock_and_says_workspace() {
         .unwrap();
     window
         .update(&mut cx, |v, _, cx| {
-            let entries = v.tab_menu_entries("inspector");
+            let entries = v.tab_menu_entries("inspector", cx);
             let checked: Vec<_> = entries.iter().filter(|e| e.checked).collect();
             assert_eq!(checked.len(), 1);
             assert_eq!(checked[0].label, "Dock Right");
@@ -97,11 +97,11 @@ fn tab_menu_checks_the_current_dock_and_says_workspace() {
             assert!(entries.iter().all(|e| !e.label.contains("Layout")));
             // Moving the panel moves the checkmark.
             assert!(v.run_shell_command("panel:dock:inspector:left", cx));
-            let entries = v.tab_menu_entries("inspector");
+            let entries = v.tab_menu_entries("inspector", cx);
             let checked: Vec<_> = entries.iter().filter(|e| e.checked).collect();
             assert_eq!(checked[0].label, "Dock Left");
             // The viewer cannot be closed.
-            let viewer = v.tab_menu_entries("viewer");
+            let viewer = v.tab_menu_entries("viewer", cx);
             assert!(viewer.iter().all(|e| !e.label.starts_with("Close")));
             // It sits in the centre column, which is not a dock choice.
             assert_eq!(viewer.iter().filter(|e| e.checked).count(), 0);

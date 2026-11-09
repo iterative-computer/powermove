@@ -179,6 +179,9 @@ impl pm_shell::integration::Integration for Bridge {
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
     }
+    fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
+        self.0.read(cx).extensions.contributed.clone()
+    }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.

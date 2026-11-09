@@ -187,25 +187,26 @@ fn split_next_to_itself_is_a_no_op_and_bad_targets_are_atomic() {
 
 #[test]
 fn close_and_show_panels_round_trip_to_their_home_dock() {
+    let panels = Panels::default();
     let mut l = Layout::preset("design");
     assert!(l.close_panel("viewer").is_err());
     l.close_panel("timeline").unwrap();
     assert!(!l.open_panels().contains(&"timeline"));
     l.validate().unwrap();
-    l.show_panel("timeline").unwrap();
+    l.show_panel("timeline", &panels).unwrap();
     let bottom = l.docks.iter().find(|d| d.id == "bottom").unwrap();
     assert_eq!(bottom.groups[0].tabs, ["timeline"]);
     // A panel that is not in this workspace's preset goes to the right dock.
-    l.show_panel("notes").unwrap();
+    l.show_panel("notes", &panels).unwrap();
     let right = l.docks.iter().find(|d| d.id == "right").unwrap();
     assert_eq!(right.groups[0].active(), "notes");
     // Showing an open panel only activates it.
     let before = l.open_panels().len();
-    l.show_panel("assets").unwrap();
+    l.show_panel("assets", &panels).unwrap();
     assert_eq!(l.open_panels().len(), before);
-    assert!(l.show_panel("unknown").is_err());
+    assert!(l.show_panel("unknown", &panels).is_err());
     for id in PANELS {
-        assert_ne!(panel_title(id), id, "{id} needs a title");
+        assert_ne!(panels.title(id), id, "{id} needs a title");
     }
 }
 
