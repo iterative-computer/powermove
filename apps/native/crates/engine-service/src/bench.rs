@@ -315,15 +315,20 @@ pub fn run() -> anyhow::Result<()> {
     let forward = sweep(&mut (0..frames).map(|i| scrub_from + i * frame))?;
     let back = sweep(&mut (0..frames).rev().map(|i| scrub_from + i * frame))?;
     let cached = sweep(&mut (0..24).map(|i| scrub_from + (i % 4) * frame))?;
-    // The playhead stops: its frame is drawn exact, at full resolution
-    // (Auto drags a slow project at reduced resolution).
+    // The playhead stops: its frame is drawn exact, at the requested
+    // resolution (Auto drags a slow project at reduced resolution).
+    let requested = match arg("quality", "auto").as_str() {
+        "half" => 0.5,
+        "quarter" => 0.25,
+        _ => 1.,
+    };
     let last = Ticks::new(scrub_from + 3 * frame)?;
     let stopped = Instant::now();
     let settle_ms = loop {
         pm_text::host::serve(&mut font_service, fonts.take_asks());
         viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
         let status = viewer.status();
-        if status.effective_quality == 1.
+        if status.effective_quality == requested
             && status
                 .frame
                 .as_ref()
@@ -333,7 +338,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         anyhow::ensure!(
             stopped.elapsed() < Duration::from_secs(10),
-            "the stopped frame was never drawn exact"
+            "the stopped frame was never drawn at the requested quality"
         );
         std::thread::sleep(Duration::from_micros(100));
     };
