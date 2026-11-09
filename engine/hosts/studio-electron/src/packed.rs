@@ -183,10 +183,9 @@ impl PackedScene {
         }
         let trailer_start=u.light_count*4+u.instance_count*9;
         if sdata.len()>trailer_start && !(u.light_count==0 && u.instance_count==0 && sdata.len()==1) {pm_studio::environment::validate_packed(&sdata[trailer_start..],u.light_count)?;}
-        if positions
+        if tris.iter().any(|t| !triangle_shading_is_finite(t)) || positions
             .iter()
             .flatten()
-            .chain(bytemuck::cast_slice::<GpuTri, f32>(&tris))
             .chain(bytemuck::cast_slice::<GpuMaterial, f32>(&materials))
             .chain(sdata.iter().flatten())
             .any(|x| !x.is_finite())
@@ -496,6 +495,13 @@ fn placements(p: &Prepared, count: usize) -> Result<(Vec<RtGeometry>, Vec<RtPlac
     }
     Ok((geometries, out))
 }
+fn triangle_shading_is_finite(triangle: &GpuTri) -> bool {
+    // Normal.w stores packed RGBA8 bits (including 0xffffffff for white), not
+    // a floating-point value. Validate only the actual shading coordinates.
+    triangle.n.iter().flat_map(|n| n[..3].iter())
+        .chain(triangle.uv01.iter()).chain(triangle.uv2m.iter())
+        .chain(triangle.tangent.iter()).all(|v| v.is_finite())
+}
 fn triangle_range(nodes: &[WideNode], root: u32, triangles: usize) -> Result<(u32, u32), String> {
     let mut stack = vec![(root, 0usize)];
     let mut visited = std::collections::HashSet::new();
@@ -583,6 +589,15 @@ fn validate_top(nodes: &[WideNode], instances: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packed_vertex_colour_bits_are_not_floating_point_shading() {
+        let good = GpuTri { n: [[0., 1., 0., f32::from_bits(0xffffffff)]; 3], uv01: [0.; 4], uv2m: [0.; 4], tangent: [1., 0., 0., 1.] };
+        assert!(triangle_shading_is_finite(&good));
+        let mut bad = good; bad.n[0][0] = f32::NAN;
+        assert!(!triangle_shading_is_finite(&bad));
+        let mut bad = good; bad.uv01[0] = f32::INFINITY;
+        assert!(!triangle_shading_is_finite(&bad));
+    }
     #[test]
     fn rejects_deep_blas_and_non_finite_bounds() {
         let leaf = WideNode { left: 0, lcount: 1, rcount: u32::MAX, ..Default::default() };

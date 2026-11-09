@@ -165,9 +165,9 @@ try {
   const probe=JSON.parse(exec('ffprobe',['-v','error','-count_frames','-show_streams','-show_format','-of','json',mp4]));
   const stream=probe.streams.find(s=>s.codec_type==='video');assert.equal(stream.codec_name,'h264');assert.equal(stream.width,640);assert.equal(stream.height,360);assert.equal(+stream.nb_read_frames,12);
   exec(path.join(relocated,'Contents/Resources/encoder/ffmpeg'),['-y','-v','error','-i',mp4,'-frames:v','1',path.join(evidence,'03-final-frame.png')]);
-  const hashes=exec(path.join(relocated,'Contents/Resources/encoder/ffmpeg'),['-v','error','-i',mp4,'-an','-f','framemd5','pipe:1']).split('\n').filter(line=>line&&!line.startsWith('#')).map(line=>line.split(',').at(-1).trim());
-  assert.equal(hashes.length,12);assert(new Set(hashes).size>1,'Animated model must advance in the encoded video');
-  await writeFile(path.join(evidence,'ffprobe.json'),JSON.stringify(probe,null,2)+'\n');await note('native-final-mp4',{status:exported.status,frames:+stream.nb_read_frames,uniqueFrames:new Set(hashes).size,duration:+probe.format.duration});
+  const frameHashes=exec(path.join(relocated,'Contents/Resources/encoder/ffmpeg'),['-v','error','-i',mp4,'-an','-f','framemd5','pipe:1']).split('\n').filter(line=>line&&!line.startsWith('#')).map(line=>line.split(',').at(-1).trim());
+  assert.equal(frameHashes.length,12);assert(new Set(frameHashes).size>1,'Animated model must advance in the encoded video');
+  await writeFile(path.join(evidence,'ffprobe.json'),JSON.stringify(probe,null,2)+'\n');await note('native-final-mp4',{status:exported.status,frames:+stream.nb_read_frames,uniqueFrames:new Set(frameHashes).size,duration:+probe.format.duration});
   await page.evaluate(()=>{window.PM.Kernel.api('packaged-acceptance').scene3d.edit({operation:'update_object',target:'model',patch:{p:{y:1.2}}});});
   const beforeCrash=await scene(page),pids=nativePids(app.process().pid);assert(pids.length>0,'Need a real native child to crash');pids.forEach(pid=>process.kill(pid,'SIGKILL'));
   const recovered=await frame(page,'04-recovered.png');assert.deepEqual(await scene(page),beforeCrash);assert.equal(recovered.status.backend,'webgpu');
