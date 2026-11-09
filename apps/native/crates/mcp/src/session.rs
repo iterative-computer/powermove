@@ -384,6 +384,22 @@ impl McpSession {
                 _ => live,
             });
         }
+        if name == "publish_visual_reply" {
+            // The reply joins the calling run's thread in the app.
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            catalog::validate(name, args)?;
+            let run = self.agent_run.clone().ok_or_else(|| {
+                Error::invalid("The visualization’s agent run is no longer active.")
+            })?;
+            let project = session.project.clone();
+            drop(host);
+            let mut call = args.clone();
+            call["agentRunId"] = json!(run);
+            return surfaces.call(name, project.as_deref(), &call);
+        }
         if ORCHESTRATION_TOOLS.contains(&name) {
             // Tasks and watches belong to the window's Agent panel runs.
             let surfaces = host

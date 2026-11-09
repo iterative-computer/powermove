@@ -549,6 +549,56 @@ impl Builtins {
         link.publish_now();
         result
     }
+    /// publish_visual_reply for the run named by `agentRunId`: validated and
+    /// normalized as main does, saved on the run's thread before it answers.
+    pub fn agent_visual_reply(&self, args: &Value) -> std::result::Result<Value, String> {
+        const GONE: &str = "The visualization’s agent run is no longer active.";
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| GONE.to_owned())?;
+            let backend = backend.lock().unwrap();
+            let agent = backend.native.agent.clone().ok_or(GONE)?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let run = args["agentRunId"].as_str().ok_or(GONE)?;
+        let mut input = args.clone();
+        if let Some(object) = input.as_object_mut() {
+            for key in ["agentRunId", "callerAccess", "callerRunId"] {
+                object.remove(key);
+            }
+        }
+        let prepared = pm_agents::visual::prepare(&input)?;
+        let id = format!("visual-{}", pm_kernel::new_id("reply"));
+        let thread = {
+            let mut state = agent.lock().unwrap();
+            let thread = state.runs.live(run).ok_or(GONE)?.thread.clone();
+            let artifact = json!({"version":1,"id":id,"runId":run,"title":prepared.title,
+                "html":prepared.html,"height":prepared.height});
+            state
+                .panel
+                .add_visual_reply(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    &thread,
+                    artifact,
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| match e {
+                    pm_panel_agentpanel::Error::Invalid("four visual replies") => {
+                        "This run already published four visual replies. Continue in a follow-up message.".to_owned()
+                    }
+                    pm_panel_agentpanel::Error::UnknownId(_) | pm_panel_agentpanel::Error::Stale => {
+                        "The visualization’s thread was removed.".to_owned()
+                    }
+                    _ => "The visual reply could not be saved. Free storage and try again.".to_owned(),
+                })?;
+            thread
+        };
+        link.touch();
+        link.publish_now();
+        Ok(json!({"id":id,"title":prepared.title,"saved":true,"threadId":thread}))
+    }
     /// Files the person chose with Add Attachments, as attachment records
     /// (`{id, name, type, size, dataUrl | content | dataBase64}`), into the
     /// visible thread's message. At most six per message, as on main.

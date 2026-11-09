@@ -225,6 +225,9 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                             .agent_thread_control(&tool, &args)
                             .map_err(Error::invalid);
                     }
+                    if tool == "publish_visual_reply" {
+                        return runtime.agent_visual_reply(&args).map_err(Error::invalid);
+                    }
                     runtime
                         .agent_orchestrate(&tool, &args)
                         .map_err(Error::invalid)

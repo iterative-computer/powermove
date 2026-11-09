@@ -281,27 +281,41 @@ function Message({
         />
       </div>
     );
-  if (kind === "visual")
+  // publish_visual_reply: each reply opens in its own sandboxed viewer.
+  const visuals = Array.isArray(v.visualReplies) ? v.visualReplies : [];
+  if (visuals.length)
     return (
-      <Placeholder gap="preview" label={str(v.title)}>
-        {v.status === "error" && (
-          <div metadata={{ symbol: "exclamationmark.triangle.fill" }} />
-        )}
-        <text style={title}>{str(v.title)}</text>
-        <text
-          style={
-            v.status === "error"
-              ? { ...body, color: t("colors.danger") }
-              : muted
-          }
-        >
-          {v.status === "error"
-            ? "The visualization couldn’t load."
-            : "Loading visualization…"}
-        </text>
-        <UI.ToolbarItem label="Replay" disabled />
-        <UI.ToolbarItem label="Expand" disabled />
-      </Placeholder>
+      <div
+        role="listitem"
+        label={`Agent: ${text}`}
+        metadata={{ rowId: row.id }}
+        style={vertical}
+      >
+        {text && <text style={reading}>{text}</text>}
+        {visuals.map((reply) => {
+          const r =
+            reply && typeof reply === "object" && !Array.isArray(reply)
+              ? reply
+              : {};
+          return (
+            <div
+              key={str(r.id)}
+              role="group"
+              label={str(r.title)}
+              metadata={{ visualReply: str(r.id) }}
+              style={card(false)}
+            >
+              <text style={title}>{str(r.title)}</text>
+              <text style={muted}>Interactive visualization</text>
+              <Push
+                id={`${row.id}-${str(r.id)}`}
+                label="Open"
+                onClick={() => send({ type: "openVisual", id: str(r.id) })}
+              />
+            </div>
+          );
+        })}
+      </div>
     );
   if (kind === "error" || v.error === true)
     return (

@@ -1197,3 +1197,88 @@ fn stopping_a_run_that_waits_for_its_subagent_stops_both() {
     drop(state);
     panel.panels.close();
 }
+#[test]
+fn a_run_publishes_a_visual_reply_that_opens_in_its_viewer() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Chart the timing");
+    let run = live_run(&agent, &thread);
+    let refused = panel
+        .panels
+        .agent_visual_reply(&json!({"agentRunId":run,"title":"x","html":"<iframe></iframe>"}))
+        .unwrap_err();
+    assert!(refused.contains("cannot embed pages"), "{refused}");
+    let published = panel
+        .panels
+        .agent_visual_reply(&json!({"agentRunId":run,"title":"Timing chart",
+            "html":"<html><body><svg width=10 height=10></svg></body></html>","height":420}))
+        .unwrap();
+    assert_eq!(published["saved"], true);
+    assert_eq!(published["threadId"], json!(thread));
+    let id = published["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("visual-"), "{id}");
+    // Main's limit: four per run.
+    for _ in 0..3 {
+        panel
+            .panels
+            .agent_visual_reply(&json!({"agentRunId":run,"title":"More","html":"<p>x</p>"}))
+            .unwrap();
+    }
+    assert_eq!(
+        panel
+            .panels
+            .agent_visual_reply(&json!({"agentRunId":run,"title":"Fifth","html":"<p>x</p>"}))
+            .unwrap_err(),
+        "This run already published four visual replies. Continue in a follow-up message."
+    );
+    assert!(panel.text().contains("Timing chart"));
+    // Saved with the thread, in main's shape.
+    let saved = agent
+        .lock()
+        .unwrap()
+        .panel
+        .visual_reply(&thread, &id)
+        .unwrap();
+    assert_eq!(
+        saved["html"],
+        "<!doctype html><html><head></head><body><svg width=10 height=10></svg></body></html>"
+    );
+    assert_eq!(saved["runId"], json!(run));
+    assert_eq!(saved["height"], 420);
+    // Open queues the viewer for the window.
+    let open = panel
+        .surface()
+        .surface
+        .nodes()
+        .values()
+        .find_map(|n| {
+            n.props
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| s.ends_with(&id))
+                .map(str::to_owned)
+        })
+        .expect("Open button");
+    panel.panels.take_platform_requests();
+    panel.click(&open);
+    let requests = panel.panels.take_platform_requests();
+    let request = requests
+        .iter()
+        .find(|r| r.operation == "agent.visual")
+        .expect("viewer request");
+    assert_eq!(request.input["title"], "Timing chart");
+    assert_eq!(request.input["height"], 420);
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    assert!(
+        panel
+            .panels
+            .agent_visual_reply(&json!({"agentRunId":run,"title":"Late","html":"<p>x</p>"}))
+            .unwrap_err()
+            .contains("no longer active")
+    );
+    panel.panels.close();
+}
