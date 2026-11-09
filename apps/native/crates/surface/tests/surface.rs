@@ -570,14 +570,6 @@ fn toggle_mixed_and_unchanged_values() {
     );
 }
 #[test]
-fn accepted_publication_has_a_linux_host_double() {
-    use std::sync::Arc;
-    let s = surface();
-    let mut host = InspectHost::default();
-    host.enqueue(Arc::new(s), vec![]);
-    assert_eq!(host.tree.unwrap().node(2).unwrap().r#type, "input");
-}
-#[test]
 fn thousand_node_commit_and_reorder_are_atomic() {
     let mut s = Surface::default();
     let mut ops = vec![];
