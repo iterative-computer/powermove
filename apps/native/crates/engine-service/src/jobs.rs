@@ -1,5 +1,6 @@
-//! Same-executable --engine-job child. Payloads stay on inherited pipes.
-//! JobSpec, ExportSettings and JobStatus are the existing engine protocol.
+//! Same-executable --engine-job child. The parent and child talk in
+//! [`ParentMessage`] and [`ChildMessage`] lines on inherited pipes; pixels go
+//! through private files. A line either end cannot read fails the job.
 use anyhow::{Result, ensure};
 use pm_protocol::{
     common::JobId,
@@ -184,46 +185,117 @@ pub fn compat_epoch(doc_id: u64) -> Option<u64> {
     let state = COMPAT.lock().unwrap().as_ref()?.get(&doc_id)?.state.clone();
     state()
 }
-/// A compat need's reply on the child's stdin. Pixels go through a private
-/// file the child reads and removes, never through the pipe; its name is the
-/// job's own, so simultaneous exports never share one.
-fn compat_reply(
+/// What the parent sends the child, one line each on its stdin.
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum ParentMessage {
+    /// The job. First, and only once.
+    Start(Box<ExportRequest>),
+    /// The GPU submission the child asked for: the rest of its frame, or one
+    /// bounded by [`Costs::bounded`].
+    Grant {
+        whole_frame: bool,
+    },
+    /// The answers to compat request `id`, one per need, or why there are none.
+    Compat {
+        id: u64,
+        answers: std::result::Result<Vec<WireAnswer>, String>,
+    },
+    Cancel,
+}
+/// What the child sends the parent, one line each on its stdout.
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum ChildMessage {
+    Status(Box<JobStatus>),
+    /// Asks for a GPU submission; the child waits for a [`ParentMessage::Grant`].
+    Gpu,
+    /// A frame's raster override needs, answered by a
+    /// [`ParentMessage::Compat`] with the same `id`.
+    Compat {
+        id: u64,
+        needs: Vec<CompatJobNeed>,
+    },
+}
+/// One need's answer on the child's stdin.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WireAnswer {
+    Native,
+    Hidden,
+    /// See [`CompatReply::Raster`]; the rows are in `file`, which the child
+    /// reads and removes.
+    Raster {
+        width: u32,
+        height: u32,
+        size: [f64; 2],
+        anchor: [f64; 2],
+        uv: [f64; 4],
+        file: PathBuf,
+    },
+}
+fn send(out: &mut impl Write, message: &impl Serialize) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *out, message)?;
+    out.write_all(b"\n")?;
+    out.flush()
+}
+/// A compat request's answers as they cross to the child. Pixels go through
+/// private files, never the pipe; their names are the job's own, so
+/// simultaneous exports never share one.
+fn wire_answers(
     job: &str,
     id: u64,
     answered: std::result::Result<Vec<CompatReply>, String>,
-) -> String {
+) -> std::result::Result<Vec<WireAnswer>, String> {
     let job: String = job
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let answer = |(i, reply): (usize, CompatReply)| match reply {
-        CompatReply::Native => serde_json::json!({"native": true}),
-        CompatReply::Hidden => serde_json::json!({"hidden": true}),
-        CompatReply::Raster {
-            width,
-            height,
-            rgba,
-            size,
-            anchor,
-            uv,
-        } => {
-            let path = std::env::temp_dir().join(format!(
-                "powermove-compat-{}-{job}-{id}-{i}.rgba",
-                std::process::id()
-            ));
-            match std::fs::write(&path, &rgba) {
-                Ok(()) => serde_json::json!({"width": width, "height": height,
-                    "size": size, "anchor": anchor, "uv": uv, "file": path}),
-                Err(e) => serde_json::json!({"error": e.to_string()}),
+    let mut written = vec![];
+    let mut wire = vec![];
+    for (i, reply) in answered?.into_iter().enumerate() {
+        wire.push(match reply {
+            CompatReply::Native => WireAnswer::Native,
+            CompatReply::Hidden => WireAnswer::Hidden,
+            CompatReply::Raster {
+                width,
+                height,
+                rgba,
+                size,
+                anchor,
+                uv,
+            } => {
+                let file = std::env::temp_dir().join(format!(
+                    "powermove-compat-{}-{job}-{id}-{i}.rgba",
+                    std::process::id()
+                ));
+                if let Err(e) = std::fs::write(&file, &rgba) {
+                    for file in written {
+                        let _ = std::fs::remove_file(file);
+                    }
+                    return Err(e.to_string());
+                }
+                written.push(file.clone());
+                WireAnswer::Raster {
+                    width,
+                    height,
+                    size,
+                    anchor,
+                    uv,
+                    file,
+                }
             }
-        }
-    };
-    let body = match answered {
-        Ok(replies) => serde_json::json!({"id": id,
-            "answers": replies.into_iter().enumerate().map(answer).collect::<Vec<_>>()}),
-        Err(error) => serde_json::json!({"id": id, "error": error}),
-    };
-    format!("{}\n", serde_json::json!({ "compatAnswer": body }))
+        });
+    }
+    Ok(wire)
 }
 /// Room left for macOS and a project save when a long export fills a disk.
 pub const DISK_RESERVE: u64 = 2 << 30;
@@ -343,7 +415,9 @@ pub struct ExportHandle {
     input: Arc<Mutex<ChildStdin>>,
     cancel: Arc<AtomicBool>,
     status: Arc<Mutex<JobStatus>>,
-    reader: Option<std::thread::JoinHandle<()>>,
+    /// Ends with the child's output; true if it stopped at a line it could
+    /// not use, with the child still running.
+    reader: Option<std::thread::JoinHandle<bool>>,
     submissions: Arc<std::sync::atomic::AtomicU64>,
     asks: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -419,28 +493,18 @@ impl ExportHandle {
             .stderr(Stdio::inherit())
             .spawn()?;
         let mut input = child.stdin.take().unwrap();
-        if let Err(e) = serde_json::to_writer(&mut input, &request)
-            .and_then(|_| input.write_all(b"\n").map_err(serde_json::Error::io))
-        {
+        let id = request.job.clone();
+        if let Err(e) = send(&mut input, &ParentMessage::Start(Box::new(request))) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(e.into());
         }
-        input.flush()?;
         let input = Arc::new(Mutex::new(input));
-        let gate_input = input.clone();
+        let child_input = input.clone();
         let gate_cancel = cancel.clone();
         let output = child.stdout.take().unwrap();
-        let state = Arc::new(Mutex::new(status(
-            &request.job,
-            JobState::Queued,
-            0.,
-            None,
-            None,
-        )));
+        let state = Arc::new(Mutex::new(status(&id, JobState::Queued, 0., None, None)));
         let events = state.clone();
-        let id = request.job;
-        let compat_input = input.clone();
         let submissions = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let granted = submissions.clone();
         let asks = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -450,70 +514,64 @@ impl ExportHandle {
             // last seen to move (an epoch moved since counts as now).
             let mut seen = interactive.epoch();
             let mut active_at: Option<std::time::Instant> = None;
-            for line in std::io::BufReader::new(output).lines() {
-                if let Ok(text) = line.as_deref()
-                    && text.starts_with("{\"compat\"")
-                {
-                    let asked: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
-                    let id = asked["compat"]["id"].as_u64().unwrap_or(0);
-                    let needs: Vec<CompatJobNeed> =
-                        serde_json::from_value(asked["compat"]["needs"].clone())
-                            .unwrap_or_default();
-                    let answered = match &answerer {
-                        Some((answer, pin)) => answer(pin, &needs),
-                        None => Err("No window has this project's extensions open".into()),
-                    };
-                    let job = answerer.as_ref().map_or("", |(_, pin)| pin.job.as_str());
-                    let mut input = compat_input.lock().unwrap();
-                    if input
-                        .write_all(compat_reply(job, id, answered).as_bytes())
-                        .and_then(|_| input.flush())
-                        .is_err()
-                    {
-                        break;
+            // A child that stopped reading its stdin has exited or is
+            // exiting: its last lines still say how it ended.
+            let reply = |message: &ParentMessage| {
+                let _ = send(&mut *child_input.lock().unwrap(), message);
+            };
+            let mut lines = std::io::BufReader::new(output).lines();
+            let broken = loop {
+                let message = match lines.next() {
+                    None => break None,
+                    Some(Err(e)) => break Some(format!("Powermove lost the export engine: {e}")),
+                    Some(Ok(line)) => serde_json::from_str::<ChildMessage>(&line),
+                };
+                match message {
+                    Err(e) => {
+                        break Some(format!("The export engine sent an invalid message: {e}"));
                     }
-                    continue;
-                }
-                if matches!(line.as_deref(), Ok("\"gpu\"")) {
-                    asked.fetch_add(1, Ordering::Release);
-                    while interactive.busy() && !gate_cancel.load(Ordering::Acquire) {
-                        active_at = Some(std::time::Instant::now());
-                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    Ok(ChildMessage::Status(s)) if s.job != id => {
+                        break Some(format!(
+                            "The export engine reported on another job, {}",
+                            s.job.as_str()
+                        ));
                     }
-                    if !gate_cancel.load(Ordering::Acquire) {
-                        let epoch = interactive.epoch();
-                        if epoch != seen {
-                            seen = epoch;
+                    Ok(ChildMessage::Status(s)) => *events.lock().unwrap() = *s,
+                    Ok(ChildMessage::Compat { id: ask, needs }) => {
+                        let answered = match &answerer {
+                            Some((answer, pin)) => answer(pin, &needs),
+                            None => Err("No window has this project's extensions open".into()),
+                        };
+                        let answers = wire_answers(id.as_str(), ask, answered);
+                        reply(&ParentMessage::Compat { id: ask, answers });
+                    }
+                    Ok(ChildMessage::Gpu) => {
+                        asked.fetch_add(1, Ordering::Release);
+                        while interactive.busy() && !gate_cancel.load(Ordering::Acquire) {
                             active_at = Some(std::time::Instant::now());
+                            std::thread::sleep(std::time::Duration::from_millis(2));
                         }
-                        let quiet = active_at.is_none_or(|t| t.elapsed() >= QUIET);
-                        let grant: &[u8] = if !quiet { b"grant\n" } else { b"grant frame\n" };
-                        let mut input = gate_input.lock().unwrap();
-                        if input.write_all(grant).and_then(|_| input.flush()).is_err() {
-                            break;
+                        if !gate_cancel.load(Ordering::Acquire) {
+                            let epoch = interactive.epoch();
+                            if epoch != seen {
+                                seen = epoch;
+                                active_at = Some(std::time::Instant::now());
+                            }
+                            let whole_frame = active_at.is_none_or(|t| t.elapsed() >= QUIET);
+                            reply(&ParentMessage::Grant { whole_frame });
+                            granted.fetch_add(1, Ordering::Relaxed);
                         }
-                        granted.fetch_add(1, Ordering::Relaxed);
                     }
-                    continue;
                 }
-                match line
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<JobStatus>(&s).ok())
-                {
-                    Some(s) if s.job == id => *events.lock().unwrap() = s,
-                    _ => break,
-                }
-            }
+            };
             let mut last = events.lock().unwrap();
             if !last.state.is_terminal() {
-                *last = status(
-                    &id,
-                    JobState::Failed,
-                    last.progress,
-                    None,
-                    Some("engine job child exited without a terminal status".into()),
-                );
+                let error = broken
+                    .clone()
+                    .unwrap_or_else(|| "engine job child exited without a terminal status".into());
+                *last = status(&id, JobState::Failed, last.progress, None, Some(error));
             }
+            broken.is_some()
         });
         Ok(Self {
             child: Some(child),
@@ -539,18 +597,22 @@ impl ExportHandle {
     }
     pub fn cancel(&mut self) -> Result<()> {
         self.cancel.store(true, Ordering::Release);
-        let mut input = self.input.lock().unwrap();
-        input.write_all(b"cancel\n")?;
-        input.flush()?;
+        send(&mut *self.input.lock().unwrap(), &ParentMessage::Cancel)?;
         Ok(())
     }
     /// Worker-only wait. Drop also reaps the child (never a detached export).
     pub fn wait(mut self) -> Result<JobStatus> {
+        let broken = match self.reader.take() {
+            Some(reader) => reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("export status reader panicked"))?,
+            None => false,
+        };
         if let Some(mut child) = self.child.take() {
+            if broken {
+                child.kill()?;
+            }
             child.wait()?;
-        }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
         }
         Ok(self.status())
     }
@@ -571,11 +633,13 @@ impl Drop for ExportHandle {
 /// No window, Node, file transport or mutable kernel authority is created.
 pub fn run_child() -> Result<()> {
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
-    let request: ExportRequest = serde_json::from_str(
-        &lines
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing export request"))??,
-    )?;
+    let first = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing export request"))??;
+    let ParentMessage::Start(request) = serde_json::from_str(&first)? else {
+        anyhow::bail!("the export request did not come first");
+    };
+    let request = *request;
     let cancel = Arc::new(AtomicBool::new(false));
     request.resources.validate()?;
     let (grant, permits) = std::sync::mpsc::channel();
@@ -586,30 +650,35 @@ pub fn run_child() -> Result<()> {
     });
     let replies = rasters.clone();
     let override_error = rasters.clone();
+    // Why the parent's messages stopped making sense, if they did.
+    let broken: Arc<Mutex<Option<String>>> = Arc::default();
+    let unreadable = broken.clone();
     std::thread::spawn(move || {
-        for line in lines {
-            if let Ok(text) = line.as_deref()
-                && text.starts_with("{\"compatAnswer\"")
-            {
-                replies.reply(text);
-                continue;
-            }
-            if let Ok(text @ ("grant" | "grant frame")) = line.as_deref() {
-                let _ = grant.send(text == "grant frame");
-                continue;
-            }
-            if matches!(line.as_deref(), Ok("cancel")) {
-                stopped.store(true, Ordering::Release);
-                return;
-            }
+        // A read error is the parent's end, as its EOF is.
+        for line in lines.map_while(Result::ok) {
+            let failure = match serde_json::from_str(&line) {
+                Ok(ParentMessage::Grant { whole_frame }) => {
+                    let _ = grant.send(whole_frame);
+                    continue;
+                }
+                Ok(ParentMessage::Compat { id, answers }) => match replies.reply(id, answers) {
+                    Ok(()) => continue,
+                    Err(e) => e,
+                },
+                Ok(ParentMessage::Cancel) => break,
+                Ok(ParentMessage::Start(_)) => "a second export request".to_owned(),
+                Err(e) => e.to_string(),
+            };
+            *unreadable.lock().unwrap() = Some(failure);
+            break;
         }
-        stopped.store(true, Ordering::Release); // Parent died/closed the pipe.
+        stopped.store(true, Ordering::Release);
     });
     let emit = |s: JobStatus| -> Result<()> {
-        let mut out = std::io::stdout().lock();
-        serde_json::to_writer(&mut out, &s)?;
-        out.write_all(b"\n")?;
-        out.flush()?;
+        send(
+            &mut std::io::stdout().lock(),
+            &ChildMessage::Status(Box::new(s)),
+        )?;
         Ok(())
     };
     emit(status(&request.job, JobState::Running, 0., None, None))?;
@@ -837,6 +906,13 @@ pub fn run_child() -> Result<()> {
             Some(path.to_string_lossy().into()),
             None,
         ))?,
+        Err(_) if let Some(error) = broken.lock().unwrap().take() => emit(status(
+            &job_id,
+            JobState::Failed,
+            0.,
+            None,
+            Some(format!("The export engine got an invalid message: {error}")),
+        ))?,
         Err(_) if cancel.load(Ordering::Acquire) => {
             emit(status(&job_id, JobState::Cancelled, 0., None, None))?
         }
@@ -864,9 +940,10 @@ struct JobRasters {
     /// Why the last need went unanswered, for the export's failure.
     error: Mutex<Option<String>>,
     next: std::sync::atomic::AtomicU64,
-    waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>,
+    waiting: Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Answers>>>,
     answered: Mutex<JobAnswers>,
 }
+type Answers = std::result::Result<Vec<WireAnswer>, String>;
 type JobKey = (String, String, u64, u64);
 #[derive(Default)]
 struct JobAnswers {
@@ -874,57 +951,58 @@ struct JobAnswers {
     time: u64,
 }
 impl JobRasters {
-    fn reply(&self, text: &str) {
-        let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
-        let body = value["compatAnswer"].clone();
-        if let Some(id) = body["id"].as_u64()
-            && let Some(tx) = self.waiting.lock().unwrap().remove(&id)
-        {
-            let _ = tx.send(body);
+    /// The parent's answers to request `id`. One for a request whose frame
+    /// stopped waiting is dropped; one for a request never made is an error.
+    fn reply(&self, id: u64, answers: Answers) -> std::result::Result<(), String> {
+        if id >= self.next.load(Ordering::Acquire) {
+            return Err(format!(
+                "an answer to compat request {id}, which was never made"
+            ));
         }
+        if let Some(tx) = self.waiting.lock().unwrap().remove(&id) {
+            let _ = tx.send(answers);
+        }
+        Ok(())
     }
-    fn raster(
-        item: &serde_json::Value,
-    ) -> std::result::Result<pm_render::compat::CompatAnswer, String> {
+    fn raster(answer: WireAnswer) -> std::result::Result<pm_render::compat::CompatAnswer, String> {
         use pm_render::compat::CompatAnswer;
-        if item["native"] == true {
-            return Ok(CompatAnswer::Native);
-        }
-        if item["hidden"] == true {
-            return Ok(crate::compat::hidden_raster());
-        }
-        let Some(file) = item["file"].as_str() else {
-            return Err(item["error"]
-                .as_str()
-                .unwrap_or("The extension did not draw the layer")
-                .to_owned());
+        let WireAnswer::Raster {
+            width,
+            height,
+            size,
+            anchor,
+            uv,
+            file,
+        } = answer
+        else {
+            return Ok(match answer {
+                WireAnswer::Hidden => crate::compat::hidden_raster(),
+                _ => CompatAnswer::Native,
+            });
         };
-        let data = std::fs::read(file);
-        let _ = std::fs::remove_file(file);
-        let number = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.);
+        let data = std::fs::read(&file);
+        let _ = std::fs::remove_file(&file);
         let data = data.map_err(|e| e.to_string())?;
+        if data.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+            return Err(format!(
+                "The extension's {width}×{height} layer arrived with {} bytes",
+                data.len()
+            ));
+        }
         Ok(crate::compat::override_raster(
-            item["width"].as_u64().unwrap_or(0) as u32,
-            item["height"].as_u64().unwrap_or(0) as u32,
-            data,
-            [number(&item["size"], 0), number(&item["size"], 1)],
-            [number(&item["anchor"], 0), number(&item["anchor"], 1)],
-            match item["uv"].as_array().map(Vec::as_slice) {
-                Some([a, b, c, d]) => [a, b, c, d].map(|v| v.as_f64().unwrap_or(0.)),
-                _ => [0., 0., 1., 1.],
-            },
+            width, height, data, size, anchor, uv,
         ))
     }
     /// The parent's reply, waited for until it comes, the export is
     /// cancelled or the parent ends.
-    fn wait(&self, rx: &std::sync::mpsc::Receiver<serde_json::Value>) -> Option<serde_json::Value> {
+    fn wait(&self, rx: &std::sync::mpsc::Receiver<Answers>) -> Option<Answers> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while std::time::Instant::now() < deadline {
             if self.stop.load(Ordering::Acquire) {
                 return None;
             }
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                Ok(body) => return Some(body),
+                Ok(answers) => return Some(answers),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
             }
@@ -974,29 +1052,41 @@ impl pm_render::compat::CompatRasters for JobRasters {
             }];
             needs
         };
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.waiting.lock().unwrap().insert(id, tx);
-        let line = serde_json::json!({"compat": {"id": id, "needs": needs}});
-        {
-            let mut out = std::io::stdout().lock();
-            if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
+        let id = {
+            let mut waiting = self.waiting.lock().unwrap();
+            let id = self.next.fetch_add(1, Ordering::AcqRel);
+            waiting.insert(id, tx);
+            id
+        };
+        let asked = send(
+            &mut std::io::stdout().lock(),
+            &ChildMessage::Compat {
+                id,
+                needs: needs.clone(),
+            },
+        );
+        let answers = asked.ok().and_then(|()| self.wait(&rx));
+        self.waiting.lock().unwrap().remove(&id);
+        let items = match answers {
+            None => return CompatAnswer::Missing,
+            Some(Err(error)) => {
+                *self.error.lock().unwrap() = Some(error);
                 return CompatAnswer::Missing;
             }
-        }
-        let body = self.wait(&rx);
-        self.waiting.lock().unwrap().remove(&id);
-        let Some(body) = body else {
-            return CompatAnswer::Missing;
+            Some(Ok(items)) if items.len() != needs.len() => {
+                *self.error.lock().unwrap() = Some(format!(
+                    "The app answered {} layers for {}",
+                    items.len(),
+                    needs.len()
+                ));
+                return CompatAnswer::Missing;
+            }
+            Some(Ok(items)) => items,
         };
-        if let Some(error) = body["error"].as_str() {
-            *self.error.lock().unwrap() = Some(error.to_owned());
-            return CompatAnswer::Missing;
-        }
-        let items = body["answers"].as_array().cloned().unwrap_or_default();
         let mut answered = self.answered.lock().unwrap();
         let mut mine = CompatAnswer::Missing;
-        for (need, item) in needs.iter().zip(&items) {
+        for (need, item) in needs.iter().zip(items) {
             let answer = match Self::raster(item) {
                 Ok(answer) => answer,
                 Err(error) => {
@@ -1139,9 +1229,9 @@ impl Costs {
     }
 }
 
-/// Inherited-pipe admission: `grant frame` admits the rest of the frame (the
-/// viewer has been quiet for [`QUIET`]), `grant` a submission bounded by
-/// [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
+/// Inherited-pipe admission: a whole-frame grant admits the rest of the frame
+/// (the viewer has been quiet for [`QUIET`]), any other a submission bounded
+/// by [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
 struct ChildGate {
     permits: Mutex<std::sync::mpsc::Receiver<bool>>,
     costs: Mutex<Costs>,
@@ -1160,16 +1250,7 @@ impl pm_export::render::GpuGate for ChildGate {
             let mut costs = self.costs.lock().unwrap();
             costs.frame_units = costs.frame_units.max(units);
         }
-        {
-            let mut out = std::io::stdout().lock();
-            if out
-                .write_all(b"\"gpu\"\n")
-                .and_then(|_| out.flush())
-                .is_err()
-            {
-                return None;
-            }
-        }
+        send(&mut std::io::stdout().lock(), &ChildMessage::Gpu).ok()?;
         let permits = self.permits.lock().unwrap();
         while !cancel.load(Ordering::Acquire) {
             match permits.recv_timeout(std::time::Duration::from_millis(5)) {
@@ -1252,28 +1333,26 @@ mod tests {
     }
     #[test]
     fn simultaneous_exports_never_share_a_pixel_file() {
-        let reply = |job: &str| {
-            let line = compat_reply(
-                job,
-                0,
-                Ok(vec![CompatReply::Raster {
-                    width: 1,
-                    height: 1,
-                    rgba: job.as_bytes()[..4].to_vec(),
-                    size: [1., 1.],
-                    anchor: [0., 0.],
-                    uv: [0., 0., 1., 1.],
-                }]),
-            );
-            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-            value["compatAnswer"]["answers"][0].clone()
+        let answer = |job: &str| {
+            let raster = CompatReply::Raster {
+                width: 1,
+                height: 1,
+                rgba: job.as_bytes()[..4].to_vec(),
+                size: [1., 1.],
+                anchor: [0., 0.],
+                uv: [0., 0., 1., 1.],
+            };
+            wire_answers(job, 0, Ok(vec![raster])).unwrap().remove(0)
         };
-        let (a, b) = (reply("export-aaaa"), reply("export-bbbb"));
-        assert_ne!(a["file"], b["file"]);
-        assert_eq!(a["uv"], serde_json::json!([0., 0., 1., 1.]));
-        for (item, bytes) in [(&a, b"expo"), (&b, b"expo")] {
+        let (a, b) = (answer("export-aaaa"), answer("export-bbbb"));
+        let file = |a: &WireAnswer| match a {
+            WireAnswer::Raster { file, .. } => file.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(file(&a), file(&b));
+        for item in [a, b] {
             match JobRasters::raster(item).unwrap() {
-                pm_render::compat::CompatAnswer::Raster(r) => assert_eq!(&r.data[..], bytes),
+                pm_render::compat::CompatAnswer::Raster(r) => assert_eq!(&r.data[..], b"expo"),
                 other => panic!("{other:?}"),
             }
         }
@@ -1286,12 +1365,50 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(rasters.wait(&rx).is_none());
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        // An extension's failure is the export's message.
-        let item = serde_json::json!({"error": "broken wrapper"});
-        assert_eq!(JobRasters::raster(&item).unwrap_err(), "broken wrapper");
         assert!(matches!(
-            JobRasters::raster(&serde_json::json!({"hidden": true})),
+            JobRasters::raster(WireAnswer::Hidden),
             Ok(pm_render::compat::CompatAnswer::Raster(_))
         ));
+    }
+    /// An answer to a request the child never made is the parent's mistake;
+    /// one to a request whose frame stopped waiting is late, and dropped.
+    #[test]
+    fn an_answer_to_a_request_never_made_fails_the_job() {
+        let rasters = JobRasters::default();
+        assert!(rasters.reply(0, Ok(vec![])).is_err());
+        rasters.next.store(1, Ordering::Release);
+        assert_eq!(rasters.reply(0, Ok(vec![])), Ok(()));
+        assert!(rasters.reply(7, Ok(vec![])).is_err());
+    }
+    /// A layer answered with the wrong number of answers, or pixels that
+    /// don't fill it, fails with the reason instead of drawing.
+    #[test]
+    fn a_short_answer_fails_the_layer() {
+        use pm_protocol::snapshot::CompatSource;
+        use pm_render::compat::{CompatAnswer, CompatRasters};
+        let rasters = Arc::new(JobRasters::default());
+        let parent = rasters.clone();
+        let replied = std::thread::spawn(move || {
+            while parent.waiting.lock().unwrap().is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            parent.reply(0, Ok(vec![])).unwrap();
+        });
+        let answer = rasters.answer("c", "l", 1., 1., CompatSource::RasterOverride, None);
+        replied.join().unwrap();
+        assert!(matches!(answer, CompatAnswer::Missing));
+        let error = rasters.error.lock().unwrap().take();
+        assert_eq!(error.as_deref(), Some("The app answered 0 layers for 1"));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), [0; 3]).unwrap();
+        let short = WireAnswer::Raster {
+            width: 1,
+            height: 1,
+            size: [1., 1.],
+            anchor: [0., 0.],
+            uv: [0., 0., 1., 1.],
+            file: file.path().to_owned(),
+        };
+        assert!(JobRasters::raster(short).is_err());
     }
 }

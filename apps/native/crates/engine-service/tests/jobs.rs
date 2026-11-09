@@ -553,3 +553,53 @@ fn deliveries_begin_their_override_answerer_at_start_and_looks_do_not() {
     set_compat_answerer(session, None);
     assert_eq!(*begun.lock().unwrap(), vec![("delivery".to_owned(), false)]);
 }
+
+/// A stand-in child: reads its request, then says `lines` and waits.
+fn fake_child(dir: &Path, lines: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("child.sh");
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nread request\ncat <<'END'\n{lines}\nEND\nexec sleep 60\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+/// A child line the parent can't use (unknown, malformed, or about another
+/// job) fails the export now, with the reason, and the child is stopped:
+/// nothing waits for a timeout.
+#[test]
+fn a_child_message_the_parent_cannot_use_fails_the_export_at_once() {
+    let mut another = serde_json::to_value(pm_protocol::priority::JobStatus {
+        job: "another".into(),
+        class: pm_protocol::priority::PriorityClass::UserJob,
+        state: JobState::Running,
+        progress: 0.5,
+        path: None,
+        error: None,
+        preview: None,
+    })
+    .unwrap();
+    another["type"] = "status".into();
+    let another = another.to_string();
+    for (line, reason) in [
+        (r#"{"compat":{"id":1,"needs":[]}}"#, "invalid message"),
+        (r#"{"type":"compat","id":1}"#, "invalid message"),
+        ("not json", "invalid message"),
+        (another.as_str(), "another job"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let child = ExportHandle::start(
+            &fake_child(dir.path(), line),
+            request(dir.path().join("out"), 1),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let status = child.wait().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "{line}");
+        assert_eq!(status.state, JobState::Failed, "{line}: {status:?}");
+        let message = status.error.unwrap().message;
+        assert!(message.contains(reason), "{line}: {message}");
+    }
+}
