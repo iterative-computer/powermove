@@ -46,11 +46,33 @@ for i,l in enumerate(lights):
     else:
         radius=l['u'][0];light.shadow_soft_size=radius;light.energy=peak*4*math.pi**2*radius**2;obj.location=Vector(l['pos'][:3])
     if hasattr(obj,'visible_camera'):obj.visible_camera=False
+def fog_material(label, density, color, anisotropy):
+    mat=bpy.data.materials.new(label);mat.use_nodes=True
+    n=mat.node_tree.nodes;n.clear();o=n.new('ShaderNodeOutputMaterial')
+    scatter=n.new('ShaderNodeVolumeScatter');scatter.inputs['Density'].default_value=density
+    scatter.inputs['Color'].default_value=(*vec(color),1)
+    scatter.inputs['Anisotropy'].default_value=anisotropy
+    absorption=n.new('ShaderNodeVolumeAbsorption');absorption.inputs['Density'].default_value=density
+    absorption.inputs['Color'].default_value=(*vec(color),1)
+    add=n.new('ShaderNodeAddShader');links=mat.node_tree.links
+    links.new(scatter.outputs[0],add.inputs[0]);links.new(absorption.outputs[0],add.inputs[1])
+    links.new(add.outputs[0],o.inputs['Volume']);return mat
 fog=data['world']['atmosphere']
+if fog['height_falloff']!=0:
+    raise RuntimeError('This room reference runner requires homogeneous global fog')
 if fog['density']>0:
-    bpy.ops.mesh.primitive_cube_add(size=1,location=vec(data['camera']['position']));obj=bpy.context.object;obj.name='finite atmosphere reference';obj.scale=(fog['distance']*2,)*3
-    mat=bpy.data.materials.new('fog');mat.use_nodes=True;n=mat.node_tree.nodes;n.clear();o=n.new('ShaderNodeOutputMaterial');scatter=n.new('ShaderNodeVolumeScatter');scatter.inputs['Density'].default_value=fog['density'];scatter.inputs['Color'].default_value=(*vec(fog['color']),1);scatter.inputs['Anisotropy'].default_value=fog['anisotropy']
-    absorption=n.new('ShaderNodeVolumeAbsorption');absorption.inputs['Density'].default_value=fog['density'];absorption.inputs['Color'].default_value=(*vec(fog['color']),1);add=n.new('ShaderNodeAddShader');mat.node_tree.links.new(scatter.outputs[0],add.inputs[0]);mat.node_tree.links.new(absorption.outputs[0],add.inputs[1]);mat.node_tree.links.new(add.outputs[0],o.inputs['Volume']);obj.data.materials.append(mat)
+    bpy.ops.mesh.primitive_cube_add(size=2,location=vec(data['camera']['position']))
+    obj=bpy.context.object;obj.name='finite atmosphere reference';obj.scale=(fog['distance'],)*3
+    obj.data.materials.append(fog_material('atmosphere',fog['density'],fog['color'],fog['anisotropy']))
+for i,volume in enumerate(data['world'].get('volumes',[])):
+    if volume['shape']=='box':
+        bpy.ops.mesh.primitive_cube_add(size=2,location=vec(volume['center']))
+        obj=bpy.context.object;obj.scale=vec(volume['size'])
+    else:
+        bpy.ops.mesh.primitive_uv_sphere_add(segments=32,ring_count=16,radius=volume['size']['x'],location=vec(volume['center']))
+        obj=bpy.context.object
+    obj.name=f'local fog {i}'
+    obj.data.materials.append(fog_material(f'local fog {i}',volume['density'],volume['color'],volume['anisotropy']))
 c=data['camera'];camera=bpy.data.cameras.new('camera');obj=bpy.data.objects.new('camera',camera);scene.collection.objects.link(obj);obj.location=vec(c['position']);forward=(vec(c['target'])-obj.location).normalized();right=forward.cross(Vector((0,1,0))).normalized();up=right.cross(forward);obj.rotation_euler=Matrix((right,up,-forward)).transposed().to_euler();camera.type='PERSP';camera.lens_unit='FOV';camera.sensor_fit='VERTICAL';camera.angle=math.radians(c['fov']);camera.clip_end=10000;camera.clip_start=.004;scene.camera=obj
 scene.render.image_settings.file_format='PNG';scene.render.filepath=str(out/f'{name}-cycles64.png');start=time.perf_counter();bpy.ops.render.render(write_still=True)
-(out/f'{name}-cycles-metrics.json').write_text(json.dumps({'blender':bpy.app.version_string,'engine':'Cycles CPU','threads':2,'size':[960,540],'samples':64,'denoise':True,'seconds':time.perf_counter()-start,'limitations':'Material implementation, material scattering and finite fog bounds differ; visual reference only.'},indent=2))
+(out/f'{name}-cycles-metrics.json').write_text(json.dumps({'blender':bpy.app.version_string,'engine':'Cycles CPU','threads':2,'size':[960,540],'samples':64,'denoise':True,'seconds':time.perf_counter()-start,'limitations':'Principled material scattering and finite fog bounds differ; visual reference only.'},indent=2))
