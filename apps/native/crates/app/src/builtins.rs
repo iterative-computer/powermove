@@ -608,9 +608,8 @@ impl Controller {
             self.builtins.views.insert(id.into(), view);
         }
         let view = self.builtins.views.get(id)?.clone();
-        let handle = window.window_handle();
         view.update(cx, |v, cx| {
-            v.attach(handle);
+            v.attach(window, cx);
             if *v.tokens() != t {
                 v.retheme(t.clone(), cx);
             }

@@ -104,6 +104,13 @@ struct Capture {
     target: Id,
     button: u64,
 }
+/// A publication compiled off the main thread, waiting to install.
+struct Compiled {
+    ticket: u64,
+    publication: Publication,
+    table: Arc<TokenTable>,
+    prepared: Prepared,
+}
 pub struct SurfaceView {
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
@@ -141,6 +148,9 @@ pub struct SurfaceView {
     /// Publications received, and the newest one compiled and shown.
     latest: u64,
     shown: u64,
+    /// The newest compiled tree, kept when it finished while the view had no
+    /// live window (a closed sheet); the next window installs it on attach.
+    parked: Option<Compiled>,
     requested: Option<(usize, usize)>,
     #[cfg(test)]
     pub renders: usize,
@@ -191,6 +201,7 @@ impl SurfaceView {
             queued_move: None,
             latest: 0,
             shown: 0,
+            parked: None,
             requested: None,
             #[cfg(test)]
             renders: 0,
@@ -201,9 +212,13 @@ impl SurfaceView {
         this.reconcile(window, cx);
         this
     }
-    /// A reopened panel window keeps its view; later publications install there.
-    pub fn attach(&mut self, window: AnyWindowHandle) {
-        self.window = window;
+    /// A reopened panel window keeps its view; later publications install
+    /// there, and so does one that finished while no window was open.
+    pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window = window.window_handle();
+        if let Some(compiled) = self.parked.take() {
+            self.install(compiled, window, cx);
+        }
     }
     pub fn tokens(&self) -> &pm_design::Tokens {
         &self.table.tokens
@@ -233,7 +248,6 @@ impl SurfaceView {
     ) {
         self.latest += 1;
         let ticket = self.latest;
-        let window = self.window;
         cx.spawn(async move |this, cx| {
             let surface = publication.surface.clone();
             let worker = table.clone();
@@ -241,23 +255,47 @@ impl SurfaceView {
                 .background_executor()
                 .spawn(async move { Prepared::new(surface, &worker) })
                 .await;
-            let _ = cx.update_window(window, |_, window, cx| {
+            let mut compiled = Some(Compiled {
+                ticket,
+                publication,
+                table,
+                prepared,
+            });
+            // The window the view is in now: a reopened sheet has a new one.
+            let Ok(window) = this.update(cx, |v, _| v.window) else {
+                return;
+            };
+            let installed = cx.update_window(window, |_, window, cx| {
                 this.update(cx, |v, cx| {
-                    if v.latest == ticket {
-                        v.shown = ticket;
-                        if v.publication.generation != publication.generation {
-                            v.restart();
-                        }
-                        v.table = table;
-                        v.publication = publication;
-                        v.prepared = Rc::new(prepared);
-                        v.reconcile(window, cx);
-                        cx.notify();
+                    if let Some(compiled) = compiled.take() {
+                        v.install(compiled, window, cx);
                     }
                 })
             });
+            if installed.is_err() {
+                let _ = this.update(cx, |v, _| {
+                    if let Some(compiled) = compiled.take().filter(|c| c.ticket == v.latest) {
+                        v.parked = Some(compiled);
+                    }
+                });
+            }
         })
         .detach();
+    }
+    fn install(&mut self, compiled: Compiled, window: &mut Window, cx: &mut Context<Self>) {
+        if compiled.ticket != self.latest {
+            return;
+        }
+        self.parked = None;
+        self.shown = compiled.ticket;
+        if self.publication.generation != compiled.publication.generation {
+            self.restart();
+        }
+        self.table = compiled.table;
+        self.publication = compiled.publication;
+        self.prepared = Rc::new(compiled.prepared);
+        self.reconcile(window, cx);
+        cx.notify();
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.

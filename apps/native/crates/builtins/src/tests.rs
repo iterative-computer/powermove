@@ -654,6 +654,30 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     assert!(backend.native.platform.is_empty());
 }
 
+#[test]
+fn a_finished_export_reopens_as_a_fresh_sheet() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("export").unwrap());
+    finish(panels.show("export").unwrap());
+    panels.take_publications();
+    // The coordinator's observations, in its order: progress up to the last
+    // frame, then the terminal run once the file is written.
+    for run in [
+        json!({"phase":"preparing"}),
+        json!({"phase":"rendering","frame":150,"total":300,"elapsed":1}),
+        json!({"phase":"rendering","frame":300,"total":300,"elapsed":2}),
+        json!({"phase":"done","path":"/tmp/Synthetic Film.mp4"}),
+    ] {
+        finish(panels.observe_export(run).unwrap());
+    }
+    panels.take_publications();
+    finish(panels.show("export").unwrap());
+    let text = text_of(&panels, "export");
+    assert!(!text.iter().any(|t| t.starts_with("Exporting")), "{text:?}");
+    assert!(text.iter().any(|t| t == "Export"), "{text:?}");
+    assert!(panels.take_errors().is_empty());
+}
 #[path = "timeline_tests.rs"]
 mod timeline;
 fn select_layer(kernel: &pm_kernel::KernelHandle, id: &str) {
