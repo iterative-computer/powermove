@@ -140,7 +140,7 @@ pub struct Engine {
     queue: metal::CommandQueue,
     pipeline: metal::RenderPipelineState,
     pool: Vec<Arc<ExportedSurface>>,
-    fonts: Option<pm_render::text::host::RenderFonts>,
+    pub(crate) fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
@@ -159,10 +159,12 @@ pub struct Engine {
     pub definition_failure: Option<String>,
     /// Built-in definitions still to load on the service thread.
     pub(crate) builtins_pending: bool,
+    /// The translated-shader folder, kept for a rebuilt engine.
+    pub(crate) shader_cache: Option<std::path::PathBuf>,
     /// Effects the document uses that no installed provider defines; the
     /// viewer draws their layers without them.
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
-    compat: Option<Arc<crate::compat::CompatStores>>,
+    pub(crate) compat: Option<Arc<crate::compat::CompatStores>>,
     /// The store of the document whose frame is rendering.
     compat_document: Option<Arc<crate::compat::CompatStore>>,
     /// The peaks of the content on screen, and the output tone of its frames.
@@ -204,7 +206,8 @@ impl Engine {
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
     pub fn rebuild(&self) -> Result<Self> {
-        let mut next = Self::new(Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?)?;
+        let gpu = Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?;
+        let mut next = Self::with_shader_cache(gpu, self.shader_cache.clone())?;
         next.set_waker(self.waker.lock().unwrap().clone());
         next.resources = self.resources.clone();
         next.mastering = self.mastering;
@@ -312,7 +315,7 @@ impl Engine {
             .map_err(|s| anyhow!(s))?;
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.set_draw_reuse(true);
-        renderer.set_program_cache_dir(shader_cache);
+        renderer.set_program_cache_dir(shader_cache.clone());
         Ok(Self {
             mastering: Default::default(),
             // Use the producer's actual queue. Metal tracks the shared source
@@ -342,6 +345,7 @@ impl Engine {
             resources: Arc::default(),
             definition_failure: None,
             builtins_pending: false,
+            shader_cache: shader_cache.clone(),
             missing_effects: Vec::new(),
             compat: None,
             compat_document: None,

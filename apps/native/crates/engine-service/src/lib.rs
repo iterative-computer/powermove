@@ -259,6 +259,8 @@ pub struct ViewerStatus {
     pub wants_display: bool,
     /// GPU devices lost and rebuilt under this viewer.
     pub device_losses: u64,
+    /// Times the worker started again after a panic (`supervise`).
+    pub restarts: u64,
     /// Clips the viewer plays from a proxy (View › Media). Never counted as
     /// originals.
     pub proxied: usize,
@@ -373,6 +375,9 @@ struct Shared {
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     lose_device: std::sync::atomic::AtomicBool,
+    /// Test hook: the worker panics once, as a bug in a frame would.
+    #[cfg(test)]
+    panic_once: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     invalid_call: std::sync::atomic::AtomicBool,
 }
@@ -775,6 +780,8 @@ impl EngineService {
             #[cfg(test)]
             lose_device: Default::default(),
             #[cfg(test)]
+            panic_once: Default::default(),
+            #[cfg(test)]
             invalid_call: Default::default(),
         });
         // Answers that land redraw every viewer, as a font change does.
@@ -794,7 +801,7 @@ impl EngineService {
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
-            .spawn(move || run(engine, worker, wakes))?;
+            .spawn(move || supervise(engine, worker, wakes))?;
         Ok(Self {
             shared,
             thread: Some(thread),
@@ -1116,7 +1123,72 @@ const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
 const LOSS_WINDOW: Duration = Duration::from_secs(10);
 const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
-fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
+/// Runs the worker; a panic in it (a bug a frame hit) must not leave every
+/// viewer blank, or poison the state the UI thread reads. The worker starts
+/// again on a fresh engine, as after a lost GPU, every view draws again, and
+/// the viewer reports what happened (its error line and the Error Log). Three
+/// panics within a minute stop it with that error showing.
+fn supervise(engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
+    let (fonts, compat, cache) = (
+        engine.fonts.clone(),
+        engine.compat.clone(),
+        engine.shader_cache.clone(),
+    );
+    let mut engine = Some(engine);
+    let mut recent = VecDeque::<std::time::Instant>::new();
+    while let Some(current) = engine.take() {
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(current, shared.clone(), &wakes)
+        }));
+        let Err(panic) = turn else { return };
+        shared.state.clear_poison();
+        shared.device.clear_poison();
+        shared.scopes.clear_poison();
+        let detail = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown cause".into());
+        eprintln!("Viewer worker panicked: {detail}");
+        let now = std::time::Instant::now();
+        recent.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        recent.push_back(now);
+        let next = (recent.len() < 3)
+            .then(|| {
+                pm_gpu::Gpu::new("pm-engine-service")
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .and_then(|gpu| render::Engine::with_shader_cache(gpu, cache.clone()))
+            })
+            .and_then(Result::ok);
+        let mut state = shared.state.lock().unwrap();
+        let restarted = next.is_some();
+        for v in state.views.values_mut() {
+            v.status.error = Some(if restarted {
+                format!("The viewer restarted after an internal error.\n{detail}")
+            } else {
+                format!("The viewer stopped after an internal error.\n{detail}")
+            });
+            v.status.restarts += u64::from(restarted);
+            v.stamp.sequence += 1;
+            v.dirty = true;
+        }
+        state.notify();
+        if state.stop {
+            return;
+        }
+        drop(state);
+        if let Some(mut next) = next {
+            if let Some(fonts) = &fonts {
+                next.set_fonts(fonts.clone());
+            }
+            next.set_compat(compat.clone());
+            *shared.device.lock().unwrap() = next.metal().to_owned();
+            engine = Some(next);
+        }
+    }
+}
+
+fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
     objc2::rc::autoreleasepool(|_| {
@@ -1178,6 +1250,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             engine.raise_validation_error();
+        }
+        #[cfg(test)]
+        if shared
+            .panic_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            panic!("injected viewer failure");
         }
         // Delivers a pending device-lost callback even while idle.
         engine.poll();
@@ -2256,11 +2335,51 @@ mod worker_tests {
         assert_eq!(output.resized(100, 50), output);
     }
 
+    /// Tests that build a whole second engine (every built-in translated)
+    /// run one at a time, so their limits measure the engine, not contention.
+    static REBUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A panic in the worker (a bug a frame hit) restarts it: the viewer
+    /// reports it and draws the same picture again, and the UI thread's
+    /// reads of its status keep working.
+    #[test]
+    fn a_worker_panic_restarts_the_worker_and_the_viewer_draws_again() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let service = EngineService::start(pm_gpu::Gpu::new("panic-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .panic_once
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while v.status().restarts == 0 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Reported until the restarted worker draws a good frame.
+        let error = v.status().error;
+        assert!(
+            error.is_none()
+                || error.as_deref().is_some_and(|e| e.starts_with(
+                    "The viewer restarted after an internal error.\ninjected viewer failure"
+                )),
+            "{error:?}"
+        );
+        v.capture_next().unwrap();
+        let after = drawn(&v);
+        assert_eq!(after.error, None, "a good frame clears the report");
+        assert_eq!(after.frame.unwrap().pixels.unwrap(), before);
+    }
+
     /// A removed or reset GPU: the worker rebuilds its device, points the
     /// viewer's layer and the service's device at it, and the viewer draws
     /// again without anyone reopening it.
     #[test]
     fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
+        let _whole_engine = REBUILDS.lock().unwrap_or_else(|e| e.into_inner());
         let service = EngineService::start(pm_gpu::Gpu::new("lost-device-test").unwrap()).unwrap();
         let layer = metal::MetalLayer::new();
         layer.set_device(&service.metal_device());
