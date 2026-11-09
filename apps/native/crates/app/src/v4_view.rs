@@ -1182,6 +1182,17 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if let Some(sample) = &node.fixed_width {
+            let mut text = window.text_style();
+            text.refine(&node.style.text);
+            let size = text.font_size.to_pixels(window.rem_size());
+            let run = text.to_run(sample.len());
+            let width = window
+                .text_system()
+                .shape_line(sample.clone(), size, &[run])
+                .width;
+            element = element.min_w(width);
+        }
         if node.outline_column && self.natives.outline.column.get() > 0. {
             element = element.w(px(self.natives.outline.column.get()));
         }

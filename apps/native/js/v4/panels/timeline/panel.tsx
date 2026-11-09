@@ -138,7 +138,10 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {f.timecode}
+                {/* While playing, the native timecode layer draws the time in
+                    this fixed-width slot every frame; the readout steps aside
+                    (S3: panels hear only play start and stop). */}
+                {f.playing ? "" : f.timecode}
               </UI.ToolbarItem>
             )}
             <text

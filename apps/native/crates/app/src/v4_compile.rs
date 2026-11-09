@@ -169,6 +169,9 @@ pub struct NodeView {
     pub outline_window: Option<(usize, usize)>,
     /// A number field's unit, drawn after the value in `muted` (language §5).
     pub unit: Option<SharedString>,
+    /// `metadata.fixedWidthSample`: the node is at least as wide as this text in
+    /// its own font, so a changing readout (timecode) never reflows its row.
+    pub fixed_width: Option<SharedString>,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NumberFacts {
@@ -533,6 +536,10 @@ fn compile(
         .flatten();
     let meta = node.props.get("metadata");
     NodeView {
+        fixed_width: meta
+            .and_then(|m| m.get("fixedWidthSample"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned().into()),
         local_change: node.listeners.contains_key("change"),
         cancel_change: meta
             .and_then(|m| m.get("cancelChange"))

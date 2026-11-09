@@ -19,7 +19,7 @@ const TRAIL_RESPONSE: f64 = 0.15;
 const TRAIL_MAX: f64 = 150.;
 const TRAIL_ALPHA: f64 = 0.22;
 
-fn colour(rgb: u32, alpha: f64) -> impl std::ops::Deref<Target = CGColor> {
+pub(crate) fn colour(rgb: u32, alpha: f64) -> impl std::ops::Deref<Target = CGColor> {
     let c = |s: u32| ((rgb >> s) & 255) as f64 / 255.;
     CGColor::new_srgb(c(16), c(8), c(0), alpha)
 }

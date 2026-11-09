@@ -26,12 +26,24 @@ pub struct Slot {
     pub w: f32,
     pub h: f32,
 }
-/// Room the timeline header leaves for the native timecode layer.
+/// The native timecode layer's box: exactly the width of `00:00:00:00` in the
+/// timecode font (tabular digits, so every time fits), so its opaque ground
+/// covers the paused readout and never the frame rate beside it.
 pub fn timecode_slot(t: &pm_design::Tokens) -> Slot {
-    let size = t.typography.timecode;
+    let font = objc2_app_kit::NSFont::monospacedDigitSystemFontOfSize_weight(
+        t.typography.timecode as f64,
+        unsafe { objc2_app_kit::NSFontWeightMedium },
+    );
+    let sample = objc2_foundation::NSString::from_str("00:00:00:00");
+    let key: &objc2_foundation::NSString = unsafe { objc2_app_kit::NSFontAttributeName };
+    let attributes = objc2_foundation::NSDictionary::<
+        objc2_foundation::NSString,
+        objc2::runtime::AnyObject,
+    >::from_slices(&[key], &[&*font as &objc2::runtime::AnyObject]);
+    let size: NSSize = unsafe { msg_send![&*sample, sizeWithAttributes: &*attributes] };
     Slot {
-        w: (size * 7.5).ceil(),
-        h: (size * t.typography.dense_leading).ceil(),
+        w: size.width.ceil() as f32 + t.metrics.border,
+        h: (t.typography.timecode * t.typography.dense_leading).ceil(),
     }
 }
 
@@ -171,6 +183,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // out): set when it changes, cleared only while no other message
     // replaced it.
     let mut shown = None::<String>;
+    let mut measured = None::<(f32, Slot)>;
     cx.spawn(async move|cx| {
         loop {
             if rx.recv().await.is_err() { break; }
@@ -228,13 +241,18 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let (pps,scroll_time,column)=v.builtins.timeline.as_ref().map_or((100.,0.,0.),|t|t.read(cx).time_mapping());
                         let seconds=clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
-                        // Opaque on the header's colour: it covers the panel's paused text
-                        // while playing, so that text never repaints.
-                        let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*cg!(colors.panel)];
+                        // A clear ground: the panel hides its paused readout while playing
+                        // (it hears only play start and stop), so the translucent header
+                        // shows through unchanged.
+                        let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*crate::playhead::colour(colors.panel, 0.)];
                         let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||!playing];
                         let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_)|offset<column||offset>r.w as f64)];
                         if let Some((r,y))=geometry {
-                            let slot=timecode_slot(&host.tokens);
+                            // Measured once per timecode size, never per tick.
+                            if measured.as_ref().is_none_or(|(size,_)|*size!=host.tokens.typography.timecode) {
+                                measured=Some((host.tokens.typography.timecode,timecode_slot(&host.tokens)));
+                            }
+                            let slot=&measured.as_ref().unwrap().1;
                             let top=r.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                             let tall=(r.h-y-metrics.inset).max(0.) as f64;

@@ -5637,6 +5637,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -8775,7 +8778,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "children": [
                     {
                       "props": {},
-                      "text": "00:00:04:16",
                       "type": "text",
                     },
                   ],
@@ -21350,6 +21352,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
