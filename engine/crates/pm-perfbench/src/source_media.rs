@@ -42,7 +42,7 @@ fn straight_source_pixels(pixels: Vec<u8>) -> Vec<u8> {
     if pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) {
         pixels
     } else {
-        pm_node::present::snapshot::encode_rgba8_unorm(&pixels, SnapshotPixels::Straight)
+        pm_export::raster::encode_rgba8_unorm(&pixels, SnapshotPixels::Straight)
     }
 }
 
