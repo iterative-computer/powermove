@@ -98,7 +98,7 @@
       <text class="label" x="60" y="117" text-anchor="middle">Front</text>
       <circle class="sun" cx={60 + sun.x} cy={60 + sun.y} r="6" />
     </svg>
-    <p class="hint">Drag the sun. The centre is overhead, the edge is the horizon.</p>
+    <p class="hint">Drag the sun, or drag the sky in the viewer. The centre is overhead, the edge is the horizon.</p>
   </div>
 {/if}
 {#if world.mode === 'sky' && channelOwner}
