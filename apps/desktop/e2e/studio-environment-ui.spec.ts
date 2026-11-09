@@ -9,7 +9,7 @@ const shots = process.env.PM_SHOT_DIR;
 async function shot(page: any, name: string) {
   if (!shots) return;
   await mkdir(shots, { recursive: true });
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(2500);
   await page.screenshot({ path: `${shots}/after-${name}.png` });
 }
 const objects = (page: any) => page.evaluate(() => (window as any).PM.proj.layers.map((l: any) => ({ id: l.id, name: l.name, object: l.d?.data?.object, light: l.d?.data?.light, camera: l.d?.data?.camera })));
@@ -27,7 +27,7 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   const ids = await page.evaluate(() => {
     const PM = (window as any).PM; PM.pause(); PM.AutomaticPreview?.cancel?.();
     const api = PM.Kernel.api('environment-ui-e2e');
-    const camera = api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 3, z: 16, fStop: 2.8 } } }).data.result.id;
+    const camera = api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 18, y: 12, z: 23, fov: 45, fStop: 2.8 } } }).data.result.id;
     const cube = api.scene3d.edit({ operation: 'add_object', object: { name: 'Tree', source: { primitive: 'cone', parameters: { radius: 0.4, height: 2, segments: 8 } }, material: { p: { color: '#334A2E', roughness: 0.85 } } } }).data.result.id;
     return { camera, cube };
   });
@@ -131,4 +131,31 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   await passes.scrollIntoViewIfNeeded();
   await shot(page, '11-export-render-passes');
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  // Dark theme review of the new sections.
+  if (shots) {
+    await page.evaluate(() => (window as any).PM.theme.apply('dark'));
+    const all = await objects(page);
+    for (const [name, find] of [['world', (l: any) => l.object?.world], ['terrain', (l: any) => l.object?.terrain], ['scatter', (l: any) => l.object?.scatter], ['fog', (l: any) => l.object?.fog]] as const) {
+      await page.evaluate((id: string) => (window as any).PM.selectLayers([id]), all.find(find).id);
+      await shot(page, `12-dark-${name}`);
+    }
+    await page.evaluate(() => (window as any).PM.theme.apply('light'));
+  }
+});
+
+test('A Terrain in an empty composition arrives lit and framed, in one Undo', async ({ session }) => {
+  test.setTimeout(90_000);
+  await session.openEditor();
+  const page = session.page;
+  await page.evaluate(() => { const PM = (window as any).PM; PM.pause(); });
+  await chooseNativeMenu(session, ['Terrain'], () => page.evaluate(() => (window as any).PM.cmd('3d.add-menu')));
+  const kinds = async () => (await objects(page)).map((l: any) => l.object?.terrain ? 'terrain' : l.object?.world ? 'world' : l.camera ? 'camera' : 'other').sort();
+  expect(await kinds()).toEqual(['camera', 'terrain', 'world']);
+  await expect(page.getByRole('button', { name: 'Rolling hills' })).toBeVisible();
+  await shot(page, '13-terrain-empty-comp');
+  // Selection changes are undoable too; the edit itself is one entry.
+  const undo = await page.evaluate(() => { const PM = (window as any).PM; const labels: string[] = []; while (PM.hist.canUndo() && PM.hist.label() !== 'Add Terrain') { labels.push(PM.hist.label()); PM.hist.undo(); } const found = PM.hist.label(); PM.hist.undo(); return { found, skipped: labels }; });
+  expect(undo.found).toBe('Add Terrain');
+  await expect.poll(async () => (await objects(page)).length).toBe(0);
 });

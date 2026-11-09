@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { environmentProperties, terrainSchema, materialOptionsSchema } from '../../renderer/src/core/scene3d/environment-data';
 import { domeAngles, domePoint, environmentKind, sourceFromKey, sourceKey, SKY_PRESETS, SKY_PRESET_VALUES } from './environment-ui';
 
 describe('environment UI helpers', () => {
@@ -23,5 +24,12 @@ describe('environment UI helpers', () => {
     expect(environmentKind({ terrain: {} })).toBe('terrain');
     expect(environmentKind({ material: {} })).toBeNull();
     for (const preset of SKY_PRESETS) expect(SKY_PRESET_VALUES[preset.id]).toBeDefined();
+  });
+  it('gives Timeline rows plain names', () => {
+    const terrain = terrainSchema.parse({ regions: [{ p: {} }] });
+    const rows = environmentProperties({ terrain, materialOptions: materialOptionsSchema.parse({}) }).map(r => `${r.group}:${r.label}`);
+    expect(rows).toContain('Terrain:Feature Size');
+    expect(rows).toContain('Ground Cover 1:Steeper Than');
+    expect(rows).toContain('Material Options:Casts Shadows');
   });
 });

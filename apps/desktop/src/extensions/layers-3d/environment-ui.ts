@@ -142,19 +142,48 @@ export function addFog(api: PowermoveAPI): string | null {
   return run(api, { operation: 'add_fog', fog: { p: { shape: 'box', width: 4, height: 2, depth: 4, density: 0.03, color: '#E6E1DA', anisotropy: 0.4 } } }, 'Add Fog Volume');
 }
 
-/** Rolling hills: grass on gentle ground, rock on steep slopes, light grass on top. */
+/** Rolling hills: grass on gentle ground, rock on steep slopes, light grass on
+    top. In a composition without a sky or lights it also adds a golden-hour
+    World, and without a camera one that frames the land, in one Undo, so the
+    first frame already reads as a landscape. */
 export function addTerrain(api: PowermoveAPI): string | null {
-  return run(api, {
-    operation: 'add_terrain',
-    terrain: {
-      p: { width: 30, depth: 30, resolution: 96, amplitude: 3, frequency: 0.12, octaves: 5, seed: 41, ridged: false },
-      regions: [
-        { p: { minSlope: 32, color: '#8C7D64', roughness: 0.9 } },
-        { p: { minHeight: 1.4, color: '#A3A078' } },
-        { p: { maxHeight: 1.4, color: '#687348' } }
-      ]
+  const layers = api.model.curComp().layers as any[];
+  const lit = layers.some(l => l.d?.data?.object?.world || l.d?.data?.light);
+  const framed = layers.some(l => l.d?.data?.camera);
+  const label = 'Add Terrain';
+  api.edit.begin(label, { origin: 'command' });
+  try {
+    const result = api.scene3d.edit({
+      operation: 'add_terrain',
+      terrain: {
+        p: { width: 30, depth: 30, resolution: 96, amplitude: 3, frequency: 0.12, octaves: 5, seed: 41, ridged: false },
+        regions: [
+          { p: { minSlope: 32, color: '#8C7D64', roughness: 0.9 } },
+          { p: { minHeight: 1.4, color: '#A3A078' } },
+          { p: { maxHeight: 1.4, color: '#687348' } }
+        ]
+      }
+    } as any, { origin: 'command' });
+    if (!result.ok) throw new Error(result.message);
+    if (!lit) {
+      const world = api.scene3d.edit({ operation: 'set_world', world: { mode: 'sky', preset: 'golden-hour', p: { elevation: 14, azimuth: -60, haze: 2.7, fogDensity: 0.003, fogColor: '#E7D2B8', fogHeightFalloff: 0.14, fogDistance: 150 } } } as any, { origin: 'command' });
+      if (!world.ok) throw new Error(world.message);
     }
-  }, 'Add Terrain');
+    if (!framed) {
+      const camera = api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 18, y: 12, z: 23, targetX: 0, targetY: 0, targetZ: 0, fov: 45 } } } as any, { origin: 'command' });
+      if (!camera.ok) throw new Error(camera.message);
+    }
+    const committed = api.edit.commit(label);
+    if (!committed.ok) throw new Error(committed.message);
+    const id = (result.data.result as any)?.id ?? null;
+    if (id) api.selection.select([id]);
+    api.transport.invalidate();
+    return id;
+  } catch (error) {
+    api.edit.cancel();
+    api.ui.toast(error instanceof Error ? error.message : String(error), { error: true });
+    return null;
+  }
 }
 
 /** Candidates for Scatter: what to copy (models) and what to cover (any model or terrain). */
