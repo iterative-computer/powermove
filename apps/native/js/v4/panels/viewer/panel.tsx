@@ -53,7 +53,6 @@ export function ViewerPanel({
         id="viewer"
         role="group"
         label="Viewer"
-        style={{ background: token("colors.viewer") }}
       >
         <EmptyState
           label="No Composition"
@@ -90,6 +89,7 @@ export function ViewerPanel({
     <>
       <PopUpButton
         id="viewer.zoom"
+        data-pm-variant="inline"
         binding="viewer.zoom"
         label={`Zoom, ${m.fit ? "Fit, " : ""}${percent(m.shownZoom)} percent`}
         title="Zoom"
@@ -118,6 +118,7 @@ export function ViewerPanel({
       </PopUpButton>
       <PopUpButton
         id="viewer.quality"
+        data-pm-variant="inline"
         binding="viewer.quality"
         label={`Preview resolution, ${m.quality === "auto" ? `Auto${effective ? `, currently ${spoken(effective)}` : ""}` : resolutionTitle(m)}`}
         title="Preview Resolution"
@@ -146,6 +147,7 @@ export function ViewerPanel({
       {state.host.presentation === "Docked" && (
         <div
           id="viewer.bar"
+          data-pm-slot="header"
           style={{
             display: "flex",
             flexDirection: "row",
@@ -221,7 +223,6 @@ export function ViewerPanel({
           ...target,
           position: "relative",
           flexGrow: 1,
-          background: token("colors.viewer"),
         }}
         state={{ interaction: state.host.interaction }}
         metadata={{

@@ -1,4 +1,3 @@
-/** Mounts the built-in panel into its window: the same entry a fork of it uses. */
 import { mountEffectControls } from "./index";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 
@@ -9,7 +8,6 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     host,
     transport,
     rootOptions,
-    activatePanel,
     report,
   } = env;
   const p = await mountEffectControls({
@@ -21,7 +19,6 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     platform: {
       effectMenu: () => platform("effectMenu"),
       contextMenu: (items) => platform("contextMenu", items),
-      activatePanel,
       focus: (id) => {
         void platform("focus", id).catch(report);
       },

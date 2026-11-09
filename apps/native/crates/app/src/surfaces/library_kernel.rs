@@ -6,6 +6,7 @@ use pm_kernel::{
     session::{SessionSource, ShellCall, ShellReply},
 };
 use pm_model::json::Value;
+use pm_services::ServiceErrorCode;
 use std::{
     collections::BTreeSet,
     path::PathBuf,
@@ -49,7 +50,7 @@ impl LibraryPort for KernelLibraryPort {
     fn enqueue(&mut self, request: Request) -> Result<(), Failure> {
         self.tx.try_send(request).map_err(|e| match e {
             mpsc::TrySendError::Full(_) => Failure::Busy,
-            mpsc::TrySendError::Disconnected(_) => Failure::Service(ErrorCode::Unavailable),
+            mpsc::TrySendError::Disconnected(_) => Failure::Service(ServiceErrorCode::Unavailable),
         })
     }
     fn poll(&mut self) -> Option<Completion> {
@@ -81,14 +82,14 @@ impl KernelLibrary {
             // The kernel's file handoff deliberately excludes library saves.
             return match self.shell(ShellCall::Save(session))? {
                 ShellReply::Saved { .. } => Ok(()),
-                _ => Err(Failure::Service(ErrorCode::Unavailable)),
+                _ => Err(Failure::Service(ServiceErrorCode::Unavailable)),
             };
         }
         let plan = self
             .kernel
             .prepare_save(session, None)
             .wait()
-            .ok_or(Failure::Service(ErrorCode::Unavailable))?
+            .ok_or(Failure::Service(ServiceErrorCode::Unavailable))?
             .map_err(kernel_failure)?;
         // File packing and IO execute on this worker, outside the actor.
         let completion = plan.run();
@@ -96,28 +97,28 @@ impl KernelLibrary {
             .kernel
             .finish_save(completion)
             .wait()
-            .ok_or(Failure::Service(ErrorCode::Unavailable))?
+            .ok_or(Failure::Service(ServiceErrorCode::Unavailable))?
             .map_err(kernel_failure)?
         {
             ShellReply::Saved { .. } => Ok(()),
-            _ => Err(Failure::Service(ErrorCode::Unavailable)),
+            _ => Err(Failure::Service(ServiceErrorCode::Unavailable)),
         }
     }
     fn shell(&self, call: ShellCall) -> Result<ShellReply, Failure> {
         self.kernel
             .shell(call)
             .wait()
-            .ok_or(Failure::Service(ErrorCode::Unavailable))?
+            .ok_or(Failure::Service(ServiceErrorCode::Unavailable))?
             .map_err(kernel_failure)
     }
     pub fn execute(&mut self, command: Command) -> Result<Outcome, Failure> {
         match command {
             Command::Load(query) => {
                 let snapshot = self.snapshot()?;
-                let rows = query.apply_with_names(&snapshot, compare_names);
+                let rows = query.apply(&snapshot);
                 Ok(Outcome::Loaded { snapshot, rows })
             }
-            Command::Open { id, new_window } => {
+            Command::Open(id) => {
                 validate_id(&id)?;
                 if self
                     .kernel
@@ -137,7 +138,7 @@ impl KernelLibrary {
                         electron_profile: None,
                     })
                     .wait()
-                    .ok_or(Failure::Service(ErrorCode::Unavailable))?;
+                    .ok_or(Failure::Service(ServiceErrorCode::Unavailable))?;
                 // Another window opened it meanwhile: bring that window forward.
                 let reply = match reply {
                     Err(KernelFailure::AlreadyOpen(_)) => return Ok(Outcome::Focus(id)),
@@ -145,9 +146,9 @@ impl KernelLibrary {
                 };
                 match reply {
                     ShellReply::Opened { .. } | ShellReply::RecoveryRequired { .. } => {
-                        Ok(Outcome::Opened { reply, new_window })
+                        Ok(Outcome::Opened(reply))
                     }
-                    _ => Err(Failure::Service(ErrorCode::Unavailable)),
+                    _ => Err(Failure::Service(ServiceErrorCode::Unavailable)),
                 }
             }
             Command::Create(values) => {
@@ -159,17 +160,14 @@ impl KernelLibrary {
                     electron_profile: None,
                 })?;
                 if !matches!(reply, ShellReply::Opened { .. }) {
-                    return Err(Failure::Service(ErrorCode::Unavailable));
+                    return Err(Failure::Service(ServiceErrorCode::Unavailable));
                 }
-                Ok(Outcome::Opened {
-                    reply,
-                    new_window: false,
-                })
+                Ok(Outcome::Opened(reply))
             }
             Command::Duplicate { id, name } => {
                 validate_id(&id)?;
                 if name.trim().is_empty() {
-                    return Err(Failure::Service(ErrorCode::InvalidInput));
+                    return Err(Failure::Service(ServiceErrorCode::InvalidInput));
                 }
                 let new_id = pm_kernel::new_id("P");
                 changed(self.shell(ShellCall::Duplicate {
@@ -182,7 +180,7 @@ impl KernelLibrary {
             Command::Rename { id, name } => {
                 validate_id(&id)?;
                 if name.trim().is_empty() {
-                    return Err(Failure::Service(ErrorCode::InvalidInput));
+                    return Err(Failure::Service(ServiceErrorCode::InvalidInput));
                 }
                 let Some(published) = self.kernel.published(&id).filter(|p| p.session.is_some())
                 else {
@@ -211,7 +209,7 @@ impl KernelLibrary {
                         pm_kernel::tx::Request::new(pm_kernel::tx::Caller::native(), call),
                     )
                     .wait()
-                    .ok_or(Failure::Service(ErrorCode::Unavailable))?
+                    .ok_or(Failure::Service(ServiceErrorCode::Unavailable))?
                     .map_err(kernel_failure)?;
                 if matches!(ack.reply, pm_kernel::tx::Reply::Throw(_)) {
                     return Err(Failure::Stale);
@@ -244,22 +242,11 @@ impl KernelLibrary {
                     "Kernel needs ArchiveReason-backed Delete Immediately, preserving all project/history/media bytes and excluding archived IDs from Library; no filesystem deletion fallback.",
                 ))
             }
-            Command::PutBackAndSave(id) => {
-                validate_id(&id)?;
-                let session = self
-                    .kernel
-                    .published(&id)
-                    .and_then(|p| p.session.as_ref().map(|s| s.handle.clone()))
-                    .ok_or(Failure::Stale)?;
-                changed(self.shell(ShellCall::Restore(id))?)?;
-                self.save(session)?;
-                Ok(Outcome::Changed)
-            }
         }
     }
     pub fn snapshot(&self) -> Result<Snapshot, Failure> {
         let ShellReply::Recent(recent) = self.shell(ShellCall::Recent)? else {
-            return Err(Failure::Service(ErrorCode::Unavailable));
+            return Err(Failure::Service(ServiceErrorCode::Unavailable));
         };
         let store = LibraryStore::open(&self.profile);
         let trash = store.trash().map_err(library_failure)?;
@@ -279,13 +266,13 @@ impl KernelLibrary {
         let id = raw
             .get("id")
             .and_then(Value::as_str)
-            .ok_or(Failure::Service(ErrorCode::InvalidData))?
+            .ok_or(Failure::Service(ServiceErrorCode::InvalidData))?
             .to_owned();
         validate_id(&id)?;
         let name = raw
             .get("name")
             .and_then(Value::as_str)
-            .ok_or(Failure::Service(ErrorCode::InvalidData))?
+            .ok_or(Failure::Service(ServiceErrorCode::InvalidData))?
             .to_owned();
         let mut row = Row {
             modified_ms: raw
@@ -380,7 +367,7 @@ fn validate_id(id: &str) -> Result<(), Failure> {
     {
         Ok(())
     } else {
-        Err(Failure::Service(ErrorCode::InvalidInput))
+        Err(Failure::Service(ServiceErrorCode::InvalidInput))
     }
 }
 fn changed(reply: ShellReply) -> Result<(), Failure> {
@@ -394,20 +381,20 @@ fn kernel_failure(failure: KernelFailure) -> Failure {
     // KernelFailure::Storage carries diagnostic text only. Never parse it or
     // leak it to product copy. The kernel owner must add typed IO classification.
     Failure::Service(match failure {
-        KernelFailure::NoProject(_) => ErrorCode::NotFound,
-        _ => ErrorCode::Unavailable,
+        KernelFailure::NoProject(_) => ServiceErrorCode::NotFound,
+        _ => ServiceErrorCode::Unavailable,
     })
 }
 fn library_failure(error: LibraryError) -> Failure {
     Failure::Service(match error {
         LibraryError::Io(e) => match e.kind() {
-            std::io::ErrorKind::NotFound => ErrorCode::NotFound,
-            std::io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
-            std::io::ErrorKind::StorageFull => ErrorCode::DiskFull,
-            _ => ErrorCode::Unavailable,
+            std::io::ErrorKind::NotFound => ServiceErrorCode::NotFound,
+            std::io::ErrorKind::PermissionDenied => ServiceErrorCode::PermissionDenied,
+            std::io::ErrorKind::StorageFull => ServiceErrorCode::DiskFull,
+            _ => ServiceErrorCode::Unavailable,
         },
-        LibraryError::Json { .. } => ErrorCode::InvalidData,
-        LibraryError::InvalidKey(_) => ErrorCode::InvalidInput,
+        LibraryError::Json { .. } => ServiceErrorCode::InvalidData,
+        LibraryError::InvalidKey(_) => ServiceErrorCode::InvalidInput,
     })
 }
 pub(crate) fn project_value(id: &str, values: &NewProject) -> Result<Value, Failure> {
@@ -422,7 +409,7 @@ pub(crate) fn project_value(id: &str, values: &NewProject) -> Result<Value, Fail
         || !(0.1..=3600.0).contains(&format.duration)
         || !valid_colour(&format.background)
     {
-        return Err(Failure::Service(ErrorCode::InvalidInput));
+        return Err(Failure::Service(ServiceErrorCode::InvalidInput));
     }
     // Use the existing JSON bridge and canonical project shape. No float
     // coercion or extension/document rewriting at this presentation boundary.
@@ -432,27 +419,12 @@ pub(crate) fn project_value(id: &str, values: &NewProject) -> Result<Value, Fail
         "dur":format.duration,"work":[0,format.duration],"bg":format.background,
         "assets":{},"layers":[],"params":{},"markers":[],
     });
-    pm_model::json::parse(&value.to_string()).map_err(|_| Failure::Service(ErrorCode::InvalidData))
+    pm_model::json::parse(&value.to_string())
+        .map_err(|_| Failure::Service(ServiceErrorCode::InvalidData))
 }
 
 fn valid_colour(value: &str) -> bool {
     matches!(value.len(), 7 | 9)
         && value.starts_with('#')
         && value[1..].bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn compare_names(a: &str, b: &str) -> std::cmp::Ordering {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSComparisonResult, NSString};
-        match NSString::from_str(a).localizedCompare(&NSString::from_str(b)) {
-            NSComparisonResult::Ascending => std::cmp::Ordering::Less,
-            NSComparisonResult::Descending => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        a.to_lowercase().cmp(&b.to_lowercase())
-    }
 }

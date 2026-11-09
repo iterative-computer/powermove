@@ -45,7 +45,6 @@ impl Session {
     }
     pub fn remove(&mut self, id: u64) {
         self.windows.retain(|w| w.id != id);
-        // Tabs that pointed at the closed leader now follow the next window in that group.
         let followers: Vec<u64> = self
             .windows
             .iter()

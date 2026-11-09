@@ -29,8 +29,7 @@ asynchronous failures. Hosts must dispose roots when retiring a panel/realm.
 The transport is asynchronous, owned by the JS worker. It sends exactly one
 complete batch at a time per root, then awaits `{accepted, revision, error?}`.
 The UI thread never waits on JS. A native worker validates/stages; the shell
-receives an immutable accepted `Arc<Surface>` through `NativeHost::enqueue`.
-`InspectHost` is the Linux/headless publication double. A renderer implementation
+receives an immutable accepted `Arc<Surface>` as a `Publication`. A renderer
 must enqueue, not call JS synchronously. Kernel mutations stay with pm-kernel:
 `BindingSink::enqueue` is the nonblocking adapter seam, not a second writer.
 
@@ -485,7 +484,7 @@ measurements pass the intended complete eval.
 Remaining integration (outside owned paths): install the published compiler
 aliases and Refresh instrumentation; connect the published generation/ack
 recovery and kernel host contracts to the runtime and live query/time publications; implement the
-GPUI/AppKit `NativeHost` and every primitive/control renderer with pm-design
+GPUI/AppKit renderer and every primitive/control renderer with pm-design
 materials/tokens; apply focus/anchor/virtual-list/resource handling. On macOS verify
 accessibility, IME/selection/clipboard and field shortcut ownership; default
 cancellation and pointer capture/lock at display scales; layout/grid, anchored

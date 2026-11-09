@@ -869,27 +869,13 @@ Decisions and selecting rules:
 | Keep current app consumers and add the new adapters without deleting them | Prune rule and N4/N6; application attachment is outside this lane's authorized edits. |
 | Retain native system geometry and pm-design token recipes; leave a neutral missing-symbol slot | Design ownership; no lane-authored visual fallback. |
 
-Portable verification (from the repository root, after the usual activation):
+Verification:
 
 ```sh
-mkdir -p work
-rustc --edition=2024 -D warnings apps/native/crates/app/src/surfaces/recovery_check.rs -o work/recovery-check
-work/recovery-check test
-work/recovery-check clippy
-rustfmt --edition 2024 --check --config skip_children=true apps/native/crates/app/src/main.rs apps/native/crates/app/src/surfaces/*.rs
-bun test --cwd apps/native/js/v4
-bun x --cwd apps/native/js/v4 tsc --noEmit --strict --skipLibCheck --target ES2022 --module ESNext --moduleResolution Bundler --jsx react-jsx --jsxImportSource powermove-v4 --types bun surfaces/recovery/index.tsx surfaces/recovery/recovery.test.tsx
-cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-kernel -p pm-services -p pm-store-host
+cd apps/native
+cargo test --locked -p pm-native-app surfaces::recovery
+bun test --cwd js/v4 surfaces/recovery
 ```
-
-The runner creates a disposable `work/recovery` manifest using these exact
-sources and the production kernel/design/services/store-host crates. It starts
-with a copy of `apps/native/Cargo.lock`; Cargo metadata registers the harness,
-then every test/Clippy command uses `--locked`. No production dependency was
-added and no production lockfile change is needed. No test references spikes,
-real profiles or user data. The full app test command cannot run on Linux:
-`objc2` requires an Apple target. Full app `cargo fmt --check` also finds an
-existing formatting difference in unowned `app/src/smoke.rs`; touched files pass.
 
 Linux results: **37 recovery Rust tests** (33 model/adapter/recipe tests + four
 real service/store source-contract tests), **232 full v4 tests** (including six
@@ -1160,9 +1146,7 @@ pm-native-app --check` also reports pre-existing formatting in the unowned
 `app/src/smoke.rs` call to `media::for_session`; the touched registration and all
 owned modules pass formatting checks. The app owner can format that call.
 
-rustc --edition=2024 apps/native/crates/app/src/surfaces/documents_check.rs -o work/documents-check-tool
-work/documents-check-tool
-work/documents-check-tool --check-macos
+```sh
 cd apps/native
 cargo test --locked -p pm-kernel
 cd js/v4
@@ -1172,16 +1156,6 @@ bun test
 ../../node_modules/.bin/tsc --noEmit -p tsconfig.json
 ../../node_modules/.bin/prettier --check index.tsx documents.test.tsx tsconfig.json
 ```
-
-The portable driver compiles the **actual owned modules** against pm-kernel
-and pm-services using a disposable `work/` manifest seeded from the workspace
-lockfile. It runs `cargo test --locked --manifest-path
-work/documents-check/Cargo.toml` (with an absolute manifest path), Clippy with
-`--locked --all-targets -- -D warnings`, and formatting. `--check-macos` runs
-`cargo check --locked` and Clippy for `x86_64-apple-darwin`; it is a type check,
-not execution. The existing app manifest unconditionally links macOS UI, so
-Linux cannot execute `cargo test -p pm-native-app`. No new workspace crate,
-production dependency or production lockfile change is required.
 
 macOS still must verify actual sheet ownership/queuing/placement, app-modal
 fallback, terminate-later/cancel, open/save/import/folder filtering, extension

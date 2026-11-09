@@ -1,4 +1,3 @@
-/** Mounts the built-in panel into its window: the same entry a fork of it uses. */
 import { createEffectsExtension } from "./index";
 import type { Registry, Target } from "./model";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";

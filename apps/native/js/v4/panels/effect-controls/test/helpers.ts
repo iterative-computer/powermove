@@ -17,7 +17,6 @@ export function platform() {
   const api: Platform = {
     effectMenu: async () => null,
     contextMenu: async () => null,
-    activatePanel: () => {},
     focus: (id) => {
       focus.push(id);
     },

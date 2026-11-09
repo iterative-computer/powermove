@@ -149,26 +149,16 @@ export function EffectControls(props: PanelProps) {
       <div
         role="group"
         label={PANEL_TITLE}
+        data-pm-slot="header"
         style={{
           display: "flex",
           flexDirection: "row",
           alignItems: "center",
-          justifyContent: "space-between",
+          justifyContent: "end",
           height: t("metrics.header"),
           paddingLeft: t("metrics.inset"),
         }}
       >
-        <UI.SegmentedControl
-          label={PANEL_TITLE}
-          value={PANEL_ID}
-          options={[
-            { id: "assets", label: "Project" },
-            { id: PANEL_ID, label: PANEL_TITLE },
-          ]}
-          onChange={(id) => {
-            if (id === "assets") c.platform.activatePanel("assets");
-          }}
-        />
         {p.target === "Layer" && (
           <UI.ToolbarItem
             id={`${PANEL_ID}:add`}

@@ -136,7 +136,9 @@ pub struct SurfaceView {
     /// so a panel's opening state is not read out.
     statuses: Option<HashMap<Id, String>>,
     queued_move: Option<(Id, EventDetail)>,
+    /// Publications received, and the newest one compiled and shown.
     latest: u64,
+    shown: u64,
     requested: Option<(usize, usize)>,
     #[cfg(test)]
     pub renders: usize,
@@ -155,11 +157,7 @@ impl SurfaceView {
     ) -> Self {
         use raw_window_handle::HasWindowHandle;
         let table = Arc::new(TokenTable::new(tokens));
-        let prepared = Rc::new(Prepared::new(
-            &publication.panel,
-            publication.surface.clone(),
-            &table,
-        ));
+        let prepared = Rc::new(Prepared::new(publication.surface.clone(), &table));
         let mut this = Self {
             runtime,
             publication,
@@ -189,6 +187,7 @@ impl SurfaceView {
             statuses: None,
             queued_move: None,
             latest: 0,
+            shown: 0,
             requested: None,
             #[cfg(test)]
             renders: 0,
@@ -205,6 +204,15 @@ impl SurfaceView {
     }
     pub fn tokens(&self) -> &pm_design::Tokens {
         &self.table.tokens
+    }
+    /// How many publications this view has shown; it grows when the panel's
+    /// tree changes.
+    pub fn shown(&self) -> u64 {
+        self.shown
+    }
+    /// A newer publication is still compiling.
+    pub fn compiling(&self) -> bool {
+        self.shown != self.latest
     }
     /// Compile off the main thread; only the newest publication installs.
     pub fn publish(&mut self, publication: Publication, cx: &mut Context<Self>) {
@@ -225,15 +233,15 @@ impl SurfaceView {
         let window = self.window;
         cx.spawn(async move |this, cx| {
             let surface = publication.surface.clone();
-            let panel = publication.panel.clone();
             let worker = table.clone();
             let prepared = cx
                 .background_executor()
-                .spawn(async move { Prepared::new(&panel, surface, &worker) })
+                .spawn(async move { Prepared::new(surface, &worker) })
                 .await;
             let _ = cx.update_window(window, |_, window, cx| {
                 this.update(cx, |v, cx| {
                     if v.latest == ticket {
+                        v.shown = ticket;
                         if v.publication.generation != publication.generation {
                             v.restart();
                         }
@@ -429,9 +437,8 @@ impl SurfaceView {
                     disabled,
                     default: primary,
                     destructive: button_role == Some("destructive"),
-                    // Bar pop-ups (viewer zoom, agent composer choices) are
-                    // borderless titles; inspector and sheet pop-ups keep the bezel.
-                    inline: matches!(self.publication.panel.as_str(), "viewer" | "agent")
+                    // Bar pop-ups are borderless titles; the rest keep the bezel.
+                    inline: crate::v4_compile::variant(node) == Some("inline")
                         && matches!(kind, crate::v4_control::Kind::Popup),
                 },
                 &tokens,
@@ -1390,9 +1397,9 @@ impl SurfaceView {
         if disabled {
             return element;
         }
-        // Finder drops reach the Project panel's own targets; the window's
-        // drop handler places anything landing elsewhere at the playhead.
-        if events.drop && self.publication.panel == "assets" {
+        // Finder drops reach targets that take files; the window's drop
+        // handler places anything landing elsewhere at the playhead.
+        if events.file_drop {
             let target = rgb(self.table.tokens.colors.selected_fill);
             element = element
                 .on_drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(target))

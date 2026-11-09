@@ -179,8 +179,13 @@ impl pm_shell::integration::Integration for Bridge {
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
     }
+    fn contributed_panels(&self, cx: &App) -> Vec<(String, String)> {
+        self.0.read(cx).extensions.contributed.clone()
+    }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
+            // Each layout pass places the timeline again, if it draws it.
+            v.builtins.timeline_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
         });
@@ -586,7 +591,6 @@ impl Controller {
             .and_then(|r| r.get("name"))
             .and_then(crate::node_string)
             .unwrap_or("Untitled");
-        // `Saving…` under the title while a save runs, then `Edited` or nothing.
         self.host.borrow().set_document_metadata(
             title,
             pm_shell::document_subtitle(p.dirty, saving),
@@ -1061,46 +1065,31 @@ impl Controller {
             let _operation = operation;
             let mut result = pending.await;
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
-                let recovery = crate::surfaces::recovery_kernel::PreparedRecovery::from_reply(
+                let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
                     reply, &name, false, saved,
                 );
                 if let Some(recovery) = recovery {
-                    use crate::surfaces::recovery::{Owner, Prompt, RecoverySurface};
-                    if let RecoverySurface::Alert(alert) = recovery.surface.clone() {
-                        let prompt = Prompt {
-                            id: pm_kernel::new_id("recovery"),
-                            revision: 0,
-                            owner: Owner::Window(name.clone()),
-                            alert,
-                        };
-                        let answer = this.update(cx, |v, _| {
-                            if matches!(
-                                reply,
-                                ShellReply::RecoveryRequired {
-                                    recovery: RecoveryResult::Unrecoverable { .. },
-                                    ..
-                                }
-                            ) {
-                                v.errors.borrow_mut().push("Project", &prompt.alert.message);
+                    let answer = this.update(cx, |v, _| {
+                        if matches!(
+                            reply,
+                            ShellReply::RecoveryRequired {
+                                recovery: RecoveryResult::Unrecoverable { .. },
+                                ..
                             }
-                            v.recovery_pending = true;
-                            v.mcp.awaiting_recovery(Some(name.clone()));
-                            crate::surfaces::recovery_macos::sheet(
-                                &prompt,
-                                &v.host.borrow().window,
-                            )
-                        });
-                        let response = match answer {
-                            Ok(rx) => rx.recv().await.ok(),
-                            Err(_) => None,
-                        };
-                        let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
-                        let call = response
-                            .and_then(|r| r.action)
-                            .and_then(|action| recovery.decision(action));
-                        if let Some(call) = call {
-                            result = kernel.shell(call).await;
+                        ) {
+                            v.errors.borrow_mut().push("Project", &recovery.alert.message);
                         }
+                        v.recovery_pending = true;
+                        v.mcp.awaiting_recovery(Some(name.clone()));
+                        recovery.alert.sheet(&v.host.borrow().window)
+                    });
+                    let response = match answer {
+                        Ok(rx) => rx.recv().await.ok().flatten(),
+                        Err(_) => None,
+                    };
+                    let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
+                    if let Some(call) = response.and_then(|action| recovery.decision(action)) {
+                        result = kernel.shell(call).await;
                     }
                 }
             }
@@ -1186,19 +1175,12 @@ impl Controller {
     ) {
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
-        let alert = documents::open_error(name, open_failure_code(error), exists);
+        let alert = documents::open_error(name, open_failure(error), exists);
         self.errors.borrow_mut().push("Project", &alert.message);
         self.message = String::new();
-        let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
-        let rx = platform::choice(
-            &self.host.borrow().window,
-            &alert.message,
-            &alert.informative,
-            &labels,
-        );
+        let rx = alert.sheet(&self.host.borrow().window);
         cx.spawn(async move |_, _| {
-            let choice = rx.recv().await.ok();
-            if alert.action_at(choice) == Some(Action::ShowInFinder)
+            if rx.recv().await.ok().flatten() == Some(Action::ShowInFinder)
                 && let Some(path) = path
             {
                 platform::reveal(&path);
@@ -1763,26 +1745,27 @@ impl Controller {
         true
     }
 }
-/// The wire code the open alert's copy is keyed on.
-/// The service code `documents::open_error` words (its snake_case wire codes).
-fn open_failure_code(error: &KernelFailure) -> &'static str {
-    match error {
-        KernelFailure::NoProject(_) => "not_found",
+/// Why the open failed, in the words the open alert has for it.
+fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailure {
+    use crate::surfaces::documents::OpenFailure;
+    use pm_services::ServiceErrorCode::*;
+    OpenFailure::Service(match error {
+        KernelFailure::NoProject(_) => NotFound,
         // Unsaved work can't be protected without its journal: say so.
-        KernelFailure::Journal(_) => "journal",
+        KernelFailure::Journal(_) => return OpenFailure::Journal,
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
             if text.contains("permission") {
-                "permission_denied"
+                PermissionDenied
             } else if text.contains("not found") || text.contains("no such file") {
-                "not_found"
+                NotFound
             } else if text.contains("no space") {
-                "disk_full"
+                DiskFull
             } else {
-                "invalid_data"
+                InvalidData
             }
         }
-    }
+    })
 }
 pub const SAVING: &str = "Saving…";
 /// `fpsRational`, else the stored float snapped to its exact rate: a project
@@ -1921,7 +1904,7 @@ mod open_failure_tests {
             ),
         ] {
             let alert =
-                crate::surfaces::documents::open_error("Film", open_failure_code(&failure), false);
+                crate::surfaces::documents::open_error("Film", open_failure(&failure), false);
             assert!(
                 !alert.message.contains("operation couldn’t be completed"),
                 "{failure:?}: {}",

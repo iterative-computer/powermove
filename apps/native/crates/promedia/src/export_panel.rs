@@ -16,6 +16,40 @@ pub enum Format {
     Json,
 }
 impl Format {
+    /// What this app exports, in menu order.
+    pub const ALL: [Format; 6] = [
+        Self::Prores,
+        Self::Mp4,
+        Self::Webm,
+        Self::Png,
+        Self::Still,
+        Self::Json,
+    ];
+    /// The format's menu label (v1's).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Prores => "QuickTime · ProRes 4444",
+            Self::Mp4 => "MP4 · H.264",
+            Self::Webm => "WebM · VP9",
+            Self::Png => "PNG Sequence",
+            Self::Still => "Still Frame (PNG)",
+            Self::Json => "Project File (.pmv)",
+        }
+    }
+    fn video(self) -> bool {
+        matches!(self, Self::Prores | Self::Mp4 | Self::Webm)
+    }
+    /// Whether an export in this format uses the option `field` (v1
+    /// `exportFieldSupport`). The others stay stored, dormant, and show dimmed.
+    pub fn reads(self, field: &str) -> bool {
+        match field {
+            "scale" | "fps" | "range" | "mblur" => self != Self::Json,
+            "quality" => matches!(self, Self::Mp4 | Self::Webm),
+            "audio" => self.video(),
+            "alpha" => matches!(self, Self::Prores | Self::Png | Self::Still),
+            _ => true,
+        }
+    }
     pub fn extension(self) -> &'static str {
         match self {
             Self::Prores => "mov",
@@ -121,6 +155,30 @@ pub struct Options {
     pub opaque: BTreeMap<String, Value>,
 }
 impl Options {
+    /// What a `width`×`height` composition at `fps` exports with, before any
+    /// project defaults or remembered choices.
+    pub fn new(width: u32, height: u32, fps: f64) -> Self {
+        Self {
+            format: Format::Mp4,
+            scale: Scale::Preset(1.),
+            width,
+            height,
+            fps,
+            range: "work".into(),
+            quality: "high".into(),
+            mblur: true,
+            audio: true,
+            alpha: false,
+            captions_burn: false,
+            captions_sidecar: "none".into(),
+            profile: Profile::default(),
+            codec: Codec::default(),
+            depth: eight(),
+            dynamic_range: DynamicRange::default(),
+            use_proxies: false,
+            opaque: BTreeMap::new(),
+        }
+    }
     pub fn validate(&self) -> Result<(), String> {
         // Portable project export does not read rendering fields. Retain dormant
         // settings even when they cannot describe an encodable raster.
@@ -150,30 +208,76 @@ impl Options {
     /// media only). PMV uses save_project instead.
     pub fn intent(&self, has_audio: bool, caption_layers: usize) -> Result<Intent, String> {
         self.validate()?;
-        let video = matches!(self.format, Format::Prores | Format::Mp4 | Format::Webm);
-        let rendered = self.format != Format::Json;
+        let f = self.format;
         Ok(Intent {
             options: self.clone(),
-            audio: video && has_audio && self.audio,
+            audio: f.reads("audio") && has_audio && self.audio,
             dynamic_range: if matches!(self.format, Format::Prores | Format::Mp4) {
                 self.dynamic_range
             } else {
                 DynamicRange::Sdr
             },
-            straight_alpha: match self.format {
-                Format::Prores => self.profile.engine().supports_alpha(),
-                Format::Png | Format::Still => true,
-                _ => false,
-            } && self.alpha,
-            motion_blur: rendered && self.mblur,
-            burn_captions: rendered && caption_layers > 0 && self.captions_burn,
-            sidecar: if video && caption_layers > 0 {
+            straight_alpha: f.reads("alpha")
+                && (f != Format::Prores || self.profile.engine().supports_alpha())
+                && self.alpha,
+            motion_blur: f.reads("mblur") && self.mblur,
+            burn_captions: f != Format::Json && caption_layers > 0 && self.captions_burn,
+            sidecar: if f.video() && caption_layers > 0 {
                 self.captions_sidecar.clone()
             } else {
                 "none".into()
             },
         })
     }
+}
+/// v1 `EXPORT_FORMAT_OPTIONS`: a project's stored default format is kept
+/// even where this app has no encoder for it (`rec`, `web`).
+const V1_FORMATS: [&str; 8] = [
+    "prores", "mp4", "webm", "rec", "png", "still", "web", "json",
+];
+/// JavaScript `Number(value)` for a JSON value.
+fn js_number(value: &Value) -> f64 {
+    match value {
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::Bool(b) => f64::from(u8::from(*b)),
+        Value::Null => 0.,
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                0.
+            } else {
+                text.parse().unwrap_or(f64::NAN)
+            }
+        }
+        _ => f64::NAN,
+    }
+}
+/// A project's stored export defaults as v1 `normalizeExportDefaults(raw,
+/// fallbackFps)` reads them, field for field.
+pub fn normalize_defaults(stored: &Value, fallback_fps: f64) -> Value {
+    let pick = |key: &str, allowed: &[&str], fallback: &str| {
+        let value = stored[key].as_str().filter(|v| allowed.contains(v));
+        serde_json::json!(value.unwrap_or(fallback))
+    };
+    let flag = |key: &str, fallback: bool| stored[key].as_bool().unwrap_or(fallback);
+    let base_fps = if fallback_fps.is_finite() && fallback_fps > 0. {
+        fallback_fps.min(240.)
+    } else {
+        30.
+    };
+    let fps = js_number(&stored["fps"]);
+    let scale = js_number(&stored["scale"]);
+    let number = |n: f64| serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number);
+    serde_json::json!({
+        "format": pick("format", &V1_FORMATS, "mp4"),
+        "scale": number(if !scale.is_finite() || scale <= 0. { 1. } else { scale.clamp(0.01, 16.) }),
+        "fps": number(if fps.is_finite() && fps > 0. { fps.min(240.) } else { base_fps }),
+        "range": pick("range", &["work", "all"], "work"),
+        "quality": pick("quality", &["draft", "high", "max"], "high"),
+        "mblur": flag("mblur", true),
+        "audio": flag("audio", true),
+        "alpha": flag("alpha", false),
+    })
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Intent {

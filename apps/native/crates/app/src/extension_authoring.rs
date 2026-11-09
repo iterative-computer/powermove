@@ -2,7 +2,7 @@
 //! extensions live, the shipped built-in sources, and the isolated check that
 //! compiles and activates staged code before it is promoted. Runs on MCP
 //! workers, never on the main thread.
-use pm_builtins::{Builtins, LIVE_PANELS};
+use pm_builtins::{BUILTIN_PANELS, Builtins};
 use pm_compat_runner::{CompatRunner, manifest};
 use pm_mcp::extensions::ExtensionHost;
 use pm_runtime_v8::{Evaluation, Ticket};
@@ -136,26 +136,17 @@ impl ExtensionHost for AppExtensions {
 }
 
 fn settle(ticket: Ticket<Evaluation>) -> Result<(), String> {
-    let deadline = Instant::now() + ACTIVATION;
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result.map(drop).map_err(|e| e.to_string());
-        }
-        if Instant::now() > deadline {
-            return Err(format!(
-                "activation did not finish within {}s",
-                ACTIVATION.as_secs()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    crate::ticket::answer(ticket, Instant::now() + ACTIVATION)
+        .ok_or_else(|| format!("activation did not finish within {}s", ACTIVATION.as_secs()))?
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 /// The built-in a fork draws in place of, if any.
 pub fn replaced_panel(manifest: &Value) -> Option<&'static str> {
     let replaces = manifest["replaces"].as_array()?;
-    LIVE_PANELS
+    BUILTIN_PANELS
         .iter()
-        .copied()
+        .map(|p| p.id.as_str())
         .find(|panel| replaces.iter().any(|r| r == panel))
 }
 /// Compile with the app's compiler, then activate in throwaway runtimes on a

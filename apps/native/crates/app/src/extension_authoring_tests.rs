@@ -82,7 +82,7 @@ fn every_built_in_forks_compiles_and_mounts_in_place_of_the_built_in() {
     let host = AppExtensions::new(profile.clone());
     let stage = profile.join("stage");
     let builtins = host.builtins().unwrap();
-    for panel in LIVE_PANELS {
+    for panel in pm_builtins::BUILTIN_PANELS.iter().map(|p| p.id.as_str()) {
         assert!(
             builtins.join(panel).join("manifest.json").exists(),
             "{panel}"
@@ -92,7 +92,7 @@ fn every_built_in_forks_compiles_and_mounts_in_place_of_the_built_in() {
         let raw: Value =
             serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
         let parsed = host.manifest(&raw).unwrap();
-        assert_eq!(replaced_panel(&parsed), Some(*panel));
+        assert_eq!(replaced_panel(&parsed), Some(panel));
         check(&dir, &parsed).unwrap_or_else(|e| panic!("{panel} fork: {e}"));
     }
     // The copy is content-addressed: a second call reuses it.

@@ -134,7 +134,6 @@ for (const [state, view, extra] of cases)
     const report = reports.at(-1)!;
     expect({
       tree: treeSnapshot(report.nodes),
-      cards: report.cards,
       ax: report.accessibility,
       focusOrder: report.focusOrder,
     }).toMatchSnapshot();
@@ -150,9 +149,6 @@ for (const [state, view, extra] of cases)
       expect(grid.multiselectable).toBe(true);
     }
     if (state === "transport-error") {
-      expect(report.cards.every((card: any) => card.actions_disabled)).toBe(
-        true,
-      );
       expect(
         report.accessibility
           .filter((n: any) => n.role === "Cell")
@@ -160,9 +156,6 @@ for (const [state, view, extra] of cases)
       ).toBe(true);
       expect(find(root, "Add").props.disabled).toBe(true);
     }
-    if (state === "unknown-after-delay")
-      expect(report.cards[0].status).toBe("Loading…");
-    if (state === "unknown-original") expect(report.cards[0].status).toBeNull();
     if (state === "60000-items") {
       expect(Object.keys(report.nodes).length).toBeLessThan(200);
       expect(find(root, "Project media").props.attr).toEqual({
@@ -261,7 +254,6 @@ test("one grid Tab stop; header, search, crumbs, grid, selection order", async (
   await event(root, find(root, "Search Media").id, "click");
   const r = replay(commits, view).at(-1)!;
   expect(r.focusOrder.map((id: number) => r.nodes[id].props.label)).toEqual([
-    "Project",
     "Search Media",
     "Add",
     "Search media",

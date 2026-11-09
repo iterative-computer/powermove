@@ -5,8 +5,8 @@
 //! by name, so the native collection scaffold is gone.
 use crate::{
     library_surface::{
-        appkit::{new_project_sheet, present_alert},
-        controller::{Content, HostEffect, Key, LibraryController, LibraryHost, Presentation},
+        appkit::new_project_sheet,
+        controller::{Content, HostEffect, LibraryController},
         form::Format,
         kernel::KernelLibraryPort,
         model::*,
@@ -16,7 +16,7 @@ use crate::{
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use pm_kernel::{KernelHandle, session::ShellReply};
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 /// What the library needs from whichever editor is in front.
 #[derive(Debug)]
@@ -26,25 +26,13 @@ pub enum Outbound {
         name: String,
         file: Option<std::path::PathBuf>,
     },
-    Focus,
     /// The project is open: bring forward the window that shows it.
     FocusProject(String),
     Message(String),
 }
 pub type Sink = Rc<dyn Fn(Outbound, &mut App)>;
-#[derive(Default)]
-struct Effects(Vec<HostEffect>, Option<Presentation>);
-impl LibraryHost for Effects {
-    fn effect(&mut self, effect: HostEffect) {
-        self.0.push(effect);
-    }
-    fn publish(&mut self, presentation: Presentation, _: WindowMetrics) {
-        self.1 = Some(presentation);
-    }
-}
 pub struct ProjectLibrary {
     pub controller: LibraryController<KernelLibraryPort>,
-    pub presentation: Option<Presentation>,
     sink: Sink,
     tokens: Tokens,
     focus: FocusHandle,
@@ -84,7 +72,6 @@ impl ProjectLibrary {
         .detach();
         Self {
             controller: LibraryController::new(port),
-            presentation: None,
             sink,
             tokens,
             focus: cx.focus_handle(),
@@ -95,11 +82,7 @@ impl ProjectLibrary {
     /// Takes finished work and turns the controller's effects into platform calls.
     pub fn pump(&mut self, cx: &mut Context<Self>) {
         self.controller.poll();
-        let mut host = Effects::default();
-        self.controller
-            .render(&mut host, &self.tokens, Duration::ZERO, 0..usize::MAX);
-        self.presentation = host.1;
-        for effect in host.0 {
+        for effect in self.controller.take_effects() {
             self.effect(effect, cx);
         }
         cx.notify();
@@ -123,7 +106,7 @@ impl ProjectLibrary {
                 let Some(window) = self.parent(cx) else {
                     return;
                 };
-                let rx = present_alert(&window, &alert);
+                let rx = alert.sheet(&window);
                 cx.spawn(async move |this, cx| {
                     let answer = rx.recv().await.ok().flatten();
                     let _ = this.update(cx, |v, cx| {
@@ -150,15 +133,12 @@ impl ProjectLibrary {
                 );
             }
             HostEffect::FocusProject(id) => (self.sink)(Outbound::FocusProject(id), cx),
-            HostEffect::SaveAs(_) => (self.sink)(Outbound::Focus, cx),
-            HostEffect::Banner(text) => (self.sink)(Outbound::Message(text.into()), cx),
-            HostEffect::Announce { text, .. } => {
+            HostEffect::Announce(text) => {
                 if let Some(window) = self.parent(cx) {
                     crate::v4_native::announce(&window, &text);
                 }
             }
             HostEffect::IntegrationGap(gap) => eprintln!("Project Library: {gap}"),
-            HostEffect::FocusSearch | HostEffect::Subtitle { .. } => {}
         }
     }
     fn show_new_project(&mut self, cx: &mut Context<Self>) {
@@ -234,7 +214,7 @@ impl ProjectLibrary {
         match action {
             "cancel" => {
                 drop(sheet);
-                let _ = self.controller.key(Key::Escape, 1);
+                self.controller.escape();
                 if let Some(open) = self.sheet.borrow_mut().take() {
                     open.close();
                 }
@@ -291,7 +271,7 @@ impl ProjectLibrary {
                             }
                             let _ = v.controller.commit_rename();
                         } else {
-                            let _ = v.controller.key(Key::Escape, 1);
+                            v.controller.escape();
                         }
                         v.pump(cx);
                     });
@@ -476,8 +456,8 @@ impl Render for ProjectLibrary {
                     .child(self.controller.query.text.clone()),
             );
         }
-        match self.presentation.as_ref().map(|p| &p.content) {
-            Some(Content::Empty(empty)) => {
+        match self.controller.content() {
+            Content::Empty(empty) => {
                 list = list.child(
                     div()
                         .flex_1()
@@ -494,12 +474,12 @@ impl Render for ProjectLibrary {
                         ),
                 );
             }
-            Some(Content::Unavailable { message, .. }) => {
-                list = list.child(div().p(px(m.inset)).child(*message));
+            Content::Unavailable { message, .. } => {
+                list = list.child(div().p(px(m.inset)).child(message));
             }
             _ => {}
         }
-        for row in self.presentation.iter().flat_map(|p| &p.rows) {
+        for row in &self.controller.rows {
             let id = row.id.clone();
             let selected = self.controller.selected.as_ref() == Some(&row.id);
             let facts = row.facts("").unwrap_or_default();

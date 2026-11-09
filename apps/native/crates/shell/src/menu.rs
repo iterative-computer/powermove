@@ -1,5 +1,6 @@
 //! One menu model for AppKit and table verification.
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Equivalent {
     pub id: String,
@@ -29,9 +30,23 @@ impl Item {
             args: vec![],
         }
     }
-    fn with_args(mut self, args: serde_json::Value) -> Self {
-        self.args = args.as_array().cloned().unwrap_or_default();
-        self
+    /// A registry command, showing the shipped keymap's chord for it.
+    fn registered(
+        keymap: &[crate::keyboard::Binding],
+        label: &str,
+        command: &str,
+        args: serde_json::Value,
+    ) -> Self {
+        let args = args.as_array().cloned().unwrap_or_default();
+        let chord = keymap
+            .iter()
+            .find(|b| b.command == command && b.args == args)
+            .map(|b| b.chord.as_str())
+            .unwrap_or_default();
+        Self {
+            args,
+            ..Self::command(label, command, chord)
+        }
     }
     fn role(label: &str, role: &'static str, chord: &str) -> Self {
         Self {
@@ -49,18 +64,19 @@ pub const DISPLAY_ONLY: [&str; 3] = ["Layer", "Timeline", "tools"];
 pub const SUBMENUS: [&str; 4] = ["openRecent", "workspaces", "panels", "tools"];
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
 pub fn tools() -> Vec<Item> {
+    let keymap = crate::keyboard::shipped();
     [
-        ("Select", "toolSelect", "v"),
-        ("Hand", "toolHand", "h"),
-        ("Zoom", "toolZoom", "z"),
-        ("Rotate", "toolRotate", "w"),
-        ("Anchor Point", "toolAnchor", "y"),
-        ("Shape", "toolShape", "q"),
-        ("Pen", "toolPen", "g"),
-        ("Text", "toolText", "cmd+t"),
+        ("Select", "toolSelect"),
+        ("Hand", "toolHand"),
+        ("Zoom", "toolZoom"),
+        ("Rotate", "toolRotate"),
+        ("Anchor Point", "toolAnchor"),
+        ("Shape", "toolShape"),
+        ("Pen", "toolPen"),
+        ("Text", "toolText"),
     ]
     .iter()
-    .map(|(l, c, k)| Item::command(l, c, k))
+    .map(|(l, c)| Item::registered(&keymap, l, c, json!([])))
     .collect()
 }
 pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
@@ -71,6 +87,9 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     };
     let sep = || Item::command("", "", "");
     // Registry-only commands, labelled for the menu bar, with their W1 chords.
+    let keymap = crate::keyboard::shipped();
+    let r = |label: &str, command: &str| Item::registered(&keymap, label, command, json!([]));
+    let r_args = |label: &str, command: &str, args| Item::registered(&keymap, label, command, args);
     let k = Item::command;
     vec![
         (
@@ -96,7 +115,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("newWindow"),
                 m("open"),
                 Item::command("Open Recent", "openRecent", ""),
-                k("Projects…", "projects", "Command+P"),
+                r("Projects…", "projects"),
                 sep(),
                 m("closeTab"),
                 sep(),
@@ -123,7 +142,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("contextPaste"),
                 k("Delete", "delete", ""),
                 m("contextSelectAll"),
-                k("Deselect All", "deselect", "Command+Shift+A"),
+                r("Deselect All", "deselect"),
                 sep(),
                 m("duplicate"),
                 m("split"),
@@ -169,92 +188,67 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
         (
             "Layer",
             vec![
-                k("New Solid", "newSolid", "cmd+y"),
-                k("New Shape", "newShape", "cmd+shift+y"),
-                k("New Adjustment Layer", "newAdjustment", "cmd+alt+y"),
+                r("New Solid", "newSolid"),
+                r("New Shape", "newShape"),
+                r("New Adjustment Layer", "newAdjustment"),
                 sep(),
-                k("Group", "groupLayers", "cmd+g"),
-                k("Ungroup", "ungroupLayers", "cmd+shift+g"),
+                r("Group", "groupLayers"),
+                r("Ungroup", "ungroupLayers"),
                 sep(),
-                k("Lock Selected Layers", "lockSelectedLayers", "cmd+l"),
-                k("Unlock All Layers", "unlockAllLayers", "cmd+shift+l"),
+                r("Lock Selected Layers", "lockSelectedLayers"),
+                r("Unlock All Layers", "unlockAllLayers"),
                 sep(),
-                k("Select Previous Layer", "selectPreviousLayer", "cmd+up"),
-                k("Select Next Layer", "selectNextLayer", "cmd+down"),
-                k(
+                r("Select Previous Layer", "selectPreviousLayer"),
+                r("Select Next Layer", "selectNextLayer"),
+                r(
                     "Extend Selection to Previous Layer",
                     "extendSelectionPreviousLayer",
-                    "cmd+shift+up",
                 ),
-                k(
-                    "Extend Selection to Next Layer",
-                    "extendSelectionNextLayer",
-                    "cmd+shift+down",
-                ),
+                r("Extend Selection to Next Layer", "extendSelectionNextLayer"),
                 sep(),
-                k("Trim In Point to Playhead", "trimIn", "alt+["),
-                k("Trim Out Point to Playhead", "trimOut", "alt+]"),
-                k("Move In Point to Playhead", "moveLayerIn", "["),
-                k("Move Out Point to Playhead", "moveLayerOut", "]"),
-                k(
-                    "Move to Composition Start",
-                    "moveLayerInToStart",
-                    "alt+home",
-                ),
-                k("Move to Composition End", "moveLayerOutToEnd", "alt+end"),
+                r("Trim In Point to Playhead", "trimIn"),
+                r("Trim Out Point to Playhead", "trimOut"),
+                r("Move In Point to Playhead", "moveLayerIn"),
+                r("Move Out Point to Playhead", "moveLayerOut"),
+                r("Move to Composition Start", "moveLayerInToStart"),
+                r("Move to Composition End", "moveLayerOutToEnd"),
                 sep(),
-                k("Center Anchor Point", "centerAnchor", "cmd+alt+home"),
-                k("Edit Text", "text.editSelected", "enter"),
-                k("Delete", "delete", "backspace"),
+                r("Center Anchor Point", "centerAnchor"),
+                r("Edit Text", "text.editSelected"),
+                r("Delete", "delete"),
             ],
         ),
         (
             "Timeline",
             vec![
-                k("Play/Pause", "play", "space"),
+                r("Play/Pause", "play"),
                 sep(),
-                k("Go to Start", "gotoStart", "home"),
-                k("Go to End", "gotoEnd", "end"),
-                k("Previous Frame", "prevFrame", "pageup"),
-                k("Next Frame", "nextFrame", "pagedown"),
-                k("Back 10 Frames", "stepFrames", "shift+pageup")
-                    .with_args(serde_json::json!([-10])),
-                k("Forward 10 Frames", "stepFrames", "shift+pagedown")
-                    .with_args(serde_json::json!([10])),
-                k(
-                    "Previous Keyframe",
-                    "timeline.adjacentKeyframe:prev",
-                    "ctrl+left",
-                ),
-                k(
-                    "Next Keyframe",
-                    "timeline.adjacentKeyframe:next",
-                    "ctrl+right",
-                ),
-                k("Previous Visible Event", "prevVisibleEvent", "j"),
-                k("Next Visible Event", "nextVisibleEvent", "k"),
+                r("Go to Start", "gotoStart"),
+                r("Go to End", "gotoEnd"),
+                r("Previous Frame", "prevFrame"),
+                r("Next Frame", "nextFrame"),
+                r_args("Back 10 Frames", "stepFrames", json!([-10])),
+                r_args("Forward 10 Frames", "stepFrames", json!([10])),
+                r("Previous Keyframe", "timeline.adjacentKeyframe:prev"),
+                r("Next Keyframe", "timeline.adjacentKeyframe:next"),
+                r("Previous Visible Event", "prevVisibleEvent"),
+                r("Next Visible Event", "nextVisibleEvent"),
                 sep(),
-                k("Go to Layer In Point", "gotoLayerIn", "i"),
-                k("Go to Layer Out Point", "gotoLayerOut", "o"),
-                k("Go to Work Area Start", "gotoWorkIn", "shift+home"),
-                k("Go to Work Area End", "gotoWorkOut", "shift+end"),
-                k("Set Work Area Start", "workIn", "b"),
-                k("Set Work Area End", "workOut", "n"),
+                r("Go to Layer In Point", "gotoLayerIn"),
+                r("Go to Layer Out Point", "gotoLayerOut"),
+                r("Go to Work Area Start", "gotoWorkIn"),
+                r("Go to Work Area End", "gotoWorkOut"),
+                r("Set Work Area Start", "workIn"),
+                r("Set Work Area End", "workOut"),
                 sep(),
-                k("Nudge Keyframes Earlier", "nudgeKeyframes", "alt+left")
-                    .with_args(serde_json::json!([-1])),
-                k("Nudge Keyframes Later", "nudgeKeyframes", "alt+right")
-                    .with_args(serde_json::json!([1])),
-                k("Easy Ease", "easyEase", "f9"),
-                k("Easy Ease In", "easyEaseIn", "shift+f9"),
-                k("Easy Ease Out", "easyEaseOut", "cmd+shift+f9"),
+                r_args("Nudge Keyframes Earlier", "nudgeKeyframes", json!([-1])),
+                r_args("Nudge Keyframes Later", "nudgeKeyframes", json!([1])),
+                r("Easy Ease", "easyEase"),
+                r("Easy Ease In", "easyEaseIn"),
+                r("Easy Ease Out", "easyEaseOut"),
                 sep(),
-                k("Graph Editor", "graph", "shift+f3"),
-                k(
-                    "Reveal All Animated Properties",
-                    "timeline.revealAll",
-                    "cmd+`",
-                ),
+                r("Graph Editor", "graph"),
+                r("Reveal All Animated Properties", "timeline.revealAll"),
             ],
         ),
         (
@@ -272,9 +266,9 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::command("Show/Hide Sidebar", "toggleSidebar", ""),
                 Item::command("Show/Hide Inspector", "toggleInspector", ""),
                 sep(),
-                k("Command Palette…", "palette", "Command+K"),
+                r("Command Palette…", "palette"),
                 Item::command("Field Menu…", "fieldMenu", ""),
-                k("Agent", "agent", "Command+Shift+K"),
+                r("Agent", "agent"),
                 sep(),
                 Item::role(
                     "Enter Full Screen",

@@ -1,6 +1,6 @@
 //! Panel-owned AX enrichment; the shared UI kit remains unchanged.
-use crate::bridge::Projection;
 use accesskit::{Action, ActionData, ActionRequest, CustomAction, Role, TreeId, TreeUpdate};
+use pm_panel_media::v4::Projection;
 use pm_panel_media::{
     Availability, Download, Input, ItemId, MenuCommand, Modifiers, PointerPhase, Row, RowData,
     Stamp,

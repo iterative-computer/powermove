@@ -163,4 +163,5 @@ export interface Mounted {
   publish?(): void;
 }
 
+/** Mounts a built-in panel into its window: the same entry a fork of it uses. */
 export type Mount = (env: BuiltinEnv) => Promise<Mounted>;

@@ -41,7 +41,7 @@ declare const runtime: { engine(operation: string, input?: Json): Json };
 const native = (operation: string, input: unknown = null): any =>
   runtime.engine(operation, input as Json);
 const report = (error: unknown) => native("report", String(error));
-/** Built-in panel ids (Rust `LIVE_PANELS`) to the module that mounts each. */
+/** Each built-in panel (`panels.json`) to the module that mounts it. */
 const MOUNTS: Record<string, Mount> = {
   "layer-effects": layerEffects,
   fxbrowser,
@@ -299,10 +299,10 @@ function overlaysFor(env: { rootOptions: any }): Overlays {
     },
   };
 }
-/** v1–3's timeline chrome (`workspace.chrome.timeline`) for v4. */
 /** This realm's clip painter (`timeline.paint`), run when clips move. */
 let clipPainter: ((clips: Json[]) => unknown) | null = null;
 const timelineApi: Timeline = {
+  /** v1–3's timeline chrome (`workspace.chrome.timeline`) for v4. */
   chrome(patch) {
     if (!patch || typeof patch !== "object")
       throw new Error("Timeline chrome is an object of fields");

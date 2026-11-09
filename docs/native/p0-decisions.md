@@ -128,7 +128,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **Panel bodies never repeat `colors.panel`.** The v4 host drops a root `colors.panel` fill; panel windows (Export, Settings, Agent) paint it once.
 - **v4 additive:** `metadata.placeholder` on `TextField` shows a muted hint in the empty field (no new prop).
 - **The ground tint is darker than `colors.window` in dark (`#080808`, the demo's `#0C0A09` relationship)** because the blur lightens it; panels then composite a step above the ground, as tonal elevation requires.
-- **The shell tab strip is the only Project / Effect Controls switch.** Both panels' own `SegmentedControl` (kept for the web host) is hidden in the native header.
+- **The shell tab strip is the only Project / Effect Controls switch.** Neither panel draws its own.
 - **Synchronous presents (live resize, key-window change) release the `CAMetalDisplayLink` first;** Core Animation forbids `nextDrawable` while a link owns the layer. While a link does own it, a draw with no link-supplied drawable waits for the link's next update and never falls back to `nextDrawable` (integration, wave 15).
 
 ## Compat lane decisions (2026-11-08)

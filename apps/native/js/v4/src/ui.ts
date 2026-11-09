@@ -1,7 +1,8 @@
 /** v4 ports of the tagged controls. Semantic trees only; no private visual language. */
-import { h, createContext, type ComponentChildren } from "preact";
+import { h, type ComponentChildren } from "preact";
 import { useContext, useId, useState } from "preact/hooks";
 import type { SurfaceProps } from "./jsx-runtime";
+import { Label } from "./label";
 import type { Json, SurfaceEvent } from "./protocol";
 export * from "./color-space";
 export { parseArithmetic } from "./arithmetic";
@@ -13,9 +14,8 @@ export interface ControlProps extends SurfaceProps {
   label?: string;
   mixed?: boolean;
 }
-const LabelContext = createContext<string | undefined>(undefined);
 function field(kind: string, primitive: string, props: ControlProps) {
-  const labelledBy = useContext(LabelContext);
+  const labelledBy = useContext(Label);
   return h(primitive, {
     ...props,
     control: kind,
@@ -108,7 +108,7 @@ export function Row(
     "div",
     { role: "group", control: "row", ...props, children: undefined },
     h("text", { id }, props.label),
-    h(LabelContext.Provider, { value: id }, props.children),
+    h(Label.Provider, { value: id }, props.children),
   );
 }
 export function Section(

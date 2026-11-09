@@ -204,6 +204,7 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -1157,6 +1158,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -2461,6 +2463,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -3839,6 +3842,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -5214,6 +5218,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -6589,6 +6594,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -7816,6 +7822,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -8887,6 +8894,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -10198,6 +10206,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -11522,6 +11531,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -12376,6 +12386,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -12805,6 +12816,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -13429,6 +13441,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -14408,6 +14421,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -15488,6 +15502,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -16408,6 +16423,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",
@@ -17687,6 +17703,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "listeners": {},
       "parent": 1,
       "props": {
+        "data-pm-slot": "header",
         "role": "heading",
         "style": {
           "alignItems": "center",

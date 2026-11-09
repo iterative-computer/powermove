@@ -724,9 +724,3 @@ pub mod workspace {
     pub const DEFAULT_TIMELINE: f32 = 344.;
     pub const DEFAULT_EFFECTS: f32 = 268.;
 }
-
-/// Compatibility name used by the merged timeline/media renderer.
-/// The live token is metrics.media_badge_opacity (Opus panels §6).
-pub mod panels {
-    pub const MEDIA_BADGE_ALPHA: f64 = 0.55;
-}

@@ -9,6 +9,7 @@ exports[`spec §3: empty six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -69,7 +70,7 @@ exports[`spec §3: empty six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,7],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -106,6 +107,7 @@ exports[`spec §3: composition six-op tree, native validator and AX snapshot 1`]
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -435,7 +437,7 @@ exports[`spec §3: composition six-op tree, native validator and AX snapshot 1`]
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,7],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -550,6 +552,7 @@ exports[`spec §3: selected six-op tree, native validator and AX snapshot 1`] = 
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -796,7 +799,7 @@ exports[`spec §3: selected six-op tree, native validator and AX snapshot 1`] = 
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -877,6 +880,7 @@ exports[`spec §3: font-loading six-op tree, native validator and AX snapshot 1`
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -1105,7 +1109,7 @@ exports[`spec §3: font-loading six-op tree, native validator and AX snapshot 1`
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -1182,6 +1186,7 @@ exports[`spec §3: hover six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -1428,7 +1433,7 @@ exports[`spec §3: hover six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -1509,6 +1514,7 @@ exports[`spec §3: focus six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -1755,7 +1761,7 @@ exports[`spec §3: focus six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -1836,6 +1842,7 @@ exports[`spec §3: editing six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -2082,7 +2089,7 @@ exports[`spec §3: editing six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -2163,6 +2170,7 @@ exports[`spec §3: scrubbing six-op tree, native validator and AX snapshot 1`] =
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -2409,7 +2417,7 @@ exports[`spec §3: scrubbing six-op tree, native validator and AX snapshot 1`] =
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -2490,6 +2498,7 @@ exports[`spec §3: animated six-op tree, native validator and AX snapshot 1`] = 
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -2736,7 +2745,7 @@ exports[`spec §3: animated six-op tree, native validator and AX snapshot 1`] = 
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -2817,6 +2826,7 @@ exports[`spec §3: key-at-playhead six-op tree, native validator and AX snapshot
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -3063,7 +3073,7 @@ exports[`spec §3: key-at-playhead six-op tree, native validator and AX snapshot
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -3144,6 +3154,7 @@ exports[`spec §3: expression six-op tree, native validator and AX snapshot 1`] 
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -3422,7 +3433,7 @@ exports[`spec §3: expression six-op tree, native validator and AX snapshot 1`] 
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -3513,6 +3524,7 @@ exports[`spec §3: mixed six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -3760,7 +3772,7 @@ exports[`spec §3: mixed six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -3841,6 +3853,7 @@ exports[`spec §3: partial-applicability six-op tree, native validator and AX sn
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -4088,7 +4101,7 @@ exports[`spec §3: partial-applicability six-op tree, native validator and AX sn
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -4169,6 +4182,7 @@ exports[`spec §3: locked six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -4420,7 +4434,7 @@ exports[`spec §3: locked six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -4503,6 +4517,7 @@ exports[`spec §3: disabled six-op tree, native validator and AX snapshot 1`] = 
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -4749,7 +4764,7 @@ exports[`spec §3: disabled six-op tree, native validator and AX snapshot 1`] = 
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -4830,6 +4845,7 @@ exports[`spec §3: error six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -5083,7 +5099,7 @@ exports[`spec §3: error six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -5168,6 +5184,7 @@ exports[`spec §3: drop six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -5469,7 +5486,7 @@ exports[`spec §3: drop six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -5550,6 +5567,7 @@ exports[`spec §3: playing six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -5796,7 +5814,7 @@ exports[`spec §3: playing six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -5877,6 +5895,7 @@ exports[`spec §3: 60000-selected six-op tree, native validator and AX snapshot 
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -6124,7 +6143,7 @@ exports[`spec §3: 60000-selected six-op tree, native validator and AX snapshot 
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -6205,6 +6224,7 @@ exports[`spec §3: collapsed six-op tree, native validator and AX snapshot 1`] =
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -6392,7 +6412,7 @@ exports[`spec §3: collapsed six-op tree, native validator and AX snapshot 1`] =
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,8],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6,7],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}
@@ -6455,6 +6475,7 @@ exports[`spec §3: audio six-op tree, native validator and AX snapshot 1`] = `
 {"op":"setProps","id":1,"patch":{"style":{"display":"flex","flexDirection":"column","background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"}}}}
 {"op":"create","id":2,"type":"div"}
 {"op":"setProps","id":2,"patch":{"id":"inspector:header"}}
+{"op":"setProps","id":2,"patch":{"data-pm-slot":"header"}}
 {"op":"setProps","id":2,"patch":{"style":{"display":"flex","flexDirection":"row","alignItems":"center","justifyContent":"space-between","height":{"token":"metrics.header"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}}}
 {"op":"create","id":3,"type":"text"}
 {"op":"setProps","id":3,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}}}
@@ -6590,7 +6611,7 @@ exports[`spec §3: audio six-op tree, native validator and AX snapshot 1`] = `
 tree
 {"children":[1],"id":0,"input":null,"listeners":{},"parent":null,"props":{},"text":"","type":"root"}
 {"children":[2,7],"id":1,"input":null,"listeners":{},"parent":0,"props":{"id":"inspector","label":"Properties","role":"group","style":{"background":{"token":"colors.panel"},"borderRadius":{"token":"metrics.panel_radius"},"display":"flex","flexDirection":"column"}},"text":"","type":"div"}
-{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
+{"children":[3,5],"id":2,"input":null,"listeners":{},"parent":1,"props":{"data-pm-slot":"header","id":"inspector:header","style":{"alignItems":"center","display":"flex","flexDirection":"row","height":{"token":"metrics.header"},"justifyContent":"space-between","paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"}}},"text":"","type":"div"}
 {"children":[4],"id":3,"input":null,"listeners":{},"parent":2,"props":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.title"},"fontWeight":{"token":"typography.semibold_weight"}}},"text":"","type":"text"}
 {"children":[],"id":4,"input":null,"listeners":{},"parent":3,"props":{},"text":"Properties","type":"text"}
 {"children":[6],"id":5,"input":null,"listeners":{},"parent":2,"props":{"style":{"alignItems":"center","display":"flex","flexDirection":"row"}},"text":"","type":"div"}

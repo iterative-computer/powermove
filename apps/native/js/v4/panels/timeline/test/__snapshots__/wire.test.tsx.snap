@@ -52,6 +52,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -712,6 +713,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -1436,6 +1438,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -1629,6 +1632,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -2285,6 +2289,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -2593,6 +2598,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": true,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -3252,6 +3258,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -3560,6 +3567,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -4219,6 +4227,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -4527,6 +4536,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -5183,6 +5193,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -5406,6 +5417,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -5633,6 +5645,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "props": {
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:property:opacity",
                             "label": "Opacity, 100 percent",
                             "metadata": {
@@ -6288,6 +6301,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -6481,6 +6495,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -7189,6 +7204,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -7497,6 +7513,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -8162,6 +8179,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -8355,6 +8373,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": true,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -8557,6 +8576,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": true,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:kicker",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -9224,6 +9244,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -9417,6 +9438,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -10073,6 +10095,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -10266,6 +10289,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29990",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -10465,6 +10489,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29991",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -10664,6 +10689,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29992",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -10863,6 +10889,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29993",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -11062,6 +11089,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29994",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -11261,6 +11289,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29995",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -11460,6 +11489,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29996",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -11659,6 +11689,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29997",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -11858,6 +11889,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29998",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -12057,6 +12089,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-29999",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -12256,6 +12289,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30000",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -12455,6 +12489,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30001",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -12654,6 +12689,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30002",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -12853,6 +12889,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30003",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -13052,6 +13089,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30004",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -13251,6 +13289,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30005",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -13450,6 +13489,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30006",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -13649,6 +13689,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30007",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -13848,6 +13889,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30008",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -14047,6 +14089,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30009",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -14246,6 +14289,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30010",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -14445,6 +14489,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30011",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -14644,6 +14689,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30012",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -14843,6 +14889,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30013",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -15042,6 +15089,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30014",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -15241,6 +15289,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30015",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -15440,6 +15489,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30016",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -15639,6 +15689,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30017",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -15838,6 +15889,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30018",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -16037,6 +16089,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:row-30019",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -16720,6 +16773,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -16913,6 +16967,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -17624,6 +17679,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -17817,6 +17873,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -18483,6 +18540,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -18617,6 +18675,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:track:audio:0",
                             "label": "A1",
                             "metadata": {
@@ -19272,6 +19331,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -19465,6 +19525,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -20197,6 +20258,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -20402,6 +20464,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:layer:headline",
                             "label": "Headline, text layer, 0:00 to 0:10",
                             "metadata": {
@@ -21058,6 +21121,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             },
           ],
           "props": {
+            "data-pm-slot": "header",
             "id": "timeline:header",
             "style": {
               "alignItems": "center",
@@ -21294,6 +21358,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "props": {
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
+                            "data-pm-variant": "band",
                             "id": "timeline:row:property:scale",
                             "label": "Scale, 100 by 100 percent, animated, keyframe at playhead",
                             "metadata": {

@@ -58,9 +58,6 @@ thread_local! {
 }
 /// A theme's patches for dark and for light windows.
 type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
-/// Keys this window's list of contributed panels in the shell.
-static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 /// Page messages enter here on AppKit's main thread, so this only enqueues.
 struct PageEvents {
     host: Arc<Mutex<Option<std::sync::mpsc::Sender<Value>>>>,
@@ -144,7 +141,8 @@ fn external_link(url: &str) -> bool {
 }
 
 pub struct Extensions {
-    window: u64,
+    /// Panels this window's extensions contribute: id and title, in menu order.
+    pub contributed: Vec<(String, String)>,
     pub host: Option<ExtensionHost>,
     /// This window's raster overrides; dropped with its host.
     overrides: Option<crate::raster_overrides::Overrides>,
@@ -210,7 +208,7 @@ pub struct Extensions {
 impl Default for Extensions {
     fn default() -> Self {
         Self {
-            window: NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            contributed: Vec::new(),
             host: None,
             overrides: None,
             doc_id: None,
@@ -253,7 +251,6 @@ impl Default for Extensions {
 }
 impl Drop for Extensions {
     fn drop(&mut self) {
-        layout::set_contributed_panels(self.window, []);
         if let Some(doc_id) = self.doc_id {
             crate::mcp_services::set_resources(doc_id, None);
         }
@@ -465,10 +462,19 @@ impl Controller {
                 let title = request["title"].as_str().unwrap_or_default();
                 let body = request["body"].as_str().unwrap_or_default();
                 let shell = self.host.borrow();
-                let answer = crate::platform::choice(&shell.window, title, body, &["OK", "Cancel"]);
+                use crate::alert::{Alert, Button};
+                let answer = Alert::new(
+                    title,
+                    body,
+                    vec![
+                        Button::new("OK", true).default(),
+                        Button::new("Cancel", false).cancel(),
+                    ],
+                )
+                .sheet(&shell.window);
                 drop(shell);
                 cx.spawn(async move |this, cx| {
-                    let confirmed = answer.recv().await == Ok(0);
+                    let confirmed = answer.recv().await == Ok(Some(true));
                     let _ = this.update(cx, |v, _| {
                         if let Some(host) = &v.extensions.host {
                             host.answer(token, confirmed.into());
@@ -496,12 +502,20 @@ impl Controller {
                     ),
                 };
                 let shell = self.host.borrow();
-                let answer =
-                    crate::platform::choice(&shell.window, &title, &body, &["Wait", "Stop"]);
+                use crate::alert::{Alert, Button};
+                let answer = Alert::new(
+                    title,
+                    body,
+                    vec![
+                        Button::new("Wait", false).default(),
+                        Button::new("Stop", true),
+                    ],
+                )
+                .sheet(&shell.window);
                 drop(shell);
                 self.extensions.unresponsive = Some(execution);
                 cx.spawn(async move |this, cx| {
-                    let stop = answer.recv().await == Ok(1);
+                    let stop = answer.recv().await == Ok(Some(true));
                     let _ = this.update(cx, |v, _| {
                         if v.extensions.unresponsive == Some(execution) {
                             v.extensions.unresponsive = None;
@@ -788,15 +802,9 @@ impl Controller {
             let ticket = cx.background_executor().spawn(async move {
                 let hot = runtime.hot(&extension).ok().and_then(|ticket| {
                     let deadline = std::time::Instant::now() + HOT_HANDOFF;
-                    loop {
-                        if let Some(result) = ticket.try_take() {
-                            return result.ok().map(|e| e.value);
-                        }
-                        if std::time::Instant::now() > deadline {
-                            return None;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                    crate::ticket::answer(ticket, deadline)?
+                        .ok()
+                        .map(|e| e.value)
                 });
                 runtime.unmount_extension(&extension);
                 runtime.mount_extension(&extension, &graph, hot.as_deref())
@@ -967,7 +975,7 @@ impl Controller {
             .iter()
             .map(|(id, (title, _))| (id.clone(), title.clone()));
         let contributed: Vec<_> = panels.iter().cloned().chain(surfaces).collect();
-        layout::set_contributed_panels(self.extensions.window, contributed);
+        self.extensions.contributed = contributed;
         // New installs need a pinned Store key; until one ships there is no entry.
         let store = pm_compat_runner::store_install::available().then(|| Choice {
             label: "Install Extension from Store…".into(),
@@ -1869,15 +1877,10 @@ fn wait_ticket(
     ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>,
     deadline: std::time::Instant,
 ) -> Result<String, String> {
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result.map(|e| e.value).map_err(|e| format!("{e:?}"));
-        }
-        if std::time::Instant::now() > deadline {
-            return Err("The extension didn't answer in time.".into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    crate::ticket::answer(ticket, deadline)
+        .ok_or_else(|| "The extension didn't answer in time.".to_owned())?
+        .map(|e| e.value)
+        .map_err(|e| format!("{e:?}"))
 }
 /// Every v4 extension's items for a menu, as native entries (off the main
 /// thread). Realms gather in parallel, each giving its contributions 100 ms;

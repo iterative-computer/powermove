@@ -163,6 +163,9 @@ pub struct TimelineSurface {
     frame: Option<Arc<Frame>>,
     bounds: Bounds<Pixels>,
     view: Viewed,
+    /// The native playhead's time mapping: pixels per second, first second and
+    /// time column of the frame last prepared.
+    shown: (f64, f64, f64),
     fitted: bool,
     gesture: Gesture,
     cursor: CursorStyle,
@@ -215,6 +218,7 @@ impl TimelineSurface {
             frame: None,
             bounds: Bounds::default(),
             view,
+            shown: (view.pps, view.scroll_time, view.layer_column),
             fitted: false,
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
@@ -524,8 +528,7 @@ impl TimelineSurface {
             self.clamp_scroll();
         }
         if self.frame.is_none() {
-            // The native playhead maps time through the view this frame shows.
-            crate::playback::set_view(self.view.pps, self.view.scroll_time, self.view.layer_column);
+            self.shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
             self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
             if let Some(frame) = self.frame.clone() {
@@ -533,6 +536,9 @@ impl TimelineSurface {
             }
         }
         self.frame.clone()
+    }
+    pub fn time_mapping(&self) -> (f64, f64, f64) {
+        self.shown
     }
     /// A clip painter arrived or left: ask again on the next frame.
     pub fn repaint_decorations(&mut self, cx: &mut Context<Self>) {

@@ -2,7 +2,6 @@ import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
   EmptyState,
   List,
-  SegmentedControl,
   TextField,
   PushButton,
   ToolbarItem,
@@ -70,7 +69,6 @@ export interface NativeServices {
   /** Real registered local-text binding handles, supplied by the native host. */
   searchBinding: string;
   renameBinding: string;
-  activatePanel(id: "assets" | "layer-effects"): void;
   /** Enqueue-only native geometry/capture adapter. It emits the model's
    * Begin/MarqueeHits/MarqueeEdge/End inputs, including unmounted hit IDs. */
   marquee?(
@@ -213,6 +211,7 @@ export function ProjectView(props: ProjectViewProps) {
     });
   };
   const dropHandlers = (folder: string | null) => ({
+    "data-pm-drop": "files" as const,
     onDragOver: (event: SurfaceEvent) => {
       event.stopPropagation();
       input({ DragOver: { target: folder, files: external(event) } });
@@ -584,27 +583,17 @@ export function ProjectView(props: ProjectViewProps) {
       }}
     >
       <div
+        data-pm-slot="header"
         style={{
           display: "flex",
           flexDirection: "row",
           alignItems: "center",
-          justifyContent: "space-between",
+          justifyContent: "end",
           height: token("metrics.header"),
           paddingLeft: token("metrics.inset"),
           paddingRight: token("metrics.inset"),
         }}
       >
-        <SegmentedControl
-          label="Project"
-          options={[
-            { id: "assets", label: "Project" },
-            { id: "layer-effects", label: "Effect Controls" },
-          ]}
-          value="assets"
-          onChange={(id) =>
-            native.activatePanel(id as "assets" | "layer-effects")
-          }
-        />
         <div
           style={{
             display: "flex",

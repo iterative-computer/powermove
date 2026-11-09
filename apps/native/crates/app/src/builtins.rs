@@ -2,7 +2,7 @@
 //! only publishes immutable trees and enqueues input; JavaScript runs on owners.
 use crate::{session::Controller, v4_view::SurfaceView};
 use gpui::{prelude::*, *};
-use pm_builtins::{Builtins, LIVE_PANELS, PlatformRequest, Publication};
+use pm_builtins::{BUILTIN_PANELS, Builtins, PlatformRequest, Publication};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -24,6 +24,10 @@ pub struct Host {
     pub views: BTreeMap<String, Entity<SurfaceView>>,
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
+    /// Where the shell last placed the timeline panel, and its header height;
+    /// `None` while it isn't drawn. The native playhead and timecode follow it.
+    pub timeline_place: Option<(pm_shell::layout::Rect, f32)>,
+    frame_outline: crate::playback::FrameOutline,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
     /// The window's open panels, and closed built-ins whose isolates are going.
     open: BTreeSet<String>,
@@ -160,11 +164,11 @@ impl Controller {
             Arc::new(pm_agents::account::open_in_browser),
         );
         let mut tickets = vec![];
-        for id in LIVE_PANELS {
-            if application && !matches!(*id, "agent" | "settings") {
+        for panel in BUILTIN_PANELS.iter() {
+            if application && !panel.application {
                 continue;
             }
-            tickets.push((id.to_string(), runtime.mount(id)));
+            tickets.push((panel.id.clone(), runtime.mount(&panel.id)));
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
@@ -461,18 +465,22 @@ impl Controller {
             return;
         };
         self.builtins.open = open.iter().map(|id| (*id).to_owned()).collect();
-        for id in pm_builtins::PARKABLE {
-            let shown = open.contains(id);
+        for id in BUILTIN_PANELS
+            .iter()
+            .filter(|p| p.parks)
+            .map(|p| p.id.as_str())
+        {
+            let shown = open.contains(&id);
             if shown && runtime.is_parked(id) {
                 self.unpark(id, cx);
             } else if !shown
-                && self.builtins.ready.contains(*id)
+                && self.builtins.ready.contains(id)
                 && !runtime.is_parked(id)
-                && self.builtins.parking.insert((*id).to_owned())
+                && self.builtins.parking.insert(id.to_owned())
             {
-                self.builtins.ready.remove(*id);
+                self.builtins.ready.remove(id);
                 self.builtins.keep_surface(id);
-                let (runtime, panel) = (runtime.clone(), (*id).to_owned());
+                let (runtime, panel) = (runtime.clone(), id.to_owned());
                 cx.spawn(async move |this, cx| {
                     let parked = {
                         let runtime = runtime.clone();
@@ -613,12 +621,7 @@ impl Controller {
             if let Some(timeline) = self.builtins.timeline.clone() {
                 timeline.update(cx, |timeline, cx| timeline.set_tokens(t.clone(), cx));
             }
-            crate::playback::set_timeline(
-                cx.entity_id(),
-                bounds,
-                t.metrics.layer_column,
-                t.metrics.header,
-            );
+            self.builtins.timeline_place = Some((bounds, t.metrics.header));
         }
         if id == "viewer" {
             let body_h = (bounds.h - t.metrics.header).max(1.);
@@ -640,7 +643,7 @@ impl Controller {
                 .viewer_transform(self.dimensions, Some(scale), self.view.pan);
             // A cropped canvas has its edges outside the pane: no outline.
             let cropped = self.host.borrow().viewer_crop.get().is_some();
-            crate::playback::frame_outline(
+            self.builtins.frame_outline.show(
                 &self.host.borrow(),
                 !cropped && crate::panels::needs_frame_outline(self.background, t.colors.viewer),
                 t.colors.separator,
@@ -1308,15 +1311,7 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                         let Ok(ticket) = ticket else { continue };
                         // A painter that threw has answered; one still running
                         // past the deadline makes this paint incomplete.
-                        let answer = loop {
-                            if let Some(result) = ticket.try_take() {
-                                break Some(result);
-                            }
-                            if std::time::Instant::now() > deadline {
-                                break None;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        };
+                        let answer = crate::ticket::answer(ticket, deadline);
                         let Some(Ok(evaluation)) = answer else {
                             complete &= answer.is_some();
                             continue;

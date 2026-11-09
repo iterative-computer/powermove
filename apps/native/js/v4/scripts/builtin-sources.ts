@@ -8,20 +8,9 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { version } from "../package.json";
+import panels from "../app/panels.json";
 
 const ROOT = resolve(import.meta.dir, "..");
-/** Built-in panel id (Rust `LIVE_PANELS`), its folder and its title. */
-const PANELS: [string, string, string][] = [
-  ["timeline", "timeline", "Timeline"],
-  ["inspector", "inspector", "Properties"],
-  ["layer-effects", "effect-controls", "Effect Controls"],
-  ["viewer", "viewer", "Viewer"],
-  ["assets", "project", "Project"],
-  ["fxbrowser", "effects", "Effects"],
-  ["agent", "agent", "Agent"],
-  ["settings", "settings", "Settings"],
-  ["export", "export", "Export"],
-];
 const SKIP =
   /(?:\.test\.tsx?$|(?:^|\/)(?:test|tests|__snapshots__|conformance|native|wire|snapshots)\/|^bench\.tsx$|^nodefree|^native-test\.ts$|^tsconfig\.json$|\.rs$|\.sh$|^bunfig\.toml$|^package\.json$)/;
 /** Runtime source module to the specifier a fork imports it by. */
@@ -30,7 +19,6 @@ const MODULES: Record<string, string> = {
   "src/protocol.ts": "powermove/protocol",
   "src/host-api.ts": "powermove/host-api",
   "src/components/index.ts": "powermove/components",
-  "src/components.ts": "powermove/components",
   "src/memo.ts": "powermove/memo",
   "src/renderer.ts": "powermove/renderer",
   "src/jsx-runtime.ts": "powermove/jsx-runtime",
@@ -63,7 +51,7 @@ function runtimeModule(from: string, specifier: string): string | undefined {
   return undefined;
 }
 const output: Record<string, Record<string, string>> = {};
-for (const [id, folder, name] of PANELS) {
+for (const { id, folder, title: name } of panels) {
   const base = join(ROOT, "panels", folder);
   const tree: Record<string, string> = {};
   for (const path of files(base)) {

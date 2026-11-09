@@ -62,6 +62,7 @@ export function EffectsPanel({
     >
       <text
         role="heading"
+        data-pm-slot="header"
         style={{
           display: "flex",
           flexDirection: "row",

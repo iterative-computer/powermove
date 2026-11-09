@@ -26,7 +26,6 @@ impl SlotChange {
     pub fn moved(self) -> bool {
         self == SlotChange::Moved
     }
-    /// `Moved` if either side moved.
     pub fn or(self, other: SlotChange) -> SlotChange {
         if self.moved() || other.moved() {
             SlotChange::Moved
