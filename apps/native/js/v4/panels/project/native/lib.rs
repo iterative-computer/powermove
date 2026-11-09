@@ -1,3 +1,2 @@
-//! Reference renderer and accessibility projection for the Project panel's conformance tools.
+//! The Project panel's accessibility projection, for its conformance tools.
 pub mod accessibility;
-pub mod render;
