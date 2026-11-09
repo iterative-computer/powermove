@@ -427,23 +427,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -475,20 +485,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -503,10 +523,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -515,6 +541,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -543,23 +578,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -588,20 +633,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -630,20 +685,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -659,13 +724,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -1152,23 +1232,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -1200,20 +1290,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -1228,10 +1328,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -1240,6 +1346,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -1268,23 +1383,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -1313,20 +1438,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -1355,20 +1490,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -1384,13 +1529,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -2003,23 +2163,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -2051,20 +2221,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -2079,10 +2259,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -2091,6 +2277,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -2119,23 +2314,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -2164,20 +2369,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -2206,20 +2421,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -2235,13 +2460,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -2972,23 +3212,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -3020,20 +3270,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -3048,10 +3308,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -3060,6 +3326,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -3088,23 +3363,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -3133,20 +3418,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -3175,20 +3470,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -3204,13 +3509,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -3941,23 +4261,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -3989,20 +4319,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -4017,10 +4357,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -4029,6 +4375,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -4057,23 +4412,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -4102,20 +4467,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -4144,20 +4519,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -4173,13 +4558,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -4907,23 +5307,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -4955,20 +5365,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -4983,10 +5403,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -4995,6 +5421,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -5023,23 +5458,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -5068,20 +5513,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -5110,20 +5565,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -5139,13 +5604,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -6015,23 +6495,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -6063,20 +6553,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -6091,10 +6591,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -6103,6 +6609,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -6131,23 +6646,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -6176,20 +6701,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -6218,20 +6753,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -6247,13 +6792,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -6918,23 +7478,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -6966,20 +7536,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -6994,10 +7574,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -7006,6 +7592,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -7034,23 +7629,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -7079,20 +7684,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -7121,20 +7736,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -7150,13 +7775,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -7893,23 +8533,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -7941,20 +8591,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -7969,10 +8629,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -7981,6 +8647,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -8009,23 +8684,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -8054,20 +8739,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -8096,20 +8791,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -8125,13 +8830,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -8958,23 +9678,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -9006,20 +9736,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -9034,10 +9774,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -9046,6 +9792,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -9074,23 +9829,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -9119,20 +9884,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -9161,20 +9936,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -9190,13 +9975,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -9809,23 +10609,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -9857,20 +10667,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -9885,10 +10705,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -9897,6 +10723,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -9925,23 +10760,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -9970,20 +10815,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -10012,20 +10867,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -10041,13 +10906,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -16460,23 +17340,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -16508,20 +17398,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -16536,10 +17436,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -16548,6 +17454,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -16576,20 +17491,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -16618,23 +17543,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -16663,20 +17598,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -16692,13 +17637,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -17366,23 +18326,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -17414,20 +18384,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -17442,10 +18422,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -17454,6 +18440,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -17482,20 +18477,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -17524,20 +18529,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -17566,23 +18581,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -17598,13 +18623,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -18254,20 +19294,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -18299,23 +19349,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -18330,10 +19390,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -18342,6 +19408,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -18370,23 +19445,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -18415,20 +19500,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -18457,20 +19552,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -18486,13 +19591,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -19045,23 +20165,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -19093,20 +20223,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -19121,10 +20261,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -19133,6 +20279,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -19161,23 +20316,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -19206,20 +20371,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -19248,20 +20423,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -19277,13 +20462,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -19972,23 +21172,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -20020,20 +21230,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -20048,10 +21268,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -20060,6 +21286,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -20088,23 +21323,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -20133,20 +21378,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -20175,20 +21430,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -20204,13 +21469,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",
@@ -20835,23 +22115,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -20883,20 +22173,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -20911,10 +22211,16 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
@@ -20923,6 +22229,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       },
                       "fontWeight": {
                         "token": "typography.medium_weight",
+                      },
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
                       },
                     },
                   },
@@ -20951,23 +22266,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "background": {
-                            "token": "colors.floating",
+                            "token": "colors.fill_strong",
                           },
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
                             "token": "colors.text",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": 0,
@@ -20996,20 +22321,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -21038,20 +22373,30 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         },
                         "role": "radio",
                         "style": {
+                          "alignItems": "center",
                           "borderRadius": {
-                            "token": "metrics.inner_radius",
+                            "token": "metrics.segment_radius",
                           },
                           "color": {
-                            "token": "colors.text",
+                            "token": "colors.secondary",
                           },
+                          "display": "flex",
+                          "flexGrow": 1,
                           "fontSize": {
                             "token": "typography.body",
                           },
+                          "justifyContent": "center",
                           "minHeight": {
                             "token": "metrics.hit",
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.inset",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.inset",
                           },
                         },
                         "tabIndex": -1,
@@ -21067,13 +22412,28 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "role": "radiogroup",
                     "style": {
                       "background": {
-                        "token": "colors.field",
+                        "token": "colors.floating",
+                      },
+                      "borderColor": {
+                        "token": "colors.hairline",
                       },
                       "borderRadius": {
-                        "token": "metrics.control_radius",
+                        "token": "metrics.pill_radius",
+                      },
+                      "borderWidth": {
+                        "token": "metrics.border",
                       },
                       "display": "flex",
                       "flexDirection": "row",
+                      "gap": {
+                        "token": "metrics.pill_inset",
+                      },
+                      "height": {
+                        "token": "metrics.tab",
+                      },
+                      "padding": {
+                        "token": "metrics.pill_inset",
+                      },
                     },
                   },
                   "type": "div",

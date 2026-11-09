@@ -343,7 +343,7 @@ test("AX contract has labelled groups, selected neutral sidebar, search/list fir
   expect(find(root, "General", "list-item").props["aria-selected"]).toBe(true);
   expect(find(root, "General", "list-item").props.style).toHaveProperty(
     "background",
-    { token: "colors.selected_fill" },
+    { token: "colors.fill_strong" },
   );
   expect(row.focusOrder.slice(0, 2)).toEqual([
     find(root, "Search", "text-field").id,
