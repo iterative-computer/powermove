@@ -62,6 +62,9 @@ pub struct Controller {
     pub settling: Option<String>,
     /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
     pub(crate) open_timer: crate::diag::OpenTimer,
+    /// Project commands asked for while the project was arriving; they run
+    /// once it has settled (`settled`), or go with a failed open.
+    pub(crate) after_open: Vec<(String, Vec<serde_json::Value>)>,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
@@ -159,7 +162,14 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
     }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
-        self.0.read(cx).disabled.clone()
+        let v = self.0.read(cx);
+        let mut off = v.disabled.clone();
+        // While a project arrives its commands stay available: they wait for
+        // it (`Controller::command`) instead of being refused.
+        if v.opening || v.settling.is_some() {
+            off.retain(|name| !crate::layer_commands::waits_for_project(name));
+        }
+        off
     }
     fn panel(
         &self,
@@ -416,6 +426,7 @@ impl Controller {
             opening_name: None,
             settling: None,
             open_timer: Default::default(),
+            after_open: Vec::new(),
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
@@ -1146,6 +1157,10 @@ impl Controller {
                 if v.settling.is_none() {
                     v.opening_name = None;
                     v.busy = None;
+                    // No project arrived; its open failure says why.
+                    if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
+                        v.after_open.clear();
+                    }
                 }
                 match result {
                     Some(Ok(ShellReply::Opened {
@@ -1200,11 +1215,13 @@ impl Controller {
                     let status = v.viewer.as_ref().map(|v| v.status());
                     let frame = status.as_ref().and_then(|s| s.frame.as_ref());
                     if let Some(f) = frame.filter(|f| f.stamp.doc_id == doc && f.gpu_ok) {
-                        v.open_timer.mark("first_frame", serde_json::json!({"cache_hit": f.cache_hit}));
+                        v.open_timer
+                            .mark("first_frame", serde_json::json!({"cache_hit": f.cache_hit}));
                         return true;
                     }
                     if let Some(error) = status.and_then(|s| s.error) {
-                        v.open_timer.mark("viewer_error", serde_json::json!({"message": error}));
+                        v.open_timer
+                            .mark("viewer_error", serde_json::json!({"message": error}));
                         return true;
                     }
                     false
@@ -1245,7 +1262,7 @@ impl Controller {
     ) {
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
-        let alert = documents::open_error(name, open_failure(error), exists);
+        let alert = documents::open_error(name, open_failure(error), exists).notice();
         self.errors.borrow_mut().push("Project", &alert.message);
         self.message = String::new();
         let rx = alert.sheet(&self.host.borrow().window);
@@ -1311,7 +1328,10 @@ impl Controller {
             return;
         };
         let comp = p.snapshot.render_comp();
-        let root = p.snapshot.document.root().unwrap();
+        // A document without a root has nothing to view.
+        let Some(root) = p.snapshot.document.root() else {
+            return;
+        };
         let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
         let number = |key: &str, default| {
             composition
@@ -1532,6 +1552,14 @@ impl Controller {
                 host.shell_state(serde_json::json!({ "tool": tool }));
             }
             return false;
+        }
+        // The menu or a launch argument during a long open: the project is
+        // coming, so the command waits for it rather than finding none.
+        if (self.opening || self.settling.is_some())
+            && crate::layer_commands::waits_for_project(&cmd.name)
+        {
+            self.after_open.push((cmd.name.clone(), cmd.args.clone()));
+            return true;
         }
         if self.extension_command(cmd, cx) {
             return true;

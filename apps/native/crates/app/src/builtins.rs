@@ -250,6 +250,9 @@ impl Controller {
             self.opening_name = None;
             self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
+            for (name, args) in std::mem::take(&mut self.after_open) {
+                self.host.borrow().send_command(&name, args);
+            }
         }
     }
     /// A surface extension's first commit landed; its panel can render and its

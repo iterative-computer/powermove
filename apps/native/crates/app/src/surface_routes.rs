@@ -179,14 +179,16 @@ impl Controller {
             cx.notify();
             return;
         };
-        let Ok(mut context) = Dialog::capture(&self.kernel, &project) else {
-            return;
+        let mut context = match Dialog::capture(&self.kernel, &project) {
+            Ok(context) => context,
+            Err(error) => return self.report_dialog_error(error, cx),
         };
         if let Some(target) = target {
             context.composition = target;
         }
-        let Ok(draft) = context.composition_draft(settings) else {
-            return;
+        let draft = match context.composition_draft(settings) {
+            Ok(draft) => draft,
+            Err(error) => return self.report_dialog_error(error, cx),
         };
         let surface = draft.surface(
             DialogId(format!("composition:{project}")),

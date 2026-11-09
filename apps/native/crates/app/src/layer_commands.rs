@@ -685,6 +685,12 @@ const DOCUMENT: [&str; 18] = [
     "compositionSettings",
 ];
 
+/// A command that acts on the project: asked for while one is still
+/// arriving, it waits for it (`Controller::command`) instead of finding none.
+pub fn waits_for_project(name: &str) -> bool {
+    DOCUMENT.contains(&name) || name == "export" || crate::keyframe_sheets::Kind::of(name).is_some()
+}
+
 /// The sheet's starting state; Leave All Attributes needs one layer with a source.
 pub fn precompose_draft(published: &Published) -> Option<PrecomposeDraft> {
     let selected = published.selection.layers();
