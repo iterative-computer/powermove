@@ -475,6 +475,31 @@ fn a_chosen_font_and_a_chosen_colour_reach_the_layer_through_their_rows() {
     let text = pm_model::json::to_canonical_string(&written);
     assert!(text.contains("Avenir"), "{text}");
     assert!(text.contains("#ABCDEF"), "{text}");
+    // The hex field beside the swatch is its own lease on the same property:
+    // typed hex reaches the layer, and the row shows it.
+    let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+    let colour = publication["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["rows"].as_array().unwrap())
+        .find(|r| r["control"]["kind"] == "colour")
+        .expect("colour row")
+        .clone();
+    assert_eq!(colour["control"]["hex"], "#ABCDEF");
+    let hex = colour["control"]["hexBinding"]["handle"].as_str().unwrap();
+    assert_ne!(
+        hex,
+        colour["control"]["binding"]["handle"].as_str().unwrap()
+    );
+    let request = presenter
+        .write(&mut model, Caller::native(), hex, "#FF5A36".into(), 0.)
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    model.sync(kernel.published("synthetic").unwrap());
+    let text = pm_model::json::to_canonical_string(&model.layer("a").unwrap().to_owned());
+    assert!(text.contains("#FF5A36"), "{text}");
 }
 
 #[test]
