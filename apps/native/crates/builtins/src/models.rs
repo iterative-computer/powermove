@@ -579,8 +579,13 @@ impl Backend {
                     (true, Some("local")) => "Custom",
                     _ => "Installed",
                 };
+                // D11 Stop turns it off for this run, not in the saved preference.
+                let stopped = host
+                    .and_then(|h| h.get("stopped"))
+                    .and_then(pm_model::Value::as_bool)
+                    == Some(true);
                 json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
-                    "enabled":e.enabled,"about":text("about").unwrap_or_default(),"includes":includes,
+                    "enabled":e.enabled && !stopped,"about":text("about").unwrap_or_default(),"includes":includes,
                     "shortcuts":[],"files":[],"variables":[],"canArchive":false})
             })
             .collect::<Vec<_>>();

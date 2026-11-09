@@ -60,14 +60,27 @@ because the v4 Inspector has no DOM slot.
 ## Failure
 
 A failed compile, throw or export leaves one record with its reason. Each
-extension activates in its own realm task. A task that runs for eight seconds gets
-the D11 sheet ("isn't responding — Wait / Stop"), named for the extension that was
-activating or whose command is running; the task keeps running meanwhile. Stop
-terminates it and rebuilds the realm; a hang during activation also turns that
-extension off in state. Two restarts in one session stop the realm until the project
+extension activates in its own realm task. A task that runs for eight seconds of
+JavaScript (time blocked in engine or kernel calls doesn't count) gets the D11 sheet
+("isn't responding — Wait / Stop"), named for the extension whose module is innermost
+on the running stack (read by a V8 interrupt inside the task, so any hang is named: a
+raster override, an event, a timer, a command), else the one activating or whose
+command runs. The task keeps running meanwhile. Stop terminates it, turns that
+extension off for this run (every window; Settings shows it off, and turning it on
+runs it again; the next launch runs it; the saved preference never changes) and
+rebuilds the realm. Two restarts nobody can name stop the realm until the project
 reopens. The rebuild is a new writer generation: the old one is sealed
 (`RealmFailed`), and its page is replaced and its open panels reopened. A panel whose
-extension reloads is parked (`panel:park`) and returns to its tab.
+extension reloads is parked (`panel:park`) and returns to its tab. The host's owner
+thread never waits for room in a busy realm's queue: what doesn't fit waits in order
+on the owner, which keeps handling Stop and Close.
+
+Quit while the sheet is up ends the sheet and stops that window's realm without a
+restart (its open entry is sealed; acknowledged kernel edits stay), then quits as
+usual; a cancelled quit starts the window's extensions again once the cancelling
+update has ended. AppKit drops the Quit Apple Event while a sheet is attached, so
+the app handles `kAEQuitApplication` itself: the event waits for the quit's outcome
+and a cancelled quit answers the sender with user-cancelled (-128).
 
 The trusted realm queues fetches that do not fit its external-memory budget
 (`Limits::queue_fetches`) and always leaves room for one synchronous engine reply,
@@ -145,9 +158,15 @@ window is open is shown in it.
 
 - Raster overrides (a `raster` service wrapper or a replaced `PM.raster`) draw in the
   viewer and in exports through the engine's compat rasters (`pm_render::compat`):
-  `engine-service/src/compat.rs` holds the viewer's answers, a missed frame asks the
-  realm (`raster_overrides.rs`, `__compat.answerRasters`) and redraws when they land,
-  asking twelve frames ahead while playing; an export child asks the parent for each
+  `engine-service/src/compat.rs` holds the viewer's answers. A paused frame waits for
+  its own answers and redraws when they land; a playing frame draws a late layer from
+  its nearest answered frame (or not at all when it has none), and a scrubbed frame
+  from its nearest answer, so the viewer never stops for the realm; such frames are
+  not cached and redraw exact. The viewer asks one batch at a time (newer needs
+  replace waiting ones); while playing it plans the frame the answers will land on
+  (the realm's measured time per need) and asks for as many frames as cost about
+  0.1 s of realm time (`raster_overrides.rs`, `__compat.answerRasters`). An export
+  child asks the parent for each
   layer through its pipes, with pixels in a private file. `render.raster`'s base is
   lazy and painted by a second renderer on its own thread (`LayerRasters`), so a
   pass-through costs one JS call and no paint. A result counts as the layer only
@@ -158,8 +177,12 @@ window is open is shown in it.
   until an edit or new wrappers; an export fails with the extension's message).
   Answers are per document (kernel `doc_id`) and per wrapper generation (any
   registration, removal or `PM.raster` change forgets them). An export pins its
-  frozen snapshot: the realm answers from that project (base rasters paint from that
-  document) and fails the export if its wrappers change mid-run. A capture
+  frozen revision: its overrides answer only while the realm is at it, so every
+  project read they make is the export's project (behind it the export asks again;
+  past it, after an edit, the export fails rather than mix revisions). The realm
+  never holds a copy of a project (copying a 238 MB one aborted the app); base
+  rasters paint from the export's document, and the export fails if its wrappers
+  change mid-run. A capture
   (`renderFrameTo`, snapshot) of the realm's own project answers the overrides it
   needs inline while the realm waits (`render.continue`). Cancelling an export or
   closing its window ends any wait at once; pixel files carry the job id. Override
@@ -196,7 +219,7 @@ window is open is shown in it.
   gathers both `layer:context` and its surface's location (`kind: "layer"`).
 - Contributed layer types render and label their timeline row, but their parameters
   have no Properties rows until per-kind controls are designed.
-- Layout reads in the realm are cached from the last page report (`remote-dom.md`).
+- Layout reads are synchronous (`remote-dom.md`); the page has the system fonts only, so text a hidden element measures in a project font (`PM.Fonts`) measures in a fallback.
 - A v4 extension adds a panel, replaces a whole built-in panel, and registers
   palette commands with shortcuts (`commands.register`). It cannot yet slot into
   part of another panel (a viewer overlay or timeline column without a fork), add

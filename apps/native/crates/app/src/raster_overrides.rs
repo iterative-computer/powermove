@@ -216,7 +216,7 @@ impl Overrides {
                 if !pins.documents.contains_key(&pin.job) {
                     let value = pm_model::json::parse(&pin.document)
                         .map_err(|_| "The export's project is unreadable".to_owned())?;
-                    realm.pin(&pin.job, &pin.document)?;
+                    realm.pin(&pin.job, pin.revision)?;
                     pins.documents.insert(
                         pin.job.clone(),
                         Arc::new(pm_model::Document::new(Some(value), pin.revision)),
@@ -229,8 +229,6 @@ impl Overrides {
                     }
                 }
             }
-            let (tx, rx) = std::sync::mpsc::channel();
-            let batch = batches.lock().unwrap().open(Asker::Export(tx));
             let wire: Vec<Value> = needs
                 .iter()
                 .map(|n| {
@@ -238,28 +236,39 @@ impl Overrides {
                     "seconds": n.seconds, "scale": n.scale})
                 })
                 .collect();
-            realm.ask(
-                batch,
-                Value::Array(wire),
-                json!({"job": pin.job, "epoch": pin.epoch}),
-            );
             let deadline = Instant::now() + EXPORT_WAIT;
+            // A realm still behind the export's revision answers "again": it
+            // is asked again once it has caught up.
             let answers = loop {
-                if pin.cancel.load(Ordering::Acquire) {
-                    batches.lock().unwrap().open.remove(&batch);
-                    return Err("cancelled".into());
-                }
-                match rx.recv_timeout(Duration::from_millis(50)) {
-                    Ok(answers) => break answers,
-                    Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
-                    Err(RecvTimeoutError::Timeout) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let batch = batches.lock().unwrap().open(Asker::Export(tx));
+                realm.ask(
+                    batch,
+                    Value::Array(wire.clone()),
+                    json!({"job": pin.job, "epoch": pin.epoch}),
+                );
+                let answers = loop {
+                    if pin.cancel.load(Ordering::Acquire) {
                         batches.lock().unwrap().open.remove(&batch);
-                        return Err("The extension did not draw the layer in time".into());
+                        return Err("cancelled".into());
                     }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        return Err("The project's extensions stopped during the export".into());
+                    match rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(answers) => break answers,
+                        Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+                        Err(RecvTimeoutError::Timeout) => {
+                            batches.lock().unwrap().open.remove(&batch);
+                            return Err("The extension did not draw the layer in time".into());
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            return Err("The project's extensions stopped during the export".into());
+                        }
                     }
+                };
+                let behind = answers.iter().any(|a| matches!(a, RasterAnswer::Retry));
+                if !behind || Instant::now() >= deadline {
+                    break answers;
                 }
+                std::thread::sleep(Duration::from_millis(20));
             };
             answers
                 .into_iter()
@@ -268,7 +277,7 @@ impl Overrides {
                     RasterAnswer::Hidden => Ok(CompatReply::Hidden),
                     RasterAnswer::Failed(error) => Err(error),
                     RasterAnswer::Retry => {
-                        Err("The extension answered for another revision".into())
+                        Err("The project's extensions did not reach the export's revision".into())
                     }
                     RasterAnswer::Raster {
                         width,

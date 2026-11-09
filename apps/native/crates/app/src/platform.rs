@@ -326,6 +326,8 @@ pub struct QuitState {
     previous: Retained<ProtocolObject<dyn NSApplicationDelegate>>,
     sender: async_channel::Sender<()>,
     allowed: Cell<bool>,
+    /// Quit Apple Events waiting for the quit's outcome (suspension ids).
+    suspended: std::cell::RefCell<Vec<usize>>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -348,6 +350,26 @@ define_class!(
         }
     }
     impl QuitDelegate {
+        /// The Quit Apple Event (Dock, Activity Monitor, `osascript … quit`,
+        /// logout). AppKit drops it while a window shows a sheet, so a hung
+        /// extension's D11 sheet would hold the app open; the event goes to
+        /// the quit coordinator directly instead, which ends that sheet.
+        #[unsafe(method(handleQuitEvent:withReplyEvent:))]
+        fn handle_quit_event(&self, _event: *mut AnyObject, _reply: *mut AnyObject) {
+            if self.ivars().allowed.get() {
+                let mtm = MainThreadMarker::new().unwrap();
+                NSApplication::sharedApplication(mtm).terminate(None);
+                return;
+            }
+            // The sender hears the outcome: quit, or cancelled (-128) when the
+            // person cancels a save prompt (`QuitDelegate::resolve_quit_events`).
+            let id: *mut std::ffi::c_void =
+                unsafe { msg_send![apple_events(), suspendCurrentAppleEvent] };
+            if !id.is_null() {
+                self.ivars().suspended.borrow_mut().push(id as usize);
+            }
+            let _ = self.ivars().sender.try_send(());
+        }
         #[unsafe(method(forwardingTargetForSelector:))]
         fn forward(&self, _: Sel) -> *const AnyObject {
             &*self.ivars().previous as *const _ as *const AnyObject
@@ -363,15 +385,57 @@ pub fn quit_guard() -> (Retained<QuitDelegate>, async_channel::Receiver<()>) {
         previous,
         sender,
         allowed: Cell::new(false),
+        suspended: Default::default(),
     });
     let guard: Retained<QuitDelegate> = unsafe { objc2::msg_send![super(this), init] };
     app.setDelegate(Some(ProtocolObject::from_ref(&*guard)));
+    // kCoreEventClass 'aevt', kAEQuitApplication 'quit'.
+    const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
+    const QUIT_APPLICATION: u32 = u32::from_be_bytes(*b"quit");
+    unsafe {
+        let manager = apple_events();
+        let _: () = msg_send![
+            manager,
+            setEventHandler: &*guard,
+            andSelector: objc2::sel!(handleQuitEvent:withReplyEvent:),
+            forEventClass: CORE_EVENT_CLASS,
+            andEventID: QUIT_APPLICATION
+        ];
+    }
     (guard, rx)
 }
 impl QuitDelegate {
     pub fn allow(&self) {
         self.ivars().allowed.set(true);
     }
+    /// Answers the Quit Apple Events the quit kept waiting: success, or the
+    /// user-cancelled error (-128) when the quit was cancelled.
+    pub fn resolve_quit_events(&self, cancelled: bool) {
+        const ERROR_NUMBER: u32 = u32::from_be_bytes(*b"errn");
+        const USER_CANCELED: i32 = -128;
+        for id in self.ivars().suspended.borrow_mut().drain(..) {
+            let id = id as *mut std::ffi::c_void;
+            unsafe {
+                let manager = apple_events();
+                if cancelled {
+                    let reply: *mut AnyObject =
+                        msg_send![manager, replyAppleEventForSuspensionID: id];
+                    let error: *mut AnyObject = msg_send![
+                        objc2::class!(NSAppleEventDescriptor),
+                        descriptorWithInt32: USER_CANCELED
+                    ];
+                    if !reply.is_null() && !error.is_null() {
+                        let _: () =
+                            msg_send![reply, setParamDescriptor: error, forKeyword: ERROR_NUMBER];
+                    }
+                }
+                let _: () = msg_send![manager, resumeWithSuspensionID: id];
+            }
+        }
+    }
+}
+fn apple_events() -> *mut AnyObject {
+    unsafe { msg_send![objc2::class!(NSAppleEventManager), sharedAppleEventManager] }
 }
 
 /// PNG sequences choose a parent directory; publication owns a fresh child

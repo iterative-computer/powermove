@@ -105,6 +105,8 @@ struct Execution {
     generation: Generation,
     epoch: u64,
     started: Instant,
+    /// Time blocked in engine calls, which the watchdog doesn't count.
+    blocked: Arc<crate::vm::Blocked>,
     noticed: bool,
     next_prompt: Duration,
 }
@@ -114,6 +116,8 @@ struct Control {
     disposed: AtomicBool,
     wake: Condvar,
     ids: AtomicU64,
+    /// The extension the watchdog found running a task it prompts about.
+    culprit: crate::vm::Culprit,
 }
 struct Inner {
     tx: Arc<SyncSender<Command>>,
@@ -270,6 +274,11 @@ impl Realm {
             })
     }
     /// Fenced by execution id; an old Stop cannot terminate a later task.
+    /// The extension (`pmext://<id>/…` module) the watchdog found running
+    /// `execution` when it prompted, if any.
+    pub fn culprit(&self, execution: u64) -> Option<String> {
+        self.inner.control.culprit.get(execution)
+    }
     pub fn stop(&self, execution: u64) -> bool {
         let active = self.inner.control.active.lock().unwrap();
         if let Some(active) = active.as_ref().filter(|a| a.id == execution) {
@@ -466,6 +475,7 @@ impl RuntimePool {
             disposed: AtomicBool::new(false),
             wake: Condvar::new(),
             ids: AtomicU64::new(1),
+            culprit: crate::vm::Culprit::default(),
         });
         let inner = Arc::new(Inner {
             tx: Arc::new(tx),
@@ -538,7 +548,11 @@ impl WatchdogThread {
                 execution
                     .handle
                     .request_interrupt(vm::check_external, std::ptr::null_mut());
-                let elapsed = execution.started.elapsed();
+                // JS time only: waiting on the engine or kernel is not a hang.
+                let elapsed = execution
+                    .started
+                    .elapsed()
+                    .saturating_sub(execution.blocked.total());
                 let notice = !execution.noticed && elapsed >= notice_after;
                 if notice {
                     execution.noticed = true;
@@ -552,6 +566,21 @@ impl WatchdogThread {
                 drop(active);
                 if notice {
                     hooks.notice(&generation, id);
+                }
+                if prompt {
+                    // Who is running: the innermost extension module on the
+                    // stack, read inside the running JS (any hang: a raster
+                    // override, an event, a timer, a command).
+                    let handle = watched
+                        .active
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .filter(|e| e.epoch == epoch)
+                        .map(|e| e.handle.clone());
+                    if let Some(handle) = handle {
+                        crate::vm::capture_culprit(&handle, &watched.culprit, id);
+                    }
                 }
                 if prompt && hooks.prompt(&generation, id) == WatchdogDecision::Stop {
                     let active = watched.active.lock().unwrap();
@@ -601,6 +630,7 @@ impl Guard {
             handle: handle.clone(),
             cancellation: cancellation.clone(),
             started: Instant::now(),
+            blocked: vm.blocked(),
             noticed: false,
             next_prompt: config.watchdog.prompt,
         });

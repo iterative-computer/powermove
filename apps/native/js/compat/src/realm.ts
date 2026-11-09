@@ -821,28 +821,21 @@ export class CompatRealm {
    * for an export, the job whose frozen project it reads.
    */
   rasterContext: { composition?: string; job?: string; layer?: object } | null = null;
-  /** Layers of the frozen projects exports read (see `pinProject`). */
-  private pinnedLayers = new WeakSet<object>();
-  private pins = new Map<string, Data>();
+  /** Each running export's frozen revision (see `pinProject`). */
+  private pins = new Map<string, number>();
   /**
-   * An export's project as its snapshot froze it: the overrides answering its
-   * frames read these layers, so edits made while it runs never reach it.
-   * The few most recent jobs are kept.
+   * An export froze the project at `revision`: its overrides answer only
+   * while this realm is at that revision, so every project read they make
+   * (`PM.proj`, layers, settings) is the export's project. No copy of a
+   * project is held. The few most recent jobs are kept.
    */
-  pinProject(job: string, project: Data): void {
-    const walk = (layers: unknown) => {
-      for (const layer of Array.isArray(layers) ? layers : [])
-        if (layer && typeof layer === "object") this.pinnedLayers.add(layer);
-    };
-    walk(project?.layers);
-    const comps = project?.comps;
-    for (const comp of Array.isArray(comps) ? comps : Object.values(comps ?? {}))
-      walk((comp as Data)?.layers);
+  pinProject(job: string, revision: number): void {
     this.pins.delete(job);
-    this.pins.set(job, project);
+    this.pins.set(job, revision);
     while (this.pins.size > PINNED_PROJECTS) this.pins.delete(this.pins.keys().next().value!);
   }
-  pinnedProject(job: string): Data | undefined {
+  /** The revision an export froze; `undefined`: the job is not pinned. */
+  pinnedRevision(job: string): number | undefined {
     return this.pins.get(job);
   }
   /**
@@ -894,9 +887,9 @@ export class CompatRealm {
     if (!layer || typeof layer !== "object") return null;
     const context = this.rasterContext;
     // The project's own record: a view of it, the exact layer this answer
-    // is for, or a layer of an export's frozen project.
+    // is for.
     const own =
-      isProjectView(layer) || layer === context?.layer || this.pinnedLayers.has(layer);
+      isProjectView(layer) || layer === context?.layer;
     const id = String(layer.id ?? "");
     const composition = context?.composition ?? this.compositionOf(id);
     const spec: Data = {

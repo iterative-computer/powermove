@@ -196,6 +196,11 @@ pub struct Extensions {
     /// a panel published while the window is open is shown, not left in a menu.
     mounted_once: BTreeSet<String>,
     booted: bool,
+    /// The D11 sheet is up for this task.
+    unresponsive: Option<u64>,
+    /// Quit stopped this window's extensions (a hung one); a cancelled quit
+    /// starts them again.
+    pub stopped_for_quit: bool,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
 }
@@ -235,6 +240,8 @@ impl Default for Extensions {
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
             booted: false,
+            unresponsive: None,
+            stopped_for_quit: false,
             resources: Arc::default(),
         }
     }
@@ -272,12 +279,47 @@ pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
     ]
 }
 impl Controller {
+    /// Quitting while an extension isn't responding (D11): its sheet goes,
+    /// the realm is stopped without a restart (its open entry is sealed;
+    /// acknowledged kernel edits stay) and the quit goes on. `false` when no
+    /// extension in this window is hung.
+    pub fn stop_hung_extensions_for_quit(&mut self) -> bool {
+        if self.extensions.unresponsive.is_none() || self.extensions.host.is_none() {
+            return false;
+        }
+        {
+            let shell = self.host.borrow();
+            if let Some(sheet) = shell.window.attachedSheet() {
+                shell
+                    .window
+                    .endSheet_returnCode(&sheet, objc2_app_kit::NSModalResponseAbort);
+            }
+        }
+        let mut shell = self.host.borrow_mut();
+        shell.native_present = None;
+        shell.native_accessibility = vec![];
+        drop(shell);
+        // Dropping the host closes the realm off the main thread.
+        self.reset_extensions();
+        self.extensions.stopped_for_quit = true;
+        true
+    }
+    /// A fresh extension state for this window. Resource generations keep
+    /// counting up, so the viewer takes the next definitions as newer.
+    fn reset_extensions(&mut self) {
+        let generation = self.extensions.resources.generation;
+        self.extensions = Extensions::default();
+        self.extensions.resources = Arc::new(ResourceSnapshot {
+            generation,
+            ..Default::default()
+        });
+    }
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
         let mut shell = self.host.borrow_mut();
         shell.native_present = None;
         shell.native_accessibility = vec![];
         drop(shell);
-        self.extensions = Extensions::default();
+        self.reset_extensions();
         let Some(session) = &self.session else {
             return;
         };
@@ -376,6 +418,14 @@ impl Controller {
         for request in host.take_requests() {
             self.extension_request(request, cx);
         }
+        // The trusted realm's document gets its page as soon as the realm
+        // starts, not only when a panel shows: hidden elements extensions
+        // measure (a caret, a label) need real layout (plan 3.5.2).
+        let trusted_page = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0)
+            && !self.extensions.pages.contains_key("");
+        if trusted_page {
+            self.ensure_page("", cx);
+        }
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
             self.mount_surfaces(cx);
@@ -443,9 +493,13 @@ impl Controller {
                 let answer =
                     crate::platform::choice(&shell.window, &title, &body, &["Wait", "Stop"]);
                 drop(shell);
+                self.extensions.unresponsive = Some(execution);
                 cx.spawn(async move |this, cx| {
                     let stop = answer.recv().await == Ok(1);
                     let _ = this.update(cx, |v, _| {
+                        if v.extensions.unresponsive == Some(execution) {
+                            v.extensions.unresponsive = None;
+                        }
                         if let Some(host) = &v.extensions.host {
                             host.answer_unresponsive(execution, stop);
                         }

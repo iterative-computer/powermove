@@ -211,7 +211,7 @@ function patchDOM() {
       configurable: true,
       get() {
         const shim = owner(this);
-        shim?.requestLayout(this);
+        shim?.fresh(this);
         return (
           shim?.values.get(this)?.get(prop) ?? (shim?.layouts.get(this)?.entry as N)?.[field] ?? 0
         );
@@ -445,6 +445,13 @@ export type ShimOptions = {
   /** The value the page gets for an attribute; null keeps it realm-only
    * (a realm `blob:` image URL the page receives as bytes instead). */
   pageAttribute?: (node: N, name: string, value: string) => string | null;
+  /**
+   * A layout read the page has not measured since the document changed (a
+   * browser's forced synchronous layout): the batch carrying the measure
+   * request has been sent; this waits, bounded, for the page's `layout`
+   * reply to it and returns it, or null (the cached layout is used).
+   */
+  measureSync?: (request: number) => PageMessage | null;
 };
 
 export class RemoteDOM {
@@ -872,7 +879,7 @@ export class RemoteDOM {
     this.schedule();
   }
   rect(node: N): DOMRect {
-    this.requestLayout(node);
+    this.fresh(node);
     const rect = this.layouts.get(node)?.entry.rect ?? { x: 0, y: 0, width: 0, height: 0 };
     return {
       ...rect,
@@ -905,21 +912,69 @@ export class RemoteDOM {
   }
   computedStyle(node: N) {
     this.requestLayout(node);
-    const values = this.layouts.get(node)?.entry.styles ?? {};
+    // A property is measured when it is read, as a browser computes it then.
+    const value = (name: string) => {
+      this.fresh(node, [name]);
+      return this.layouts.get(node)?.entry.styles?.[name] ?? '';
+    };
+    const values = () => this.layouts.get(node)?.entry.styles ?? {};
     return new Proxy(
       {
-        getPropertyValue: (name: string) => values[name] ?? '',
-        item: (index: number) => Object.keys(values)[index] ?? '',
-        length: Object.keys(values).length
+        getPropertyValue: (name: string) => value(name),
+        item: (index: number) => Object.keys(values())[index] ?? '',
+        get length() {
+          return Object.keys(values()).length;
+        }
       },
       {
         get(target, name: string) {
           return name in target
             ? target[name as keyof typeof target]
-            : (values[name.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())] ?? '');
+            : value(name.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()));
         }
       }
     ) as unknown as CSSStyleDeclaration;
+  }
+  /** Synchronous layout reads are off for a moment after one went unanswered. */
+  private syncPausedUntil = 0;
+  /**
+   * Makes `node`'s layout (and `styles`) current, as a browser's forced
+   * layout does: when the page has not measured it since the document last
+   * changed, the pending changes and a measure request go now and the realm
+   * waits for the page's answer (`measureSync`). Without a host for it, or
+   * when the page does not answer, the cached layout stays and a refresh is
+   * requested.
+   */
+  fresh(node: N, styles: string[] = []) {
+    const measure = this.options.measureSync;
+    if (!measure || this.disposed || this.lifecycle === 'faulted') return this.requestLayout(node);
+    // A detached node has no layout, in a browser too.
+    if (!node.isConnected) return;
+    this.collect(this.observer.takeRecords());
+    const known = this.layouts.get(node);
+    const changed =
+      this.dirty.size || this.commands.length || this.pending || this.backlog.length;
+    if (
+      known &&
+      known.applied >= this.seq &&
+      !changed &&
+      styles.every((name) => name in (known.entry.styles ?? {}))
+    )
+      return;
+    if (Date.now() < this.syncPausedUntil) return this.requestLayout(node);
+    const request = ++this.request;
+    this.commands.push({ op: 'measure', request, ids: [this.id(node)], styles });
+    // Everything up to the request reaches the page first.
+    for (let i = 0; i < 64; i++) {
+      if (!this.flush() || !(this.pending || this.backlog.length || this.commands.length)) break;
+    }
+    const reply = this.pending ? null : measure(request);
+    if (reply?.kind === 'layout' && sameSession(reply.session, this.session)) {
+      this.applyLayout(reply, true);
+    } else {
+      this.syncPausedUntil = Date.now() + 1000;
+      this.requestLayout(node);
+    }
   }
   observeResize(observer: RemoteResizeObserver, node: N, enabled: boolean) {
     let observers = this.resizeTargets.get(node);
@@ -958,6 +1013,34 @@ export class RemoteDOM {
     if (this.disposed || !sameSession(message.session, this.session)) return false;
     return this.realmTask(() => this.receiveMessage(message));
   }
+  /**
+   * A page layout snapshot into the cache. Resize observers hear about it
+   * now, or (`deferred`, a synchronous read inside extension code) after the
+   * current task, as a browser delivers them after layout.
+   */
+  private applyLayout(message: Extract<PageMessage, { kind: 'layout' }>, deferred: boolean) {
+    if (message.applied < this.applied || message.applied > this.seq) return;
+    const changed: [N, LayoutEntry][] = [];
+    for (const entry of message.entries) {
+      const node = this.node(entry.id);
+      if (!node) continue;
+      const previous = this.layouts.get(node);
+      if (previous && previous.applied > message.applied) continue;
+      const styles = { ...(previous?.applied === message.applied ? previous.entry.styles : {}), ...entry.styles };
+      this.layouts.set(node, { entry: { ...entry, styles }, applied: message.applied });
+      let values = this.values.get(node);
+      if (!values) this.values.set(node, (values = new Map()));
+      values.set('scrollLeft', entry.scroll_left);
+      values.set('scrollTop', entry.scroll_top);
+      changed.push([node, entry]);
+    }
+    const deliver = () => {
+      for (const [node, entry] of changed)
+        for (const observer of this.resize) observer.deliver(node, entry);
+    };
+    if (deferred) (this.options.queueMicrotask ?? queueMicrotask)(() => this.realmTask(deliver));
+    else deliver();
+  }
   private receiveMessage(message: PageMessage): boolean {
     if (this.disposed || !sameSession(message.session, this.session)) return false;
     if (message.kind === 'fault') {
@@ -974,18 +1057,7 @@ export class RemoteDOM {
     }
     if (message.applied < this.applied || message.applied > this.seq) return false;
     if (message.kind === 'layout') {
-      for (const entry of message.entries) {
-        const node = this.node(entry.id);
-        if (!node) continue;
-        const previous = this.layouts.get(node);
-        if (previous && previous.applied > message.applied) continue;
-        this.layouts.set(node, { entry, applied: message.applied });
-        let values = this.values.get(node);
-        if (!values) this.values.set(node, (values = new Map()));
-        values.set('scrollLeft', entry.scroll_left);
-        values.set('scrollTop', entry.scroll_top);
-        for (const observer of this.resize) observer.deliver(node, entry, previous?.entry);
-      }
+      this.applyLayout(message, false);
       if (message.request !== null) {
         const wait = this.waits.get(message.request);
         const entry = message.entries.find((e) => this.node(e.id) === wait?.node);
@@ -1197,12 +1269,17 @@ class RemoteResizeObserver {
   disconnect() {
     for (const node of this.targets) this.unobserve(node);
   }
-  deliver(node: N, entry: LayoutEntry, previous?: LayoutEntry) {
+  /** The size each target was last reported at: a change is reported once,
+   * whichever layout read found it. */
+  private reported = new WeakMap<N, { width: number; height: number }>();
+  deliver(node: N, entry: LayoutEntry) {
+    const last = this.reported.get(node);
     if (
       !this.targets.has(node) ||
-      (previous?.rect.width === entry.rect.width && previous.rect.height === entry.rect.height)
+      (last?.width === entry.rect.width && last.height === entry.rect.height)
     )
       return;
+    this.reported.set(node, { width: entry.rect.width, height: entry.rect.height });
     this.callback(
       [{ target: node, contentRect: this.shim.rect(node) } as ResizeObserverEntry],
       this as unknown as ResizeObserver

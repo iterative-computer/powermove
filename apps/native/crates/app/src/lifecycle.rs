@@ -38,16 +38,34 @@ struct QuitCoordinator {
 }
 impl gpui::Global for QuitCoordinator {}
 pub fn allow_quit(cx: &App) {
-    cx.global::<QuitCoordinator>()._delegate.allow();
+    let delegate = &cx.global::<QuitCoordinator>()._delegate;
+    delegate.allow();
+    delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
-    {
+    cx.global::<QuitCoordinator>()
+        ._delegate
+        .resolve_quit_events(true);
+    let controllers = {
         let q = cx.global_mut::<QuitCoordinator>();
         q.quitting = false;
         q.discard = false;
         q.queue.clear();
         q.host.closing.store(false, Ordering::Release);
-    }
+        q.controllers.clone()
+    };
+    // Extensions a hung one made the quit stop come back with the window,
+    // once the update that cancelled (a close sheet's answer, inside one
+    // controller) has ended: a controller can't be updated within itself.
+    cx.defer(move |cx| {
+        for weak in controllers {
+            let _ = weak.update(cx, |v, cx| {
+                if v.extensions.stopped_for_quit {
+                    v.start_extensions(cx);
+                }
+            });
+        }
+    });
 }
 pub fn begin_quit(cx: &mut App) {
     let q = cx.global_mut::<QuitCoordinator>();
@@ -239,6 +257,29 @@ impl Controller {
             if intent == Intent::Quit {
                 cancel_quit(cx);
             }
+            return;
+        }
+        if intent == Intent::Quit && self.stop_hung_extensions_for_quit() {
+            // The stopped realm's open entry is sealed on its owner thread;
+            // the quit goes on once it has gone (or after three seconds).
+            let kernel = self.kernel.clone();
+            let project = self.session.as_ref().map(|s| s.project.clone());
+            cx.spawn(async move |this, cx| {
+                for _ in 0..60 {
+                    let open = project
+                        .as_ref()
+                        .and_then(|p| kernel.published(p))
+                        .is_some_and(|p| p.entry.is_some());
+                    if !open {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                }
+                let _ = this.update(cx, |v, cx| v.request_close(Intent::Quit, cx));
+            })
+            .detach();
             return;
         }
         if intent == Intent::Window && cx.global::<QuitCoordinator>().quitting {
