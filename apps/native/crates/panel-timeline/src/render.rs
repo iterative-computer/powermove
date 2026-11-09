@@ -1148,6 +1148,9 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     // bars stand on the clip's floor in the body's bright tint, one column per
     // point summarising every peak under it.
     if let (Some(audio), false) = (&c.audio, offline) {
+        // Bars keep clear of the seam and the rounded corners on every side.
+        let inset = 2. * m.border as f64;
+        let r = Rect::new(r.x + inset, r.y, (r.width - 2. * inset).max(0.), r.height);
         let mut o = Op::new(
             format!("clip-content:{}", c.id),
             "waveform",
