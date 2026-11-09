@@ -699,41 +699,6 @@ fn protected_folders_row(folders: &Value) -> Option<Value> {
         "actionLabel":action,"disabled":false,"detail":detail.join(" ")}),
     )
 }
-#[cfg(test)]
-mod protected_folders_tests {
-    use super::protected_folders_row;
-    use serde_json::json;
-    #[test]
-    fn the_row_names_each_folder_with_its_files_and_what_macos_still_asks() {
-        assert_eq!(protected_folders_row(&json!([])), None);
-        let row = protected_folders_row(&json!([
-            {"name":"Downloads","files":3,"refused":false},
-            {"name":"Desktop","files":1,"refused":false},
-            {"name":"Documents","files":2,"refused":true},
-        ]))
-        .unwrap();
-        assert_eq!(row["disabled"], false);
-        assert_eq!(row["actionLabel"], "Allow Access…");
-        let detail = row["detail"].as_str().unwrap();
-        assert!(
-            detail.starts_with(
-                "Originals in Downloads (3 files) and Desktop (1 file) weren’t opened"
-            ),
-            "{detail}"
-        );
-        assert!(
-            detail.contains("macOS refused Documents (2 files)"),
-            "{detail}"
-        );
-        // Only refused folders: Check Again, for access granted in System
-        // Settings since.
-        let row =
-            protected_folders_row(&json!([{"name":"Desktop","files":1,"refused":true}])).unwrap();
-        assert_eq!(row["disabled"], false);
-        assert_eq!(row["actionLabel"], "Check Again…");
-    }
-}
-
 /// macOS's answer about agent notifications (S114), as the app last read it.
 static NOTIFICATIONS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// The app records the notification center's answer whenever it changes.
@@ -767,4 +732,39 @@ fn notification_row() -> Value {
         row["value"] = json!(if code == 1 { "Allowed" } else { "Not Set Up" });
     }
     row
+}
+
+#[cfg(test)]
+mod protected_folders_tests {
+    use super::protected_folders_row;
+    use serde_json::json;
+    #[test]
+    fn the_row_names_each_folder_with_its_files_and_what_macos_still_asks() {
+        assert_eq!(protected_folders_row(&json!([])), None);
+        let row = protected_folders_row(&json!([
+            {"name":"Downloads","files":3,"refused":false},
+            {"name":"Desktop","files":1,"refused":false},
+            {"name":"Documents","files":2,"refused":true},
+        ]))
+        .unwrap();
+        assert_eq!(row["disabled"], false);
+        assert_eq!(row["actionLabel"], "Allow Access…");
+        let detail = row["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with(
+                "Originals in Downloads (3 files) and Desktop (1 file) weren’t opened"
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("macOS refused Documents (2 files)"),
+            "{detail}"
+        );
+        // Only refused folders: Check Again, for access granted in System
+        // Settings since.
+        let row =
+            protected_folders_row(&json!([{"name":"Desktop","files":1,"refused":true}])).unwrap();
+        assert_eq!(row["disabled"], false);
+        assert_eq!(row["actionLabel"], "Check Again…");
+    }
 }
