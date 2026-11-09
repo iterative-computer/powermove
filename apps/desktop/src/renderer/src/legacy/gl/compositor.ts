@@ -2216,7 +2216,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   }
   if(opt.rawOwner){const layer=proj.layers.find((l:any)=>l.id===opt.rawOwner);if(!layer||layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new EffectInputError('Source owner processing requires a 2D content layer');const frame=renderInputSource(proj,layer,T,'effects',{...opt,ownerGrow:true});completed=true;return frame;}
   // Exports and agent frames render 3D at Studio's Final quality.
-  PM._studioFinal=!!(opt.exporting||PM.agentFrameCapture||previousStudio[0]);
+  PM._studioFinal=!!(opt.exporting||PM.Export?.busy||PM.agentFrameCapture||previousStudio[0]);
   // Offscreen renders that are neither the viewer nor final output (stills,
   // captures, thumbnails) get a fixed, repeatable Studio frame.
   // An explicit fresh frame (previewReuse: false) is a still too, even through the editor's camera.

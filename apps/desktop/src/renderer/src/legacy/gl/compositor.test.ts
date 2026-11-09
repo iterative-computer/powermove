@@ -59,6 +59,22 @@ function preparedVideoRegistry() {
   return { PM, gl, canvas, video, assets, layer, capture: (options: any = {}) => PM.GL.renderToPixels(0, 2, 2, { transparent: true, mblur: false, ...options }) };
 }
 describe('prepared video texture sharing', () => {
+  it('keeps export readbacks in Studio Final and restores the previous tier', () => {
+    const h = preparedVideoRegistry(), tiers: boolean[] = [];
+    h.gl.texImage2D.mockImplementation(() => { tiers.push(!!h.PM._studioFinal); });
+    h.capture();
+    expect(tiers).not.toHaveLength(0);
+    expect(tiers.every(Boolean)).toBe(true);
+    expect(h.PM._studioFinal).toBeUndefined();
+  });
+  it('keeps ordinary still readbacks outside Studio Final', () => {
+    const h = preparedVideoRegistry(), tiers: boolean[] = [];
+    h.PM.Export.busy = false;
+    h.gl.texImage2D.mockImplementation(() => { tiers.push(!!h.PM._studioFinal); });
+    h.capture();
+    expect(tiers).not.toHaveLength(0);
+    expect(tiers.every(tier => !tier)).toBe(true);
+  });
   it('keeps viewer uploads separate while an export owns prepared frames', () => {
     const h = preparedVideoRegistry();
     h.PM.GL.progs.set('present', { pr: {}, a: 0, u: new Map() });

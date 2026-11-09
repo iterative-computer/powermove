@@ -501,6 +501,7 @@ test('authors and exports the original Studio showcase', async ({ session }) => 
     for (const p of progress) {
       expect(p.studio?.failure).toBeNull();
       expect(p.studio?.declined).toBe('');
+      expect(p.studio?.backend, JSON.stringify(p)).toBe('native-studio');
     }
     if(mode==='prores' && process.env.PM_SHOWCASE_DELIVERY) {
       // Encode the app-rendered master once; this changes no authored pixels
