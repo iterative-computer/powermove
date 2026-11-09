@@ -457,7 +457,10 @@ fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
     assert_eq!(wave.color, t.clip_material(t.colors.labels.green).primary);
     let bars = wave.detail["bars"].as_array().unwrap();
     let inset = 2. * t.metrics.border as f64;
-    assert_eq!(bars.len(), (body.bounds.width - 2. * inset).floor() as usize);
+    assert_eq!(
+        bars.len(),
+        (body.bounds.width - 2. * inset).floor() as usize
+    );
     assert_eq!(wave.bounds.x, body.bounds.x + inset);
     assert!(
         bars.iter().all(|b| b.as_f64() == Some(0.25)),

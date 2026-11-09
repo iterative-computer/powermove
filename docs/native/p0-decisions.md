@@ -285,3 +285,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 ## Design editor lane (wave 20)
 
 - `Tokens::clip_material(fill)` (+ `pm_design::mix`) derives a timeline clip's tactile chip from its label fill: soft vertical gradient, top highlight hairline, a seam one shade under the body, a small drop shadow, and a tinted foreground (≥ 4.5:1 on every label); Increase Contrast flattens it (v1's authored clip recipe, low intensity).
+- Timeline clips take their material from the layer's kind (`Label::for_kind`: text slate, shape red, video teal, image and captions yellow, audio green, solids, adjustments and effects violet), not the layer's swatch, as v1; the outline's kind badge shares it (`labelColor`).
+- Clips fill their row less a 1 pt breath; selection is a 2 pt accent ring inside the clip edge (never grows into neighbours); a hidden layer's clip draws at half strength.
+- A collapsed layer's key summary sits inside the clip's foot in its foreground; an open layer shows none (its property rows show the keys). Property keys: linear diamond, ease circle, hold square; a span's first and last diamonds are half filled toward it; a faint lane line runs under keyed properties.
+- Ruler labels centre over their ticks (sliding clear of the layer column); minor ticks quarter each labelled step (frames when labels count frames); markers are v1's pin with a 35 % guide.
+- Audio clips draw their waveform instead of a name: bars on the clip floor in the label's tint, one column per point from a per-file 100 Hz peak envelope read once per process off the main thread (`waveforms.rs`); a hairline marks the middle while it is read.
+- The playhead line has a `panel` halo, a pin head, and v1's velocity trail (critically damped spring of measured speed, only while playing, none under Reduce Motion).
+- The v4 host honours `metadata.fixedWidthSample` as a measured minimum width; the timeline timecode uses it, and while playing the panel blanks its readout under the native timecode layer, which draws on a clear ground.
+- In Dope Sheet and Graph / Graph Editor the tracks stop at the graph region, which gets plain material under a hairline; the plot is inset by `inset` top and bottom, with value lines at round steps labelled on the leading inset.

@@ -664,7 +664,15 @@ impl TimelineSurface {
     fn time_at(&self, x: f64) -> f64 {
         self.view.scroll_time + (x - self.view.layer_column) / self.view.pps
     }
+    /// The plot: the graph region less `inset` top and bottom, so keys at the
+    /// value range's ends never sit on its edges. Values map into this rect.
     fn graph_area(&self) -> Option<Rect> {
+        let inset = self.tokens.metrics.inset as f64;
+        self.graph_region()
+            .map(|r| Rect::new(r.x, r.y + inset, r.width, (r.height - 2. * inset).max(1.)))
+    }
+    /// The graph's whole region under the ruler (lower half in Dope Sheet and Graph).
+    fn graph_region(&self) -> Option<Rect> {
         let m = self.tokens.metrics;
         let (w, h) = (
             f32::from(self.bounds.size.width) as f64,
@@ -741,8 +749,8 @@ impl TimelineSurface {
             }
             return;
         }
-        if let Some(area) = self.graph_area()
-            && y >= area.y
+        if let (Some(region), Some(area)) = (self.graph_region(), self.graph_area())
+            && y >= region.y
         {
             self.press_graph(event, x, y, additive, area, cx);
             return;
@@ -1211,7 +1219,7 @@ impl TimelineSurface {
                     time: self.time_at(x),
                 },
             }
-        } else if self.graph_area().is_some_and(|a| y >= a.y) {
+        } else if self.graph_region().is_some_and(|a| y >= a.y) {
             MenuContext::Graph {
                 series: self.graph.as_ref().map_or(0, |_| 1),
             }
@@ -1749,6 +1757,8 @@ impl Render for TimelineSurface {
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
         let graph = self.graph_area().and_then(|area| self.graph_ops(area));
+        let region = self.graph_region();
+        let column = self.view.layer_column;
         let decorations = self.decorations.clone();
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
@@ -1849,8 +1859,36 @@ impl Render for TimelineSurface {
                         if let Some(frame) = frame {
                             // The outline row owns the keyframe toggle; the scene's
                             // copy would sit stale beneath it.
+                            // Under a graph, the tracks stop at its top: the graph
+                            // gets the plain material with a hairline over it.
+                            let above = region.map(|r| {
+                                Bounds::from_corners(
+                                    bounds.origin,
+                                    point(bounds.right(), bounds.origin.y + px(r.y as f32)),
+                                )
+                            });
                             for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
-                                paint(op, bounds.origin, &tokens, window, cx);
+                                match above {
+                                    Some(mask) if op.bounds.x >= column - 1. => window
+                                        .with_content_mask(
+                                            Some(ContentMask {
+                                                bounds: mask,
+                                                fade_out: Default::default(),
+                                            }),
+                                            |w| paint(op, bounds.origin, &tokens, w, cx),
+                                        ),
+                                    _ => paint(op, bounds.origin, &tokens, window, cx),
+                                }
+                            }
+                            if let Some(r) = region {
+                                let (edge, alpha) = tokens.line();
+                                window.paint_quad(
+                                    PaintQuad::new(Bounds::new(
+                                        bounds.origin + point(px(r.x as f32), px(r.y as f32)),
+                                        size(px(r.width as f32), px(tokens.metrics.border)),
+                                    ))
+                                    .background(rgba((edge << 8) | (alpha * 255.).round() as u32)),
+                                );
                             }
                             for op in
                                 pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
@@ -2095,7 +2133,16 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                         path.move_to(at(from.0, from.1));
                         started = true;
                     }
-                    path.line_to(at(to.0, to.1));
+                    // Eased segments are the Bézier they evaluate, not a chord.
+                    match segment["controls"]
+                        .as_array()
+                        .and_then(|c| Some((point_of(c.first()?)?, point_of(c.get(1)?)?)))
+                    {
+                        Some((a, b)) => {
+                            path.cubic_bezier_to(at(to.0, to.1), at(a.0, a.1), at(b.0, b.1))
+                        }
+                        None => path.line_to(at(to.0, to.1)),
+                    }
                 }
             }
             if started && let Ok(path) = path.build() {
