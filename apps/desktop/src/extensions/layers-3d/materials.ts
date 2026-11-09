@@ -125,6 +125,7 @@ export interface SourceGroup { id: string; label: string; options: SourceOption[
 
 const GROUP_TYPES: Array<{ id: string; label: string; types: string[]; filters: SourceFilter[] }> = [
   { id: 'precomps', label: 'Pre-comp Layers', types: ['precomp'], filters: ['comps'] },
+  { id: 'groups', label: 'Groups', types: ['group'], filters: [] },
   { id: 'solids', label: 'Solid Layers', types: ['solid'], filters: [] },
   { id: 'footage', label: 'Footage Layers', types: ['image', 'video'], filters: ['footage'] },
   { id: 'text', label: 'Text & Shape Layers', types: ['text', 'shape'], filters: [] }
@@ -134,7 +135,6 @@ const GROUP_TYPES: Array<{ id: string; label: string; types: string[]; filters: 
 export function wrongTypeReason(layer: Layer): string {
   if (isModelLayer(layer) || String((layer.d as any)?.definition ?? '').startsWith('powermove.3d.')) return '3D layers can’t be painted onto a model';
   if (layer.type === 'audio') return 'Audio has no picture';
-  if (layer.type === 'group') return 'Pre-compose the group to use it';
   if (layer.type === 'adjustment') return 'Adjustment layers have no picture of their own';
   return 'This kind of layer can’t be used as a material';
 }

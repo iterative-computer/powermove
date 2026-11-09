@@ -41,7 +41,7 @@ extraResources:
     to: figma-plugin
     filter:
       - manifest.json
-      - ui.html
+      - dist/ui.html
       - dist/code.js
   - from: resources/sounds
     to: sounds

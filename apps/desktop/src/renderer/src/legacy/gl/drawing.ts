@@ -32,8 +32,8 @@ export function shapeOutline(d: any): Path2D {
   }
   if (d.shape === "line") {
     const p = new Path2D();
-    p.moveTo(0, 0);
-    p.lineTo(d.w, d.h);
+    p.moveTo(0, d.h / 2);
+    p.lineTo(d.w, d.h / 2);
     return p;
   }
   if (d.shape === "polygon" || d.shape === "star") {

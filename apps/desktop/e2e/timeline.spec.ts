@@ -616,8 +616,9 @@ test('Shift pressed during a playhead drag latches when crossing clip edges and 
 
     await page.keyboard.up('Shift');
     await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').snapGuide)).toBeNull();
-    expect(await page.evaluate(() => (window as any).PM.time)).toBeGreaterThan(point.target);
+    expect(await page.evaluate(() => (window as any).PM.time)).toBeCloseTo(point.target,6);
     await page.mouse.up();
+    expect(await page.evaluate(() => (window as any).PM.time)).toBeCloseTo(point.target,6);
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

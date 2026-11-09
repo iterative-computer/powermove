@@ -29,7 +29,7 @@ import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
 import { disposeSceneRuntimes } from '../../core/scene3d/service';
-import { parseSvg } from '../core/svg-import';
+import { parseSvg,svgImportRepair } from '../core/svg-import';
 import { isStreamedMedia } from '../../host/streamed-media';
 import { forgetVideo, trackVideo } from '../core/video-residency';
 import { inspectorService, viewerService } from '../core/services';
@@ -881,6 +881,10 @@ function rasterDrawing(d: any, geometry: any, paths: any[] | null, crop?: Raster
   if(crop)ctx.translate(-crop.x,-crop.y);
   ctx.scale(density,density);ctx.translate(-x0,-y0);
   const outline = primitive ? shapeOutline(d) : new Path2D(), ends:any[]=[],strokeOutlines:any[]=[],fills=new Map<string,{path:Path2D;rule:string}>();
+  if(primitive&&d.shape==='line'){
+    ends.push({x:0,y:d.h/2,angle:Math.PI,cap:d.strokeStyle?.startCap??d.strokeStyle?.cap??'ROUND'},{x:d.w,y:d.h/2,angle:0,cap:d.strokeStyle?.endCap??d.strokeStyle?.cap??'ROUND'});
+    d={...d,color:'transparent',fillGradient:undefined,stroke:Math.max(1,d.stroke||6),strokeColor:d.color,strokeGradient:d.strokeGradient??d.fillGradient,strokeStyle:{...d.strokeStyle,align:'center',cap:'NONE'}};
+  }
   if(paths)for(const record of paths) {
     const v=record.values,vs=v.vertices,p=new Path2D(); if(!vs.length)continue;
     p.moveTo(vs[0].x,vs[0].y);
@@ -1824,6 +1828,17 @@ PM.assets = {
       const meta: any = project.assets?.[a.id];
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
     });
+    // Old SVG imports discarded author CSS and compound fill membership.
+    // Only exact, untouched legacy paths are upgraded, in one undoable edit.
+    const svgRepairs:Array<{layer:any;patch:Record<string,unknown>}>=[];
+    for(const asset of restored.filter((a:any)=>a.format==='svg'&&a.svg)){
+      const layers=[project.layers,...Object.values<any>(project.comps || {}).map(comp=>comp.layers)].flat().filter((layer:any)=>layer?.d?.svgSourceAsset===asset.id&&!layer.d.svgImportVersion);
+      if(!layers.length)continue;
+      const source=await asset.persistBlob.text();
+      if(epoch!==assetEpoch||PM.proj!==project)return {restored:[],missing:[],stale:true};
+      for(const layer of layers){const patch=svgImportRepair(layer,source,asset.svg);if(patch)svgRepairs.push({layer,patch});}
+    }
+    if(svgRepairs.length)PM.Edit?.mutate('Repair SVG import',()=>{for(const {layer,patch} of svgRepairs)Object.assign(layer.d,patch);PM.touch();},{origin:'migration'});
     const backfill = results.filter((result: any) => result.asset && !result.posterBlob && !result.kept);
     if (backfill.length) setTimeout(() => {
       void (async () => {

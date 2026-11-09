@@ -368,6 +368,17 @@ export interface Scene3DGizmo {
   dispose():void;
 }
 export interface Scene3DAPI {
+  /** Scene-space or extrusion-scene null pivot projected by the viewer camera,
+   * including animated parents and anchors. null for native 2D or hidden/behind
+   * camera controls. rect describes the displayed composition in CSS pixels. */
+  nullViewerPosition(layerId:string,time:number,rect:Scene3DViewerRect):Point2D|null;
+  /** Project a 3D null's pivot and control plane through the current viewer camera. */
+  nullViewerState(layerId:string,time:number,rect:Scene3DViewerRect):{viewerPosition:Point2D;corners:Point2D[]}|null;
+  /** Tight evaluated geometry in scene units (X right, Y up, Z toward the
+   * default camera). Includes parent/group descendants, imported parts, skin,
+   * morphs, extrusion and native planes. No projection or viewport clipping.
+   * Missing/loading geometry throws; an entirely nonvisual selection is null. */
+  geometryBounds(layerIds:readonly string[],time?:number):Bounds3D|null;
   /** Text/shape geometry is opt-in. Enabling extrusion also enables native 3D. */
   getExtrusion(layerId:string,time?:number):import('../core/scene3d/extrusion-data').ExtrusionState|null;
   setExtrusion(layerId:string,patch:import('../core/scene3d/extrusion-data').ExtrusionPatch,meta?:EditMeta):EditResult;
@@ -630,6 +641,7 @@ export type Mat3 = [number, number, number, number, number, number, number, numb
 export type Mat4 = [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number];
 export interface Point { x: number; y: number }
 export interface Bounds { x0: number; x1: number; y0: number; y1: number; cx?: number; cy?: number }
+export interface Bounds3D { x0:number; y0:number; z0:number; x1:number; y1:number; z1:number }
 export interface PropertyEntry { key: string; prop: Channel; label: string; group: string }
 
 /**
@@ -707,6 +719,18 @@ export interface SelectionAPI {
  * Groups query hierarchy and timing, expand selections, and perform structural reparenting. `normalizeStack` and `moveToGroup` mutate the project; the latter also touches animation state and emits the legacy layer/selection changes.
  */
 export interface GroupsAPI {
+  /** Nine-point bounds pivot, row-major top-left through bottom-right, at the
+   * playhead. Inserts native identity nulls without rebasing keys/expressions.
+   * One shared null at the combined bounds. Wraps existing null controllers
+   * and preserves animated parent/group branches. Selected hierarchies include
+   * their descendants. One Undo. data.result.nullIds contains the controller ID.
+   * replace repositions a selected static identity null, or one with all its
+   * direct children selected. New and replaced controls are selected afterward.
+   * New nulls span the selected layers' earliest start through latest end;
+   * replacement retains the existing null's timing.
+   * Locks, protected replacement channels and index-dependent expressions fail
+   * before mutation. Requires the full-access extension API. */
+  createBoundsNull(layerIds:readonly string[],index:number,options?:{replace?:boolean},meta?:EditMeta):EditResult;
   ancestors(layer: Layer, layers?: Layer[]): Layer[];
   transformRoots(ids: string[]): Layer[];
   /** Bounds of a group's active visual descendants in the group's local space. */
@@ -1106,6 +1130,8 @@ export interface TimelineService {
   reveal(layer: Layer, keys: string[]): void;
 }
 export interface ViewerService {
+  /** Editor-only null markers in stage-relative CSS pixels, selected or not. */
+  nullMarkers?():Array<{id:string;x:number;y:number;selected:boolean;corners?:Point[];scene?:boolean}>;
   pan: number[];
   zoom: number;
   fit: boolean;

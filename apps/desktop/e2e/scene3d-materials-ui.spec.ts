@@ -33,6 +33,9 @@ async function setup(session: any) {
     PM.Edit.apply({ type: 'add_layer', id: 'anim', layerType: 'precomp', name: 'Screen Animation', visible: false, content: { comp, w: 256, h: 256 } });
     PM.Edit.apply({ type: 'add_layer', id: 'paint', layerType: 'solid', name: 'Red Solid', visible: false, content: { w: 256, h: 256, color: '#E5484D' } });
     PM.Edit.apply({ type: 'add_layer', id: 'title', layerType: 'text', name: 'Title', visible: false, content: { text: 'HELLO', size: 64, color: '#FFFFFF' } });
+    PM.Edit.apply({type:'add_layer',id:'artwork',layerType:'group',name:'Screen Artwork',visible:false});
+    PM.Edit.apply({type:'add_layer',id:'group-paint',layerType:'shape',content:{shape:'rect',w:128,h:128,radius:0,color:'#2F80ED'}});
+    PM.Edit.apply({type:'move_to_group',targets:['group-paint'],group:'artwork'});
     const imported = await PM.cmd('3d.import-obj', new File([new Uint8Array(bytes)], 'phone.glb', { type: 'model/gltf-binary' }));
     if (!imported.ok) throw new Error(imported.message);
     const model = PM.proj.layers.find((l: any) => l.d?.data?.object).id;
@@ -74,7 +77,7 @@ test('Materials section picks layers, comps and images per material, and keyfram
   await trigger.click();
   const picker = page.locator('[data-material-picker="color"]');
   await expect(picker).toBeVisible();
-  await expect(picker.locator('.pm-menu-heading')).toHaveText(['Pre-comp Layers', 'Solid Layers', 'Text & Shape Layers', 'Other Layers', 'Compositions', 'Images']);
+  await expect(picker.locator('.pm-menu-heading')).toHaveText(['Pre-comp Layers', 'Groups', 'Solid Layers', 'Text & Shape Layers', 'Other Layers', 'Compositions', 'Images']);
   // Hidden layers still work, and say so.
   await expect(picker.locator('[data-option="layer:paint"] .mp-tag')).toHaveAttribute('title', 'Hidden layers still work as materials');
   // Loops are disabled with the reason.
@@ -85,6 +88,14 @@ test('Materials section picks layers, comps and images per material, and keyfram
   await shot(page, '02-after-02-picker-open-groups');
   await matted.scrollIntoViewIfNeeded();
   await shot(page, '02-after-03-picker-loop-disabled');
+
+  // A hidden group assigns directly, without making a pre-comp, and undoes once.
+  await picker.locator('[data-option="layer:artwork"]').click();
+  await expect.poll(async()=>(await maps(page,model)).own?.[0]?.color).toEqual({layerId:'artwork'});
+  await expect(trigger).toContainText('Screen Artwork');
+  await page.keyboard.press('Meta+z');
+  await expect.poll(async()=>(await maps(page,model)).own?.[0]?.color).toBeUndefined();
+  await trigger.click();await expect(picker).toBeVisible();
 
   // Comps filter: pre-comp layers and compositions; the open comp would loop.
   await picker.getByRole('radio', { name: 'Comps' }).click();

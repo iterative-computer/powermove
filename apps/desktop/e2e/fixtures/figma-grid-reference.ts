@@ -365,7 +365,8 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
       : n.absoluteTransform;
     const shape = outline(n);
     let body = "";
-    for (const fill of [...n.fills].reverse())
+    // Plugin API paint arrays are in drawing order (last paint is on top).
+    for (const fill of n.fills)
       body +=
         '<g fill="' +
         (await paint(n, fill)) +
@@ -400,7 +401,7 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
       defs.push('<clipPath id="' + key + '">' + shape + "</clipPath>");
       body = '<g clip-path="url(#' + key + ')">' + body + "</g>";
     }
-    for (const stroke of [...n.strokes].reverse()) {
+    for (const stroke of n.strokes) {
       const color = await paint(n, stroke),
         width = n.strokeWeight ?? 1;
       if (

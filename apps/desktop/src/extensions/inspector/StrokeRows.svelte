@@ -17,14 +17,14 @@
   const { contentBinding } = api.ui.controls.binding;
 
   const style = $derived((content.strokeStyle && typeof content.strokeStyle === 'object' ? content.strokeStyle : {}) as Record<string, any>);
-  const width = $derived(Math.max(0, Number(content.stroke) || 0));
   const shape = $derived(String(content.shape ?? 'rect'));
+  const width = $derived(shape==='line'?Math.max(1,Number(content.stroke)||6):Math.max(0, Number(content.stroke) || 0));
   const paths = $derived((void content, (Array.isArray(layer.d?.paths) ? layer.d.paths : []) as any[]));
   const closedValue = (path: any) => {
     const closed = path?.p?.closed ?? path?.closed;
     return !!(closed && typeof closed === 'object' && 'v' in closed ? closed.v : closed);
   };
-  const openPath = $derived(paths.some((path) => !closedValue(path)));
+  const openPath = $derived(shape === 'line' || paths.some((path) => !closedValue(path)));
   const dashes = $derived((Array.isArray(style.dashes) ? style.dashes : []).map(Number));
   const dash = $derived(dashes[0] ?? 0);
   const gap = $derived(dashes[1] ?? dashes[0] ?? 0);
@@ -44,7 +44,7 @@
   const resolved = (target: any) => api.anim.resolveContent(target, transport.time) as Record<string, any>;
   function styleWith(target: any, patch: Record<string, unknown>) {
     const raw = cloneRaw(rawAt(target, 'strokeStyle')) as Record<string, unknown> | undefined;
-    return { ...DEFAULT_STYLE, ...(raw && typeof raw === 'object' ? raw : {}), ...patch };
+    return { ...DEFAULT_STYLE, ...(resolved(target).shape==='line'?{cap:'ROUND',startCap:'ROUND',endCap:'ROUND'}:{}), ...(raw && typeof raw === 'object' ? raw : {}), ...patch };
   }
   const shapeEdit = (has: (target: any) => boolean, build: (target: any, exists: boolean) => any) =>
     perLayerEdit(api, live(), (target) => target.type === 'shape' && has(target), (target, exists) => target.type === 'shape' ? build(target, exists) : null);
@@ -114,7 +114,7 @@
     {#if sides}
       <span class="stroke-readout" aria-label="Stroke width">{sideSummary}</span>
     {:else}
-      <NumField {api} {mixed} get={() => content.stroke ?? 0} edit={contentBinding(layer.id, 'stroke', { label: 'Stroke', origin: 'inspector' })} label="Stroke" step={0.5} min={0} unit="px" />
+      <NumField {api} {mixed} get={() => width} edit={contentBinding(layer.id, 'stroke', { label: 'Stroke', origin: 'inspector' })} label="Stroke" step={0.5} min={0} unit="px" />
     {/if}
     {#if rect && width > 0}
       <button type="button" class="stroke-btn" class:on={!!sides} aria-pressed={!!sides} aria-label="Independent sides" title="Independent sides" onclick={toggleSides}>
@@ -138,12 +138,14 @@
   </div>
 {/if}
 
-<PaintRows {layer} {content} kind="stroke" label="Stroke color" />
+<PaintRows {layer} {content} kind={shape==='line'?'fill':'stroke'} label="Stroke color" />
 
-{#if width > 0 && shape !== 'line'}
+{#if width > 0}
+  {#if shape !== 'line'}
   <AnimatedRow {layer} label="Position" path={has('strokeStyle.align') ? 'c.strokeStyle.align' : undefined}>
     <Choice value={String(style.align ?? 'center')} options={STROKE_POSITIONS} label="Stroke position" edit={field('align', 'Stroke position')} />
   </AnimatedRow>
+  {/if}
   <AnimatedRow {layer} label="Dash" path={dashes.length ? 'c.strokeStyle.dashes.0' : undefined}>
     <NumField {api} {mixed} get={() => dash} edit={dashEdit} label="Stroke dash" step={1} min={0} unit="px" />
   </AnimatedRow>
@@ -159,13 +161,13 @@
   {/if}
   {#if openPath}
     <AnimatedRow {layer} label="Start" path={has('strokeStyle.startCap') ? 'c.strokeStyle.startCap' : undefined}>
-      <SelectField {api} {mixed} get={() => String(style.startCap ?? style.cap ?? 'NONE').toUpperCase()} edit={field('startCap', 'Start cap')} options={END_CAPS} label="Start cap" />
+      <SelectField {api} {mixed} get={() => String(style.startCap ?? style.cap ?? (shape==='line'?'ROUND':'NONE')).toUpperCase()} edit={field('startCap', 'Start cap')} options={END_CAPS} label="Start cap" />
     </AnimatedRow>
     <AnimatedRow {layer} label="End" path={has('strokeStyle.endCap') ? 'c.strokeStyle.endCap' : undefined}>
-      <SelectField {api} {mixed} get={() => String(style.endCap ?? style.cap ?? 'NONE').toUpperCase()} edit={field('endCap', 'End cap')} options={END_CAPS} label="End cap" />
+      <SelectField {api} {mixed} get={() => String(style.endCap ?? style.cap ?? (shape==='line'?'ROUND':'NONE')).toUpperCase()} edit={field('endCap', 'End cap')} options={END_CAPS} label="End cap" />
     </AnimatedRow>
   {/if}
-  {#if shape !== 'ellipse' || paths.length}
+  {#if shape !== 'line' && (shape !== 'ellipse' || paths.length)}
     <AnimatedRow {layer} label="Join" path={has('strokeStyle.join') ? 'c.strokeStyle.join' : undefined}>
       <Choice value={join} options={JOINS} label="Stroke join" edit={field('join', 'Stroke join')} />
     </AnimatedRow>

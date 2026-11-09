@@ -200,6 +200,7 @@ const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
         svgWidth: a.svg.width,
         svgHeight: a.svg.height,
         svgWarnings: a.svg.warnings,
+        svgImportVersion: 2,
       },
       select: true,
     };

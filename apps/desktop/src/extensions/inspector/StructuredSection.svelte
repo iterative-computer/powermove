@@ -4,6 +4,7 @@
   import AnimatedRow from './AnimatedRow.svelte';
   import Icon from './Icon.svelte';
   import SectionHeading from './SectionHeading.svelte';
+  import { DASH_CAPS, JOINS } from './figma-data';
   import { pathTargets, structuredProperties } from 'powermove';
   import { inspectorRefresh } from './refresh.svelte';
   import TextAnimators from './TextAnimators.svelte';
@@ -38,6 +39,9 @@
     inspectorEdit.apply({type:'set_property',target:layer.id,path:channel(key),value,time:transport.time,preserveHandEdits:false},{label,origin:'inspector'});
     api.transport.invalidate();
   }
+  const pathStyleBinding=(key:string,label:string)=>({mode:'command' as const,label,origin:'inspector' as const,command:(value:any)=>property(key)
+    ?{type:'set_property' as const,target:layer.id,path:channel(key),value,time:transport.time,preserveHandEdits:false}
+    :{type:'set_content' as const,target:layer.id,patch:{paths:layer.d.paths.map((path:any)=>path.id===activeTarget.path.id?{...path,p:{...path.p,[key]:api.model.P(value)}}:path)},preserveHandEdits:false}});
   function setActivePath(value:string|null){const service=viewer();if(service)service.activePath=value;}
   function makePath(){const values={x:0,y:0,rotation:0,scaleX:100,scaleY:100,closed:false,fill:'#E8E2CF',fillEnabled:true,fillOpacity:100,stroke:'#ffffff',strokeWidth:2,strokeOpacity:100,trimStart:0,trimEnd:100,trimOffset:0,copies:1,repeatX:30,repeatY:0,repeatRotation:0};return{id:api.util.uid('path'),name:'Path',parent:null,vertices:[],p:Object.fromEntries(Object.entries(values).map(([key,value])=>[key,api.model.P(value)]))};}
   function selectPath(target:any,startEditing=false){activePathId=target.path.id;setActivePath(target.path.id);if(startEditing)tools()?.setTool('pen');}
@@ -95,6 +99,17 @@
     <AnimatedRow {layer} path={channel('stroke')} label="Color"><ColorField {api} {mixed} label="Stroke color" get={()=>activeValues.stroke} edit={bind(channel('stroke'))} /></AnimatedRow>
     <ChannelRow {layer} channel={channel('strokeWidth')} property={property('strokeWidth')} label="Weight" step={0.5} min={0} unit="px" />
     <ChannelRow {layer} channel={channel('strokeOpacity')} property={property('strokeOpacity')} label="Opacity" step={1} min={0} max={100} unit="%" />
+    {#if !activeValues.closed || Number(activeValues.trimEnd)-Number(activeValues.trimStart)<99.999}
+      <AnimatedRow {layer} path={property('startCap')?channel('startCap'):undefined} label="Start">
+        <SelectField {api} {mixed} label="Start cap" get={()=>activeValues.startCap??activeValues.cap??'NONE'} options={DASH_CAPS} edit={pathStyleBinding('startCap','Start cap')} />
+      </AnimatedRow>
+      <AnimatedRow {layer} path={property('endCap')?channel('endCap'):undefined} label="End">
+        <SelectField {api} {mixed} label="End cap" get={()=>activeValues.endCap??activeValues.cap??'NONE'} options={DASH_CAPS} edit={pathStyleBinding('endCap','End cap')} />
+      </AnimatedRow>
+    {/if}
+    <AnimatedRow {layer} path={property('join')?channel('join'):undefined} label="Join">
+      <SelectField {api} {mixed} get={()=>activeValues.join??'miter'} options={[...JOINS]} label="Stroke join" edit={pathStyleBinding('join','Stroke join')} />
+    </AnimatedRow>
   {/if}
 {/if}
 

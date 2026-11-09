@@ -6,6 +6,7 @@ function harness() {
     source: { assetId: 'glb' }, material: { maps: {} }, sourceMaterials: { 0: { color: { layerId: 'paint' } } }, sourceMaterialProperties: { 0: { opacity: { v: 50, kf: [], expr: null } } } } } } };
   const layers: any[] = [
     model,
+    { id: 'artwork', type: 'group', name: 'Screen Artwork', on: false },
     { id: 'paint', type: 'solid', name: 'Red Solid', on: false },
     { id: 'anim', type: 'precomp', name: 'Screen Animation', on: true },
     { id: 'loop', type: 'solid', name: 'Blurred by Phone', on: true },
@@ -19,7 +20,7 @@ function harness() {
     project: { get: () => project },
     scene3d: {
       listMaterials: () => [{ index: 0, name: 'Screen', slots: [], maps: {} }, { index: 1, name: 'Body', slots: [], maps: {} }],
-      listEligibleSourceLayers: () => [{ group: 'Comps', layers: [{ id: 'anim' }] }, { group: 'Solids', layers: [{ id: 'paint' }] }, { group: 'Footage', layers: [{ id: 'clip' }] }],
+      listEligibleSourceLayers: () => [{ group: 'Groups', layers: [{ id: 'artwork' }] },{ group: 'Comps', layers: [{ id: 'anim' }] }, { group: 'Solids', layers: [{ id: 'paint' }] }, { group: 'Footage', layers: [{ id: 'clip' }] }],
       listValidCompositions: () => [{ id: 'inner' }],
       materialLinks: () => [{ materialIndex: 0, slot: 'color', layerId: 'paint', status: 'ready' }],
       setMaterialMap: vi.fn(() => ({ ok: true })),
@@ -43,7 +44,8 @@ describe('Layers as Materials model', () => {
     const { api } = harness();
     const groups = sourceGroups(api, 'model', 'color');
     const option = (id: string) => groups.flatMap(group => group.options).find(item => item.id === id)!;
-    expect(groups.map(group => group.label)).toEqual(['', 'Pre-comp Layers', 'Solid Layers', 'Footage Layers', 'Text & Shape Layers', 'Other Layers', 'Compositions', 'Images']);
+    expect(groups.map(group => group.label)).toEqual(['', 'Pre-comp Layers', 'Groups', 'Solid Layers', 'Footage Layers', 'Text & Shape Layers', 'Other Layers', 'Compositions', 'Images']);
+    expect(option('layer:artwork')).toMatchObject({disabled:false,hidden:true,icon:'layers',map:{layerId:'artwork'}});
     expect(option('layer:paint')).toMatchObject({ disabled: false, hidden: true, map: { layerId: 'paint' } });
     expect(option('layer:loop')).toMatchObject({ disabled: true, detail: 'Uses this model, so it would loop' });
     expect(option('layer:cam')).toMatchObject({ disabled: true, detail: '3D layers can’t be painted onto a model' });

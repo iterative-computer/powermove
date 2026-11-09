@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Window } from 'happy-dom';
-import { materializeSvgPaths, parseSvg, parseSvgPathData } from './svg-import';
+import { materializeSvgPaths, parseSvg, parseSvgPathData,svgImportRepair } from './svg-import';
 
 const previousDOMParser = globalThis.DOMParser;
 
@@ -17,6 +17,40 @@ const logo = `<svg width="141" height="116" viewBox="0 0 141 116" fill="none" xm
 </svg>`;
 
 describe('SVG shape import', () => {
+  it('resolves class CSS, inheritance, selector precedence, inline styles and currentColor',()=>{
+    const imported=parseSvg(`<svg viewBox="0 0 100 100"><style>.red{fill:#e60012} g .red{fill:#123456} #specific{fill:#abcdef} .forced{fill:red!important}</style><g color="#fedcba"><path class="red" id="specific" d="M0 0H20V20Z"/><path class="red" style="fill:#ffffff" d="M25 0H45V20Z"/><path fill="currentColor" d="M50 0H70V20Z"/><path class="forced" style="fill:blue" d="M75 0H95V20Z"/></g></svg>`);
+    expect(imported.paths.map(p=>p.fill)).toEqual(['#ABCDEF','#FFFFFF','#FEDCBA','#FF0000']);expect(imported.warnings).toEqual([]);
+  });
+  it('retains compound element identity and SVG fills on open contours',()=>{
+    const imported=parseSvg(`<svg viewBox="0 0 100 100"><path fill="#e60012" fill-rule="evenodd" d="M0 0H40V40H0Z M10 10H30V30H10Z"/><path fill="#e60012" d="M50 0H90V40H50"/></svg>`);
+    expect(imported.paths[0]!.fillGroup).toBe(imported.paths[1]!.fillGroup);
+    expect(imported.paths[2]!.fillGroup).not.toBe(imported.paths[0]!.fillGroup);
+    expect(imported.paths[2]).toMatchObject({closed:false,fillEnabled:true,fillOpen:true});
+    expect(imported.paths[0]!.fillRule).toBe('evenodd');
+  });
+  it('imports inherited caps, joins and miter limits as native path channels',()=>{
+    const imported=parseSvg(`<svg viewBox="0 0 100 100"><g fill="none" stroke="red" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="7"><path d="M10 10L50 70L90 10"/></g></svg>`);
+    const PM={uid:()=>'',P:(v:unknown)=>({v,kf:[],expr:null})};
+    const path=materializeSvgPaths(PM,imported)[0]!;
+    expect(path.p.cap.v).toBe('ROUND');expect(path.p.join.v).toBe('round');expect(path.p.miterLimit.v).toBe(7);
+  });
+  it('repairs only untouched legacy imports and keeps all path/vertex identities',()=>{
+    const source=`<svg viewBox="0 0 100 100"><style>.red{fill:#e60012}</style><path class="red" d="M0 0H40V40H0Z M10 10H10V30H30V10Z"/></svg>`;
+    let next=0;const PM={uid:()=>String(++next),P:(v:unknown)=>({v,kf:[],expr:null})};
+    const paths=materializeSvgPaths(PM,parseSvg(source,{legacy:true}));
+    for(const path of paths)for(const key of ['cap','join','miterLimit'])delete path.p[key];
+    const layer={d:{paths,svgSourceAsset:'asset'},lock:false};
+    const repair=svgImportRepair(layer,source,parseSvg(source))!;
+    expect(repair.svgImportVersion).toBe(2);
+    expect((repair.paths as any[])[0].p.fill.v).toBe('#E60012');
+    expect((repair.paths as any[]).map(p=>p.id)).toEqual(paths.map(p=>p.id));
+    expect((repair.paths as any[])[0].vertices).toBe(paths[0]!.vertices);
+    const subset={...layer,d:{...layer.d,paths:[paths[1]]}};
+    const subsetRepair=svgImportRepair(subset,source,parseSvg(source))!;
+    expect((subsetRepair.paths as any[])).toHaveLength(1);expect((subsetRepair.paths as any[])[0].id).toBe(paths[1]!.id);
+    expect((subsetRepair.paths as any[])[0].p.fill.v).toBe('#E60012');
+    paths[0]!.p.fill.v='#ffffff';expect(svgImportRepair(layer,source,parseSvg(source))).toBeNull();
+  });
   it('turns the supplied Powermove logo into centered editable Bezier vertices', () => {
     const imported = parseSvg(logo);
 

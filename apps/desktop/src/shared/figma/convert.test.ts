@@ -137,7 +137,7 @@ describe('host-independent Figma commands', () => {
       }),
     );
     expect(p.issues).toEqual([]);
-    expect(p.commands.map((c) => c.ref)).toEqual(['1:node', '1:stroke-0', '1:fill-0', '1:fill-1']);
+    expect(p.commands.map((c) => c.ref)).toEqual(['1:node', '1:stroke-0', '1:fill-1', '1:fill-0']);
   });
   it('maps editable vector points', () => {
     const c = plan(node({ type: 'VECTOR', paths: [{ data: 'M0 0 L100 0 L0 100 Z', windingRule: 'NONZERO' }] }))

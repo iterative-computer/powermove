@@ -13,7 +13,7 @@ it('installs to a stable path, refreshes changed bundles and repairs missing fil
     userData = path.join(root, 'userData');
   try {
     await mkdir(path.join(bundle, 'dist'), { recursive: true });
-    for (const name of ['manifest.json', 'ui.html', 'dist/code.js']) await writeFile(path.join(bundle, name), name);
+    for (const name of ['manifest.json', 'dist/ui.html', 'dist/code.js']) await writeFile(path.join(bundle, name), name);
     const manifest = await installFigmaPlugin(bundle, userData);
     expect(manifest).toBe(path.join(userData, 'Figma Plugin/manifest.json'));
     const before = await stat(manifest);

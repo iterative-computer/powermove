@@ -21,6 +21,7 @@ import { beginTextEdit, type TextEditOptions, type TextEditSession } from './tex
 import { drawEditablePaths, startPathEdit } from './path-editing';
 import { resizeParametricShape } from 'powermove';
 import { collectLightMarkers, drawLightMarkers, markerAt, markerTitle, type LightMarker } from './light-markers';
+import {collectNullMarkers,drawNullMarkers,nullMarkerAt,type NullMarker} from './null-markers';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false, moveSlot: '#viewer-head',
@@ -827,6 +828,7 @@ let pendingResize: { width: number; height: number; viewport: PreviewViewport | 
 let overlayGeometry: { width: number; height: number; x: number; y: number } | null = null;
 /* Light markers drawn on the last overlay paint; hit tests reuse them. */
 let lightMarkers: LightMarker[] = [];
+let nullMarkers:NullMarker[]=[];
 let lightHoverId: string | null = null;
 let lightAccent: { at: number; value: string } | null = null;
 let lightsPainted = false;
@@ -868,7 +870,8 @@ let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null
 let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null,gizmoView:any=null,gizmoViewHost:HTMLElement|null=null;
 const freeView=()=>api.scene3d?.getView?.()==='editor';
 const isExtrudedArtwork=(layer:any)=>(layer?.type==='text'||layer?.type==='shape')&&layer.d?.extrusion?.enabled===true&&layer.threeD===true;
-const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
+const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id)
+  || (layer?.type==='null' && !!sceneGizmo?.covers([layer.id]));
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
@@ -1243,6 +1246,7 @@ function markerAccent(): string {
 
 /** Read-only marker snapshot (stage-relative CSS px) for tests and agents. */
 V.lightMarkers = () => lightMarkers.map(({ guides, ...marker }) => ({ ...marker, hasCone: !!guides?.rim, hasRange: !!guides?.range }));
+V.nullMarkers = () => nullMarkers.map(marker=>({...marker,...(marker.corners?{corners:marker.corners.map(point=>({...point}))}:{})}));
 
 /* Every light shows in the viewer, in screen space above the comp image.
    Layer Controls (Command+Shift+H) hides them with the other handles. */
@@ -1289,6 +1293,11 @@ function drawOverlayContent(): boolean | void {
 
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
+  nullMarkers=V.showControls===false||V.preview?.activeId?[]:collectNullMarkers(api,
+    {x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},api.transport.time(),
+    layer=>layerWorldPivot(api,layer,api.transport.time(),space3d),layer=>isModel3D(layer),
+    layer=>resolveSelectionGeometry(api,[layer],api.transport.time(),space3d)?.corners || []);
+  c.save();c.setTransform(dpr,0,0,dpr,0,0);drawNullMarkers(c,nullMarkers,selectionInk,hoverId);c.restore();
   if (V.zoomRect) {
     const box = V.zoomRect as DragBox;
     c.save();
@@ -1336,7 +1345,7 @@ function drawOverlayContent(): boolean | void {
   }
 
   const hovered = hoverId ? api.model.layer(hoverId) : null;
-  if (hovered && !isModel3D(hovered) && api.anim.active(hovered, api.transport.time()) && hovered.id !== V.canvasTextEditing) {
+  if (hovered && hovered.type!=='null' && !isModel3D(hovered) && api.anim.active(hovered, api.transport.time()) && hovered.id !== V.canvasTextEditing) {
     const geometry = resolveSelectionGeometry(api, [hovered], api.transport.time(), space3d);
     if (geometry) {
       c.strokeStyle = selectionInk;
@@ -1751,6 +1760,8 @@ function bindStage(stage: any, inner: any): () => void {
   V.layerAtPoint = (clientX: number, clientY: number) => {
     const rect = stage.getBoundingClientRect();
     if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
+    const marker=nullMarkerAt(nullMarkers,clientX-rect.left,clientY-rect.top);
+    if(marker)return api.model.layer(marker.id);
     const point = pointerComp({ clientX, clientY });
     return api.render.gl.pick(point.x, point.y, api.transport.time());
   };
@@ -1763,6 +1774,14 @@ function bindStage(stage: any, inner: any): () => void {
     /* A light marker sits on the gizmo's centre: pressing it selects the
        light and drags it freely; the gizmo's arrows still constrain. */
     if(lightPointerDown(event)){event.preventDefault();event.stopImmediatePropagation();return;}
+    if(event.button===0 && lightsInteractive()){
+      const point=stagePoint(event),marker=nullMarkerAt(nullMarkers,point.x,point.y);
+      if(marker&&(!api.selection.layers().includes(marker.id)||event.shiftKey||event.metaKey||event.ctrlKey)){
+        if(event.shiftKey||event.metaKey||event.ctrlKey)api.selection.select(api.selection.layers().includes(marker.id)?api.selection.layers().filter(id=>id!==marker.id):[...api.selection.layers(),marker.id]);
+        else selectLayers(marker.id);
+        event.preventDefault();event.stopImmediatePropagation();return;
+      }
+    }
     if(sceneGizmo?.pointerDown(event))return;
   }),true);
   listen(stage, 'pointerdown', guarded(onDown), capture);
@@ -1774,7 +1793,7 @@ function bindStage(stage: any, inner: any): () => void {
     const light=lightUnderPointer(e);
     setLightHover(light);
     if(light){setHover(null);hoverPointer=null;setStageCursor(api.selection.layers().includes(light.id)?'move':'pointer');return;}
-    if(sceneGizmo?.hover(e.clientX,e.clientY)){setStageCursor('pointer');return;}
+    if(sceneGizmo?.hover(e.clientX,e.clientY)){setHover(null);hoverPointer=null;setStageCursor('pointer');return;}
     updateStageCursor(e);
     hoverPointer = { clientX: e.clientX, clientY: e.clientY, deep: e.metaKey || e.ctrlKey };
     scheduleHover();
@@ -2036,6 +2055,8 @@ function scheduleHover(): void {
 function hoverTargetId(): string | null {
   if (!hoverPointer || !V.pointerOver || activeDrag || V.textSession || !V.stage) return null;
   if ((V.temporaryTool || toolService()?.tool || 'select') !== 'select') return null;
+  const stage=stagePoint(hoverPointer),marker=nullMarkerAt(nullMarkers,stage.x,stage.y);
+  if(marker)return marker.selected?null:marker.id;
   const T = api.transport.time();
   const point = pointerComp(hoverPointer);
   const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!isModel3D(l)), T, space3d);

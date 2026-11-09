@@ -51,6 +51,7 @@ import { retryPendingWorkspaceAppearance } from './workspace-appearance';
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
+import { createBoundsNull } from '../core/scene3d/geometry-bounds';
 import { records as storeRecords } from './extensions.svelte';
 import { installRuntimeGlobals } from './runtime-globals';
 import { installKernelSignals } from './signals.svelte';
@@ -265,6 +266,7 @@ function makeSelection(PM: LegacyPM): SelectionAPI {
 
 function makeGroups(PM: LegacyPM): GroupsAPI {
   return {
+    createBoundsNull:(ids,index,options,meta)=>createBoundsNull(PM,ids,index,options,meta),
     ancestors: (...args) => PM?.groupAncestors?.(...args) ?? [],
     transformRoots: (ids) => PM?.transformRoots?.(ids) ?? [],
     bounds: (group, time) => PM?.groupBounds?.(group, time) ?? null,

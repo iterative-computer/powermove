@@ -1,3 +1,5 @@
+import {boundsControlSpace,controlMatrix,usesSceneUnits} from '../../core/scene3d/control-space';
+
 type Mat3 = [
     number,
     number,
@@ -79,7 +81,18 @@ export function local3D(PM: any, L: any, T: number): Mat4 {
 }
 export function parent3D(PM: any, L: any, T: number, parent = L.parent ? PM.L(L.parent) : null): Mat4 {
     const groups = new Set<string>();
+    const controls = new Set<string>();
+    let scene:boolean|undefined;
     let m = identity();
+    const append = (item:any) => {
+        let local=local3D(PM,item,T);
+        if(boundsControlSpace(item)){
+            if(controls.has(item.id))return;
+            controls.add(item.id);scene ??= usesSceneUnits(PM,L);
+            local=controlMatrix(PM,item,local,scene) as Mat4;
+        }
+        m=multiply(m,local);
+    };
     const appendParents = (layer: any, firstParent = layer.parent ? PM.L(layer.parent) : null) => {
         const chain: any[] = [], seen = new Set<any>([layer]);
         for (let cur = firstParent; cur && !seen.has(cur) && chain.length < 256; cur = cur.parent ? PM.L(cur.parent) : null) {
@@ -87,14 +100,14 @@ export function parent3D(PM: any, L: any, T: number, parent = L.parent ? PM.L(L.
             chain.push(cur);
             appendGroups(cur);
         }
-        for (const item of chain.reverse()) m = multiply(m, local3D(PM, item, T));
+        for (const item of chain.reverse()) append(item);
     };
     const appendGroups = (layer: any) => {
         for (const group of (PM.groupAncestors?.(layer) || []).slice().reverse())
             if (!groups.has(group.id)) {
                 groups.add(group.id);
                 appendParents(group);
-                m = multiply(m, local3D(PM, group, T));
+                append(group);
             }
     };
     appendGroups(L);

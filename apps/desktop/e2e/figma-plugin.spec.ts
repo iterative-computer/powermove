@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
-const html = () => readFile('../../packages/figma-plugin/ui.html', 'utf8');
+const html = () => readFile('../../packages/figma-plugin/dist/ui.html', 'utf8');
 test('plugin recovers from offline, approves, tracks selection, keeps results and drops rejected tokens', async ({
   page,
 }) => {
@@ -104,4 +104,24 @@ test('accepts desktop Figma messages through its top frame and rejects other anc
   await expect(ui.getByRole('button', { name: 'Send 3 Layers', exact: true })).toBeEnabled();
   await host('parent', 'null', { type: 'count', count: 4 });
   await expect(ui.getByRole('button', { name: 'Send 4 Layers', exact: true })).toBeEnabled();
+});
+
+test('plugin follows Powermove light and dark materials and the host theme changes', async ({page}) => {
+  await page.setViewportSize({width:300,height:230});
+  await page.route('http://localhost:47832/status',route=>route.fulfill({json:{tokenValid:true,compositionOpen:true,protocolVersion:2}}));
+  await page.setContent(await html());
+  await page.evaluate(()=>{
+    window.postMessage({pluginMessage:{type:'count',count:80}},'*');
+    window.postMessage({pluginMessage:{type:'token',token:'a'.repeat(64)}},'*');
+  });
+  const action=page.getByRole('button',{name:'Send 80 Layers'});await expect(action).toBeEnabled();
+  for(const theme of ['light','dark','light']){
+    await page.evaluate(theme=>document.documentElement.className=`figma-${theme}`,theme);
+    await expect(page.locator('html')).toHaveAttribute('data-theme',theme);
+    const style=await page.evaluate(()=>({bg:getComputedStyle(document.body).backgroundColor,overflow:document.documentElement.scrollHeight>innerHeight}));
+    expect(style.bg).toBe(theme==='dark'?'rgb(25, 25, 25)':'rgb(253, 253, 254)');
+    await expect(action).toHaveCSS('background-color',theme==='dark'?'rgb(255, 96, 25)':'rgb(240, 88, 10)');
+    expect(style.overflow).toBe(false);
+    await page.screenshot({path:`/tmp/powermove-figma-ui-${theme}.png`});
+  }
 });

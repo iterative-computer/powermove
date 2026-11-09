@@ -23,7 +23,7 @@ function exhaustiveSnapper(initialDelta = 0) {
       if (lock) {
         const anchor = anchors[lock.anchor];
         const exists = anchor && targets.some(target => target.time === lock!.target && (!target.edge || target.edge === anchor.edge));
-        if (exists && (!direction || direction === lock.direction) && Math.abs(anchor.time + raw - lock.target) <= radius + epsilon) {
+        if (exists && Math.abs(anchor.time + raw - lock.target) <= radius + epsilon) {
           return { delta: lock.target - anchor.time, lock };
         }
         lock = null;
@@ -62,19 +62,18 @@ describe('directional timeline latching', () => {
     expect(snap.resolve(anchors, 2.16, targets, .15)).toEqual({ delta: 2.16, lock: null });
     expect(snap.resolve(anchors, 2.17, targets, .15).lock).toBeNull();
   });
-  it('works in both directions and releases immediately when reversing', () => {
+  it('works in both directions and keeps small reversals latched until leaving the release distance', () => {
     const snap = createDirectionalSnapper(3);
     expect(snap.resolve(anchors, 2.02, targets, .15).lock).toBeNull();
     expect(snap.resolve(anchors, 1.98, targets, .15).lock?.direction).toBe(-1);
-    expect(snap.resolve(anchors, 1.99, targets, .15)).toEqual({ delta: 1.99, lock: null });
-    // Fine positioning remains free until the next crossing.
-    expect(snap.resolve(anchors, 1.995, targets, .15).delta).toBe(1.995);
+    expect(snap.resolve(anchors, 1.99, targets, .15).delta).toBe(2);
     expect(snap.resolve(anchors, 2.01, targets, .15).delta).toBe(2);
+    expect(snap.resolve(anchors, 2.16, targets, .15)).toEqual({delta:2.16,lock:null});
   });
-  it('does not reacquire a latch in the sample that reverses across its edge', () => {
+  it('keeps the same latch when release jitter crosses back over its edge', () => {
     const snap = createDirectionalSnapper(1);
     snap.resolve(anchors, 2.05, targets, .15);
-    expect(snap.resolve(anchors, 1.99, targets, .15)).toEqual({ delta: 1.99, lock: null });
+    expect(snap.resolve(anchors, 1.99, targets, .15)).toEqual({delta:2,lock:{anchor:0,target:2,direction:1}});
   });
   it('does not snap when toggled at rest or acquire an edge passed while disabled', () => {
     const snap = createDirectionalSnapper(1);
