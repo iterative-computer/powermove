@@ -3,7 +3,7 @@
 **Decision: not ready to ship.** A green renderer demonstration is insufficient.
 Every unchecked gate below blocks a production-quality claim. No tag, release,
 notarization, upload or installation over an existing app is authorized by this
-checklist. Updated 2026-11-09 by Lane P1 (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
+checklist. Updated 2026-11-09 by Lanes P1/P3 (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
 
 Status: **PASS** = reproduced against the stated build; **OPEN** = evidence still
 required; **FAIL** = attempted and failed; **PARTIAL** = narrower evidence only.
@@ -18,13 +18,13 @@ Unset `ELECTRON_RUN_AS_NODE`; set `CARGO_TARGET_DIR=$HOME/Developer/pm-target`.
 
 | Gate | Status | Evidence / required command |
 | --- | --- | --- |
-| All desktop unit tests | PASS | Latest Lane K full run at `c1f86836e`: **7,368 passed, 7 skipped**, 719 files passed / 3 skipped (304.03 s). Includes import/material regressions and a surface authentication test that builds this checkout's addon. The 35 targeted host/bridge/packaging tests also pass. `nice -n 10 npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
+| All desktop unit tests | PASS | Latest Lane P3 full run at `4368b15db`: **7,428 passed, 7 skipped**, 727 files passed / 3 skipped (348.76 s). Includes the P3 engine-facing, history/migration, import and lifecycle regressions. `nice -n 10 npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
 | Entire desktop e2e suite, including 2D/editor/media | FAIL | Full run: **979 passed, 19 failed, 24 skipped** (42.1 min). Retry: **5 passed, 14 still failing** (2.9 min), including all four native failures now cleared. Full 1,022-test discovery, no filter: `nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000`. Failures listed below.  `nice -n 10 npx playwright test`; report full discovery, completion and skips. A global timeout is a failure, not a pass. |
-| Non-film 3D editor regressions | PASS | Lane K at `c1f86836e`: **71 passed, zero skipped** (6.0 min), fresh native host, temporary profiles and optional UI screenshots enabled. `npx playwright test scene3d studio --grep-invert 'product film' --global-timeout=1800000`; see [parity reproduction](parity.md#reproduce-the-checks). This is the 3D subset of the full desktop gate above. |
+| Non-film 3D editor regressions | PASS | Lane P3 at `46f2e9861`: **71 passed, zero skipped** (6.0 min), fresh native host, `ELECTRON_RUN_AS_NODE` unset, background mode, temporary user-data profile and optional UI screenshots outside Git. `npx playwright test scene3d studio --grep-invert 'product film' --trace off --reporter=line --global-timeout=1800000`; see [parity reproduction](parity.md#reproduce-the-checks). This is the 3D subset of the full desktop gate above. |
 | Svelte and renderer types | PASS | 0 errors, 1 existing accessibility warning in `IconCropper.svelte`.  `npx svelte-check --tsconfig ./tsconfig.web.json` |
 | Main/preload types | PASS | Generate cloud bindings/types first: `bun run --cwd ../cloud types && bun run --cwd ../cloud types:emit`.  `npx tsc --noEmit -p tsconfig.node.json` |
-| Rust workspace, host and GPU tests | PASS | **83 tests passed**, including 20 host tests, Metal/GPU tests and the optional 11-scene Cycles regression. Initial optional reference run correctly stopped below its 8 GB disk floor; the complete run passed after removing the packaged build.  `nice -n 10 cargo test --release --locked --workspace --no-fail-fast --features pm-studio-host/oidn,pm-studio/yardstick --target-dir "$(node ../apps/desktop/scripts/studio-cargo-target.mjs)" -- --test-threads=1`; the higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
-| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans this branch's complete ancestry (1,219 non-merge commits at the tested code revision) with no leaks. No ignore entries changed.  Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
+| Rust workspace, host and GPU tests | PASS with disk-guard retry | P3 at `46f2e9861`: **100 tests passed** across 99 native/host/GPU tests and the optional 11-scene Cycles test. The latest Cargo invocation stopped only that optional test at its unchanged 8 GB disk guard; after pruning P3's own completed compiler cache, the same compiled test binary passed all 11 scenes (43.90 s). Earlier full invocation at `4368b15db` passed all 100 together. Features `oidn,metalfx,yardstick`; exact command below. This covers `pm-studio` and `pm-studio-host`, the workspace's two packages. The higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
+| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; P3's `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans this branch's complete ancestry (1,225 commits at `4368b15db`) with no leaks. No ignore entries changed. Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
 
 ## Real packaged app
 
@@ -101,22 +101,22 @@ scene blocks the bar; report it individually and retain raw samples.
 
 | Gate | Status | Evidence / acceptance |
 | --- | --- | --- |
-| Host crash, GPU/device loss, hung response | PARTIAL | Timeout rejects all pending requests and portable backend replays scene/view/time: [recovery tests](../../apps/desktop/src/renderer/src/core/studio-native/recovery.test.ts). Manager tests cover crash generations and forced reaping. Packaged crash/replay passes; physical device-loss injection remains required. |
+| Host crash, GPU/device loss, hung response | PARTIAL | Timeout rejects all pending requests and portable backend replays scene/view/time: [recovery tests](../../apps/desktop/src/renderer/src/core/studio-native/recovery.test.ts). P3 adds device-generation ownership for shader compilation, target recreation and stale editor-frame eviction; mocked device-loss tests pass in `gpu-lifecycle`, `backend-lifecycle` and `webgpu-backend`. Manager tests cover crash generations and forced reaping. Packaged crash/replay passes; physical device-loss injection remains required. |
 | IPC framing and back-pressure | PARTIAL | JSON ≤4 MiB, binary ≤256 MiB, bounded request count and aggregate pending bytes; partial-read and bad-header tests in [protocol](../../engine/hosts/studio-electron/src/protocol.rs) and manager tests. No network command listener; inherited child pipes only. |
 | Shared-texture peer and lifetime | PARTIAL | Main authenticates kernel Mach audit PID against its spawned host; addon tests reject another process. Managed VideoFrame/reference release and three-slot host pool; packaged resize/reload/two-window checks pass. Long stress remains open. |
 | File access confined to referenced assets | PARTIAL | Host accepts geometry/texture/FBX **bytes**, never a renderer-supplied filesystem path. FBX external-file loading is disabled in [importer](../../engine/hosts/studio-electron/src/fbx.rs). Main owns executable/addon resolution. Continue review when adding any path-based host operation. |
-| GPU memory budget for large scenes | OPEN | Packet/frame/instance/texture limits exist; prove aggregate GPU/CPU allocation behavior and controlled errors against the memory stress gate above. Packet size alone is not a GPU-memory guarantee. |
+| GPU memory budget for large scenes | PARTIAL | P3 adds preallocation scene/target checks, a conservative 512 MiB geometry allowance and 2 GiB session allowance, inactive native target / portable LRU target eviction, bounded geometry workers and close-time cache release. Existing texture planning lowers texture resolution under its 256 MiB cap. A synthetic 1.1M-triangle native scene fails before BVH/GPU work and preserves the previous scene; portable oversized geometry/target tests pass. Animated scatter overflow is reduced in evaluated copies with a warning. Real-app RSS, large decoded textures, pressure/no-swap and 200-cycle stress remain OPEN. Some full-resolution 4K requests now fail with a controlled budget error; no out-of-core rendering. |
 | Broken model, font or texture isolated to one layer | OPEN | Corrupt/missing model/font/texture fixtures must leave healthy layers visible and editable, with a clear per-layer error; Lane K owns import/font fixes. |
-| Save/reopen and undo/redo for every new 3D action | OPEN | Cover model/material/maps, text extrusion, camera/light creation and edits, World/HDRI/fog, terrain/heightmap/regions, scatter/prototype references, parenting, duplicate/remove and motion options. Round trip semantic values and references, not only pixels. |
-| Old-project migration | OPEN | Reopen representative pre-Studio and earlier scene3d version projects; retain 2D behavior, assets, timing and undo-safe converted values. Save/reopen again. |
-| Logs and privacy | PARTIAL | Host stderr is drained without forwarding raw scene data/user paths to telemetry. Do not add raw exception/scene/asset payloads to telemetry; review future diagnostics for path redaction. |
+| Save/reopen and undo/redo for every new 3D action | PARTIAL | P3's `history-roundtrip` matrix checks 27 actions with exact persistent before/undo/redo equality and evaluated save/reopen equality: World/sun/HDRI, terrain/heightmap/regions, scatter, fog, Material Options, iris/focus, sample policy, parts/finishes, five Shots, exploded view, studio/light helpers, source replacement, duplicate/remove. Multi-view layout/panes now persist through ordinary document history with their own round-trip test. Existing import/text/material/parenting e2e remains required; pass exports are export jobs, not undoable document properties. Full packaged UX acceptance remains OPEN. |
+| Old-project migration | PARTIAL | P3 adds tiny synthetic pre-Studio and early-Studio fixtures covering `switch3DVersion`, explicit flat artwork, camera/material/timing values, conversion undo/redo, scatter source references and a second save/reopen. Fixes broken converted source IDs and future-version downgrades. Semantic tests pass; representative old-project pixel/look parity remains OPEN. |
+| Logs and privacy | PARTIAL | P3 reviewed new scene3d/Studio/host paths: no telemetry/network send of project data found; the only renderer fetches in those paths load bundled KTX decoder assets. Host stderr is drained without forwarding raw scene data/user paths to telemetry. Host receives scene/FBX bytes; FBX external-file reads are disabled and external glTF resources rejected. Dynamic network-capture privacy verification remains OPEN. Do not add raw exception/scene/asset payloads to telemetry. |
 
 ## Review, UX and documentation
 
 | Gate | Status | Evidence / acceptance |
 | --- | --- | --- |
 | Native host / main IPC / preload / backend review | PASS for P1 scope | Lane P1 reviewed process ownership, framing/limits, Mach peers, managed references, renderer replay, file access and packaging; regression fixes below. GPU device-loss injection and large-scene/long-run stress remain open robustness gates. |
-| Scene schema, evaluator, compositor, Final/export, materials/lighting/environment, assets/import review | OPEN | An accountable reviewer per area, findings resolved, targeted regressions and review SHA recorded. P1's bridge review is not whole-system approval. |
+| Scene schema, evaluator, compositor, Final/export, materials/lighting/environment, assets/import review | PARTIAL | P3 reviewed the engine/packed contract, WGSL finite math and traversal bounds, geometry/BVH extraction, GPU/worker ownership, scene edit/history/migration and model-import allocation boundaries; fixes and regressions at `4368b15db` and `46f2e9861` below. Existing seeded-scene/render tests stay green. This is not full compositor/Final visual or whole-system approval; measured main-thread stalls and the remaining acceptance gates still block shipping. |
 | UX review | OPEN | Normal packaged app; light/dark, empty/new/open project, native controls, camera navigation, selection/picking, text, World/terrain/scatter defaults, errors/recovery, undo/redo, export and accessibility. See [UI review tests](../../apps/desktop/e2e/studio-ui-review.spec.ts); automated screenshots alone are insufficient. |
 | User docs complete | OPEN | [Studio](../../apps/desktop/docs/STUDIO.md), [3D guide](../../apps/desktop/docs/SCENE3D.md), environment creation, supported imports/fonts/textures, Live/Refine/Final expectations, failures/limits and export instructions all agree with shipped behavior. |
 | Agent docs and bundled API pack complete | OPEN | [native integration](native-host.md), [parity](parity.md), [environments](environments.md), [Cycles yardstick](cycles-yardstick.md), schema/operations and bundled API pack include every new action, units, limitations and reproducible commands. |
@@ -150,6 +150,62 @@ scene blocks the bar; report it individually and retain raw samples.
 - Main now validates page commands before creating sessions, keeps lifecycle
   commands private, bounds native sessions/import workers across all windows,
   and preserves sessions across same-document navigation.
+
+## Lane P3 findings and fixes
+
+Reviewed the `origin/main...origin/studio-3d` engine, WGSL, scene contract,
+3D document/edit/agent, import and renderer-lifecycle changes. Fixes below
+are in **`4368b15db`**, with the extreme-finite-value follow-up in
+**`46f2e9861`**. Severity totals: **9 High, 4 Medium fixed**. No built-in
+extension source changed; the ten built-in version checks pass without a bump.
+
+| Area | Finding | Severity | Fix / commit | Regression evidence |
+| --- | --- | --- | --- | --- |
+| Engine / packed contract | Non-finite UV/lens/material/light data, extreme finite material/light values and overflowing transform inverses could reach GPU work; patches could mutate transforms before rejecting other fields. | High | Validate before expansion/allocation or patch mutation; bound physical values and preserve packed RGBA bit words (`4368b15db`, `46f2e9861`). | Rust validation, scene and packed tests; invalid data leaves the previous scene usable; finite-overflow regression reproduced before the follow-up fix. |
+| WGSL shading | Zero interpolated normals and degenerate triangles produced non-finite/black output. | High | Scaled safe normalization, face-normal fallback and finite sample outputs (`4368b15db`). | `zero_normals_and_degenerate_triangles_keep_healthy_pixels_lit`, hardware and portable traversal. |
+| BVH / traversal | Skewed SAH trees could exceed fixed shader stacks; binary depth acceptance exceeded the actual stack. | High | Cap generated depth and enforce BLAS/TLAS stack-safe binary depths (`4368b15db`). | Rust and TS skewed-tree tests retain all triangles; host rejects deep/cyclic/out-of-range trees and accepts empty scenes. |
+| GPU / allocation | Scene and multi-tier target allocations lacked an aggregate preallocation allowance. | High | 512 MiB geometry / 2 GiB session checks, per-binding checks and target eviction; retain texture-resolution planning (`4368b15db`). | Native 1.1M-triangle rejection before BVH/GPU work; portable oversized geometry/targets and eviction tests. |
+| Workers / close | Idle worker handlers retained completed results; queued inputs/workers survived project close, and failed workers could trigger a large synchronous retry. | High | Bound retained work, time out/reap workers, clear completed handlers, cancel on close and isolate failed layers (`4368b15db`). | Worker lifecycle/transfer-failure tests and healthy-layer oversized-scene isolation. |
+| Device recovery | Old asynchronous shader results/errors could poison a replacement device; the editor could remain disabled or show stale completed frames after loss. | High | Generation-owned compilation, retry initialization, recreate targets and discard stale frames (`4368b15db`). | `gpu-lifecycle`, `backend-lifecycle`, `webgpu-backend`; physical loss remains open. |
+| Document / agent edits | Individually valid operations could overflow composition-wide budgets; animated count/range/resolution combinations could invalidate the evaluated scene. | High | Atomic aggregate edit checks; bounded evaluated scatter, crossed-range clamp and heightmap resampling, with saved data unchanged (`4368b15db`). | 37 history/round-trip/invalid-input tests, including aggregate rejection and animated evaluation. |
+| Model import | Tiny sparse/bufferless glTF accessors could request huge decoded arrays before loader validation. | High | Check decoded accessor bytes/types before GLTFLoader; clear missing-scene error (`4368b15db`). | `import-model` sparse-allocation regression. |
+| Migration | Preserving a converted container ID left scatter/model references pointing at a removed generated ID; future switch versions were downgraded. | High | Remap converted references and respect versions ≥2 (`4368b15db`). | Four synthetic migration-fixture tests, exact conversion undo/redo and save/reopen. |
+| Imported finishes | Applying a finish left source-material mode active, so the model's appearance did not change. | Medium | Explicitly select the finish override (`4368b15db`). | Real runtime material changes, then exact Undo/Redo restores source/override. |
+| Render passes | Pass image and live-composition maps used fixed 1024 dimensions despite a different planned texture size. | Medium | Upload/resample at the scene's planned map size (`4368b15db`). | Two pass texture-size regressions. |
+| Multi-view | Layout, pane selection and pane views existed only in transient maps and lacked save/history behavior. | Medium | Validated per-composition data through the ordinary edit/history boundary; release prior-project maps (`4368b15db`). | Layout/pane/view exact Undo/Redo and reopen; malformed view edits reject atomically. |
+| Mesh / math utilities | Malformed OBJ indices could panic, relative tuple caching reused the wrong vertex, short/Unicode colors could panic, and extreme normalization could become non-finite. | Medium | Validate indices, resolve relative indices before caching, safe color parsing and scaled normalization (`4368b15db`). | Rust OBJ, color and finite-normalization regressions. |
+
+P3 validation uses this checkout's isolated Cargo target under
+`$HOME/Developer/pm-target/studio/`, two build jobs, `CARGO_INCREMENTAL=0`,
+`CARGO_PROFILE_RELEASE_DEBUG=0` and `nice -n 10` to fit the shared machine.
+Native validation enables **`oidn,metalfx,yardstick`** and passes
+**100 tests**, including 25 host tests, GPU tests and all 11 Cycles scenes.
+The final revision uses the disk-guard retry described above; the guard and
+test thresholds were unchanged. Compiler-cache cleanup was confined to this
+checkout's isolated target after native builds/tests had finished.
+Command from the root:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Developer/pm-target" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=0 PM_STUDIO_YARDSTICK_OUT=/tmp/pm-p3-cycles nice -n 10 "$HOME/.cargo/bin/cargo" test --manifest-path engine/Cargo.toml --target-dir "$(node apps/desktop/scripts/studio-cargo-target.mjs)" --release --locked --no-fail-fast -p pm-studio -p pm-studio-host --features oidn,metalfx,yardstick -- --test-threads=1
+```
+
+### P3 remaining acceptance work
+
+These are **3 High and 2 Medium open gates**, distinct from the fixed defects
+above. They are not waived by green functional tests.
+
+| Area | Severity | What remains |
+| --- | --- | --- |
+| Main-thread responsiveness | High | The latest 1,024,000-triangle editor run measured a 119 ms preparation task (first draw 1 ms, ready after 1,204 ms; earlier runs 154–174 ms). Its existing 400 ms assertion is weaker than the production bar. Terrain/scatter generation and skinned evaluation still contain synchronous work; the existing skin benchmark is about 20.5 ms median / 27.8 ms p95. Move/profile bulk preparation and pose work off-thread, then measure against the 16 ms bar. No e2e threshold was weakened. |
+| Resident memory / long-run lifecycle | High | Prove whole-app ≤6 GiB, host ≤3 GiB, bounded swap and ≤10% retained growth over 10 minutes / 200 resize and project cycles, including oversized geometry and decoded textures. Allocation estimates and worker/cache disposal tests do not establish these measurements. |
+| Physical device loss | High | Inject native GPU/device loss and verify a usable frame plus preserved unsaved edits. Mock WebGPU loss and native process termination cover narrower failure modes. |
+| Old-project appearance | Medium | Compare representative pre-Studio and early-Studio rendered looks, not only semantic data, camera, references and timing. Synthetic fixtures do not establish pixel parity between renderers. |
+| Privacy instrumentation | Medium | Capture outbound traffic while opening/importing/editing synthetic projects to supplement source review; no project-data telemetry path was found in the audited code. |
+
+The full desktop e2e failures below remain Lane P2's separate work. P3 does not
+claim full-suite, packaged UX or production-release approval. Local profiles,
+logs, Cycles outputs and optional UI screenshots stay under `/tmp/pm-p3-*`,
+outside Git.
 
 ## Full-suite failures awaiting follow-up
 

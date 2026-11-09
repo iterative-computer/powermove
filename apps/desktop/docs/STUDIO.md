@@ -29,7 +29,9 @@ The viewer's toolbar, for a composition with 3D layers, left to right:
   other panes are Studio Live pictures from their own sessions, redrawn
   round-robin (about 20 a second in total) only when what they show
   changes, so the selected pane keeps its frame rate. One click in another
-  pane selects that pane and the layer under the pointer.
+  pane selects that pane and the layer under the pointer. Layout, selected pane
+  and pane views are saved per composition and support Undo/Redo. Orbiting the
+  free view remains navigation and does not add undo steps.
 
 Studio has three rendering tiers:
 
@@ -250,9 +252,18 @@ settings; switching back restores the source material.
 
 Material images now use up to 4096×4096 texels. Studio chooses a common array
 size from source detail, resident geometry and device-memory hints, with a
-256 MB texture cap and a 512 MB working-set target including geometry. More
-images or larger geometry reduce texture resolution automatically. The native
-host independently enforces the texture dimensions and total byte budget.
+256 MiB texture cap and a 512 MiB texture-planning target including geometry.
+More images or larger geometry reduce texture resolution automatically. Both
+renderers also enforce a 512 MiB geometry allowance and a conservative 2 GiB
+session allowance for render targets, scene buffers and textures. Inactive
+quality targets are released when needed; project close releases geometry
+caches and workers. Requests that still exceed the allowance return an error
+with advice to reduce detail, scatter count or output size. Some full-resolution
+4K outputs exceed this allowance; out-of-core rendering is not supported.
+Animated scatter counts that together exceed one million are reduced in the
+evaluated scene, including exports, with a warning; the saved counts and
+keyframes stay intact.
+The native host independently enforces texture dimensions and total bytes.
 KTX2/Basis LDR ETC1S and UASTC images decode in an isolated worker to RGBA8;
 the decoder is loaded only for imports that need it. Source files stay embedded
 in the saved asset. See [import licenses](../../../docs/studio/import-licenses.md).

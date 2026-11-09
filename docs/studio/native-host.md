@@ -190,6 +190,23 @@ recovering backend replays its scene into WebGPU when native work fails.
 Navigating, closing or crashing an editor releases its sessions and surfaces.
 There are at most two native sessions per editor to bound memory.
 
+Scene and prepared-binary boundaries reject non-finite coordinates, invalid
+physical material/light ranges, singular transforms and BVHs deeper than the
+shader traversal stacks. Validation runs before expansion, BVH construction or
+GPU allocation. Geometry has a conservative 512 MiB allowance; render targets,
+scene buffers and textures share a 2 GiB session allowance. The inactive
+Live/Full target is evicted before allocating a replacement that would exceed
+that allowance. Texture planning reduces resolution under pressure, while
+requests that cannot fit fail with a clear error and preserve the document.
+Some full-resolution 4K requests exceed this allowance. These estimates and
+oversized-scene regressions do not replace the real-app resident-memory stress
+gate in [production readiness](production-readiness.md).
+
+Portable WebGPU recovery starts a new device generation, discards stale shader
+compilations and completed frames, then recreates targets from the retained
+scene. Native process-crash replay and mocked WebGPU device-loss recovery are
+tested; physical native GPU loss remains an open acceptance gate.
+
 ## Build and verification
 
 From the repository root:
