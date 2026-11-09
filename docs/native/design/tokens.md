@@ -93,6 +93,8 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.accent_wash` | Opaque accent tint: drop targets, active guide bed | `#FBE9E1` | `#3C241A` | `#FBE9E1` | `#3C241A` |
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
 | `colors.field` | Value wells, text fields, segmented control track | `#F3F3F6` | `#262626` | `#F3F3F6` | `#262626` |
+| `colors.fill` | Soft neutral fill: segmented tracks, search fields (derived) | `#F3F3F4` | `#272727` | `#EBEBEC` | `#303030` |
+| `colors.fill_strong` | Selected tab or segment, never the accent (derived) | `#EDEDEF` | `#303030` | `#E2E2E4` | `#3D3D3D` |
 | `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#2C2C2C` | `#FFFFFF` | `#2C2C2C` |
 | `colors.focus` | Keyboard focus ring | `#76767C` | `#9A9A9A` | `#3C3C42` | `#E0E0E0` |
 | `colors.hover` | Pointer hover fill on rows and borderless buttons | `#EBEBEF` | `#232323` | `#EBEBEF` | `#232323` |
@@ -164,6 +166,8 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.palette_width` | Command palette width | 520 | 520 | 520 | 520 |
 | `metrics.panel_radius` | Panel corner radius | 8 | 8 | 8 | 8 |
 | `metrics.pasteboard_opacity` | Opacity of selected layers drawn outside the frame | 0.35 | 0.35 | 0.35 | 0.35 |
+| `metrics.pill_inset` | Track-to-segment padding and segment gap | 2 | 2 | 2 | 2 |
+| `metrics.pill_radius` | Segmented track and tab-strip corner | 9 | 9 | 9 | 9 |
 | `metrics.playhead` | Playhead line width | 1.5 | 1.5 | 1.5 | 1.5 |
 | `metrics.popover_radius` | Corner of popovers Powermove frames itself (agent popover) | 16 | 16 | 16 | 16 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
@@ -185,6 +189,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.symbol_panel` | SF Symbol size in panel headers | 13 | 13 | 13 | 13 |
 | `metrics.symbol_toolbar` | SF Symbol size in toolbar items | 15 | 15 | 15 | 15 |
 | `metrics.sync_badge` | Linked-clip sync badge height | 16 | 16 | 16 | 16 |
+| `metrics.tab` | Text tab and full-height segmented control | 28 | 28 | 28 | 28 |
 | `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
 | `metrics.text_padding` | Vertical text padding in bubbles, the composer and code blocks | 8 | 8 | 8 | 8 |
 | `metrics.thumbnail_min` | Minimum Project grid thumbnail width | 120 | 120 | 120 | 120 |
@@ -229,9 +234,12 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.06 | 0.08 | 0.06 |
 | `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#080808` | `#EEEEF1` | `#080808` |
+| `translucency.hover` | Hover wash and soft fills, as `text` ink | 0.045 | 0.06 | 0.08 | 0.1 |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.09 | 0.07 | 0.09 | 0.07 |
 | `translucency.offline_hatch` | Media Offline hatch on timeline clips, as `danger` ink | 0.28 | 0.28 | 0.28 | 0.28 |
 | `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.66 | 0.7 | 0.66 | 0.7 |
+| `translucency.pressed` | Pressed wash, as `text` ink | 0.1 | 0.14 | 0.16 | 0.2 |
+| `translucency.selected` | Neutral on state of a tab or segment, as `text` ink | 0.07 | 0.1 | 0.12 | 0.16 |
 | `translucency.tick_major` | Labelled ruler tick, as `text` ink | 0.3 | 0.3 | 0.3 | 0.3 |
 | `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |
 | `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.82 | 0.62 | 0.82 |

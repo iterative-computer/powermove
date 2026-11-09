@@ -365,6 +365,29 @@ const ROLES: &[(&str, &str)] = &[
         "translucency.offline_hatch",
         "Media Offline hatch on timeline clips, as `danger` ink",
     ),
+    (
+        "translucency.hover",
+        "Hover wash and soft fills, as `text` ink",
+    ),
+    (
+        "translucency.selected",
+        "Neutral on state of a tab or segment, as `text` ink",
+    ),
+    ("translucency.pressed", "Pressed wash, as `text` ink"),
+    (
+        "colors.fill",
+        "Soft neutral fill: segmented tracks, search fields (derived)",
+    ),
+    (
+        "colors.fill_strong",
+        "Selected tab or segment, never the accent (derived)",
+    ),
+    ("metrics.tab", "Text tab and full-height segmented control"),
+    ("metrics.pill_radius", "Segmented track and tab-strip corner"),
+    (
+        "metrics.pill_inset",
+        "Track-to-segment padding and segment gap",
+    ),
 ];
 
 fn root() -> PathBuf {
