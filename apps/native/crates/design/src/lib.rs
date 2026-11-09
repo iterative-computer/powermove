@@ -717,6 +717,70 @@ impl Tokens {
         }
     }
 }
+/// `a` moved `amount` (0–1) of the way toward `b`, per sRGB channel.
+pub fn mix(a: u32, b: u32, amount: f32) -> u32 {
+    [0, 8, 16].into_iter().fold(0, |out, s| {
+        let (x, y) = (((a >> s) & 255) as f32, ((b >> s) & 255) as f32);
+        out | (((x + (y - x) * amount).round() as u32) << s)
+    })
+}
+/// A timeline clip's tactile chip, derived from its label fill: a soft vertical
+/// gradient, a hairline highlight inside the top edge, a seam one shade under the
+/// body and a small drop shadow (v1's clip recipe, kept at low intensity).
+/// Increase Contrast flattens it: one fill, a solid `separator` seam, no shadow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipMaterial {
+    pub top: u32,
+    pub bottom: u32,
+    /// Hairline just inside the top edge, as (colour, alpha); alpha 0 draws none.
+    pub highlight: (u32, f32),
+    /// 1 pt ring inside the clip's edge.
+    pub seam: u32,
+    /// Drop shadow (colour, alpha), offset `border × 2`, blur `border × 4`.
+    pub shadow: (u32, f32),
+    /// Names and lock glyphs on the clip.
+    pub foreground: u32,
+    /// Waveforms and marks drawn on the clip (the body's bright tint).
+    pub primary: u32,
+}
+impl Tokens {
+    pub fn clip_material(&self, fill: u32) -> ClipMaterial {
+        let dark = self.scheme == Scheme::Dark;
+        let (white, black) = (0xffffff, 0x000000);
+        if self.accessibility.increase_contrast {
+            return ClipMaterial {
+                top: fill,
+                bottom: fill,
+                highlight: (white, 0.),
+                seam: self.colors.separator,
+                shadow: (black, 0.),
+                foreground: self.colors.text,
+                primary: self.colors.text,
+            };
+        }
+        if dark {
+            ClipMaterial {
+                top: mix(fill, white, 0.06),
+                bottom: mix(fill, black, 0.1),
+                highlight: (white, 0.1),
+                seam: mix(fill, black, 0.4),
+                shadow: (black, 0.35),
+                foreground: mix(fill, white, 0.86),
+                primary: mix(fill, white, 0.5),
+            }
+        } else {
+            ClipMaterial {
+                top: mix(fill, white, 0.04),
+                bottom: mix(fill, black, 0.05),
+                highlight: (white, 0.45),
+                seam: mix(fill, black, 0.18),
+                shadow: (0x0f0f14, 0.12),
+                foreground: mix(fill, black, 0.66),
+                primary: mix(fill, black, 0.4),
+            }
+        }
+    }
+}
 /// Persisted dimensions are workspace data, not styling literals in views.
 pub mod workspace {
     pub const DEFAULT_LEFT: f32 = 300.;
