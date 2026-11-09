@@ -56,7 +56,7 @@ describe('Studio scene extraction', () => {
     // No maps: -1 layers.
     expect([...s.materials.slice(16, 20)]).toEqual([-1, -1, -1, -1]);
     expect([...s.materials.slice(20, 24)]).toEqual([0, 0, 0, 0]);
-    expect(s.materials.length).toBe(24);
+    expect(s.materials.length).toBe(32);
   });
 
   it('turns three lights into Studio lights', () => {

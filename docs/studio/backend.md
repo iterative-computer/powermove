@@ -42,3 +42,28 @@ Studio Live with fewer pixels/samples; Quality refines while idle. In-page
 WebGPU remains the fallback for the native backend. Neither backend uses
 three.js to draw the picture; three.js remains useful for import, geometry,
 pose evaluation, picking and gizmo math.
+
+## Prepared buffer layout
+
+The material stride is **32 floats / 128 bytes** (8 `vec4`s). The first 24
+floats retain the source branch's fields. Offsets 24–27 are ambient response,
+flags, alpha-test threshold, reserved. Flags: Casts Shadows = 1, Accepts Shadows
+= 2, Double Sided = 4, Unlit = 8, Vertex Colors = 16. Offsets 28–31 are independent
+roughness, metalness, AO map indexes, then normal-map scale. Map index -1 means
+absent. The legacy ORM index at offset 18 remains for older prepared scenes;
+independent maps take precedence.
+
+Triangles remain 24 floats / 96 bytes. If Vertex Colors is set, each normal's
+unused `w` holds a **bit-cast packed RGBA8 color** (linear RGB). Copy these lanes
+as bytes; do not JSON-encode their float interpretation (it may be NaN). The
+canonical description represents these safely as optional `vertex_colors` in
+`object_ids`, in mesh-vertex order.
+
+Lights remain 16 floats. For point/spot lights `u.y` is finite range (0 means
+unlimited) and `u.z` is the attenuation exponent (normally 2). Negative `u.w`
+turns that light's shadows off; softbox area uses its absolute value. The
+prepared instance stride remains 36 floats. Optional `instancePolicies`,
+`materialPolicies` and `lightPolicies` preserve names/policies for JSON and
+picking without changing those binary buffers. `Params.opts.w = 1` selects
+orthographic camera rays; 0 selects perspective. Camera right/up extents contain
+half the orthographic frame span in that mode.

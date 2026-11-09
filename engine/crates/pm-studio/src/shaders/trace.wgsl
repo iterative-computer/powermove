@@ -35,7 +35,9 @@ struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, rig
 // emit: rgb, subsurface radius (0: none) · extra: ior, specular, opacity, anisotropy (-1..1)
 // maps: texture-array layers for color, emissive, occlusion-roughness-metal, normal (-1: none)
 // layers: sheen, thin-film thickness (nm), dispersion, water droplets
-struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f, layers: vec4f }
+// policy: ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16), alpha test
+// maps2: independent roughness, metalness, AO indices, normal-map scale
+struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f, layers: vec4f, policy: vec4f, maps2: vec4f }
 // pos.w: kind (0 softbox, 1 sphere, 2 spot, 3 sun).
 // softbox: pos = centre, u/v = half extents (u.w: area); emits along u × v.
 // sphere/spot: pos = centre, u.x = radius; spot: v.xyz = axis, v.w = cos outer, radiance.w = cos inner.
@@ -217,7 +219,12 @@ fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   for (var k = 0; k < 6; k++) {
     let h = intersect(o, rd, left, !nearest);
     if (h.tri < 0) { return t; }
-    let m = tri_material(h.tri);
+    let sf = surface(o, rd, h);
+    let m = sf.m;
+    if ((u32(m.policy.y) & 1u) == 0u) {
+      o += rd * (h.t + EPS); left -= h.t + EPS; nearest = true;
+      if (left <= 0.0) { return t; } continue;
+    }
     // With caustics on, light through glass arrives as photons (bent and
     // focused); here glass then blocks it like any solid. Live has no
     // photons and lets it through tinted instead.
@@ -310,7 +317,7 @@ fn light_pdf(l: Light, ro: vec3f, rd: vec3f, t: f32) -> f32 {
   let kind = light_kind(l);
   if (kind == 0u) {
     let cl = max(dot(-rd, rect_normal(l)), 1e-4);
-    return t * t / (cl * l.u.w);
+    return t * t / (cl * abs(l.u.w));
   }
   if (kind == 3u) { return 1.0 / (2.0 * PI * one_minus_cos(1.0 - l.u.x * l.u.x)); }
   let d = l.pos.xyz - ro;
@@ -338,7 +345,7 @@ fn sample_light(l: Light, p: vec3f) -> LightSample {
     let dir = d / dist;
     let cl = dot(-dir, rect_normal(l));
     if (cl <= 0.0) { return LightSample(dir, dist, vec3f(0.0), 0.0); }
-    return LightSample(dir, dist, light_emit(l, q, dir), dist2 / (cl * l.u.w));
+    return LightSample(dir, dist, light_emit(l, q, dir), dist2 / (cl * abs(l.u.w)));
   }
   if (kind == 3u) {
     let omc = one_minus_cos(1.0 - l.u.x * l.u.x);
@@ -352,7 +359,11 @@ fn sample_light(l: Light, p: vec3f) -> LightSample {
   let dir = cone_dir(d * inverseSqrt(dist2), omc, u);
   let t = sphere_t(p, dir, l.pos.xyz, l.u.x);
   let dist = select(sqrt(dist2), t, t < BIG);
-  return LightSample(dir, dist, light_emit(l, p + dir * dist, dir), 1.0 / (2.0 * PI * omc));
+  // Preserve editable point/spot falloff and finite range. Sampling a sphere
+  // already contributes inverse-square attenuation; correct only the exponent.
+  var attenuation = pow(max(sqrt(dist2), 0.01), 2.0 - l.u.z);
+  if (l.u.y > 0.0) { attenuation *= pow(clamp(1.0 - pow(sqrt(dist2) / l.u.y, 4.0), 0.0, 1.0), 2.0); }
+  return LightSample(dir, dist, light_emit(l, p + dir * dist, dir) * attenuation, 1.0 / (2.0 * PI * omc));
 }
 
 // ── Microfacet BSDF ─────────────────────────────────────
@@ -591,7 +602,7 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   if (all(f <= vec3f(0.0))) { return vec3f(0.0); }
   // With shadows off (the environment's switch), every light reaches every surface.
   var t = vec3f(1.0);
-  if (P.opts.y == 0u) { t = transmittance(p, s.dir, s.dist); }
+  if (P.opts.y == 0u && l.u.w >= 0.0 && (floor_hit || (u32(m.policy.y) & 2u) != 0u)) { t = transmittance(p, s.dir, s.dist); }
   if (all(t <= vec3f(0.0))) { return vec3f(0.0); }
   let pl = s.pdf / f32(count);
   let mis = pl * pl / (pl * pl + pb * pb);
@@ -609,11 +620,12 @@ fn catcher_ratio(p: vec3f) -> f32 {
   var last = P.counts.x;
   if (live && P.counts.x > 0u) { first = min(u32(rnd() * f32(P.counts.x)), P.counts.x - 1u); last = first + 1u; }
   for (var i = first; i < last; i++) {
-    let s = sample_light(light_at(i), p);
+    let light = light_at(i);
+    let s = sample_light(light, p);
     if (s.pdf <= 0.0) { continue; }
     let e = max(dot(n, s.dir), 0.0) * dot(s.radiance, vec3f(0.333)) / s.pdf;
     free += e;
-    if (e > 0.0) { lit += e * dot(transmittance(p, s.dir, s.dist), vec3f(0.333)); }
+    if (e > 0.0) { lit += e * select(1.0, dot(transmittance(p, s.dir, s.dist), vec3f(0.333)), P.opts.y == 0u && light.u.w >= 0.0); }
   }
   if (live) { free *= f32(P.counts.x); lit *= f32(P.counts.x); }
   // Cosine-weighted dome samples: soft contact occlusion.
@@ -622,7 +634,7 @@ fn catcher_ratio(p: vec3f) -> f32 {
     let dir = cosine_dir(n, rnd2());
     let e = 2.4 / f32(dome);
     free += e;
-    if (intersect(p, dir, 4000.0, true).tri < 0) { lit += e; }
+    lit += e * select(1.0, dot(transmittance(p, dir, 4000.0), vec3f(0.333)), P.opts.y == 0u);
   }
   if (free <= 0.0) { return 1.0; }
   // Focused light on the studio floor brightens it past the backdrop.
@@ -659,14 +671,23 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     m.extra.z *= c.a;
   }
   if (m.maps.y >= 0.0) { m.emit = vec4f(m.emit.xyz * decode_srgb(map_texel(m.maps.y, uv).rgb), m.emit.w); }
-  if (m.maps.z >= 0.0) {
+  if (m.maps.z >= 0.0 && m.maps2.x < 0.0 && m.maps2.y < 0.0) {
     let orm = map_texel(m.maps.z, uv);
     m.spec.x *= orm.g;
     m.base.w *= orm.b;
   }
+  if (m.maps2.x >= 0.0) { m.spec.x *= map_texel(m.maps2.x, uv).g; }
+  if (m.maps2.y >= 0.0) { m.base.w *= map_texel(m.maps2.y, uv).b; }
+  if (m.maps2.z >= 0.0) { m.policy.x *= map_texel(m.maps2.z, uv).r; }
+  if ((u32(m.policy.y) & 16u) != 0u) {
+    let c = unpack4x8unorm(bitcast<u32>(t.n0.w)) * w + unpack4x8unorm(bitcast<u32>(t.n1.w)) * h.b.x + unpack4x8unorm(bitcast<u32>(t.n2.w)) * h.b.y;
+    m.base = vec4f(m.base.xyz * c.rgb, m.base.w); m.extra.z *= c.a;
+  }
+  if (m.extra.z < m.policy.z) { m.extra.z = 0.0; }
   let tangent = vector_to_world(h.inst, t.tangent.xyz);
   if (m.maps.w >= 0.0 && dot(tangent, tangent) > 0.0) {
-    let tn = map_texel(m.maps.w, uv).xyz * 2.0 - 1.0;
+    let texnormal = map_texel(m.maps.w, uv).xyz * 2.0 - 1.0;
+    let tn = vec3f(texnormal.xy * m.maps2.w, texnormal.z);
     let tg = normalize(tangent - n * dot(n, tangent));
     let bt = cross(n, tg) * t.tangent.w;
     let mapped = normalize(tg * tn.x + bt * tn.y + n * tn.z);
@@ -725,7 +746,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   if (tf < h.t) {
     let q = p + d * tf;
     let n = vec3f(0.0, 1.0, 0.0);
-    let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0));
+    let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0), vec4f(1.0, 7.0, 0.0, 0.0), vec4f(-1.0, -1.0, -1.0, 1.0));
     return sample_lights(q + n * EPS, n, -d, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
   }
   let sf = surface(p, d, h);
@@ -757,6 +778,10 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   let d = normalize(fwd + P.cam_right.xyz * ndc.x * P.cam_right.w - P.cam_up.xyz * ndc.y * P.cam_up.w);
   var ro = P.cam_pos.xyz;
   var rd = d;
+  if (P.opts.w == 1u) {
+    ro += P.cam_right.xyz * ndc.x * P.cam_right.w - P.cam_up.xyz * ndc.y * P.cam_up.w;
+    rd = fwd;
+  }
   // Live uses a pinhole: depth of field appears as the view refines.
   if (P.cam_pos.w > 0.0 && P.opts.x == 0u) {
     let focus = ro + d * (P.cam_fwd.w / dot(d, fwd));
@@ -775,6 +800,7 @@ fn path(px: vec2f) -> Sample {
   var ro = ray[0];
   var rd = ray[1];
   var tp = vec3f(1.0);
+  var ambient_response = 1.0;
   var last_pdf = 0.0;   // BSDF pdf of the last bounce (0: camera or delta)
   var primary = true;   // still on the camera ray (passes through cut-outs keep it)
   var band = -1;        // dispersion: the RGB channel this path carries (-1: all)
@@ -810,7 +836,7 @@ fn path(px: vec2f) -> Sample {
         s.bg = P.backdrop.xyz;
         s.void_hit = 1.0;
       } else {
-        s.radiance += tp * environment(rd);
+        s.radiance += tp * environment(rd) * ambient_response;
         // The sun disc, weighted against light sampling.
         for (var i = 0u; i < P.counts.x; i++) {
           let l = light_at(i);
@@ -835,7 +861,7 @@ fn path(px: vec2f) -> Sample {
       }
       // A matte floor in reflections: one diffuse bounce, lit by the lights.
       let n = vec3f(0.0, 1.0, 0.0);
-      let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0));
+      let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0), vec4f(1.0, 7.0, 0.0, 0.0), vec4f(-1.0, -1.0, -1.0, 1.0));
       s.radiance += tp * sample_lights(p + n * EPS, n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
       if (photons_on) { s.radiance += tp * P.env_horizon.w / PI * caustic_at(p); }
       tp *= P.env_horizon.w;
@@ -854,15 +880,18 @@ fn path(px: vec2f) -> Sample {
       continue;
     }
     let front = dot(rd, sf.ng) < 0.0;
+    if (!front && (u32(m.policy.y) & 4u) == 0u) { ro = sf.p + rd * EPS; continue; }
+    ambient_response = m.policy.x;
     var n = sf.n;
     var ng = sf.ng;
     if (!front) { n = -n; ng = -ng; }
     if (primary) { s.normal = n; s.depth = h.t; s.object = sf.object + 1u; }
     let v = -rd;
     // Emission (a product's screen, or a glowing part).
-    if (any(m.emit.xyz > vec3f(0.0)) && front) {
+    if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
       if (primary) { s.emit += m.emit.xyz; } else { s.radiance += tp * m.emit.xyz; }
     }
+    if ((u32(m.policy.y) & 8u) != 0u) { return s; }
     var nv = max(dot(n, v), 1e-4);
     let p = sf.p + ng * EPS;
     // A near-mirror coat (cover glass, lacquer) is traced on every sample
@@ -1111,7 +1140,7 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
   if (kind == 0u) {
     ro = l.pos.xyz + l.u.xyz * (u.x * 2.0 - 1.0) + l.v.xyz * (u.y * 2.0 - 1.0);
     rd = cosine_dir(rect_normal(l), rnd2());
-    flux = l.radiance.xyz * l.u.w * PI;
+    flux = l.radiance.xyz * abs(l.u.w) * PI;
   } else if (kind == 3u) {
     let dir = normalize(l.pos.xyz);
     let tb = basis(dir);
@@ -1142,6 +1171,7 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
     let sf = surface(ro, rd, h);
     let m = sf.m;
     let front = dot(rd, sf.ng) < 0.0;
+    if (!front && (u32(m.policy.y) & 4u) == 0u) { ro = sf.p + rd * EPS; continue; }
     var n = sf.n;
     var ng = sf.ng;
     if (!front) { n = -n; ng = -ng; }
