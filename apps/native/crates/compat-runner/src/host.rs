@@ -1431,7 +1431,7 @@ impl Owner {
         }
         // Also the shim's next flush: it holds a batch the realm's queue refused.
         if !full {
-            let _ = live.realm.eval("__compat.flushCanvases?.()");
+            self.eval("__compat.flushCanvases?.()");
         }
     }
     /// Only a page that is reading gets pixels, and only surfaces that changed.
