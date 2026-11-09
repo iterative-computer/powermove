@@ -1747,6 +1747,21 @@ impl Drop for Controller {
         }
     }
 }
+/// Points the engine's disk render cache at Storage › Renders (and finds its
+/// frames again after Clear…), off the main thread.
+pub(crate) fn sync_render_storage(
+    pro_media: &Arc<crate::pro_media::ProMedia>,
+    engine: &Arc<EngineService>,
+) {
+    let (pro_media, disk) = (pro_media.clone(), engine.render_cache());
+    std::thread::Builder::new()
+        .name("pm-render-storage".into())
+        .spawn(move || {
+            let _ = disk.set_storage(pro_media.render_frames());
+        })
+        .ok();
+}
+
 #[cfg(test)]
 mod save_note_tests {
     use super::*;
@@ -1791,19 +1806,4 @@ mod save_note_tests {
         assert_eq!(save_note(true, false, false, "Edit failed"), None);
         assert_eq!(save_note(false, false, false, "Opened"), None);
     }
-}
-
-/// Points the engine's disk render cache at Storage › Renders (and finds its
-/// frames again after Clear…), off the main thread.
-pub(crate) fn sync_render_storage(
-    pro_media: &Arc<crate::pro_media::ProMedia>,
-    engine: &Arc<EngineService>,
-) {
-    let (pro_media, disk) = (pro_media.clone(), engine.render_cache());
-    std::thread::Builder::new()
-        .name("pm-render-storage".into())
-        .spawn(move || {
-            let _ = disk.set_storage(pro_media.render_frames());
-        })
-        .ok();
 }
