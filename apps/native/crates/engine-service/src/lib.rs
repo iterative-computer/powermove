@@ -1381,9 +1381,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             .collect();
         if !stale.is_empty() {
             drop(state);
+            let mut failures = Vec::new();
             for (id, snapshot, media, composition, revision, content) in stale {
                 if let Some(r) = runtime.get_mut(&id) {
-                    r.transport.update(&snapshot, media, &composition);
+                    if let Err(e) = r.transport.update(&snapshot, media, &composition) {
+                        failures.push((id, e.to_string()));
+                    }
                     r.revision = revision;
                     r.content = content;
                 }
@@ -1394,6 +1397,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             state = shared.state.lock().unwrap();
             if state.stop {
                 break;
+            }
+            for (id, error) in failures {
+                if let Some(v) = state.views.get_mut(&id) {
+                    v.status.error = Some(error);
+                }
             }
         }
         let now = trace::now();
@@ -1450,11 +1458,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
-                r.transport.update(
+                if let Err(e) = r.transport.update(
                     &v.config.snapshot,
                     v.config.media.audio_paths(v.media_mode),
                     &v.config.composition,
-                );
+                ) {
+                    v.status.error = Some(e.to_string());
+                }
                 r.revision = v.stamp.revision;
                 r.content = v.content;
             }
