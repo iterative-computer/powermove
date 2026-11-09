@@ -146,6 +146,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Shell `panel:park:<id>`: closes a tab but a later `panel:show` puts it back in place (used when an extension reloads).
 - ae-workspace-theme turning itself off on a fresh profile is its own one-time recovery (storage key `restore-request-1.0.4`), as in Electron; a migrated profile that carries the key keeps it on.
 
+## Compat lane, wave 18 (2026-11-08)
+
+- Playing and scrubbed viewer frames draw a late raster-override layer from its nearest answered frame (playing: nothing when it has none) and redraw exact when the answer lands; paused frames and exports still wait (plan 3.6.4).
+- The viewer keeps one raster batch in flight per document; playback asks ahead by the realm's measured cost, about 0.1 s of realm time per batch.
+- Code-cache keys hash the V8 version, snapshot and flags once per isolate (was: the whole snapshot on every eval).
+- The D11 watchdog counts JavaScript time only (engine and kernel calls excluded) and names the extension innermost on the stack; Stop turns that extension off, whatever task hung.
+- Quit while an extension isn't responding stops that window's realm without a restart and quits; the app handles the Quit Apple Event itself because AppKit drops it while a sheet is attached.
+
 ## Extension authoring (moat lane, 2026-11-07)
 
 - **v4 additive API:** an extension may export `mount(env)` (`BuiltinEnv`, the built-ins' own entry) as well as `view()`; it may import `powermove/{runtime,protocol,host-api,components,memo,renderer,builtin}`; `activate({hot})` and `env.hot` carry `api.hot.data` across reloads; a v4 manifest's `replaces` naming a built-in panel makes it a fork drawn in that panel's place.

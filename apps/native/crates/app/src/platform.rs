@@ -348,6 +348,19 @@ define_class!(
         }
     }
     impl QuitDelegate {
+        /// The Quit Apple Event (Dock, Activity Monitor, `osascript … quit`,
+        /// logout). AppKit drops it while a window shows a sheet, so a hung
+        /// extension's D11 sheet would hold the app open; the event goes to
+        /// the quit coordinator directly instead, which ends that sheet.
+        #[unsafe(method(handleQuitEvent:withReplyEvent:))]
+        fn handle_quit_event(&self, _event: *mut AnyObject, _reply: *mut AnyObject) {
+            if self.ivars().allowed.get() {
+                let mtm = MainThreadMarker::new().unwrap();
+                NSApplication::sharedApplication(mtm).terminate(None);
+            } else {
+                let _ = self.ivars().sender.try_send(());
+            }
+        }
         #[unsafe(method(forwardingTargetForSelector:))]
         fn forward(&self, _: Sel) -> *const AnyObject {
             &*self.ivars().previous as *const _ as *const AnyObject
@@ -366,6 +379,20 @@ pub fn quit_guard() -> (Retained<QuitDelegate>, async_channel::Receiver<()>) {
     });
     let guard: Retained<QuitDelegate> = unsafe { objc2::msg_send![super(this), init] };
     app.setDelegate(Some(ProtocolObject::from_ref(&*guard)));
+    // kCoreEventClass 'aevt', kAEQuitApplication 'quit'.
+    const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
+    const QUIT_APPLICATION: u32 = u32::from_be_bytes(*b"quit");
+    unsafe {
+        let manager: *mut AnyObject =
+            msg_send![objc2::class!(NSAppleEventManager), sharedAppleEventManager];
+        let _: () = msg_send![
+            manager,
+            setEventHandler: &*guard,
+            andSelector: objc2::sel!(handleQuitEvent:withReplyEvent:),
+            forEventClass: CORE_EVENT_CLASS,
+            andEventID: QUIT_APPLICATION
+        ];
+    }
     (guard, rx)
 }
 impl QuitDelegate {
