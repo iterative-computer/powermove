@@ -59,6 +59,7 @@ mod v4_view;
 mod v4_view_tests;
 mod viewer2;
 mod viewer_overlays;
+mod waveforms;
 use anyhow::{Context, Result};
 use gpui::AppContext;
 use pm_render::text::host::RenderFonts;

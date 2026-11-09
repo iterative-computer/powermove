@@ -57,6 +57,8 @@ pub struct Layer {
     pub effects: Vec<(String, String)>,
     /// The media asset an image, video or audio layer draws (`d.asset`).
     pub asset: Option<String>,
+    /// Seconds of the media skipped before the layer starts (`d.trim`).
+    pub trim: f64,
     /// Effects whose extension is missing (`fx[].missing`): the layer draws
     /// with them bypassed. Their display names, else types.
     pub missing_effects: Vec<String>,
@@ -240,6 +242,10 @@ impl TimelineIndex {
                 .filter_map(|m| string(m.get("id")))
                 .collect();
             result.layers.push(Layer {
+                trim: number(layer.get("d").and_then(|d| d.get("trim")))
+                    .filter(|t| t.is_finite())
+                    .unwrap_or(0.)
+                    .max(0.),
                 asset,
                 missing_effects,
                 id,

@@ -1,7 +1,7 @@
 //! Native timeline paint plan. Preparation is worker-only; playback changes only
 //! the overlay. Coordinates are points; authored seconds are never frame-rounded.
 //! Spec: docs/native/design/panels/timeline.md §2–3. No platform/JS dependency.
-use pm_design::{Scheme, Tokens};
+use pm_design::Tokens;
 use serde_json::{Value, json};
 use std::{collections::HashMap, ops::Range};
 
@@ -124,6 +124,24 @@ pub enum Label {
     Gray,
 }
 impl Label {
+    /// A clip's material by layer kind, not by the layer's own swatch, so every
+    /// text clip is the same slate and every audio clip the same green (v1's
+    /// type-keyed clip palette). The outline's kind badge shares it.
+    pub fn for_kind(kind: &str) -> Self {
+        match kind {
+            "text" => Self::Blue,
+            "shape" => Self::Red,
+            "video" | "sequence" => Self::Teal,
+            "image" | "captions" => Self::Yellow,
+            "audio" => Self::Green,
+            "solid" | "adjustment" | "effect" | "shader" | "extension" => Self::Violet,
+            _ => Self::Gray,
+        }
+    }
+    /// The `colors.labels.*` field name.
+    pub fn name(self) -> &'static str {
+        pm_design::Labels::NAMES[self as usize]
+    }
     fn color(self, t: &Tokens) -> u32 {
         let l = t.colors.labels;
         match self {
@@ -147,12 +165,25 @@ pub struct Clip {
     pub label: Label,
     pub selected: bool,
     pub locked: bool,
+    /// The layer is switched off: the clip draws at half strength.
+    pub hidden: bool,
     pub media: Media,
-    /// Already decoded/downsampled for this visible window, peak values in [-1,1].
-    pub waveform: Option<Vec<f64>>,
+    /// An audio clip draws its waveform instead of a name; `None` while the
+    /// peaks are still being read (a hairline then marks the clip's middle).
+    pub audio: Option<Option<Waveform>>,
     pub trim: Option<Edge>,
     /// The first missing extension effect: the clip carries a quiet badge.
     pub missing_effect: Option<String>,
+}
+/// An audio file's peak envelope, read once per file off the main thread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Waveform {
+    /// Largest absolute sample of any channel per bucket, 0–1.
+    pub peaks: std::sync::Arc<[f32]>,
+    /// Buckets per second of media.
+    pub rate: f64,
+    /// Media seconds skipped before the clip starts.
+    pub trim: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
@@ -278,8 +309,9 @@ pub trait ModelPresenter {
     fn layer_label(&self, layer: &crate::Layer) -> Label;
     fn media(&self, layer: &crate::Layer) -> Media;
     fn interpolation(&self, key: &crate::Key) -> Interpolation;
-    /// Measured/downsampled audio peaks supplied by native media services.
-    fn waveform(&self, _layer: &crate::Layer) -> Option<Vec<f64>> {
+    /// An audio layer's waveform: `Some(None)` while its peaks are read,
+    /// `None` for layers that draw a name.
+    fn waveform(&self, _layer: &crate::Layer) -> Option<Option<Waveform>> {
         None
     }
     /// Native schema supplies track names/AX copy; no renderer-invented labels.
@@ -345,8 +377,9 @@ impl Scene {
                                     label: p.layer_label(layer),
                                     selected: selected.contains(id.as_str()),
                                     locked: layer.effectively_locked,
+                                    hidden: !layer.visible,
                                     media: p.media(layer),
-                                    waveform: p.waveform(layer),
+                                    audio: p.waveform(layer),
                                     trim: None,
                                     missing_effect: layer.missing_effects.first().cloned(),
                                 }),
@@ -395,8 +428,9 @@ impl Scene {
                     label: p.layer_label(layer),
                     selected: selected.contains(item.id.as_str()),
                     locked: layer.effectively_locked,
+                    hidden: !layer.visible,
                     media: p.media(layer),
-                    waveform: p.waveform(layer),
+                    audio: p.waveform(layer),
                     trim: None,
                     missing_effect: layer.missing_effects.first().cloned(),
                 });
@@ -685,15 +719,26 @@ impl Scene {
                     if let Some(clip) = clip {
                         paint_clip(clip, y, h, v, t, &mut ops);
                     }
-                    paint_keys(
-                        &row.id,
-                        summary,
-                        true,
-                        y + h - m.inner_radius as f64,
-                        v,
-                        t,
-                        &mut ops,
-                    );
+                    // Summary marks only while the layer is collapsed: open, its
+                    // property rows show the keys themselves.
+                    let open = self
+                        .rows
+                        .get(i + 1)
+                        .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
+                    if !open {
+                        let ink = clip.as_ref().map_or(c.text, |clip| {
+                            t.clip_material(clip.label.color(t)).foreground
+                        });
+                        paint_keys(
+                            &row.id,
+                            summary,
+                            Some(ink),
+                            y + h - m.border as f64 - m.inner_radius as f64,
+                            v,
+                            t,
+                            &mut ops,
+                        );
+                    }
                 }
                 RowContent::Track { clips } => {
                     let first =
@@ -728,11 +773,28 @@ impl Scene {
                     o.detail = json!({"navigationVisible":*state!=KeyState::Static,"labelX":m.inset+3.*m.hit+m.gap});
                     controls.push((o.clone(), self.control_times[&row.id].clone()));
                     ops.push(o);
-                    paint_keys(&row.id, keys, false, y + h / 2., v, t, &mut ops);
+                    // The lane the keys sit on (v1): a faint line across the tracks.
+                    if !keys.is_empty() {
+                        let mut lane = Op::new(
+                            format!("lane:{}", row.id),
+                            "rect",
+                            Rect::new(
+                                v.layer_column,
+                                y + (h - m.border as f64) / 2.,
+                                v.width - v.layer_column,
+                                m.border as f64,
+                            ),
+                            c.text,
+                        );
+                        lane.opacity = t.translucency.grid as f64;
+                        ops.push(lane);
+                    }
+                    paint_keys(&row.id, keys, None, y + h / 2., v, t, &mut ops);
                 }
             }
             for op in &mut ops[op_start..] {
                 let track = op.id.starts_with("clip")
+                    || op.id.starts_with("lane:")
                     || op.id.starts_with("key:")
                     || op.id.starts_with("key-focus:")
                     || op.id.starts_with("trim:");
@@ -833,13 +895,11 @@ impl Scene {
                 (c.text, t.translucency.tick_major as f64),
             )
         };
-        // Literal spec chooses the largest candidate retaining >=8pt spacing.
-        let step = [1. / self.fps, 0.25, 1., 5.]
-            .into_iter()
-            .filter(|s| s * v.pps >= 8.)
-            .max_by(f64::total_cmp)
-            .unwrap_or(1. / self.fps);
-        let label_step = if v.pps / self.fps >= 40. {
+        // Labels at the first nice step at least 60 pt apart (frames once a
+        // frame is 40 pt wide); minor ticks split each labelled step in four,
+        // or into frames when the labels count frames.
+        let frames = v.pps / self.fps >= 40.;
+        let label_step = if frames {
             (60. / (v.pps / self.fps)).ceil() / self.fps
         } else {
             [1., 5., 10., 15., 30., 60., 120., 300., 600., 1800., 3600.]
@@ -847,23 +907,29 @@ impl Scene {
                 .find(|s| s * v.pps >= 60.)
                 .unwrap_or(3600.)
         };
+        let step = if frames {
+            1. / self.fps
+        } else {
+            label_step / 4.
+        };
         let right = v.scroll_time + (v.width - v.layer_column) / v.pps;
-        let mut i = (v.scroll_time / step).ceil().max(0.) as u64;
-        while (i as f64) * step <= right && ops.len() < 10_000 {
-            let time = i as f64 * step;
-            let x = v.x(time);
-            let mut o = Op::new(
-                format!("minor:{i}"),
-                "rect",
-                Rect::new(x, h - 3., m.border as f64, 3.),
-                tick.0,
-            );
-            o.opacity = tick.1;
-            ops.push(o);
-            let Some(next) = i.checked_add(1) else {
-                break;
-            };
-            i = next;
+        if step * v.pps >= 6. {
+            let mut i = (v.scroll_time / step).ceil().max(0.) as u64;
+            while (i as f64) * step <= right && ops.len() < 10_000 {
+                let x = v.x(i as f64 * step);
+                let mut o = Op::new(
+                    format!("minor:{i}"),
+                    "rect",
+                    Rect::new(x, h - 3., m.border as f64, 3.),
+                    tick.0,
+                );
+                o.opacity = tick.1;
+                ops.push(o);
+                let Some(next) = i.checked_add(1) else {
+                    break;
+                };
+                i = next;
+            }
         }
         let mut i = (v.scroll_time / label_step).ceil().max(0.) as u64;
         while i as f64 * label_step <= right && ops.len() < 10_000 {
@@ -872,7 +938,7 @@ impl Scene {
             let mut o = Op::new(
                 format!("major:{i}"),
                 "rect",
-                Rect::new(x, h - 7., m.border as f64, 7.),
+                Rect::new(x, h - 6., m.border as f64, 6.),
                 major.0,
             );
             o.opacity = major.1;
@@ -888,19 +954,17 @@ impl Scene {
                 o.opacity = t.translucency.grid as f64;
                 ops.push(o);
             }
+            // The label centres over its tick, so the numbers read as a
+            // scale; one that would cross the layer column slides right.
+            let width = label_step * v.pps;
             let mut o = Op::new(
                 format!("time:{i}"),
                 "text",
-                Rect::new(
-                    x + 4.,
-                    4.,
-                    label_step * v.pps - 4.,
-                    t.typography.minimum as f64,
-                ),
+                Rect::new(x - width / 2., 2., width, t.typography.minimum as f64),
                 c.muted,
             );
             let seconds = time.floor() as u64;
-            o.text = Some(if v.pps / self.fps >= 40. {
+            o.text = Some(if frames {
                 format!(
                     "{}:{:02}:{:02}",
                     seconds / 60,
@@ -911,26 +975,30 @@ impl Scene {
                 format!("{}:{:02}", seconds / 60, seconds % 60)
             });
             o.font_size = t.typography.minimum as f64;
-            o.detail = json!({"tabular":true,"baseline":"top + 4 + capHeight"});
+            o.detail =
+                json!({"tabular":true,"align":"center","minX":v.layer_column + m.gap as f64});
             ops.push(o);
             let Some(next) = i.checked_add(1) else {
                 break;
             };
             i = next;
         }
+        // Marker pins sit on the ruler's foot; a guide drops through the tracks.
         for marker in &self.markers {
             let x = v.x(marker.seconds);
             if x >= v.layer_column && x <= v.width {
-                ops.push(Op::new(
+                let mut o = Op::new(
                     format!("marker-guide:{}", marker.id),
                     "rect",
                     Rect::new(x, h, m.border as f64, v.height - h),
-                    c.separator,
-                ));
+                    c.secondary,
+                );
+                o.opacity = 0.35;
+                ops.push(o);
                 let mut o = Op::new(
                     format!("marker:{}", marker.id),
                     "marker",
-                    Rect::new(x - 4.5, h - 9., 9., 9.),
+                    Rect::new(x - 4.5, h - 11., 9., 10.),
                     c.secondary,
                 );
                 o.detail = json!({"name":marker.name,"seconds":marker.seconds});
@@ -979,9 +1047,10 @@ fn valid_clip(c: &Clip) -> bool {
         && c.duration.is_finite()
         && c.duration >= 0.
         && (c.from + c.duration).is_finite()
-        && c.waveform
-            .as_ref()
-            .is_none_or(|w| w.iter().all(|p| p.is_finite() && (-1. ..=1.).contains(p)))
+        && c.audio
+            .iter()
+            .flatten()
+            .all(|w| w.rate.is_finite() && w.rate > 0. && w.trim.is_finite() && w.trim >= 0.)
 }
 fn span(a: f64, b: f64, y: f64, h: f64, v: Viewport) -> Option<Rect> {
     let x = a.max(v.layer_column);
@@ -992,21 +1061,15 @@ fn span(a: f64, b: f64, y: f64, h: f64, v: Viewport) -> Option<Rect> {
 const OFFLINE_ADVANCE: f64 = 3.6;
 /// Width of the "Missing effect" badge, in `minimum` ems.
 const MISSING_EFFECT_ADVANCE: f64 = 6.6;
-fn mix(a: u32, b: u32, amount: f64) -> u32 {
-    [0, 8, 16].into_iter().fold(0, |out, s| {
-        out | (((((a >> s) & 255) as f64 * (1. - amount) + ((b >> s) & 255) as f64 * amount).round()
-            as u32)
-            << s)
-    })
-}
 fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
     let m = t.metrics;
     let colors = &t.colors;
+    // Clips fill their row with a hairline breath between neighbours (v1).
     let Some(r) = span(
         v.x(c.from),
         v.x(c.from + c.duration),
-        y + m.inner_radius as f64,
-        h - 2. * m.inner_radius as f64,
+        y + m.border as f64,
+        h - 2. * m.border as f64,
         v,
     ) else {
         return;
@@ -1019,22 +1082,23 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     } else {
         c.label.color(t)
     };
-    let mut o = Op::new(
-        format!("clip:{}", c.id),
-        "rounded-rect",
-        r,
-        if c.selected {
-            mix(
-                fill,
-                colors.text,
-                if t.scheme == Scheme::Dark { 0.12 } else { 0.06 },
-            )
-        } else {
-            fill
-        },
-    );
+    // The tactile chip (pm-design `clip_material`): gradient body, top
+    // highlight, a seam one shade under the body, a soft drop shadow. A hidden
+    // layer's clip draws at half strength.
+    let material = t.clip_material(fill);
+    let strength = if c.hidden { 0.5 } else { 1. };
+    let mut o = Op::new(format!("clip:{}", c.id), "clip", r, fill);
     o.radius = m.clip_radius as f64;
-    o.detail = json!({"from":c.from,"duration":c.duration,"cursor":if c.locked {"notAllowed"}else{"openHand"},"sourceEdges":[v.x(c.from),v.x(c.from+c.duration)]});
+    o.opacity = strength;
+    o.detail = json!({
+        "from":c.from,"duration":c.duration,
+        "cursor":if c.locked {"notAllowed"}else{"openHand"},
+        "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
+        "top":material.top,"bottom":material.bottom,
+        "highlight":material.highlight.0,"highlightAlpha":material.highlight.1,
+        "seam":material.seam,"seamWidth":m.border,
+        "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
+    });
     ops.push(o);
     if offline {
         let mut o = Op::new(
@@ -1043,36 +1107,12 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
             r,
             colors.danger,
         );
-        o.opacity = t.translucency.offline_hatch as f64;
+        o.opacity = t.translucency.offline_hatch as f64 * strength;
         o.radius = m.clip_radius as f64;
         o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
         ops.push(o);
     }
-    if !c.selected {
-        // A hairline keyline gives the muted fill an edge against the tracks.
-        let (edge, alpha) = t.edge();
-        let mut o = Op::new(format!("clip-edge:{}", c.id), "ring", r, edge);
-        o.opacity = if t.accessibility.increase_contrast {
-            1.
-        } else {
-            (alpha * 2.) as f64
-        };
-        o.stroke = m.border as f64;
-        o.radius = m.inner_radius as f64;
-        ops.push(o);
-    }
-    if c.selected {
-        let mut o = Op::new(
-            format!("clip-ring:{}", c.id),
-            "outside-ring",
-            r,
-            colors.accent,
-        );
-        o.stroke = m.playhead as f64;
-        o.radius = m.clip_radius as f64;
-        ops.push(o);
-    }
-    // "Offline" leads in `danger`; the name follows in `text`.
+    // "Offline" leads in `danger`; the name follows in the clip's foreground.
     let lead = (m.inset - m.inner_radius) as f64;
     let offline_w = if offline {
         let w = t.typography.minimum as f64 * OFFLINE_ADVANCE;
@@ -1084,6 +1124,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         );
         o.text = Some("Offline".into());
         o.font_size = t.typography.minimum as f64;
+        o.opacity = strength;
         o.detail = json!({"truncate":"tail"});
         ops.push(o);
         w + m.gap as f64
@@ -1098,40 +1139,68 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         .as_ref()
         .filter(|_| r.width - lead - offline_w > badge_w + 3. * lead);
     let reserve = if badge.is_some() { badge_w + lead } else { 0. };
-    let mut o = Op::new(
-        format!("clip-content:{}", c.id),
-        if c.waveform.is_some() {
-            "waveform"
-        } else {
-            "text"
-        },
-        Rect::new(
-            r.x + lead + offline_w,
-            r.y,
-            (r.width - lead - offline_w - reserve).max(0.),
-            r.height,
-        ),
-        if c.media == Media::Loading {
-            colors.muted
-        } else {
-            colors.text
-        },
-    );
-    o.text = Some(if c.media == Media::Loading {
-        "Loading…".into()
+    let ink = if offline {
+        colors.text
     } else {
-        c.name.clone()
-    });
-    o.font_size = if c.media == Media::Loading {
-        t.typography.minimum
+        material.foreground
+    };
+    // A readable audio clip shows its waveform in place of the name (v1): the
+    // bars stand on the clip's floor in the body's bright tint, one column per
+    // point summarising every peak under it.
+    if let (Some(audio), false) = (&c.audio, offline) {
+        let mut o = Op::new(
+            format!("clip-content:{}", c.id),
+            "waveform",
+            r,
+            material.primary,
+        );
+        o.text = Some(c.name.clone());
+        o.opacity = strength;
+        let left = v.x(c.from);
+        let bars: Vec<f32> = audio
+            .as_ref()
+            .map(|w| {
+                let count = r.width.floor().max(0.) as usize;
+                (0..count)
+                    .map(|i| {
+                        let at = w.trim + (r.x + i as f64 - left) / v.pps;
+                        let from = (at * w.rate).floor().max(0.) as usize;
+                        let to = (((at + 1. / v.pps) * w.rate).floor() as usize).max(from + 1);
+                        w.peaks
+                            .get(from.min(w.peaks.len())..to.min(w.peaks.len()))
+                            .map_or(0., |s| s.iter().copied().fold(0., f32::max))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        o.detail = json!({"bars": bars, "inset": m.border * 2., "minBar": m.border});
+        ops.push(o);
     } else {
-        t.typography.body
-    } as f64;
-    o.detail = json!({"truncate":"tail","offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None},"waveform":c.waveform,"maxPeakToPeak":h-4.*m.inner_radius as f64});
-    if c.waveform.is_some() {
-        o.opacity = 0.75;
+        let mut o = Op::new(
+            format!("clip-content:{}", c.id),
+            "text",
+            Rect::new(
+                r.x + lead + offline_w,
+                r.y,
+                (r.width - lead - offline_w - reserve).max(0.),
+                r.height,
+            ),
+            ink,
+        );
+        o.text = Some(if c.media == Media::Loading {
+            "Loading…".into()
+        } else {
+            c.name.clone()
+        });
+        o.font_size = if c.media == Media::Loading {
+            t.typography.minimum
+        } else {
+            t.typography.body
+        } as f64;
+        o.opacity = strength * if c.media == Media::Loading { 0.7 } else { 1. };
+        o.detail = json!({"truncate":"tail","offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None}});
+        ops.push(o);
     }
-    ops.push(o);
     if let Some(effect) = badge {
         let mut o = Op::new(
             format!("clip-missing-effect:{}", c.id),
@@ -1141,7 +1210,16 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         );
         o.text = Some("Missing effect".into());
         o.font_size = t.typography.minimum as f64;
+        o.opacity = strength;
         o.detail = json!({"truncate":"tail","tooltip":format!("Missing effect: {effect}. The layer draws without it.")});
+        ops.push(o);
+    }
+    // Selection: an accent ring inside the clip's edge, so a selected clip
+    // never grows into its neighbours (v1's inset ring).
+    if c.selected {
+        let mut o = Op::new(format!("clip-ring:{}", c.id), "ring", r, colors.accent);
+        o.stroke = 2. * m.border as f64;
+        o.radius = m.clip_radius as f64;
         ops.push(o);
     }
     if let Some(edge) = c.trim {
@@ -1159,42 +1237,69 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         }
     }
 }
+/// Keys on a property row (v1's marks): linear diamond, ease circle, hold
+/// square; the first and last keys of an animated span are half filled toward
+/// it, so a curve's ends read at a glance; selected keys are `accent` with a
+/// `panel` keyline. A collapsed layer's summary marks (`summary` = the clip's
+/// foreground) are small quiet diamonds inside the clip's foot.
 fn paint_keys(
     row: &str,
     keys: &[Key],
-    summary: bool,
+    summary: Option<u32>,
     y: f64,
     v: Viewport,
     t: &Tokens,
     ops: &mut Vec<Op>,
 ) {
-    let size = t.metrics.keyframe as f64 - if summary { 2. } else { 0. };
+    let size = t.metrics.keyframe as f64 - if summary.is_some() { 4. } else { 0. };
     let from = v.scroll_time - size / v.pps;
     let to = v.scroll_time + (v.width - v.layer_column + size) / v.pps;
     let start = keys.partition_point(|k| k.seconds < from);
     let end = keys.partition_point(|k| k.seconds <= to);
+    let (first, last) = (
+        keys.first().map(|k| k.seconds),
+        keys.last().map(|k| k.seconds),
+    );
     for key in &keys[start..end] {
         let x = v.x(key.seconds);
+        let shape = if summary.is_some() {
+            "diamond"
+        } else {
+            match key.interpolation {
+                Interpolation::Linear => "diamond",
+                Interpolation::Ease => "circle",
+                Interpolation::Hold => "square",
+            }
+        };
+        let color = match summary {
+            _ if key.selected => t.colors.accent,
+            Some(ink) => ink,
+            None => t.colors.text,
+        };
         let mut o = Op::new(
             format!("key:{}", json!([row, key.id])),
-            if summary {
-                "diamond"
-            } else {
-                match key.interpolation {
-                    Interpolation::Linear => "diamond",
-                    Interpolation::Ease => "circle",
-                    Interpolation::Hold => "keyframe.hold",
-                }
-            },
+            shape,
             Rect::new(x - size / 2., y - size / 2., size, size),
-            if key.selected {
-                t.colors.accent
-            } else {
-                t.colors.text
-            },
+            color,
         );
-        o.opacity = if key.selected { 1. } else { 0.9 };
-        o.detail = json!({"keyline":if summary || key.selected {Some(t.colors.panel)}else{None},"keylineWidth":1.,"seconds":key.seconds});
+        o.opacity = match summary {
+            _ if key.selected => 1.,
+            Some(_) => 0.6,
+            None => 0.85,
+        };
+        // A lone key is solid; the ends of a span are half filled toward it.
+        let half = (summary.is_none() && first != last && shape == "diamond")
+            .then(|| {
+                if Some(key.seconds) == first {
+                    Some("right")
+                } else if Some(key.seconds) == last {
+                    Some("left")
+                } else {
+                    None
+                }
+            })
+            .flatten();
+        o.detail = json!({"keyline":if key.selected {Some(t.colors.panel)}else{None},"keylineWidth":t.metrics.border,"half":half,"seconds":key.seconds});
         ops.push(o);
         if key.focused {
             let mut o = Op::new(

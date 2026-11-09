@@ -423,6 +423,7 @@ pub fn project_window(
                     value["kind"] = json!("layer");
                     value["layer"] = json!(id);
                     value["layerKind"] = json!(layer.kind);
+                    value["labelColor"] = json!(crate::render::Label::for_kind(&layer.kind).name());
                     value["index"] = if layer.group.is_some() {
                         Value::Null
                     } else {

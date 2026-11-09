@@ -14,7 +14,8 @@ use pm_panel_timeline::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
     rc::Rc,
     sync::Arc,
 };
@@ -125,7 +126,11 @@ struct Built {
     scene: Arc<Scene>,
     graph: Option<Arc<Graph>>,
     model: Arc<TimelineModel>,
+    /// Audio files whose waveforms the scene drew as still reading.
+    wanted: Vec<PathBuf>,
 }
+/// Audio originals by asset id, for waveforms.
+type Sources = Arc<BTreeMap<String, PathBuf>>;
 struct Press {
     origin: Point<Pixels>,
     spec: Option<Spec>,
@@ -165,6 +170,9 @@ pub struct TimelineSurface {
     /// Assets this editor's viewer cannot read: their clips show Media
     /// Offline (docs/native/design/media-offline.md).
     offline: Arc<BTreeSet<String>>,
+    sources: Sources,
+    /// Waveform files being read for this timeline.
+    reading: BTreeSet<PathBuf>,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     graph: Option<Arc<Graph>>,
@@ -222,6 +230,8 @@ impl TimelineSurface {
             queue: VecDeque::new(),
             busy: true,
             offline: Arc::new(offline),
+            sources: Default::default(),
+            reading: Default::default(),
             model: Default::default(),
             scene: None,
             graph: None,
@@ -263,6 +273,7 @@ impl TimelineSurface {
         })
         .detach();
         let offline = this.offline.clone();
+        let sources = this.sources.clone();
         cx.spawn(async move |this, cx| {
             // Indexing the document is O(layers): never on the main thread.
             let created = cx
@@ -270,7 +281,7 @@ impl TimelineSurface {
                 .spawn(async move {
                     TimelineClient::new(kernel, project, Caller::native()).map(|mut client| {
                         let _ = client.adopt_view();
-                        let built = build(&client, &tokens, offline);
+                        let built = build(&client, &tokens, offline, sources);
                         (client, built)
                     })
                 })
@@ -322,6 +333,17 @@ impl TimelineSurface {
     pub fn set_offline_media(&mut self, offline: BTreeSet<String>, cx: &mut Context<Self>) {
         if *self.offline != offline {
             self.offline = Arc::new(offline);
+            self.published(cx);
+        }
+    }
+    /// Readable audio originals by asset id: their clips draw waveforms.
+    pub fn set_audio_sources(
+        &mut self,
+        sources: BTreeMap<String, PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if *self.sources != sources {
+            self.sources = Arc::new(sources);
             self.published(cx);
         }
     }
@@ -457,13 +479,17 @@ impl TimelineSurface {
             job = self.queue.pop_front().unwrap();
         }
         self.busy = true;
-        let (tokens, offline) = (self.tokens.clone(), self.offline.clone());
+        let (tokens, offline, sources) = (
+            self.tokens.clone(),
+            self.offline.clone(),
+            self.sources.clone(),
+        );
         cx.spawn(async move |this, cx| {
             let (client, effects, built) = cx
                 .background_executor()
                 .spawn(async move {
                     let effects = run(&mut client, job).await;
-                    let built = build(&client, &tokens, offline);
+                    let built = build(&client, &tokens, offline, sources);
                     (client, effects, built)
                 })
                 .await;
@@ -491,6 +517,24 @@ impl TimelineSurface {
         let Some(built) = built else {
             return;
         };
+        for path in built.wanted {
+            if self.reading.insert(path.clone()) {
+                // Peaks are a full decode: a background task, then one rebuild.
+                cx.spawn(async move |this, cx| {
+                    let read = path.clone();
+                    let wait = cx
+                        .background_executor()
+                        .spawn(async move { crate::waveforms::read(&read) })
+                        .await;
+                    let _ = wait.recv().await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.reading.remove(&path);
+                        s.published(cx);
+                    });
+                })
+                .detach();
+            }
+        }
         self.model = built.model;
         self.scene = Some(built.scene.clone());
         // A drag maps the pointer through the graph's value range: hold it until
@@ -1605,6 +1649,8 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
 }
 struct Presenter {
     offline: Arc<BTreeSet<String>>,
+    sources: Sources,
+    wanted: RefCell<Vec<PathBuf>>,
 }
 impl ModelPresenter for Presenter {
     fn accessibility_label(&self, row: &RowId) -> String {
@@ -1614,14 +1660,7 @@ impl ModelPresenter for Presenter {
         }
     }
     fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> Label {
-        match layer.kind.as_str() {
-            "text" | "shape" => Label::Blue,
-            "video" | "image" | "sequence" => Label::Teal,
-            "audio" => Label::Green,
-            "solid" => Label::Orange,
-            "adjustment" | "effect" => Label::Violet,
-            _ => Label::Gray,
-        }
+        Label::for_kind(&layer.kind)
     }
     fn media(&self, layer: &pm_panel_timeline::Layer) -> Media {
         if layer
@@ -1633,6 +1672,26 @@ impl ModelPresenter for Presenter {
         } else {
             Media::Ready
         }
+    }
+    fn waveform(
+        &self,
+        layer: &pm_panel_timeline::Layer,
+    ) -> Option<Option<pm_panel_timeline::render::Waveform>> {
+        if layer.kind != "audio" {
+            return None;
+        }
+        let path = self.sources.get(layer.asset.as_ref()?)?;
+        Some(match crate::waveforms::lookup(path)? {
+            Some((peaks, rate)) => Some(pm_panel_timeline::render::Waveform {
+                peaks,
+                rate,
+                trim: layer.trim,
+            }),
+            None => {
+                self.wanted.borrow_mut().push(path.clone());
+                None
+            }
+        })
     }
     fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
         match key.stored.get("e").and_then(pm_model::Value::as_str) {
@@ -1653,9 +1712,14 @@ fn build(
     client: &TimelineClient,
     tokens: &Tokens,
     offline: Arc<BTreeSet<String>>,
+    sources: Sources,
 ) -> Option<Built> {
     let published: Arc<Published> = client.kernel.published(&client.project)?;
-    let presenter = Presenter { offline };
+    let presenter = Presenter {
+        offline,
+        sources,
+        wanted: Default::default(),
+    };
     let mut scene = Scene::from_model(&client.model, &presenter, tokens, 0.).ok()?;
     scene.bars = crate::render_frames::bars(client.model.index.comp_id.as_deref());
     let graph = (client.model.graph_display != GraphDisplay::DopeSheet)
@@ -1675,6 +1739,7 @@ fn build(
         scene: Arc::new(scene),
         graph: graph.map(Arc::new),
         model: Arc::new(client.model.clone()),
+        wanted: presenter.wanted.into_inner(),
     })
 }
 /// The frame the canvas prepared, and where, for the clips' accessible elements.
@@ -1867,7 +1932,66 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 },
             );
         }
-        "rect" | "rounded-rect" | "work-area-handle" | "square" => {
+        // The tactile clip chip (pm-design `clip_material`).
+        "clip" => {
+            let hex = |key: &str| op.detail[key].as_u64().unwrap_or(op.color as u64) as u32;
+            let alpha = |key: &str| op.detail[key].as_f64().unwrap_or(0.) * op.opacity;
+            let tint =
+                |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
+            let radius = px(op.radius as f32);
+            let border = op.detail["seamWidth"].as_f64().unwrap_or(1.) as f32;
+            if alpha("shadowAlpha") > 0. {
+                window.paint_drop_shadows(
+                    area,
+                    Corners::all(radius),
+                    0.,
+                    &[BoxShadow {
+                        color: tint(hex("shadow"), alpha("shadowAlpha")).into(),
+                        offset: point(px(0.), px(border * 2.)),
+                        blur_radius: px(border * 4.),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }],
+                );
+            }
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(linear_gradient(
+                        180.,
+                        linear_color_stop(tint(hex("top"), op.opacity), 0.),
+                        linear_color_stop(tint(hex("bottom"), op.opacity), 1.),
+                    ))
+                    .corner_radii(radius),
+            );
+            if alpha("highlightAlpha") > 0. && area.size.width > radius * 2. {
+                let inset = radius * 0.7;
+                window.paint_quad(
+                    PaintQuad::new(Bounds::new(
+                        point(area.origin.x + inset, area.origin.y + px(border)),
+                        size(area.size.width - inset * 2., px(border)),
+                    ))
+                    .background(tint(hex("highlight"), alpha("highlightAlpha"))),
+                );
+            }
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .border_color(tint(hex("seam"), op.opacity))
+                    .border_widths(px(border))
+                    .corner_radii(radius),
+            );
+        }
+        "square" => {
+            if let Some(keyline) = op.detail["keyline"].as_u64() {
+                let w = px(op.detail["keylineWidth"].as_f64().unwrap_or(1.) as f32);
+                window.paint_quad(
+                    PaintQuad::new(area.dilate(w))
+                        .background(rgb(keyline as u32))
+                        .corner_radii(px(1.)),
+                );
+            }
+            window.paint_quad(PaintQuad::new(area).background(color).corner_radii(px(1.)));
+        }
+        "rect" | "rounded-rect" | "work-area-handle" => {
             window.paint_quad(
                 PaintQuad::new(area)
                     .background(color)
@@ -1888,14 +2012,51 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             );
         }
         "circle" => {
+            if let Some(keyline) = op.detail["keyline"].as_u64() {
+                let grown =
+                    area.dilate(px(op.detail["keylineWidth"].as_f64().unwrap_or(1.) as f32));
+                window.paint_quad(
+                    PaintQuad::new(grown)
+                        .background(rgb(keyline as u32))
+                        .corner_radii(grown.size.width / 2.),
+                );
+            }
             window.paint_quad(
                 PaintQuad::new(area)
                     .background(color)
                     .corner_radii(area.size.width / 2.),
             );
         }
-        "diamond" | "diamond.fill" | "diamond.lefthalf.filled" | "keyframe.hold" | "marker" => {
-            diamond(area, color, window)
+        "diamond" | "diamond.fill" | "diamond.lefthalf.filled" | "keyframe.hold" => {
+            if let Some(keyline) = op.detail["keyline"].as_u64() {
+                let w = px(op.detail["keylineWidth"].as_f64().unwrap_or(1.) as f32 * 1.5);
+                diamond(area.dilate(w), rgb(keyline as u32), window);
+            }
+            match op.detail["half"].as_str() {
+                // The end of a span: an outline with the half toward the span filled.
+                Some(side) => {
+                    diamond_outline(area, color, window);
+                    half_diamond(area, side == "right", color, window);
+                }
+                None => diamond(area, color, window),
+            }
+        }
+        // A marker pin: flat top, pointed foot (v1's marker).
+        "marker" => {
+            let (l, r) = (area.origin.x, area.origin.x + area.size.width);
+            let (top, bottom) = (area.origin.y, area.origin.y + area.size.height);
+            let mid = area.center().x;
+            let shoulder = bottom - area.size.width / 2.;
+            let mut path = PathBuilder::fill();
+            path.move_to(point(l, top));
+            path.line_to(point(r, top));
+            path.line_to(point(r, shoulder));
+            path.line_to(point(mid, bottom));
+            path.line_to(point(l, shoulder));
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
         }
         // The playhead pin: a rounded top and a rounder point (the owner's demo).
         "ph-head" => {
@@ -1941,7 +2102,42 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 window.paint_path(path, color);
             }
         }
-        "text" | "waveform" => {
+        // Bars stand on the clip's floor, one point per column; while the
+        // peaks are read a hairline marks the middle (v1).
+        "waveform" => {
+            let bars = op.detail["bars"].as_array();
+            let inset = op.detail["inset"].as_f64().unwrap_or(2.) as f32;
+            let min_bar = op.detail["minBar"].as_f64().unwrap_or(1.) as f32;
+            let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
+            let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+            let room = (h - 2. * inset).max(0.);
+            match bars.filter(|b| !b.is_empty()) {
+                None => window.paint_quad(
+                    PaintQuad::new(Bounds::new(
+                        point(px(x0), px(top + (h / 2.).floor())),
+                        size(px(w), px(1.)),
+                    ))
+                    .background(color),
+                ),
+                Some(bars) => {
+                    let floor = top + h - inset;
+                    let mut path = PathBuilder::fill();
+                    path.move_to(point(px(x0), px(floor)));
+                    for (i, peak) in bars.iter().enumerate() {
+                        let bar = (peak.as_f64().unwrap_or(0.) as f32 * room).max(min_bar);
+                        let x = x0 + i as f32;
+                        path.line_to(point(px(x), px(floor - bar)));
+                        path.line_to(point(px(x + 1.), px(floor - bar)));
+                    }
+                    path.line_to(point(px(x0 + bars.len() as f32), px(floor)));
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, color);
+                    }
+                }
+            }
+        }
+        "text" => {
             let Some(text) = &op.text else {
                 return;
             };
@@ -1988,14 +2184,14 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             }
             let height = font_size * t.typography.dense_leading;
             let y = b.y + (b.height - f32::from(height) as f64) / 2.;
-            let _ = line.paint(
-                at(b.x, y.max(b.y)),
-                height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+            // Centred labels (the ruler's) keep clear of `minX`.
+            let x = if op.detail["align"] == "center" {
+                let x = b.x + (b.width - f32::from(line.width) as f64) / 2.;
+                x.max(op.detail["minX"].as_f64().unwrap_or(f64::MIN))
+            } else {
+                b.x
+            };
+            let _ = line.paint(at(x, y.max(b.y)), height, TextAlign::Left, None, window, cx);
         }
         _ => {}
     };
@@ -2037,6 +2233,33 @@ fn diamond(area: Bounds<Pixels>, color: Rgba, window: &mut Window) {
     path.line_to(point(c.x + w, c.y));
     path.line_to(point(c.x, c.y + h));
     path.line_to(point(c.x - w, c.y));
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+fn diamond_outline(area: Bounds<Pixels>, color: Rgba, window: &mut Window) {
+    let c = area.center();
+    let (w, h) = (area.size.width / 2., area.size.height / 2.);
+    let mut path = PathBuilder::stroke(px(1.));
+    path.move_to(point(c.x, c.y - h));
+    path.line_to(point(c.x + w, c.y));
+    path.line_to(point(c.x, c.y + h));
+    path.line_to(point(c.x - w, c.y));
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+/// The right (`toward_right`) or left half of a diamond, filled.
+fn half_diamond(area: Bounds<Pixels>, toward_right: bool, color: Rgba, window: &mut Window) {
+    let c = area.center();
+    let (w, h) = (area.size.width / 2., area.size.height / 2.);
+    let tip = if toward_right { c.x + w } else { c.x - w };
+    let mut path = PathBuilder::fill();
+    path.move_to(point(c.x, c.y - h));
+    path.line_to(point(tip, c.y));
+    path.line_to(point(c.x, c.y + h));
     path.close();
     if let Ok(path) = path.build() {
         window.paint_path(path, color);

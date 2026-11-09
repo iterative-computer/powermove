@@ -44,7 +44,7 @@ fn all_reviewed_paint_states_have_wire_snapshots_in_each_appearance() {
     assert_eq!(actual, expected);
 }
 #[test]
-fn selected_clips_use_label_mix_and_accent_ring_and_exact_authored_times() {
+fn selected_clips_keep_their_material_with_an_inside_accent_ring_and_exact_authored_times() {
     for scheme in [Scheme::Light, Scheme::Dark] {
         let t = Tokens::new(scheme, Accessibility::default());
         let f = scene(&t).prepare(viewport(&t), &t).unwrap();
@@ -52,11 +52,16 @@ fn selected_clips_use_label_mix_and_accent_ring_and_exact_authored_times() {
         assert_eq!(clip.detail["from"], 0.125);
         assert_eq!(clip.detail["duration"], 5.375);
         assert_eq!(clip.bounds.x, t.metrics.layer_column as f64); // sticky visible edge
-        assert_ne!(clip.color, t.colors.accent);
-        assert_ne!(clip.color, t.colors.labels.teal);
+        // The body is the label's tactile material, never an accent fill.
+        let material = t.clip_material(t.colors.labels.teal);
+        assert_eq!(clip.shape, "clip");
+        assert_eq!(clip.detail["top"], material.top);
+        assert_eq!(clip.detail["seam"], material.seam);
+        // The ring sits inside the clip's edge, so it never grows into a neighbour.
         let ring = f.ops.iter().find(|o| o.id == "clip-ring:selected").unwrap();
+        assert_eq!((ring.shape, ring.bounds), ("ring", clip.bounds));
         assert_eq!(ring.color, t.colors.accent);
-        assert_eq!(ring.stroke, t.metrics.playhead as f64);
+        assert_eq!(ring.stroke, 2. * t.metrics.border as f64);
         let content = f
             .ops
             .iter()
@@ -431,4 +436,71 @@ fn a_missing_effect_badge_keeps_its_room_and_explains_itself() {
     let tip = f.tooltip_at(x, y).unwrap();
     assert!(tip.contains("Deep Glow"), "{tip}");
     assert_eq!(f.tooltip_at(name.bounds.x + 1., y), None);
+}
+#[test]
+fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
+    let t = tokens();
+    let v = viewport(&t);
+    let mut audio = clip("a");
+    audio.label = Label::Green;
+    // 10 buckets per second; a two-second trim skips the first 20.
+    let peaks: Vec<f32> = (0..100).map(|i| if i < 20 { 1. } else { 0.25 }).collect();
+    audio.audio = Some(Some(Waveform {
+        peaks: peaks.into(),
+        rate: 10.,
+        trim: 2.,
+    }));
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let body = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+    let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
+    assert_eq!(wave.shape, "waveform");
+    assert_eq!(wave.color, t.clip_material(t.colors.labels.green).primary);
+    let bars = wave.detail["bars"].as_array().unwrap();
+    assert_eq!(bars.len(), body.bounds.width.floor() as usize);
+    assert!(
+        bars.iter().all(|b| b.as_f64() == Some(0.25)),
+        "trimmed peaks only"
+    );
+    // Still reading: no bars (the painter draws the middle hairline).
+    audio.audio = Some(None);
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
+    assert_eq!(
+        (wave.shape, wave.detail["bars"].as_array().map(Vec::len)),
+        ("waveform", Some(0))
+    );
+    // Offline audio names itself with the Offline lead instead.
+    audio.media = Media::Offline;
+    let f = scene_with(&t, audio).prepare(v, &t).unwrap();
+    let name = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
+    assert_eq!(name.shape, "text");
+    assert!(f.ops.iter().any(|o| o.id == "clip-offline:a"));
+}
+#[test]
+fn hidden_layers_draw_at_half_strength_and_keys_mark_their_span_ends() {
+    let t = tokens();
+    let mut c = clip("h");
+    c.hidden = true;
+    let f = scene_with(&t, c).prepare(viewport(&t), &t).unwrap();
+    assert_eq!(
+        f.ops.iter().find(|o| o.id == "clip:h").unwrap().opacity,
+        0.5
+    );
+    let f = scene(&t).prepare(viewport(&t), &t).unwrap();
+    let half: Vec<_> = f
+        .ops
+        .iter()
+        .filter(|o| o.id.starts_with("key:") && !o.detail["half"].is_null())
+        .map(|o| o.detail["half"].as_str().unwrap())
+        .collect();
+    // Each property's first key (linear) opens its span; its last is a hold
+    // square, which keeps its own shape.
+    assert!(
+        !half.is_empty() && half.iter().all(|h| *h == "right"),
+        "{half:?}"
+    );
+    assert!(
+        f.ops.iter().any(|o| o.shape == "square"),
+        "hold keys are squares"
+    );
 }

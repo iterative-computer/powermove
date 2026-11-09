@@ -518,7 +518,7 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
           {row.label}
         </text>
       </div>
-      <div style={line}>
+      <div style={{ ...line, paddingRight: t("metrics.gap") }}>
         {row.numeric && row.scaleLinked === undefined ? (
           <UI.NumberField
             id={`timeline:value:${row.id}`}
