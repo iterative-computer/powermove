@@ -31,3 +31,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [[test]]
 name = "child_windows"
 harness = false
+[[test]]
+name = "child_windows_gpui"
+harness = false

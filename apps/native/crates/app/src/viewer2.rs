@@ -555,7 +555,7 @@ impl Popout {
                 v.origin.y,
             ));
         }
-        window.makeKeyAndOrderFront(None);
+        gpui_macos::child_window::present(&window, true);
         view.fit();
         Ok((
             Self {

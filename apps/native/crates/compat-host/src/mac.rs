@@ -347,7 +347,13 @@ impl Bridge {
                 parent.addChildWindow_ordered(&window, NSWindowOrderingMode::Above);
             }
         }
-        window.makeKeyAndOrderFront(None);
+        // An extension can open one while another app is in front: it comes
+        // forward only while Powermove is active, else it waits behind.
+        if NSApplication::sharedApplication(self.mtm()).isActive() {
+            window.makeKeyAndOrderFront(None);
+        } else {
+            window.orderBack(None);
+        }
         s.popouts.borrow_mut().push((window, child.clone()));
         s.handler.event(HostEvent::PopoutOpened);
         Some(child)

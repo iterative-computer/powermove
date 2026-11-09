@@ -40,7 +40,9 @@ impl Controller {
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
                 Outbound::Opened { reply, name, file } => v.adopt_reply(*reply, name, file, cx),
-                Outbound::Focus => v.host.borrow().window.makeKeyAndOrderFront(None),
+                Outbound::Focus => {
+                    gpui_macos::child_window::raise_if_active(&v.host.borrow().window)
+                }
                 Outbound::FocusProject(id) => v.focus_project(&id, cx),
                 Outbound::Message(text) => {
                     v.message = text;

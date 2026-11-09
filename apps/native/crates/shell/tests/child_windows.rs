@@ -5,7 +5,9 @@
 //! with activation prohibited and never orders a window on screen.
 #[cfg(target_os = "macos")]
 fn main() {
-    use gpui_macos::child_window::{apply, follows_policy, forget, is_pending, show, show_pending};
+    use gpui_macos::child_window::{
+        apply, attach, follows_policy, forget, is_pending, show, show_pending,
+    };
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorPanel, NSPanel,
@@ -73,6 +75,32 @@ fn main() {
     colours.setFloatingPanel(false);
     check("colour panel", &colours);
 
+    // Attaching to the window that asked keeps the policy (AppKit resets a
+    // child's hiding and Spaces behaviour), and a shared window moves.
+    let parent = window(NSWindowStyleMask::Titled);
+    let other = window(NSWindowStyleMask::Titled);
+    let child = panel(NSWindowStyleMask::Borderless);
+    apply(&child);
+    attach(&child, &parent);
+    assert!(follows_policy(&child), "an attached child keeps the policy");
+    assert!(
+        child
+            .parentWindow()
+            .is_some_and(|p| std::ptr::eq(&*p, &*parent))
+    );
+    attach(&child, &other);
+    assert!(follows_policy(&child));
+    assert!(
+        child
+            .parentWindow()
+            .is_some_and(|p| std::ptr::eq(&*p, &*other))
+    );
+    assert!(
+        parent.childWindows().is_none_or(|c| c.is_empty()),
+        "moved, not copied"
+    );
+    assert!(!child.isVisible() && !parent.isVisible() && !other.isVisible());
+
     // Shown while the app is inactive (this process can't be active): the
     // window waits off screen; a hide forgets it; activation shows it.
     assert!(!app.isActive());
@@ -95,6 +123,43 @@ fn main() {
     assert!(waiting.isVisible(), "it shows once the app is active");
     waiting.orderOut(None);
     assert!(!waiting.isVisible());
+
+    // Nothing orders a window front directly: every show goes through
+    // child_window (active-only for child windows, behind other apps while
+    // the app is inactive for the rest).
+    for (name, source) in [
+        (
+            "gpui_macos window",
+            include_str!("../../../vendor/gpui-ce/crates/gpui_macos/src/window.rs"),
+        ),
+        ("shell native", include_str!("../src/native.rs")),
+        ("app builtins", include_str!("../../app/src/builtins.rs")),
+        ("app session", include_str!("../../app/src/session.rs")),
+        (
+            "app surface routes",
+            include_str!("../../app/src/surface_routes.rs"),
+        ),
+        (
+            "app viewer popout",
+            include_str!("../../app/src/viewer2.rs"),
+        ),
+        (
+            "app colour panel",
+            include_str!("../../app/src/colour_panel.rs"),
+        ),
+    ] {
+        for banned in [
+            "makeKeyAndOrderFront",
+            "orderFront:",
+            "orderFront(",
+            "orderFrontRegardless",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "{name} orders a window front with {banned}"
+            );
+        }
+    }
 
     // The creation sites use the policy and nothing sets a global level.
     let sources = [
@@ -123,7 +188,7 @@ fn main() {
             "{name} applies the policy"
         );
         assert!(
-            source.contains("child_window::show("),
+            source.contains("child_window::show(") || source.contains("child_window::present("),
             "{name} shows only while the app is active"
         );
     }
@@ -132,5 +197,6 @@ fn main() {
         sources.len()
     );
 }
+
 #[cfg(not(target_os = "macos"))]
 fn main() {}

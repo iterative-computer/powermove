@@ -477,7 +477,7 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         return false;
     }
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
-    window.makeKeyAndOrderFront(None);
+    gpui_macos::child_window::present(window, true);
     // A group of two or more must show its tab bar. AppKit can leave it hidden
     // (unified-compact toolbars, windows grouped before they were on screen).
     unsafe {
