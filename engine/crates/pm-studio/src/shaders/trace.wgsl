@@ -1031,8 +1031,9 @@ fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
 
 // ── Subsurface random walk ──
 // Inside the object, light travels an exponential distance (mean = the
-// material's radius) between isotropic scatters, each tinted by the base
-// color, until it reaches the surface again. Returns the exit point (w = 1)
+// material's radius) between conservative isotropic scatters until it reaches
+// the surface again. The boundary lobe applies base tint once on exit; this
+// is not an absorptive, albedo-calibrated BSSRDF. Returns the exit point (w = 1)
 // and leaves its outward normal in `exit_n`; w = 0 when it never leaves.
 var<private> exit_n: vec3f;
 fn random_walk(start: vec3f, dir0: vec3f, m: Material) -> vec4f {
@@ -1462,7 +1463,7 @@ fn path(px: vec2f) -> Sample {
     if (primary) { s.normal = n; s.depth = select(distance(sf.p,P.cam_pos.xyz), dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz), (P.opts.w & 1u)!=0u); s.object = sf.object + 1u; }
     let v = -rd;
     var nv = max(dot(n, v), 1e-4);
-    // Emission originates below the coat and loses its reflected share on exit.
+    // Emission originates below the reflective layers and loses their exiting share.
     if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
       let sheen_exit=clamp(m.layers.x*sheen_energy(m.spec.x,nv)/sheen_normalization(m.spec.x),0.,1.);
       let emitted = m.emit.xyz * (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * (1.-sheen_exit);
