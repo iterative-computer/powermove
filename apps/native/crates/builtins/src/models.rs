@@ -897,7 +897,19 @@ impl Backend {
                 "preset",
                 "presetName"
             ]))?;
-            let saved = self.kernel.state().settings.get("exportOpts").map(wire);
+            let mut saved = self.kernel.state().settings.get("exportOpts").map(wire);
+            // A project's own export defaults (Settings ▸ Project) open the sheet,
+            // as in v1; other options keep the last export's.
+            if root.get("exportDefaults").is_some() {
+                let defaults = self.export_defaults(root, fps);
+                let mut options = saved.clone().filter(|v| crate::delivery::options(v).is_ok()).unwrap_or_else(|| json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+                for key in [
+                    "format", "scale", "fps", "range", "quality", "mblur", "audio", "alpha",
+                ] {
+                    options[key] = defaults[key].clone();
+                }
+                saved = Some(options);
+            }
             let options=saved.filter(|v|crate::delivery::options(v).is_ok()).unwrap_or_else(||json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
             self.native.export = json!({"version":1,"sequence":1,"project":null,"options":options,"bindings":fields,"presets":[],"capabilities":{},"run":{"phase":"idle"}});
         }

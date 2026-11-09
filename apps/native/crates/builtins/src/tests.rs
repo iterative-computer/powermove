@@ -2544,3 +2544,102 @@ fn project_size_offers_the_shipped_presets_and_writes_width_and_height() {
     assert_eq!(find("project.width")["value"], json!(1280.0));
     assert_eq!(find("project.height")["value"], json!(720.0));
 }
+
+/// Settings ▸ Project ▸ Export defaults: real controls that write the project's
+/// `exportDefaults` through the kernel (one undo), and open the Export sheet.
+#[test]
+fn export_defaults_rows_write_the_project_and_open_the_export_sheet() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings-export".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "settings", false).unwrap();
+    let row = |p: &Value, id: &str| {
+        p["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("{id}"))
+            .clone()
+    };
+    let publication = backend.settings_snapshot().unwrap();
+    for id in [
+        "project.format",
+        "project.resolution",
+        "project.export-fps",
+        "project.range",
+        "project.quality",
+        "project.motion-blur",
+        "project.audio",
+        "project.alpha",
+    ] {
+        let r = row(&publication, id);
+        assert_eq!(r["group"], "Export defaults");
+        assert!(r["binding"].is_string(), "{id} has a control binding");
+        if r["control"] == "choice" {
+            assert!(
+                !r["options"].as_array().unwrap().is_empty(),
+                "{id} offers choices"
+            );
+        }
+    }
+    assert_eq!(row(&publication, "project.format")["value"], "mp4");
+    // An MP4 has no alpha: the row stays, dimmed.
+    assert_eq!(row(&publication, "project.alpha")["disabled"], true);
+    for (id, value) in [
+        ("project.format", json!("gif")),
+        ("project.audio", json!("yes")),
+    ] {
+        assert!(backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":id,"value":value}})).is_err());
+    }
+    let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.format","value":"prores"}})).unwrap() else { panic!("actor request") };
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let stored = |kernel: &pm_kernel::KernelHandle| {
+        kernel
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .get("exportDefaults")
+            .map(|n| n.to_value())
+    };
+    let defaults = stored(&kernel).expect("exportDefaults written");
+    assert_eq!(
+        defaults.get("format"),
+        Some(&pm_model::Value::from("prores"))
+    );
+    let publication = backend.settings_snapshot().unwrap();
+    assert_eq!(row(&publication, "project.format")["value"], "prores");
+    assert_eq!(row(&publication, "project.alpha")["disabled"], false);
+    // The Export sheet opens with the project's defaults.
+    let mut sheet = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "export-defaults".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "export",
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        sheet.export_snapshot().unwrap()["options"]["format"],
+        "prores"
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored(&kernel), None, "one undo restores the project");
+}
