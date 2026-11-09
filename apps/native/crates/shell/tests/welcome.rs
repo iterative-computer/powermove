@@ -1,6 +1,6 @@
 #![cfg(target_os = "macos")]
 //! The Welcome window under real input events, through GPUI's test window.
-use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px};
+use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_shell::{
     welcome::{Button, Choice, Frame, Row, Severity},
@@ -90,13 +90,18 @@ fn a_held_return_acts_once() {
 fn the_animation_starts_from_its_top_when_it_comes_into_view() {
     let mut cx = TestAppContext::single();
     let (view, cx, _) = open(&mut cx, frame());
-    view.update(cx, |view, _| view.clock = None);
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    assert!(view.read_with(cx, |view, _| view.time()) >= 0.06);
+    let time = |cx: &mut VisualTestContext| view.read_with(cx, |view, _| view.time());
+    view.update(cx, |view, _| view.clock = Some(12.));
+    assert_eq!(time(cx), 12.);
     let mut animated = frame();
     animated.animate = true;
-    view.update(cx, |view, cx| view.set_frame(animated, cx));
-    assert!(view.read_with(cx, |view, _| view.time()) < 0.06);
+    view.update(cx, |view, cx| view.set_frame(animated.clone(), cx));
+    assert_eq!(time(cx), 0.);
+    view.update(cx, |view, cx| {
+        view.clock = Some(14.5);
+        view.set_frame(animated, cx);
+    });
+    assert_eq!(time(cx), 2.5, "an animation already in view keeps playing");
 }
 #[test]
 fn the_leading_button_and_back_are_separate_actions() {
@@ -151,12 +156,20 @@ fn the_animation_never_blocks_the_buttons_and_reduce_motion_skips_it() {
     let (view, cx, log) = open(&mut cx, animated);
     click(cx, "welcome-continue");
     assert_eq!(*log.borrow(), ["continue"]);
+    assert!(cx.debug_bounds("welcome-mark").is_some());
     view.update(cx, |view, cx| {
         view.tokens.accessibility.reduce_motion = true;
         cx.notify();
     });
-    cx.run_until_parked();
-    let at = point(px(4.), px(4.));
-    cx.simulate_mouse_move(at, None, Modifiers::default());
-    cx.run_until_parked();
+    for clock in [1., 5.] {
+        view.update(cx, |view, cx| {
+            view.clock = Some(clock);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("welcome-mark").is_none(), "at {clock}s");
+        assert!(cx.debug_bounds("welcome-title").is_some());
+    }
+    click(cx, "welcome-continue");
+    assert_eq!(*log.borrow(), ["continue", "continue"]);
 }
