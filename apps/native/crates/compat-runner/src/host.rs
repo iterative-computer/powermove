@@ -48,6 +48,10 @@ const MAX_RESTARTS: usize = 2;
 const PAGE_QUEUE: usize = 256;
 /// How often an idle owner looks for extensions changed on disk.
 const DISK_POLL: Duration = Duration::from_secs(3);
+/// How long a synchronous layout read waits for the page, and for a page
+/// that has not started reading yet.
+const SYNC_LAYOUT_WAIT: Duration = Duration::from_millis(250);
+const SYNC_LAYOUT_FIRST_WAIT: Duration = Duration::from_secs(3);
 /// Realm sources the owner holds while the realm's queue is full.
 const MAX_DEFERRED: usize = 4096;
 const TIME_MOVED: u8 = 1;
@@ -98,7 +102,7 @@ enum Input {
     /// `{needs, ask}`.
     Rasters(u64, Value),
     /// An export's frozen project (realized wire JSON), for its overrides.
-    Pin(String, String),
+    Pin(String, u64),
     /// The shell's tool and the viewer's navigation, for built-in services.
     Shell(Value),
     Menu(String, Value, u64),
@@ -209,6 +213,10 @@ struct Events {
     inbox: Sender<Input>,
     /// The extension whose activation is on the stack, for failure attribution.
     activating: Mutex<Option<String>>,
+    /// A synchronous layout read waiting for the page's answer to its request.
+    measuring: Mutex<Option<(u64, std::sync::mpsc::SyncSender<Value>)>>,
+    /// A read already waited for a page that never started reading.
+    page_missed: AtomicBool,
     dom_pending: AtomicBool,
     canvas_pending: AtomicBool,
 }
@@ -257,6 +265,31 @@ impl RealmEvents for Arc<Events> {
         let _ = self
             .inbox
             .send(Input::Unresponsive(self.writer.generation, execution));
+    }
+    /// The owner routes the page's answer here (`Owner::page`) while the
+    /// realm waits; the main thread never waits for it.
+    fn measure_sync(&self, request: u64) -> Option<Value> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        *self.measuring.lock().unwrap() = Some((request, tx));
+        self.dom_ready();
+        // A page still loading (the window just opened) answers once it
+        // starts reading; a read answered with nothing would be remembered
+        // by the extension as the layout.
+        // Without a window (headless) no page ever comes: only one read waits.
+        let reading =
+            self.shared.reader.load(Ordering::Acquire) == u64::from(self.writer.generation);
+        let first = !reading && !self.page_missed.load(Ordering::Acquire);
+        let wait = if first {
+            SYNC_LAYOUT_FIRST_WAIT
+        } else {
+            SYNC_LAYOUT_WAIT
+        };
+        let answer = rx.recv_timeout(wait).ok();
+        if first && answer.is_none() {
+            self.page_missed.store(true, Ordering::Release);
+        }
+        self.measuring.lock().unwrap().take();
+        answer
     }
 }
 
@@ -344,12 +377,14 @@ impl RasterInbox {
     }
     /// An export's frozen project, from its canonical document text, as the
     /// realm's mirror shows a project. Call off the main thread.
-    pub fn pin(&self, job: &str, document: &str) -> std::result::Result<(), String> {
-        let project = crate::adapter::realized_wire(document)?;
+    /// An export froze its project at `revision`: the realm answers its
+    /// layers from the live project while it is at that revision, and asks
+    /// for the frozen layer otherwise (`RasterHooks::pinned_layer`).
+    pub fn pin(&self, job: &str, revision: u64) -> std::result::Result<(), String> {
         self.inbox
             .lock()
             .unwrap()
-            .send(Input::Pin(job.to_owned(), project))
+            .send(Input::Pin(job.to_owned(), revision))
             .map_err(|_| "The project's extensions stopped".to_owned())
     }
 }
@@ -881,12 +916,8 @@ impl Owner {
                     wire["needs"]
                 ));
             }
-            Input::Pin(job, project) => {
-                self.eval(&format!(
-                    "__compat.pinProject({},JSON.parse({}))",
-                    json!(job),
-                    json!(project)
-                ));
+            Input::Pin(job, revision) => {
+                self.eval(&format!("__compat.pinProject({},{revision})", json!(job)));
             }
             Input::Menu(location, context, key) => {
                 self.eval(&format!(
@@ -1146,6 +1177,15 @@ impl Owner {
             return;
         }
         for message in delivered.0 {
+            // A synchronous layout read is waiting for this answer: it goes to
+            // the blocked realm directly (and through its queue as usual).
+            if message["kind"] == "layout"
+                && let (Some(request), Some(live)) = (message["request"].as_u64(), &self.realm)
+                && let Some((waiting, reply)) = &*live.events.measuring.lock().unwrap()
+                && *waiting == request
+            {
+                let _ = reply.try_send(message.clone());
+            }
             self.eval(&format!(
                 "__compat.dom.receive({message});__compat.dom.flush()"
             ));
@@ -1504,6 +1544,8 @@ impl Owner {
             writer: self.writer,
             inbox: self.inbox.clone(),
             activating: Mutex::default(),
+            measuring: Mutex::default(),
+            page_missed: AtomicBool::new(false),
             dom_pending: AtomicBool::new(false),
             canvas_pending: AtomicBool::new(false),
         });

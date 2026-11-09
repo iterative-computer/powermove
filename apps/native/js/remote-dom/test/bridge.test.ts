@@ -4,7 +4,7 @@ import { RemoteDOM } from '../src/shim';
 import { RemoteEvent } from '../src/events';
 import { PageApplier } from '../src/applier';
 import { JSDOM } from 'jsdom';
-import type { Batch } from '../src/protocol';
+import type { Batch, PageMessage } from '../src/protocol';
 
 describe('remote DOM mirror and real-document applier', () => {
   test('innerHTML applies browser DOMString coercion before parsing', () => {
@@ -196,6 +196,66 @@ describe('remote DOM mirror and real-document applier', () => {
     expect(h.shim.computedStyle(node).color).toBe('rgb(255, 0, 0)');
     expect(h.errors).toEqual([]);
     h.close();
+  });
+  test('a layout read the page has not measured waits for the page, as a forced layout', async () => {
+    const page = new JSDOM('<!doctype html><html><head></head><body></body></html>');
+    const replies: PageMessage[] = [];
+    let asked = 0,
+      answer = true;
+    const shim: RemoteDOM = new RemoteDOM({
+      session: { panel: 'fixture', generation: 1 },
+      // The host hands batches to the page and routes its answer back.
+      send(batch) {
+        applier.apply(structuredClone(batch));
+        return true;
+      },
+      measureSync(request) {
+        asked++;
+        const reply = replies.find((m) => m.kind === 'layout' && m.request === request);
+        return answer ? (reply ?? null) : null;
+      }
+    });
+    const applier = new PageApplier({
+      document: page.window.document,
+      session: shim.session,
+      send: (message) => replies.push(structuredClone(message))
+    });
+    const caret = shim.document.createElement('span');
+    shim.document.body.append(caret);
+    shim.flush();
+    const real = applier.node(shim.id(caret)) as HTMLElement;
+    let left = 30;
+    real.getBoundingClientRect = () =>
+      ({ x: left, y: 4, width: 2, height: 18, left, top: 4, right: left + 2, bottom: 22 }) as DOMRect;
+    let resized = 0;
+    new shim.window.ResizeObserver(() => resized++).observe(caret);
+    // Fresh without waiting for a page round trip in another task.
+    expect(caret.getBoundingClientRect().left).toBe(30);
+    expect(asked).toBe(1);
+    // Unchanged document: the measured layout is current, nothing is asked.
+    expect(caret.getBoundingClientRect().left).toBe(30);
+    expect(asked).toBe(1);
+    // A change in the document makes the next read measure again.
+    left = 44;
+    caret.textContent = 'x';
+    expect(caret.getBoundingClientRect().left).toBe(44);
+    expect(asked).toBe(2);
+    // Observers hear about it after the task, never inside the read.
+    expect(resized).toBe(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resized).toBe(1);
+    // A page that doesn't answer leaves the cached layout, and reads stop
+    // waiting for a moment.
+    answer = false;
+    caret.textContent = 'xy';
+    expect(caret.getBoundingClientRect().left).toBe(44);
+    caret.textContent = 'xyz';
+    expect(caret.getBoundingClientRect().left).toBe(44);
+    expect(asked).toBe(3);
+    shim.dispose();
+    applier.dispose();
+    page.window.close();
   });
   test('scroll commands and resize observation use asynchronous page snapshots', async () => {
     const h = harness(),

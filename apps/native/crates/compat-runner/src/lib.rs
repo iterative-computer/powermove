@@ -196,7 +196,14 @@ pub struct RasterHooks {
     /// Whether a `raster` override is registered, and the generation of
     /// wrappers answering (it changes whenever they do).
     pub producing: Arc<dyn Fn(bool, u64) + Send + Sync>,
+    /// One layer of an export's frozen project (`job`, composition, layer
+    /// id), read from the document the export pinned: the realm never holds
+    /// a second copy of a project.
+    pub pinned_layer: PinnedLayer,
 }
+/// `(job, composition, layer)` → that layer of the export's frozen project.
+pub type PinnedLayer =
+    Arc<dyn Fn(&str, &str, &str) -> std::result::Result<Option<Value>, String> + Send + Sync>;
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
     Arc<dyn Fn(&FrameRequest) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
@@ -456,6 +463,20 @@ mod tests {
         let pixels=runner.json("(()=>{const a=__compat.realm.createCanvas(2,2),b=__compat.realm.createCanvas(2,2); const c=a.getContext('2d');c.fillStyle='#ff0000';c.fillRect(0,0,2,2); b.getContext('2d').drawImage(a,0,0);a.width=4;a.dispose();return b.getContext('2d').getImageData(0,0,1,1).data})()").unwrap();
         assert_eq!(pixels, json!([255, 0, 0, 255]));
     }
+    /// `roundRect` (the Typewriter cursor): corners are cut, the middle filled.
+    #[test]
+    fn round_rects_draw_with_their_radii() {
+        let runner = runner();
+        let pixels = runner
+            .json(
+                "(()=>{const c=__compat.realm.createCanvas(20,20).getContext('2d');
+            c.fillStyle='#00ff00';c.beginPath();c.roundRect(0,0,20,20,[8]);c.fill();
+            c.beginPath();c.roundRect(0,0,4,4,{x:1,y:1});c.roundRect(0,0,4,4);
+            const p=c.getImageData(0,0,20,20).data;return [p[3],p[(10*20+10)*4+1]]})()",
+            )
+            .unwrap();
+        assert_eq!(pixels, json!([0, 255]));
+    }
     #[test]
     fn a_failing_prelude_refuses_the_realm() {
         assert!(CompatRunner::with_prelude(&initial(), "throw Error('synthetic')").is_err());
@@ -619,6 +640,11 @@ mod tests {
         let producing = Arc::new(std::sync::Mutex::new(vec![]));
         let (p, a, o) = (painted.clone(), answered.clone(), producing.clone());
         runner.host.set_rasters(Some(crate::RasterHooks {
+            // The export froze `t1` before an edit.
+            pinned_layer: Arc::new(|job, _, layer| {
+                Ok((job == "job-1" && layer == "t1")
+                    .then(|| json!({"id":"t1","type":"text","name":"T1","d":{"text":"frozen"}})))
+            }),
             base: Arc::new(move |request: crate::BaseRasterRequest| {
                 p.lock().unwrap().push(json!([
                     request.layer,
@@ -812,7 +838,7 @@ mod tests {
         // The export froze the project before the edit.
         runner
             .eval(&format!(
-                "__compat.pinProject('job-1',{{layers:[{{id:'t1',type:'text',name:'T1',d:{{text:'frozen'}}}}]}});
+                "__compat.pinProject('job-1',-1);
                  __compat.answerRasters(1,[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'job-1',epoch:{epoch}}});
                  globalThis.out=globalThis.seen.slice()"
             ))

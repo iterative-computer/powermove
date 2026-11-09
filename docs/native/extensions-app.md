@@ -175,8 +175,11 @@ window is open is shown in it.
   until an edit or new wrappers; an export fails with the extension's message).
   Answers are per document (kernel `doc_id`) and per wrapper generation (any
   registration, removal or `PM.raster` change forgets them). An export pins its
-  frozen snapshot: the realm answers from that project (base rasters paint from that
-  document) and fails the export if its wrappers change mid-run. A capture
+  frozen snapshot: the realm reads the live project while it is at the frozen
+  revision and each frozen layer from the app's pinned document once it moves on
+  (`compat.pinnedLayer`; the realm never holds a second copy of a project, which
+  aborted the app on a 238 MB project); base rasters paint from that document, and
+  the export fails if its wrappers change mid-run. A capture
   (`renderFrameTo`, snapshot) of the realm's own project answers the overrides it
   needs inline while the realm waits (`render.continue`). Cancelling an export or
   closing its window ends any wait at once; pixel files carry the job id. Override
@@ -213,7 +216,7 @@ window is open is shown in it.
   gathers both `layer:context` and its surface's location (`kind: "layer"`).
 - Contributed layer types render and label their timeline row, but their parameters
   have no Properties rows until per-kind controls are designed.
-- Layout reads in the realm are cached from the last page report (`remote-dom.md`).
+- Layout reads are synchronous (`remote-dom.md`); the page has the system fonts only, so text a hidden element measures in a project font (`PM.Fonts`) measures in a fallback.
 - A v4 extension adds a panel, replaces a whole built-in panel, and registers
   palette commands with shortcuts (`commands.register`). It cannot yet slot into
   part of another panel (a viewer overlay or timeline column without a fork), add

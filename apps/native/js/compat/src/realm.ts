@@ -823,27 +823,37 @@ export class CompatRealm {
   rasterContext: { composition?: string; job?: string; layer?: object } | null = null;
   /** Layers of the frozen projects exports read (see `pinProject`). */
   private pinnedLayers = new WeakSet<object>();
-  private pins = new Map<string, Data>();
+  /** Each running export's frozen revision, and the frozen layers it read. */
+  private pins = new Map<string, { revision: number; layers: Map<string, object | null> }>();
   /**
-   * An export's project as its snapshot froze it: the overrides answering its
-   * frames read these layers, so edits made while it runs never reach it.
-   * The few most recent jobs are kept.
+   * An export froze the project at `revision`: the overrides answering its
+   * frames read the live project while it is at that revision, and the
+   * frozen layer (from the document the export pinned, one layer at a time)
+   * once it moves on, so edits made while it runs never reach it and no
+   * second copy of a project is ever held here. The few most recent jobs
+   * are kept.
    */
-  pinProject(job: string, project: Data): void {
-    const walk = (layers: unknown) => {
-      for (const layer of Array.isArray(layers) ? layers : [])
-        if (layer && typeof layer === "object") this.pinnedLayers.add(layer);
-    };
-    walk(project?.layers);
-    const comps = project?.comps;
-    for (const comp of Array.isArray(comps) ? comps : Object.values(comps ?? {}))
-      walk((comp as Data)?.layers);
+  pinProject(job: string, revision: number): void {
     this.pins.delete(job);
-    this.pins.set(job, project);
+    this.pins.set(job, { revision, layers: new Map() });
     while (this.pins.size > PINNED_PROJECTS) this.pins.delete(this.pins.keys().next().value!);
   }
-  pinnedProject(job: string): Data | undefined {
-    return this.pins.get(job);
+  /** The revision an export froze; `undefined`: the job is not pinned. */
+  pinnedRevision(job: string): number | undefined {
+    return this.pins.get(job)?.revision;
+  }
+  /** A frozen layer of an export, read once through `fetch` (the host). */
+  frozenLayer(job: string, composition: string, id: string, fetch: () => unknown): object | null {
+    const pin = this.pins.get(job);
+    if (!pin) return null;
+    const key = `${composition}\u0000${id}`;
+    if (!pin.layers.has(key)) {
+      const layer = fetch();
+      const own = layer && typeof layer === "object" ? (layer as object) : null;
+      if (own) this.pinnedLayers.add(own);
+      pin.layers.set(key, own);
+    }
+    return pin.layers.get(key) ?? null;
   }
   /**
    * Whether `value` is the base raster of exactly `need`'s layer, frame, scale

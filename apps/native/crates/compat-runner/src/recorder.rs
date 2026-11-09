@@ -46,6 +46,12 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn activating(&self, _id: Option<&str>) {}
     /// A task has run past the watchdog's limit; the user decides (D11).
     fn unresponsive(&self, _execution: u64) {}
+    /// A synchronous layout read: the page's `layout` answer to measure
+    /// `request` (already sent with the realm's last batch), or `None` when
+    /// the page doesn't answer in time. Blocks the realm's worker only.
+    fn measure_sync(&self, _request: u64) -> Option<Value> {
+        None
+    }
 }
 pub struct NoEvents;
 impl RealmEvents for NoEvents {}
@@ -1081,6 +1087,38 @@ impl NativeHost {
                 );
                 Value::Null
             }
+            ("recorder.command", "roundRect") => {
+                // Radii: a number, a DOMPointInit, or a list of 1–4 of them
+                // (omitted: 0), as the HTML spec reads them.
+                let corner = |value: &Value| -> Result<Vec2> {
+                    match value {
+                        Value::Number(n) => {
+                            let r = n.as_f64().unwrap_or(f64::NAN);
+                            Ok(Vec2::new(r, r))
+                        }
+                        Value::Object(point) => {
+                            let axis = |key| point.get(key).and_then(Value::as_f64).unwrap_or(0.);
+                            Ok(Vec2::new(axis("x"), axis("y")))
+                        }
+                        _ => Err(Error::Invalid("roundRect radius")),
+                    }
+                };
+                let radii = match values.get(4) {
+                    None | Some(Value::Null) => vec![Vec2::ZERO],
+                    Some(Value::Array(list)) => list.iter().map(corner).collect::<Result<_>>()?,
+                    Some(value) => vec![corner(value)?],
+                };
+                canvas
+                    .round_rect(
+                        num(values, 0)?,
+                        num(values, 1)?,
+                        num(values, 2)?,
+                        num(values, 3)?,
+                        &radii,
+                    )
+                    .map_err(host_error)?;
+                Value::Null
+            }
             ("recorder.command", "fillRect" | "strokeRect" | "clearRect") => {
                 let (x, y, w, h) = (
                     num(values, 0)?,
@@ -1439,6 +1477,16 @@ impl EngineProxy for NativeHost {
                 return Ok(Value::Null);
             }
             "compat.answers" => return self.raster_answers(input),
+            "compat.pinnedLayer" => {
+                let hooks = self.rasters.lock().unwrap().clone();
+                let Some(hooks) = hooks else {
+                    return Ok(Value::Null);
+                };
+                let text = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
+                return (hooks.pinned_layer)(&text("job"), &text("composition"), &text("layer"))
+                    .map(Option::unwrap_or_default)
+                    .map_err(Error::Host);
+            }
             "extension.health" => {
                 self.events
                     .health(input["id"].as_str().unwrap_or_default(), &input["health"]);
@@ -1490,6 +1538,12 @@ impl EngineProxy for NativeHost {
                 return Ok(Value::Null);
             }
             _ => (),
+        }
+        if operation == "dom.measureSync" {
+            let request = input["request"]
+                .as_u64()
+                .ok_or(Error::Invalid("measure request"))?;
+            return Ok(self.events.measure_sync(request).unwrap_or(Value::Null));
         }
         if operation == "dom.batch" {
             let mut state = self.state.lock().unwrap();

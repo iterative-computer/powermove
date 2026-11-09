@@ -135,16 +135,17 @@ Two important compatibility boundaries remain explicit:
    clipboard, focus or IME. There is no generic default-action replay here. N4/N6
    keep these cases as cutover blockers; the host may not silently select a policy
    and declare all old panels compatible.
-2. **Fresh synchronous layout is unavailable across the asynchronous boundary.**
-   `getBoundingClientRect`, client/scroll dimensions and getComputedStyle return
-   the latest snapshot and request refresh; the initial rectangle is zero and
-   initial computed properties are empty. `layoutStatus(node)` exposes the cached
-   applied revision/staleness. `await measure(node, styles)` resolves from an
-   explicitly requested page snapshot. Replies older than current application
-   state cannot replace newer data. This implements the requested async-but-cached
-   design, not an assertion that immediate post-write layout matches a browser's
-   forced synchronous layout. Existing callers that depend on that freshness need
-   a proven host/measurement strategy before cutover.
+2. **Layout reads are synchronous, as a browser's forced layout.**
+   `getBoundingClientRect`, client/scroll dimensions and getComputedStyle (per
+   property, when read) return the page's layout as of the current document: a
+   read the page has not measured since the document changed sends the pending
+   changes with a measure request and the realm's worker waits (250 ms; 3 s for a
+   page still loading) for the page's answer, which the host routes straight to
+   the waiting realm (`measureSync`, `dom.measureSync`). The main thread never
+   waits. Unchanged documents read the cache without a round trip; an unanswered
+   read keeps the cache and reads stop waiting for a second. Resize observers hear
+   about a change once, after the task that found it. `layoutStatus(node)` and
+   `await measure(node, styles)` remain.
 
 The basic Range/Selection adapter supports text selection, collapse, anchor/focus,
 selectAllChildren, range endpoints/cloning and contextual fragments. It is not

@@ -153,6 +153,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Code-cache keys hash the V8 version, snapshot and flags once per isolate (was: the whole snapshot on every eval).
 - The D11 watchdog counts JavaScript time only (engine and kernel calls excluded) and names the extension innermost on the stack; Stop turns that extension off, whatever task hung.
 - Quit while an extension isn't responding stops that window's realm without a restart and quits; the app handles the Quit Apple Event itself because AppKit drops it while a sheet is attached.
+- Realm layout reads are synchronous: the realm's worker waits (bounded) for the page's measurement of the current document; the trusted page exists whenever the trusted realm runs, not only when a panel shows.
+- An export's frozen project stays in Rust; the realm reads it one layer at a time (`RasterHooks::pinned_layer`, additive in compat-runner).
 
 ## Extension authoring (moat lane, 2026-11-07)
 

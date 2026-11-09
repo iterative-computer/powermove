@@ -408,6 +408,14 @@ impl Controller {
         for request in host.take_requests() {
             self.extension_request(request, cx);
         }
+        // The trusted realm's document gets its page as soon as the realm
+        // starts, not only when a panel shows: hidden elements extensions
+        // measure (a caret, a label) need real layout (plan 3.5.2).
+        let trusted_page = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0)
+            && !self.extensions.pages.contains_key("");
+        if trusted_page {
+            self.ensure_page("", cx);
+        }
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
             self.mount_surfaces(cx);
