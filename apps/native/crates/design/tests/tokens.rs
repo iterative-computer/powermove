@@ -115,3 +115,20 @@ fn clip_names_read_on_every_label_material() {
     }
     assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
 }
+#[test]
+fn a_clip_tint_keeps_its_hue_and_reads_on_its_body() {
+    let dark = Tokens::new(Scheme::Dark, Accessibility::default());
+    let m = dark.clip_material(dark.colors.labels.green);
+    let [r, g, b] = [16, 8, 0].map(|s| (m.primary >> s) & 255);
+    assert!(g > r && g > b, "green stays green: {:06x}", m.primary);
+    for t in [dark, Tokens::new(Scheme::Light, Accessibility::default())] {
+        for fill in t.colors.labels.all() {
+            let m = t.clip_material(fill);
+            assert!(
+                contrast(m.primary, m.bottom) >= 3.,
+                "{fill:06x} {:06x}",
+                m.primary
+            );
+        }
+    }
+}

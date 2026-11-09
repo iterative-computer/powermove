@@ -724,6 +724,45 @@ pub fn mix(a: u32, b: u32, amount: f32) -> u32 {
         out | (((x + (y - x) * amount).round() as u32) << s)
     })
 }
+/// `rgb` with its HSL lightness set to `lightness` and saturation scaled by
+/// `chroma` (capped at 0.6), keeping its hue: a label's bright tint.
+fn tint(rgb: u32, chroma: f32, lightness: f32) -> u32 {
+    let [r, g, b] = [16, 8, 0].map(|s| ((rgb >> s) & 255) as f32 / 255.);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.;
+    let d = max - min;
+    let s = if d == 0. {
+        0.
+    } else {
+        d / (1. - (2. * l - 1.).abs())
+    };
+    let h = if d == 0. {
+        0.
+    } else if max == r {
+        ((g - b) / d).rem_euclid(6.)
+    } else if max == g {
+        (b - r) / d + 2.
+    } else {
+        (r - g) / d + 4.
+    } * 60.;
+    let s = (s * chroma).min(0.6);
+    let c = (1. - (2. * lightness - 1.).abs()) * s;
+    let x = c * (1. - ((h / 60.).rem_euclid(2.) - 1.).abs());
+    let m = lightness - c / 2.;
+    let (r, g, b) = match (h / 60.) as u32 {
+        0 => (c, x, 0.),
+        1 => (x, c, 0.),
+        2 => (0., c, x),
+        3 => (0., x, c),
+        4 => (x, 0., c),
+        _ => (c, 0., x),
+    };
+    [(r, 16), (g, 8), (b, 0)]
+        .into_iter()
+        .fold(0, |out, (v, s)| {
+            out | ((((v + m) * 255.).round() as u32) << s)
+        })
+}
 /// A timeline clip's tactile chip, derived from its label fill: a soft vertical
 /// gradient, a hairline highlight inside the top edge, a seam one shade under the
 /// body and a small drop shadow (v1's clip recipe, kept at low intensity).
@@ -766,7 +805,7 @@ impl Tokens {
                 seam: mix(fill, black, 0.4),
                 shadow: (black, 0.35),
                 foreground: mix(fill, white, 0.86),
-                primary: mix(fill, white, 0.5),
+                primary: tint(fill, 1.5, 0.66),
             }
         } else {
             ClipMaterial {
@@ -776,7 +815,7 @@ impl Tokens {
                 seam: mix(fill, black, 0.18),
                 shadow: (0x0f0f14, 0.12),
                 foreground: mix(fill, black, 0.66),
-                primary: mix(fill, black, 0.4),
+                primary: tint(fill, 1.3, 0.3),
             }
         }
     }
