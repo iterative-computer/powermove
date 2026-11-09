@@ -5093,6 +5093,7 @@ dependencies = [
  "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "pm-agents",

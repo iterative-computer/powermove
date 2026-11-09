@@ -34,6 +34,7 @@ mod panels;
 mod perf_gate;
 mod platform;
 mod playback;
+mod playhead;
 mod pro_media;
 mod project_library;
 mod raster_overrides;
