@@ -892,3 +892,31 @@ fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
     assert_eq!(host.window_session(4).unwrap().project, "eta");
     actor.shutdown();
 }
+/// A provider run's tool server names its run on connect; the app's own
+/// connection hands it to the session, so orchestration acts as that run.
+#[test]
+fn a_connection_acts_as_the_run_that_launched_it() {
+    struct Recorder(std::sync::Mutex<Vec<Value>>);
+    impl pm_mcp::automation::SurfaceHook for Recorder {
+        fn call(&self, _: &str, _: Option<&str>, args: &Value) -> pm_mcp::Result<Value> {
+            self.0.lock().unwrap().push(args.clone());
+            Ok(json!({}))
+        }
+    }
+    let f = Fixture::new();
+    let recorder = Arc::new(Recorder(Default::default()));
+    f.tools.automation.lock().unwrap().surfaces = Some(recorder.clone());
+    let mut c = f.connection();
+    start(&mut c);
+    let refused = c
+        .dispatch("orchestrator_capabilities", &json!({}))
+        .unwrap_err();
+    assert!(
+        refused.message.contains("Powermove agent run"),
+        "{}",
+        refused.message
+    );
+    pm_mcp::transport::ToolConnection::bind_agent_run(&mut c, "run-9");
+    c.dispatch("orchestrator_capabilities", &json!({})).unwrap();
+    assert_eq!(recorder.0.lock().unwrap()[0]["agentRunId"], "run-9");
+}
