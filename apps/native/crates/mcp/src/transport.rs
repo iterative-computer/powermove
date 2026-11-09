@@ -189,7 +189,7 @@ impl<T: ToolConnection> Rpc<T> {
         self.session.disconnect()
     }
 }
-fn line(reader: &mut impl BufRead) -> std::io::Result<Option<Vec<u8>>> {
+pub(crate) fn line(reader: &mut impl BufRead) -> std::io::Result<Option<Vec<u8>>> {
     let mut bytes = vec![];
     let n = reader
         .take((MAX_LINE + 1) as u64)

@@ -16,6 +16,7 @@ pub mod media;
 pub mod media_tools;
 pub mod memory;
 pub mod memory_admission;
+pub mod pro_edit;
 pub mod registration;
 pub mod registration_cli;
 pub mod scene3d;

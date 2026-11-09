@@ -1,20 +1,31 @@
-mod common;
+#[path = "../../kernel/tests/pro_fixture.rs"]
 mod pro_fixture;
-use pm_kernel::{
-    Caller, HistoryCall, KernelActor, OpenSource, Request,
-    pro_mcp::{ProMcp, TOOL},
-};
+use pm_kernel::{Caller, HistoryCall, KernelActor, OpenSource, Request};
+use pm_mcp::pro_edit::{ProEditSession, TOOL};
 use pm_model::Value;
 use pro_fixture::*;
 use serde_json::{Value as Json, json};
 use std::{
-    future::Future,
     io::Write,
-    pin::pin,
+    path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
-    task::{Context, Poll, Wake, Waker},
 };
+struct TempDir(PathBuf);
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(pm_kernel::new_id(tag));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir.canonicalize().unwrap())
+    }
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 fn value(v: Json) -> Value {
     pm_model::json::parse(&v.to_string()).unwrap()
 }
@@ -24,26 +35,9 @@ fn rpc(id: u32, args: Json) -> Json {
 fn decoded(v: &Json) -> Json {
     serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
-fn block_on<F: Future>(f: F) -> F::Output {
-    struct Unpark(std::thread::Thread);
-    impl Wake for Unpark {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-    let w = Waker::from(Arc::new(Unpark(std::thread::current())));
-    let mut cx = Context::from_waker(&w);
-    let mut f = pin!(f);
-    loop {
-        match f.as_mut().poll(&mut cx) {
-            Poll::Ready(v) => return v,
-            Poll::Pending => std::thread::park(),
-        }
-    }
-}
 fn process(messages: Vec<Json>, layers: Vec<Json>) -> Vec<Json> {
-    let temp = common::TempDir::new("pro-mcp");
-    let path = fs_canonical(temp.path("project.json"));
+    let temp = TempDir::new("pro-mcp");
+    let path = temp.path("project.json");
     let source = pm_model::json::to_canonical_string(&pm_model::canonical::realize_project(root(
         &store(layers),
     )));
@@ -82,13 +76,6 @@ fn process(messages: Vec<Json>, layers: Vec<Json>) -> Vec<Json> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
-}
-fn fs_canonical(path: std::path::PathBuf) -> std::path::PathBuf {
-    path.parent()
-        .unwrap()
-        .canonicalize()
-        .unwrap()
-        .join(path.file_name().unwrap())
 }
 #[test]
 fn real_stdio_mcp_drives_link_ripple_inspect_undo_and_redo() {
@@ -208,14 +195,14 @@ fn competing_clients_require_inspection_and_reopen_never_rebinds() {
         .wait()
         .unwrap()
         .unwrap();
-    let mut first = ProMcp::new(h.clone(), "P", Caller::native()).unwrap();
-    let mut second = ProMcp::new(h.clone(), "P", Caller::native()).unwrap();
+    let mut first = ProEditSession::new(h.clone(), "P", Caller::native()).unwrap();
+    let mut second = ProEditSession::new(h.clone(), "P", Caller::native()).unwrap();
     let edit = value(rpc(
         1,
         json!({"op":"move","layerIds":["a"],"delta":1.,"linked":true}),
     ));
-    let call = |m: &mut ProMcp, v: &Value| {
-        let v = block_on(m.handle(v)).unwrap();
+    let call = |m: &mut ProEditSession, v: &Value| {
+        let v = m.handle(v).unwrap();
         serde_json::from_str::<Json>(&pm_model::json::to_canonical_string(&v)).unwrap()
     };
     assert_eq!(call(&mut first, &edit)["result"]["isError"], false);
@@ -235,8 +222,8 @@ fn competing_clients_require_inspection_and_reopen_never_rebinds() {
 }
 #[test]
 fn stdio_framing_reports_parse_errors_and_caps_input_size() {
-    let temp = common::TempDir::new("pro-mcp-framing");
-    let path = fs_canonical(temp.path("source.json"));
+    let temp = TempDir::new("pro-mcp-framing");
+    let path = temp.path("source.json");
     std::fs::write(
         &path,
         pm_model::json::to_canonical_string(&pm_model::canonical::realize_project(root(&store(
