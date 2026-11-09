@@ -1,6 +1,7 @@
 import type { EditResult, PowermoveAPI, MenuContribution } from 'powermove';
 import { PRIMITIVES, LIGHT_TYPES } from './scene-model';
 import type { Primitive, LightType } from './scene-types';
+import { addAmbientLight, addEnvironmentLight, addFog, addScatter, addTerrain, addWorld, scatterSources, worldLayer, SKY_PRESETS } from './environment-ui';
 export const MODEL_DEFINITION_ID='powermove.3d.object';
 export const MODEL_ACCEPT='.obj,.mtl,.glb,.gltf,.step,.stp,.iges,.igs,.brep,.ply,.splat,.png,.jpg,.jpeg,.webp';
 const MODEL_FILE=/\.(obj|glb|gltf|step|stp|iges|igs|brep|ply|splat)$/i;
@@ -17,6 +18,8 @@ export function addPrimitive(api:PowermoveAPI,primitive:Primitive='box',_layerId
   return result.ok?(result.data.result as any)?.id ?? null:null;
 }
 export function addLight(api:PowermoveAPI,type:LightType='point',_layerId?:unknown):string|null {
+  if(type==='ambient')return addAmbientLight(api);
+  if(type==='environment')return addEnvironmentLight(api);
   const name=`${LIGHT_TYPES.find(p=>p.id===type)?.label || 'Point'} light`;
   const result=run(api,{operation:'add_light',light:{type,name}},`Add ${name}`);
   return result.ok?(result.data.result as any)?.id ?? null:null;
@@ -54,12 +57,25 @@ function batch(api:PowermoveAPI,ids:string[],operation:'remove'|'duplicate',labe
     const result=api.edit.commit(label);if(!result.ok)throw new Error(result.message);api.selection.select(operation==='duplicate'?copies:[]);return true;
   }catch(error){api.edit.cancel();api.ui.toast(error instanceof Error?error.message:String(error),{error:true});return false;}
 }
-/** Add 3D Layer ▸: shapes, then a model from disk, then lights and the camera.
-    Plain rows: one icon repeated on every shape would say nothing. */
-export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[]=>[
-  ...PRIMITIVES.map(p=>({label:p.label,run:()=>addPrimitive(api,p.id)})),
-  '-',
-  {label:'Import 3D Model…',run:()=>importModelIntoScene(api)},'-',
-  ...LIGHT_TYPES.map(l=>({label:`${l.label} Light`,run:()=>addLight(api,l.id)})),
-  {label:'Camera',run:()=>addCamera(api)}
-];
+/** Add 3D Layer ▸: shapes and models, then whole environments (World, Terrain,
+    Scatter, Fog), then lights and the camera. Plain rows: one icon repeated on
+    every shape would say nothing. */
+export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[]=>{
+  const {models,surfaces}=scatterSources(api);
+  const world=worldLayer(api);
+  /* Scatter asks "what" (a model) and then "on what" (terrain first). */
+  const scatter:MenuContribution=models.length&&surfaces.length>1
+    ?{label:'Scatter',submenu:[{header:'Copies of'},...models.map(m=>({label:m.name,submenu:[{header:'Over'},...[...surfaces].sort((a,b)=>Number(b.terrain)-Number(a.terrain)).filter(s=>s.id!==m.id).map(s=>({label:s.name,run:()=>addScatter(api,m.id,s.id)}))] as MenuContribution[]}))]}
+    :{label:'Scatter (add a model and a terrain first)',disabled:true};
+  return [
+    ...PRIMITIVES.map(p=>({label:p.label,run:()=>addPrimitive(api,p.id)})),
+    '-',
+    {label:'Import 3D Model…',run:()=>importModelIntoScene(api)},'-',
+    world?{label:'World',run:()=>api.selection.select([world.id])}:{label:'World',submenu:SKY_PRESETS.map(p=>({label:p.label,run:()=>addWorld(api,p.id)}))},
+    {label:'Terrain',run:()=>addTerrain(api)},
+    scatter,
+    {label:'Fog Volume',run:()=>addFog(api)},'-',
+    ...LIGHT_TYPES.map(l=>({label:`${l.label} Light`,run:()=>addLight(api,l.id)})),
+    {label:'Camera',run:()=>addCamera(api)}
+  ];
+};

@@ -183,6 +183,22 @@ X.dialog = () => {
     toggle(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, 'Include audio'));
   mk(rendering, 'alpha', 'Transparent background', 'Keep the background see-through, with straight alpha.',
     toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, 'Transparent background'));
+  /* 3D render passes (After Effects' 3D Channel / Render Passes): 16-bit PNG
+     sequences, one folder entry per pass, beside per-frame metadata. */
+  const has3D = (p.layers || []).some((layer: any) => /^powermove\.3d\.(object|light|camera)$/.test(layer.d?.definition || ''));
+  const PASS_LABELS: [string, string][] = [['beauty', 'Beauty'], ['depth', 'Depth'], ['normal', 'Normal'], ['albedo', 'Albedo'], ['object_id', 'Object ID'], ['material_id', 'Material ID'], ['shadow', 'Shadow']];
+  const passBoxes = PASS_LABELS.map(([id, label]) => {
+    const input: any = h('input', { type: 'checkbox', value: id, 'aria-label': `${label} pass` });
+    input.sync = () => { input.checked = Array.isArray(opts.passes) && opts.passes.includes(id); };
+    input.onchange = () => {
+      const next = PASS_LABELS.map(([pass]) => pass).filter(pass => pass === id ? input.checked : Array.isArray(opts.passes) && opts.passes.includes(pass));
+      opts.passes = next.length ? next : undefined; sync();
+    };
+    input.sync();
+    return h('label.export-pass', input, h('span', label));
+  });
+  mk(rendering, 'passes', 'Render passes', '3D layers only: 16-bit PNG images per pass, instead of the finished picture.',
+    h('div.export-passes', { role: 'group', 'aria-label': 'Render passes' }, ...passBoxes));
   /* Captions: burned in by default, optionally also delivered as a sidecar. */
   const captionLayers = (p.layers || []).filter((layer: any) => layer.type === 'captions');
   const captionsSection = createSettingsSection('Captions');
@@ -231,6 +247,7 @@ X.dialog = () => {
     for (const key of Object.keys(rows)) {
       if (key === 'format' || key === 'size' || key === 'preset' || key === 'presetSave') continue;
       if (key === 'captionsBurn' || key === 'captionsSidecar') { rows[key]!.element.hidden = kind !== 'video' && !(key === 'captionsBurn' && kind === 'images'); continue; }
+      if (key === 'passes') { rows[key]!.element.hidden = !has3D || opts.format !== 'png'; continue; }
       rows[key]!.element.hidden = !support[key];
     }
     rows.format!.element.hidden = settingsFree;

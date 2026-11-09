@@ -2,8 +2,8 @@ import type { LightType, MapSlot, Primitive } from './scene-types';
 
 /* Field definitions shared by the native inspector and layer commands. */
 
-export type FieldKind = 'num' | 'color' | 'toggle';
-export interface FieldSpec { key: string; label: string; kind: FieldKind; step?: number; min?: number; max?: number; unit?: string; prefix?: string }
+export type FieldKind = 'num' | 'color' | 'toggle' | 'select';
+export interface FieldSpec { key: string; label: string; kind: FieldKind; step?: number; min?: number; max?: number; unit?: string; prefix?: string; options?: ReadonlyArray<{ v: string | number; label: string }> }
 
 export const PRIMITIVES: ReadonlyArray<{ id: Primitive; label: string }> = [
   { id: 'box', label: 'Cube' },
@@ -20,7 +20,9 @@ export const LIGHT_TYPES: ReadonlyArray<{ id: LightType; label: string }> = [
   { id: 'sun', label: 'Sun' },
   { id: 'point', label: 'Point' },
   { id: 'spot', label: 'Spot' },
-  { id: 'area', label: 'Softbox' }
+  { id: 'area', label: 'Softbox' },
+  { id: 'ambient', label: 'Ambient' },
+  { id: 'environment', label: 'Environment' }
 ];
 
 export const MAP_SLOTS: ReadonlyArray<{ id: MapSlot; label: string }> = [
@@ -66,9 +68,11 @@ export const MATERIAL_FIELDS: FieldSpec[] = [
 export function lightFields(type: LightType): FieldSpec[] {
   const fields: FieldSpec[] = [
     { key: 'color', label: 'Color', kind: 'color' },
-    { key: 'intensity', label: 'Intensity', kind: 'num', step: 0.05, min: 0 },
-    ...xyz('', 'Position', 0.01)
+    { key: 'intensity', label: 'Intensity', kind: 'num', step: 0.05, min: 0 }
   ];
+  // Ambient and Environment light have no position or direction.
+  if (type === 'ambient' || type === 'environment') return fields;
+  fields.push(...xyz('', 'Position', 0.01));
   if (type !== 'point') fields.push(...xyz('target', 'Target', 0.01));
   if (type === 'area') {
     fields.push(

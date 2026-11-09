@@ -227,6 +227,9 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .export-form .export-preset-save{display:flex;align-items:center;gap:6px}
 .export-form .export-preset-save .settings-input{width:150px;text-align:left}
 .export-form .export-preset-save .btn{height:30px;padding:0 12px}
+.export-form .export-passes{display:grid;grid-template-columns:repeat(2,minmax(0,auto));gap:4px 14px;justify-content:end}
+.export-form .export-pass{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--tx);white-space:nowrap;cursor:pointer}
+.export-form .export-pass input{margin:0;accent-color:var(--accent)}
 .export-modal .mf .btn{border-radius:var(--sg-control-radius)}
 .export-form .settings-note{margin-top:8px}
 /* The readout: one line of the result, one line of how it gets there. */
