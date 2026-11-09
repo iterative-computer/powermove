@@ -82,7 +82,7 @@ export function pathRasterGeometry(PM:any,layer:any,time:number,scale:number,rec
   let sx0=Infinity,sy0=Infinity,sx1=-Infinity,sy1=-Infinity;
   for(const rec of records)for(let i=0;i<Math.min(256,Math.max(1,Math.round(rec.v.copies)));i++){
     const r=i*rec.v.repeatRotation*Math.PI/180,c=Math.cos(r),s=Math.sin(r),m=PM.mul(rec.matrix,[c,s,-s,c,i*rec.v.repeatX,i*rec.v.repeatY]);
-    const reach=Math.max(1,rec.v.join==='miter'?Math.min(100,Number(rec.v.miterLimit)||4):1,[rec.v.cap,rec.v.startCap,rec.v.endCap].some(cap=>/ARROW|TRIANGLE|DIAMOND|CIRCLE/.test(cap??''))?6:1);
+    const reach=Math.max(1,rec.v.join==='miter'?Math.min(100,Number(rec.v.miterLimit)||4):1,[rec.v.cap,rec.v.startCap,rec.v.endCap].some(cap=>/ARROW|TRIANGLE|DIAMOND|CIRCLE/.test(cap??''))?12:1);
     const stroke=rec.v.strokeWidth/2*Math.max(Math.hypot(m[0],m[1]),Math.hypot(m[2],m[3]));
     const visualPad=stroke*reach+1;
     // Canvas defaults to miter even for legacy paths without a join channel.
