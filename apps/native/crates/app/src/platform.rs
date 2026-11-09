@@ -175,6 +175,22 @@ pub fn import_paths(
     choose_paths(window, folders, multiple, extensions, "Import")
 }
 
+/// The general pasteboard's HTML and PNG, for Figma paste. Main thread: the
+/// pasteboard is read where AppKit expects it, once per paste.
+pub fn pasteboard_figma() -> Option<(String, Option<Vec<u8>>)> {
+    let board = NSPasteboard::generalPasteboard();
+    let html = board
+        .stringForType(unsafe { NSPasteboardTypeHTML })?
+        .to_string();
+    if !html.contains("(figma)") {
+        return None;
+    }
+    let png = board
+        .dataForType(unsafe { NSPasteboardTypePNG })
+        .map(|data| data.to_vec());
+    Some((html, png))
+}
+
 /// Files for the Agent panel's Add Attachments.
 pub fn attach_paths(window: &NSWindow) -> async_channel::Receiver<Vec<PathBuf>> {
     choose_paths(window, false, true, &[], "Attach")

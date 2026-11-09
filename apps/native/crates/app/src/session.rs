@@ -835,6 +835,10 @@ impl Controller {
     }
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::layer_commands::Clipboard;
+        // Figma's layers claim the paste ahead of the app's own clipboard.
+        if self.paste_figma(cx) {
+            return true;
+        }
         let time = self.time();
         match self.clipboard.clone() {
             Clipboard::Empty => false,
@@ -860,7 +864,11 @@ impl Controller {
         );
     }
     /// One Undo step, then the selection it leads to.
-    fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
+    pub(crate) fn run_layer_plan(
+        &mut self,
+        plan: crate::layer_commands::Plan,
+        cx: &mut Context<Self>,
+    ) {
         let revision = self.published.as_ref().map(|p| p.revision());
         let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
             if let Some(ids) = plan.select {

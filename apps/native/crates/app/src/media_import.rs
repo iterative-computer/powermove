@@ -340,6 +340,7 @@ impl Controller {
         }
         let document = published.snapshot.doc_id;
         let profile = self.profile.clone();
+        let note = request.note.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -357,7 +358,10 @@ impl Controller {
                         // Settings › Media › Create Proxies, once the
                         // catalog resolves the new files.
                         v.pro_media.after_import(outcome.assets.clone());
-                        outcome.summary()
+                        match note {
+                            Some(note) if outcome.failed.is_empty() && !outcome.cancelled => note,
+                            _ => outcome.summary(),
+                        }
                     }
                     Err(error) => error,
                 };

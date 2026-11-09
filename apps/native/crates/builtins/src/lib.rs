@@ -12,6 +12,7 @@ pub use settings::{RESOLUTIONS, set_notification_status};
 mod agent_tests;
 mod data;
 pub mod delivery;
+pub mod figma;
 pub mod media_import;
 mod models;
 mod properties;

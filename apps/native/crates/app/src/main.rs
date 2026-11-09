@@ -12,6 +12,7 @@ mod error_log;
 mod export_coordinator;
 mod extension_authoring;
 mod extensions;
+mod figma_paste;
 mod first_run;
 mod gizmo;
 mod keyframe_sheets;

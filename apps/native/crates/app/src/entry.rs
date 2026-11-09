@@ -83,7 +83,7 @@ fn review_library_row(rest: &str, cx: &mut App) {
     }
 }
 
-/// `<drop|sequence>/<paths>`, percent-encoded and newline-separated, on the
+/// `<drop|sequence|figma>/<paths>`, percent-encoded and newline-separated, on the
 /// first editor: what a Finder drop on the window, or the open panel of
 /// File ▸ Import Image Sequence…, hands over. The system open panel takes no
 /// background input, so reviews choose files here.
@@ -104,6 +104,13 @@ fn review_files(rest: &str, cx: &mut App) {
             "sequence" => {
                 let at = Some(v.time());
                 v.choose_sequence(paths, true, at, None, cx)
+            }
+            // What Paste reads from the pasteboard, from a file: reviews
+            // never overwrite the person's clipboard.
+            "figma" => {
+                if let Some(html) = paths.first().and_then(|p| std::fs::read_to_string(p).ok()) {
+                    v.paste_figma_html(html, None, cx);
+                }
             }
             _ => {}
         });

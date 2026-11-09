@@ -184,6 +184,19 @@ pub struct ImportRequest {
     pub layer_definition: Option<String>,
     /// Import Image Sequence: `paths` are the frames, encoded into one clip.
     pub sequence: Option<SequenceImport>,
+    /// The placed layer's name and fitted size, instead of the file's.
+    pub placed_as: Option<PlacedAs>,
+    /// Scratch holding generated `paths`, removed once the import is done.
+    pub staged: Option<tempfile::TempDir>,
+    /// What the status bar says once it lands, instead of the summary.
+    pub note: Option<String>,
+}
+/// Figma's image fallback: the layer is named for the selection and fitted
+/// into the selection's size, keeping the image's aspect.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlacedAs {
+    pub name: String,
+    pub fit: Option<(f64, f64)>,
 }
 /// File ▸ Import Image Sequence…'s choice, with the line its progress reads from.
 #[derive(Debug, Default)]
@@ -438,7 +451,9 @@ impl Builtins {
                 .map_err(|_| "The project's media could not be read")?
                 .stamp;
             let (layers, place) = match request.place_at.filter(|_| request.replace.is_none()) {
-                Some(at) => placement(&published, &items, at).ok_or(SWITCHED)?,
+                Some(at) => {
+                    placement(&published, &items, at, request.placed_as.as_ref()).ok_or(SWITCHED)?
+                }
                 None => (vec![], vec![]),
             };
             let reply = self
@@ -506,6 +521,7 @@ fn placement(
     published: &Published,
     items: &[RetainedAsset],
     at: f64,
+    placed_as: Option<&PlacedAs>,
 ) -> Option<(Vec<String>, Vec<Command>)> {
     let root = published.snapshot.root()?;
     let open = published.snapshot.open_comp();
@@ -545,12 +561,22 @@ fn placement(
             _ => {}
         }
         if kind != "audio" {
-            content.insert("w", Value::from(field("w").unwrap_or(w)));
-            content.insert("h", Value::from(field("h").unwrap_or(h)));
+            let (mut cw, mut ch) = (field("w").unwrap_or(w), field("h").unwrap_or(h));
+            if let Some((fw, fh)) = placed_as.and_then(|p| p.fit)
+                && let (Some(aw), Some(ah)) = (field("w"), field("h"))
+            {
+                let scale = (fw / aw).min(fh / ah);
+                (cw, ch) = (aw * scale, ah * scale);
+            }
+            content.insert("w", Value::from(cw));
+            content.insert("h", Value::from(ch));
         }
         let layer = pm_kernel::commands::new_id("L");
         layers.push(layer.clone());
-        let name = asset.get("name").and_then(Value::as_str).map(str::to_owned);
+        let name = match placed_as {
+            Some(placed) => Some(placed.name.clone()),
+            None => asset.get("name").and_then(Value::as_str).map(str::to_owned),
+        };
         commands.push(
             LayerCommand::Add(Box::new(pm_kernel::commands::layers::AddLayer {
                 id: layer,
