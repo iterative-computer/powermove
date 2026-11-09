@@ -97,13 +97,20 @@ impl pm_mcp::store::StoreRead for StoreHttp {
         if !request.query.is_empty() {
             url.query_pairs_mut().extend_pairs(request.query);
         }
-        // Transport errors can carry hosts and system detail: none crosses MCP.
-        let response = pm_compat_runner::net::get(url.as_str(), request.max_bytes, 30)
-            .map_err(|_| failed("The Store didn't answer. Check the connection and try again."))?;
-        // A redirect may not take a Store read to another origin.
-        if url::Url::parse(&response.url).ok().map(|u| u.origin()) != Some(origin.origin()) {
-            return Err(failed("The Store answered from another origin"));
-        }
+        // Never leaves the Store's origin, even by redirect. Transport errors
+        // can carry hosts and system detail: none crosses MCP.
+        let response = pm_compat_runner::net::get_within(
+            pm_compat_runner::store_install::ORIGIN,
+            url.as_str(),
+            request.max_bytes,
+            30,
+        )
+        .map_err(|e| match e {
+            pm_runtime_v8::Error::Host(m) if m.contains("sent elsewhere") => {
+                failed("The Store redirected the read to another origin")
+            }
+            _ => failed("The Store didn't answer. Check the connection and try again."),
+        })?;
         Ok(pm_mcp::store::Response {
             status: response.status,
             body: response.body,
