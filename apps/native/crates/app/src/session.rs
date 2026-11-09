@@ -332,8 +332,10 @@ impl Controller {
         )
         .expect("viewer layer");
         host.borrow().set_viewer_label("Composition viewer");
+        let mut builtins = crate::builtins::Host::default();
+        builtins.export_tasks = crate::export_coordinator::tasks();
         Self {
-            builtins: Default::default(),
+            builtins,
             extensions: Default::default(),
             font_broker: None,
             composition_views: Default::default(),

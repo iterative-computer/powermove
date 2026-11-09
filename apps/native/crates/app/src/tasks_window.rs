@@ -74,7 +74,9 @@ impl TasksWindow {
     fn act(&self, media: bool, id: pm_promedia::tasks::TaskId, action: TaskAction, cx: &mut App) {
         if media {
             let _ = self.pro.act(id, action);
-        } else if action == TaskAction::Cancel {
+        } else if action == TaskAction::Cancel
+            && !crate::export_coordinator::cancel_agent_export(id)
+        {
             let _ = self.controller.update(cx, |v, _| {
                 if let Some(job) = &v.builtins.export_job {
                     job.cancel.store(true, std::sync::atomic::Ordering::Release);
@@ -267,10 +269,31 @@ impl crate::session::Controller {
                     size(px(t.metrics.palette_width), px(t.metrics.palette_height)),
                 )))),
             |_, cx| {
-                let view = cx.new(|_| TasksWindow {
-                    pro,
-                    exports,
-                    controller,
+                let watched = exports.clone();
+                let view = cx.new(|cx| {
+                    // Exports progress on workers (the person's and agents'):
+                    // redraw when the list changes, while the window is open.
+                    cx.spawn(async move |this, cx| {
+                        let mut seen = None;
+                        loop {
+                            let now = watched.lock().unwrap().sequence();
+                            if seen != Some(now) {
+                                seen = Some(now);
+                                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                                    return;
+                                }
+                            }
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(250))
+                                .await;
+                        }
+                    })
+                    .detach();
+                    TasksWindow {
+                        pro,
+                        exports,
+                        controller,
+                    }
                 });
                 entity = Some(view.clone());
                 view

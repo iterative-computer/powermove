@@ -32,6 +32,84 @@ pub struct Run {
     pub cancel: AtomicBool,
 }
 pub type Job = Arc<Run>;
+/// Every export of this process, the person's and agents', in one list: every
+/// window's Background Tasks shows them all.
+pub fn tasks() -> Arc<Mutex<BackgroundTasks>> {
+    static TASKS: std::sync::OnceLock<Arc<Mutex<BackgroundTasks>>> = std::sync::OnceLock::new();
+    TASKS.get_or_init(Arc::default).clone()
+}
+/// Cancel flags of running agent exports, by task, for the Cancel button.
+fn agent_cancels() -> &'static Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>> {
+    static CANCELS: std::sync::OnceLock<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
+        std::sync::OnceLock::new();
+    CANCELS.get_or_init(Default::default)
+}
+/// Background Tasks ▸ Cancel on an agent's export. False if it isn't one.
+pub fn cancel_agent_export(id: pm_promedia::tasks::TaskId) -> bool {
+    agent_cancels()
+        .lock()
+        .unwrap()
+        .get(&id.0)
+        .is_some_and(|flag| {
+            flag.store(true, Ordering::Release);
+            true
+        })
+}
+/// An agent's export as a Background Task: listed beside the person's, with its
+/// progress, and cancellable there.
+pub struct AgentExport {
+    ticket: pm_promedia::tasks::Ticket,
+    pub cancel: Arc<AtomicBool>,
+}
+impl AgentExport {
+    pub fn start(title: &str, project: &str, frames: u64) -> Result<Self, String> {
+        let tasks = tasks();
+        let mut tasks = tasks.lock().unwrap();
+        let id = tasks
+            .enqueue(
+                project.into(),
+                project.into(),
+                TaskSpec {
+                    title: format!("{title} (Agent)"),
+                    kind: TaskKind::Export,
+                    unit: ProgressUnit::Frames,
+                    priority: 0,
+                    total: frames,
+                },
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        // Enqueued and started under one lock: no other export waits queued.
+        let ticket = tasks
+            .start_next()
+            .filter(|t| t.id == id)
+            .ok_or("Export task did not start")?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        agent_cancels().lock().unwrap().insert(id.0, cancel.clone());
+        Ok(Self { ticket, cancel })
+    }
+    pub fn progress(&self, frames: u64, total: u64) {
+        let tasks = tasks();
+        let mut tasks = tasks.lock().unwrap();
+        let done = tasks.get(self.ticket.id).map_or(0, |t| t.completed);
+        let _ = tasks.progress(self.ticket, frames.max(done).min(total), total);
+    }
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Acquire)
+    }
+    /// Settles the row: completed, failed with its reason, or cancelled.
+    pub fn finish(self, result: Result<(), String>) {
+        agent_cancels().lock().unwrap().remove(&self.ticket.id.0);
+        let tasks = tasks();
+        let mut tasks = tasks.lock().unwrap();
+        if self.cancel.load(Ordering::Acquire) {
+            let _ = tasks
+                .cancel(self.ticket.id)
+                .and_then(|_| tasks.settle_control(self.ticket));
+        } else {
+            let _ = tasks.finish(self.ticket, result.map_err(|e| e.into()));
+        }
+    }
+}
 impl Controller {
     pub fn begin_builtin_export(&mut self, options: Value, retry: bool, cx: &mut Context<Self>) {
         let Some(runtime) = self.builtins.runtime.clone() else {
@@ -391,5 +469,50 @@ async fn execute_inner(
         };
         observe(runtime, run).await;
         executor.timer(std::time::Duration::from_millis(50)).await;
+    }
+}
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+    use pm_promedia::tasks::TaskState;
+
+    fn row(project: &str) -> pm_promedia::tasks::Task {
+        tasks()
+            .lock()
+            .unwrap()
+            .all()
+            .into_iter()
+            .rev()
+            .find(|t| t.project == project)
+            .expect("listed")
+    }
+    #[test]
+    fn an_agent_export_is_a_background_task_the_person_can_cancel() {
+        let export = AgentExport::start("Promo", "agent-test-cancel", 120).unwrap();
+        let listed = row("agent-test-cancel");
+        assert_eq!(listed.title, "Promo (Agent)");
+        assert_eq!(listed.kind, TaskKind::Export);
+        assert_eq!(listed.state, TaskState::Running);
+        export.progress(30, 120);
+        assert_eq!(row("agent-test-cancel").completed, 30);
+        // Background Tasks ▸ Cancel reaches the agent's job, not the person's.
+        assert!(cancel_agent_export(listed.id));
+        assert!(export.cancelled());
+        export.finish(Err("cancelled".into()));
+        assert_eq!(row("agent-test-cancel").state, TaskState::Cancelled);
+        assert!(
+            !cancel_agent_export(listed.id),
+            "a settled export has no cancel"
+        );
+    }
+    #[test]
+    fn an_agent_export_settles_as_done_or_failed() {
+        let export = AgentExport::start("Done", "agent-test-done", 10).unwrap();
+        export.finish(Ok(()));
+        let done = row("agent-test-done");
+        assert_eq!((done.state, done.completed), (TaskState::Completed, 10));
+        let export = AgentExport::start("Failed", "agent-test-failed", 10).unwrap();
+        export.finish(Err("Missing media: clip.mov".into()));
+        assert_eq!(row("agent-test-failed").state, TaskState::Failed);
     }
 }

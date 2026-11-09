@@ -298,6 +298,10 @@ impl BackgroundTasks {
         self.publish(id);
         Ok(id)
     }
+    /// Grows with every change to any task; a watcher redraws when it moves.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
     pub fn get(&self, id: TaskId) -> Option<&Task> {
         self.tasks.get(&id)
     }
