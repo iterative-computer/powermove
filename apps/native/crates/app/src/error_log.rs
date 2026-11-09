@@ -1,9 +1,12 @@
 //! Window ▸ Error Log (S053). Rows are what the app told the person, newest
 //! first, on the recovery lane's table recipe. Nothing here leaves this Mac.
-use crate::surfaces::recovery::notices::{LOG_EMPTY_LINE, LOG_EMPTY_TITLE, LOG_TITLE};
 use gpui::{prelude::*, *};
 use pm_shell::tokens;
 use std::{cell::RefCell, rc::Rc, time::SystemTime};
+
+const LOG_TITLE: &str = "Error Log";
+const LOG_EMPTY_TITLE: &str = "No Errors";
+const LOG_EMPTY_LINE: &str = "Problems Powermove notices appear here.";
 
 #[derive(Clone, Debug)]
 pub struct Entry {

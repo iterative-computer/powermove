@@ -3,7 +3,10 @@ use super::*;
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use pm_design::{Accessibility, Scheme};
 use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::ShellCall};
-use std::{cell::RefCell, time::Instant};
+use std::{
+    cell::RefCell,
+    time::{Duration, Instant},
+};
 
 fn value(text: &str) -> pm_model::json::Value {
     pm_model::json::parse(text).unwrap()
@@ -63,7 +66,6 @@ fn open<'a>(
         Rc::new(move |outbound, _| {
             log.borrow_mut().push(match outbound {
                 Outbound::Opened { name, .. } => format!("opened {name}"),
-                Outbound::Focus => "focus".into(),
                 Outbound::FocusProject(id) => format!("focus {id}"),
                 Outbound::Message(text) => text,
             })
@@ -178,14 +180,14 @@ fn sections_switch_and_an_empty_trash_says_so() {
     cx.simulate_click(bounds.center(), Modifiers::default());
     settle(&view, cx, |v| v.controller.rows.is_empty());
     assert!(view.read_with(cx, |v, _| matches!(
-        v.presentation.as_ref().map(|p| &p.content),
-        Some(Content::Empty(_))
+        v.controller.content(),
+        Content::Empty(_)
     )));
 }
 
 #[::core::prelude::v1::test]
 fn a_window_without_a_project_uses_the_shipped_defaults() {
-    use crate::library_surface::NewProjectForm;
+    use crate::library_surface::form::NewProjectForm;
     let form = NewProjectForm::new(
         String::new(),
         current_format(None).as_ref(),
@@ -202,7 +204,11 @@ fn a_window_without_a_project_uses_the_shipped_defaults() {
 
 #[::core::prelude::v1::test]
 fn create_opens_a_library_project_with_the_forms_format_and_saves_it() {
-    use crate::library_surface::{Command, NewProjectForm, Outcome, kernel::KernelLibrary};
+    use crate::library_surface::{
+        controller::{Command, Outcome},
+        form::NewProjectForm,
+        kernel::KernelLibrary,
+    };
     use pm_kernel::session::ShellReply;
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().canonicalize().unwrap();
@@ -239,10 +245,7 @@ fn create_opens_a_library_project_with_the_forms_format_and_saves_it() {
         kernel: actor.handle(),
         profile: profile.clone(),
     };
-    let Outcome::Opened {
-        reply: ShellReply::Opened { session, .. },
-        ..
-    } = service
+    let Outcome::Opened(ShellReply::Opened { session, .. }) = service
         .execute(Command::Create(form.values().unwrap()))
         .unwrap()
     else {

@@ -1,4 +1,5 @@
-use super::*;
+use super::{controller::*, form::*, kernel, model::*};
+use pm_services::ServiceErrorCode;
 use std::{
     collections::{BTreeSet, VecDeque},
     time::Duration,
@@ -13,7 +14,7 @@ struct Port {
 impl LibraryPort for Port {
     fn enqueue(&mut self, request: Request) -> Result<(), Failure> {
         if self.refuse {
-            return Err(Failure::Service(ErrorCode::Unavailable));
+            return Err(Failure::Service(ServiceErrorCode::Unavailable));
         }
         self.sent.push(request);
         Ok(())
@@ -80,13 +81,8 @@ fn ready() -> LibraryController<Port> {
     load(&mut c, sample());
     c
 }
-fn metrics() -> pm_design::Tokens {
-    pm_design::Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default())
-}
 fn effects(c: &mut LibraryController<Port>) -> Vec<HostEffect> {
-    let mut host = HeadlessHost::default();
-    c.render(&mut host, &metrics(), Duration::ZERO, 0..10);
-    host.effects
+    c.take_effects()
 }
 fn alert(c: &mut LibraryController<Port>) -> (u64, Alert) {
     effects(c)
@@ -107,41 +103,6 @@ fn format() -> Format {
         fps: 30.0,
         duration: 10.0,
         background: "#09090A".into(),
-    }
-}
-
-#[test]
-fn window_contract_uses_exact_spec_copy_and_native_pieces() {
-    assert_eq!(TITLE, "Project Library");
-    assert_eq!(SEARCH, "Search Projects");
-    assert_eq!(
-        SIDEBAR,
-        &[
-            ("Recents", "clock"),
-            ("All Projects", "square.grid.2x2"),
-            ("Recently Deleted", "trash")
-        ]
-    );
-    assert_eq!(
-        VIEW_BUTTONS,
-        &[
-            ("Grid View", "square.grid.2x2"),
-            ("List View", "list.bullet")
-        ]
-    );
-    assert_eq!(SORT_OPTIONS, &["Date Modified", "Name"]);
-    assert_eq!(
-        COLUMNS,
-        &["Name", "Date Modified", "Duration", "Size", "Frame Rate"]
-    );
-    for native in [
-        "NSToolbar",
-        "NSSplitViewController",
-        "NSTableView",
-        "NSAlert.beginSheetModal",
-        "NSWindow.beginSheet",
-    ] {
-        assert!(NATIVE_PIECES.contains(&native));
     }
 }
 
@@ -183,21 +144,18 @@ fn all_empty_states_and_quoted_search_copy() {
 }
 
 #[test]
-fn loading_does_not_flash_and_storage_retry_is_available() {
+fn loading_then_storage_retry_is_available() {
     let mut c = LibraryController::new(Port::default());
     c.show().unwrap();
-    assert_eq!(
-        c.presentation(Duration::from_millis(499), 0..0).content,
-        Content::Loading { spinner: false }
-    );
-    assert_eq!(
-        c.presentation(Duration::from_millis(500), 0..0).content,
-        Content::Loading { spinner: true }
-    );
+    assert_eq!(c.content(), Content::Loading);
     let serial = c.port.sent[0].serial;
-    complete(&mut c, serial, Err(Failure::Service(ErrorCode::DiskFull)));
+    complete(
+        &mut c,
+        serial,
+        Err(Failure::Service(ServiceErrorCode::DiskFull)),
+    );
     assert_eq!(
-        c.presentation(Duration::ZERO, 0..0).content,
+        c.content(),
         Content::Unavailable {
             message: "Your projects can’t be shown right now.",
             action: "Try Again"
@@ -205,10 +163,7 @@ fn loading_does_not_flash_and_storage_retry_is_available() {
     );
     c.refresh().unwrap();
     load(&mut c, Snapshot::default());
-    assert!(matches!(
-        c.presentation(Duration::ZERO, 0..0).content,
-        Content::Empty(_)
-    ));
+    assert!(matches!(c.content(), Content::Empty(_)));
 }
 
 #[test]
@@ -226,7 +181,6 @@ fn worker_search_retains_previous_rows_and_discards_out_of_order_completions() {
     })
     .unwrap();
     assert_eq!(c.rows.len(), 2);
-    assert!(c.presentation(Duration::ZERO, 0..10).searching);
     complete(
         &mut c,
         stale,
@@ -238,111 +192,6 @@ fn worker_search_retains_previous_rows_and_discards_out_of_order_completions() {
     assert_eq!(c.rows.len(), 2);
     load(&mut c, sample());
     assert_eq!(c.rows[0].id, "b");
-}
-
-#[test]
-fn filter_sort_uses_service_recents_and_does_not_mix_trash() {
-    let snapshot = sample();
-    assert_eq!(
-        Query {
-            section: Section::Recents,
-            ..Default::default()
-        }
-        .apply(&snapshot)
-        .iter()
-        .map(|r| &r.id)
-        .collect::<Vec<_>>(),
-        vec!["b"]
-    );
-    assert_eq!(
-        Query {
-            section: Section::Deleted,
-            ..Default::default()
-        }
-        .apply(&snapshot)[0]
-            .id,
-        "c"
-    );
-    assert_eq!(
-        Query {
-            text: "LAUNCH".into(),
-            ..Default::default()
-        }
-        .apply(&snapshot)
-        .len(),
-        1
-    );
-    let mut snapshot = snapshot;
-    snapshot.rows[0].modified_ms = Some(10);
-    snapshot.rows[1].modified_ms = Some(20);
-    assert_eq!(Query::default().apply(&snapshot)[0].id, "b");
-    assert_eq!(
-        Query {
-            sort: Sort::Name,
-            ..Default::default()
-        }
-        .apply(&snapshot)[0]
-            .id,
-        "a"
-    );
-}
-
-#[test]
-fn large_library_only_publishes_viewport_with_overscan_and_preserves_id_anchor() {
-    let rows = (0..60_000)
-        .map(|i| row(&format!("P{i}"), "Film", false))
-        .collect::<Vec<_>>();
-    let snapshot = Snapshot {
-        rows,
-        recents: BTreeSet::new(),
-    };
-    let mut c = ready();
-    c.refresh().unwrap();
-    load(&mut c, snapshot);
-    c.set_scroll_anchor(Some("P30000".into()));
-    let range = virtual_range(60_000, 10_000, 10, 3);
-    assert_eq!(range, 29_970..30_060);
-    let p = c.presentation(Duration::ZERO, range);
-    assert_eq!(p.total_rows, 60_000);
-    assert_eq!(p.rows.len(), 90);
-    assert_eq!(p.anchor, Some("P30000".into()));
-    assert_eq!(
-        virtual_range(10, usize::MAX, usize::MAX, usize::MAX),
-        10..10
-    );
-}
-
-#[test]
-fn voiceover_and_card_facts_use_system_date_and_authored_dimensions() {
-    let mut r = row("a", "Launch Film", false);
-    assert_eq!(
-        r.ax_label("Today, 11:42"),
-        Some("Launch Film, edited Today, 11:42, 1920 by 1080".into())
-    );
-    assert_eq!(r.facts("Yesterday"), Some("Yesterday · 1920×1080".into()));
-    assert_eq!(r.file_tooltip(), "Not saved to a file");
-    r.file = Some(std::env::temp_dir().join("Launch.pmv"));
-    assert_eq!(
-        r.file_tooltip(),
-        format!("Saved to {}", r.file.as_ref().unwrap().display())
-    );
-    assert_eq!(r.edited_label(), None);
-    r.edited = true;
-    assert_eq!(r.edited_label(), Some("Edited"));
-    r.summary = None;
-    assert_eq!(
-        r.ax_label("Yesterday"),
-        Some("Launch Film, edited Yesterday".into())
-    );
-    assert_eq!(r.facts("Yesterday"), Some("Yesterday".into()));
-    let mut c = ready();
-    assert_eq!(c.presentation(Duration::ZERO, 0..10).ax_container, "AXList");
-    assert_eq!(c.presentation(Duration::ZERO, 0..10).ax_item, "AXGroup");
-    c.view = View::List;
-    assert_eq!(
-        c.presentation(Duration::ZERO, 0..10).ax_container,
-        "AXTable"
-    );
 }
 
 #[test]
@@ -376,87 +225,6 @@ fn context_menus_match_spec_and_file_backing_controls_reveal() {
 }
 
 #[test]
-fn keyboard_selection_obeys_grid_columns_list_rows_and_native_type_select() {
-    let mut c = ready();
-    c.key(Key::Right, 3).unwrap();
-    assert_eq!(c.selected.as_deref(), Some("a"));
-    c.key(Key::Down, 3).unwrap();
-    assert_eq!(c.selected.as_deref(), Some("b"));
-    c.key(Key::Up, 3).unwrap();
-    assert_eq!(c.selected.as_deref(), Some("a"));
-    c.view = View::List;
-    c.key(Key::Down, 100).unwrap();
-    assert_eq!(c.selected.as_deref(), Some("b"));
-    c.type_select("launch");
-    assert_eq!(c.selected.as_deref(), Some("a"));
-    c.key(Key::Find, 1).unwrap();
-    assert!(
-        effects(&mut c)
-            .iter()
-            .any(|e| matches!(e, HostEffect::FocusSearch))
-    );
-    assert_eq!(
-        KEYBOARD
-            .iter()
-            .filter(|(_, k)| *k == Key::NewProject)
-            .map(|(s, _)| *s)
-            .collect::<Vec<_>>(),
-        vec!["⌥⌘N"]
-    );
-    assert!(KEYBOARD.iter().all(|(s, _)| *s != "⇧⌘O"));
-}
-
-#[test]
-fn return_and_option_double_click_preserve_open_intent_by_id() {
-    let mut c = ready();
-    c.select("a").unwrap();
-    c.key(Key::Return, 1).unwrap();
-    assert_eq!(
-        c.port.sent.last().unwrap().command,
-        Command::Open {
-            id: "a".into(),
-            new_window: false
-        }
-    );
-    let mut c = ready();
-    c.double_click("b", true).unwrap();
-    assert_eq!(
-        c.port.sent.last().unwrap().command,
-        Command::Open {
-            id: "b".into(),
-            new_window: true
-        }
-    );
-}
-
-#[test]
-fn rename_return_escape_empty_and_unchanged_match_finder_behavior() {
-    let mut c = ready();
-    let count = c.port.sent.len();
-    c.menu("a", MenuAction::Rename).unwrap();
-    c.rename.as_mut().unwrap().text = "Changed".into();
-    c.key(Key::Escape, 1).unwrap();
-    assert!(c.rename.is_none());
-    assert_eq!(c.port.sent.len(), count);
-    for value in ["", "   ", "Launch Film"] {
-        c.menu("a", MenuAction::Rename).unwrap();
-        c.rename.as_mut().unwrap().text = value.into();
-        c.key(Key::Return, 1).unwrap();
-        assert_eq!(c.port.sent.len(), count);
-    }
-    c.menu("a", MenuAction::Rename).unwrap();
-    c.rename.as_mut().unwrap().text = "  New Film  ".into();
-    c.key(Key::Return, 1).unwrap();
-    assert_eq!(
-        c.port.sent.last().unwrap().command,
-        Command::Rename {
-            id: "a".into(),
-            name: "New Film".into()
-        }
-    );
-}
-
-#[test]
 fn vanished_rename_target_cannot_receive_a_commit() {
     let mut c = ready();
     c.menu("a", MenuAction::Rename).unwrap();
@@ -486,30 +254,6 @@ fn duplicate_uniques_name_then_selects_and_starts_rename_after_ack() {
     load(&mut c, snapshot);
     assert_eq!(c.selected.as_deref(), Some("d"));
     assert_eq!(c.rename.as_ref().unwrap().id, "d");
-}
-
-#[test]
-fn trash_requires_confirmation_and_undo_only_appears_after_success() {
-    let mut c = ready();
-    let count = c.port.sent.len();
-    c.menu("a", MenuAction::Trash).unwrap();
-    let (serial, prompt) = alert(&mut c);
-    assert_eq!(prompt.message, "Move “Launch Film” to the Trash?");
-    assert_eq!(prompt.detail, "You can put it back from Recently Deleted.");
-    assert_eq!(prompt.buttons, vec!["Move to Trash", "Cancel"]);
-    assert_eq!(prompt.default, 0);
-    assert!(!prompt.critical);
-    assert_eq!(c.port.sent.len(), count);
-    assert_eq!(c.undo_label(), None);
-    c.answer(serial, Some(0)).unwrap();
-    let serial = c.port.sent.last().unwrap().serial;
-    complete(&mut c, serial, Ok(Outcome::Changed));
-    assert_eq!(c.undo_label(), Some("Undo Move to Trash"));
-    c.undo_move_to_trash().unwrap();
-    assert_eq!(
-        c.port.sent.last().unwrap().command,
-        Command::PutBack("a".into())
-    );
 }
 
 #[test]
@@ -582,47 +326,6 @@ fn alerts_queue_in_arrival_order() {
 }
 
 #[test]
-fn trash_subtitle_and_first_save_choices_match_spec() {
-    let mut c = ready();
-    assert!(!c.before_save("a").unwrap());
-    assert!(c.before_save("c").unwrap());
-    let all = effects(&mut c);
-    assert!(
-        all.iter()
-            .any(|e| matches!(e,HostEffect::Subtitle { id,text: Some("In Trash") } if id == "c"))
-    );
-    let (serial, prompt) = all
-        .into_iter()
-        .find_map(|e| {
-            if let HostEffect::Alert { serial, alert, .. } = e {
-                Some((serial, alert))
-            } else {
-                None
-            }
-        })
-        .unwrap();
-    assert_eq!(prompt.message, "“Unused” is in the Trash.");
-    assert!(prompt.detail.is_empty());
-    assert_eq!(
-        prompt.buttons,
-        vec!["Put Back and Save", "Save As…", "Cancel"]
-    );
-    c.answer(serial, Some(1)).unwrap();
-    assert!(
-        effects(&mut c)
-            .iter()
-            .any(|e| matches!(e,HostEffect::SaveAs(id) if id == "c"))
-    );
-    assert!(c.before_save("c").unwrap());
-    let (serial, _) = alert(&mut c);
-    c.answer(serial, Some(0)).unwrap();
-    assert_eq!(
-        c.port.sent.last().unwrap().command,
-        Command::PutBackAndSave("c".into())
-    );
-}
-
-#[test]
 fn new_project_defaults_current_format_and_uniqued_untitled_name() {
     let current = Format {
         width: 1080,
@@ -666,33 +369,6 @@ fn preset_copy_dimensions_and_manual_edits_switch_to_custom() {
     }
     f.edit_size("1920".into(), "1080".into()).unwrap();
     assert_eq!(f.preset, None);
-}
-
-#[test]
-fn sheet_fields_and_voiceover_labels_preserve_the_shipped_contract() {
-    assert_eq!(
-        FORM_ROWS,
-        &[
-            "Name",
-            "Resolution",
-            "Size",
-            "Frame Rate",
-            "Duration",
-            "Background"
-        ]
-    );
-    assert_eq!(
-        FIELD_LABELS,
-        &[
-            "Name",
-            "Resolution",
-            "Width",
-            "Height",
-            "Frame Rate",
-            "Duration",
-            "Background"
-        ]
-    );
 }
 
 #[test]
@@ -772,7 +448,11 @@ fn create_failure_keeps_sheet_and_draft_then_retry_closes_after_success() {
     assert!(c.form.as_ref().unwrap().submitting);
     assert_eq!(c.create(), Err(Failure::Busy));
     let serial = c.port.sent.last().unwrap().serial;
-    complete(&mut c, serial, Err(Failure::Service(ErrorCode::DiskFull)));
+    complete(
+        &mut c,
+        serial,
+        Err(Failure::Service(ServiceErrorCode::DiskFull)),
+    );
     assert_eq!(c.form.as_ref().unwrap().name, "Launch Film");
     assert!(!c.form.as_ref().unwrap().submitting);
     let (serial, prompt) = alert(&mut c);
@@ -790,74 +470,55 @@ fn create_failure_keeps_sheet_and_draft_then_retry_closes_after_success() {
 }
 
 #[test]
-fn stale_sheet_owner_closes_with_exact_banner_and_escape_never_creates() {
-    let mut c = ready();
-    c.begin_new("owner:1".into(), None, &format()).unwrap();
-    c.owner_changed("owner:2");
-    assert!(c.form.is_some());
-    c.owner_changed("owner:1");
-    assert!(c.form.is_none());
-    assert!(effects(&mut c).iter().any(|e| matches!(
-        e,
-        HostEffect::Banner("The project was changed, so the dialog closed.")
-    )));
-    c.begin_new("owner:2".into(), None, &format()).unwrap();
-    let count = c.port.sent.len();
-    c.key(Key::Escape, 1).unwrap();
-    assert!(c.form.is_none());
-    assert_eq!(c.port.sent.len(), count);
-}
-
-#[test]
 fn service_errors_use_spec_sentences_and_never_show_diagnostics() {
     let cases = [
         (
-            ErrorCode::Offline,
+            ServiceErrorCode::Offline,
             "Powermove can’t connect.",
             "Check your internet connection and try again.",
         ),
         (
-            ErrorCode::NotFound,
+            ServiceErrorCode::NotFound,
             "“Launch Film” can’t be found.",
             "It may have been moved or deleted.",
         ),
         (
-            ErrorCode::TooLarge,
+            ServiceErrorCode::TooLarge,
             "“Launch Film” is too large to open.",
             "",
         ),
         (
-            ErrorCode::InvalidProject,
+            ServiceErrorCode::InvalidProject,
             "“Launch Film” can’t be opened because it isn’t a Powermove project.",
             "",
         ),
         (
-            ErrorCode::PermissionDenied,
+            ServiceErrorCode::PermissionDenied,
             "You don’t have permission to open “Launch Film”.",
             "Check its sharing and permissions in Finder.",
         ),
         (
-            ErrorCode::DiskFull,
+            ServiceErrorCode::DiskFull,
             "There isn’t enough disk space.",
             "Free some space and try again.",
         ),
         (
-            ErrorCode::InvalidInput,
+            ServiceErrorCode::InvalidInput,
             "“Launch Film” couldn’t be read.",
             "The file may be damaged.",
         ),
         (
-            ErrorCode::InvalidData,
+            ServiceErrorCode::InvalidData,
             "“Launch Film” couldn’t be read.",
             "The file may be damaged.",
         ),
         (
-            ErrorCode::Unavailable,
+            ServiceErrorCode::Unavailable,
             "The operation couldn’t be completed.",
             "Try again. If it keeps happening, choose Window ▸ Error Log for details.",
         ),
         (
-            ErrorCode::Unknown,
+            ServiceErrorCode::Unknown,
             "The operation couldn’t be completed.",
             "Try again. If it keeps happening, choose Window ▸ Error Log for details.",
         ),
@@ -872,31 +533,13 @@ fn service_errors_use_spec_sentences_and_never_show_diagnostics() {
 }
 
 #[test]
-fn reviewed_tokens_resolve_and_metrics_follow_theme() {
-    let mut tokens = metrics();
-    let m = WindowMetrics::resolve(&tokens);
-    assert_eq!(m.min_width, tokens.metrics.min_width);
-    assert_eq!(m.min_height, tokens.metrics.min_height / 1.25);
-    assert_eq!(m.sidebar, tokens.metrics.settings_sidebar);
-    assert_eq!(m.thumbnail_min, tokens.metrics.thumbnail_min);
-    assert_eq!(m.sheet_inset, tokens.metrics.sheet_inset);
-    assert_eq!(m.sheet_value_column, tokens.metrics.sheet_value_column);
-    assert_eq!(m.media_badge, tokens.colors.media_badge);
-    tokens.apply_patch([("metrics.row", 32.0)]).unwrap();
-    assert_eq!(WindowMetrics::resolve(&tokens).row, 32.0);
-}
-
-#[test]
 fn disconnected_service_and_unsupported_operations_are_not_successes() {
     let mut c = LibraryController::new(Port {
         refuse: true,
         ..Default::default()
     });
     assert!(c.show().is_err());
-    assert!(matches!(
-        c.presentation(Duration::ZERO, 0..0).content,
-        Content::Unavailable { .. }
-    ));
+    assert!(matches!(c.content(), Content::Unavailable { .. }));
     let mut c = ready();
     c.menu("c", MenuAction::DeleteImmediately).unwrap();
     let (serial, _) = alert(&mut c);
@@ -944,10 +587,7 @@ fn service() -> (
     (dir, actor, service)
 }
 fn create_real(service: &mut kernel::KernelLibrary) -> pm_kernel::session::SessionHandle {
-    let Outcome::Opened {
-        reply: pm_kernel::session::ShellReply::Opened { session, .. },
-        ..
-    } = service
+    let Outcome::Opened(pm_kernel::session::ShellReply::Opened { session, .. }) = service
         .execute(Command::Create(NewProject {
             name: "Launch Film".into(),
             format: format(),
@@ -967,10 +607,7 @@ fn real_kernel_creates_renames_duplicates_and_focuses_existing_session() {
     assert_eq!(snapshot.rows[0].name, "Launch Film");
     assert_eq!(snapshot.rows[0].summary.as_ref().unwrap().fps, Some(30.0));
     let outcome = service
-        .execute(Command::Open {
-            id: session.project.clone(),
-            new_window: true,
-        })
+        .execute(Command::Open(session.project.clone()))
         .unwrap();
     assert!(matches!(outcome,Outcome::Focus(id) if id == session.project));
     service
@@ -1123,50 +760,6 @@ fn recents_default_and_twelve_item_limit_preserve_tagged_authored_behavior() {
 }
 
 #[test]
-fn form_failure_and_first_save_alerts_keep_their_owning_windows() {
-    let mut c = ready();
-    c.begin_new("editor:7".into(), None, &format()).unwrap();
-    c.create().unwrap();
-    let serial = c.port.sent.last().unwrap().serial;
-    complete(&mut c, serial, Err(Failure::Service(ErrorCode::DiskFull)));
-    let list = effects(&mut c);
-    assert!(list.iter().any(|e| matches!(e,HostEffect::Alert { owner: AlertOwner::NewProject(owner),.. } if owner == "editor:7")));
-    let mut c = ready();
-    c.before_save("c").unwrap();
-    assert!(
-        effects(&mut c).iter().any(
-            |e| matches!(e,HostEffect::Alert { owner: AlertOwner::Editor(id),.. } if id == "c")
-        )
-    );
-}
-
-#[test]
-fn modal_alert_focus_scope_blocks_underlying_keyboard_actions() {
-    let mut c = ready();
-    c.select("a").unwrap();
-    c.menu("a", MenuAction::Trash).unwrap();
-    let count = c.port.sent.len();
-    c.key(Key::Return, 1).unwrap();
-    c.key(Key::NewProject, 1).unwrap();
-    assert_eq!(c.port.sent.len(), count);
-    assert!(c.form.is_none());
-}
-
-#[test]
-fn sheet_contract_contains_default_button_focus_selection_and_units() {
-    assert_eq!(SHEET_TITLE, "New Project");
-    assert_eq!(SHEET_BUTTONS, &["Cancel", "Create"]);
-    assert_eq!(CUSTOM_PRESET, "Custom");
-    assert_eq!(UNITS, &["px", "fps", "s"]);
-    assert_eq!(INITIAL_FOCUS, "Name");
-    let mut c = ready();
-    c.begin_new("owner".into(), None, &format()).unwrap();
-    let form = c.presentation(Duration::ZERO, 0..1).form.unwrap();
-    assert_eq!(form.owner, "owner");
-    assert!(form.can_create());
-}
-
-#[test]
 fn real_kernel_rejects_invalid_colour_and_preserves_fractional_rate_and_background() {
     let (_dir, actor, mut service) = service();
     let mut input = NewProject {
@@ -1177,10 +770,8 @@ fn real_kernel_rejects_invalid_colour_and_preserves_fractional_rate_and_backgrou
             ..format()
         },
     };
-    let Outcome::Opened {
-        reply: pm_kernel::session::ShellReply::Opened { session, .. },
-        ..
-    } = service.execute(Command::Create(input.clone())).unwrap()
+    let Outcome::Opened(pm_kernel::session::ShellReply::Opened { session, .. }) =
+        service.execute(Command::Create(input.clone())).unwrap()
     else {
         panic!("opened");
     };
@@ -1202,31 +793,7 @@ fn real_kernel_rejects_invalid_colour_and_preserves_fractional_rate_and_backgrou
 }
 
 #[test]
-fn external_put_back_removes_stale_library_undo_action() {
-    let mut c = ready();
-    c.menu("a", MenuAction::Trash).unwrap();
-    let (serial, _) = alert(&mut c);
-    c.answer(serial, Some(0)).unwrap();
-    let serial = c.port.sent.last().unwrap().serial;
-    complete(&mut c, serial, Ok(Outcome::Changed));
-    assert_eq!(c.undo_label(), Some("Undo Move to Trash"));
-    load(&mut c, sample());
-    assert_eq!(c.undo_label(), None);
-}
-
-#[test]
-fn name_sort_calls_the_host_collator_instead_of_assuming_ascii_order() {
-    let snapshot = sample();
-    let query = Query {
-        sort: Sort::Name,
-        ..Default::default()
-    };
-    let rows = query.apply_with_names(&snapshot, |a, b| b.cmp(a));
-    assert_eq!(rows[0].name, "Trailer");
-}
-
-#[test]
-fn real_kernel_open_hands_a_closed_project_to_the_editor_with_new_window_intent() {
+fn real_kernel_open_hands_a_closed_project_to_the_editor() {
     let (_dir, actor, mut service) = service();
     let session = create_real(&mut service);
     service
@@ -1236,34 +803,17 @@ fn real_kernel_open_hands_a_closed_project_to_the_editor_with_new_window_intent(
         .unwrap()
         .unwrap();
     let result = service
-        .execute(Command::Open {
-            id: session.project.clone(),
-            new_window: true,
-        })
+        .execute(Command::Open(session.project.clone()))
         .unwrap();
-    let Outcome::Opened {
-        reply: pm_kernel::session::ShellReply::Opened {
-            session: opened, ..
-        },
-        new_window,
-    } = result
+    let Outcome::Opened(pm_kernel::session::ShellReply::Opened {
+        session: opened, ..
+    }) = result
     else {
         panic!("opened");
     };
-    assert!(new_window);
     assert_eq!(opened.project, session.project);
     assert_ne!(opened.generation, session.generation);
     actor.shutdown();
-}
-
-#[test]
-fn stale_owner_closes_even_when_creation_is_in_flight() {
-    let mut c = ready();
-    c.begin_new("editor:1".into(), None, &format()).unwrap();
-    c.create().unwrap();
-    c.owner_changed("editor:1");
-    assert!(c.form.is_none());
-    assert_eq!(c.create(), Err(Failure::Stale));
 }
 
 #[test]
@@ -1312,66 +862,6 @@ fn reviewed_link_and_admitted_creation_have_exact_controls() {
     assert_eq!(f.buttons(), ("Create", true, true));
 }
 #[test]
-fn reviewed_missing_facts_omit_separators_and_zero_dimensions() {
-    let mut r = row("a", "Film", false);
-    r.modified_ms = None;
-    assert_eq!(r.facts(""), Some("1920×1080".into()));
-    assert_eq!(r.ax_label(""), Some("Film, 1920 by 1080".into()));
-    r.summary.as_mut().unwrap().width = Some(0);
-    assert_eq!(r.facts(""), None);
-    assert_eq!(r.ax_label(""), Some("Film".into()));
-}
-#[test]
-fn reviewed_numeric_sorts_descend_first_reverse_and_omit_popup_check() {
-    let mut a = row("a", "A", false);
-    let mut b = row("b", "B", false);
-    let mut missing = row("m", "Missing", false);
-    a.summary.as_mut().unwrap().duration_seconds = Some(5.);
-    b.summary.as_mut().unwrap().duration_seconds = Some(15.);
-    a.summary.as_mut().unwrap().fps = Some(24.);
-    b.summary.as_mut().unwrap().fps = Some(60.);
-    a.summary.as_mut().unwrap().width = Some(1080);
-    a.summary.as_mut().unwrap().height = Some(1920);
-    missing.summary = None;
-    let snapshot = Snapshot {
-        rows: vec![a, b, missing],
-        ..Default::default()
-    };
-    for sort in [
-        Sort::Duration { ascending: false },
-        Sort::Size { ascending: false },
-        Sort::FrameRate { ascending: false },
-    ] {
-        let mut q = Query {
-            sort,
-            ..Default::default()
-        };
-        assert_eq!(
-            q.apply(&snapshot)
-                .iter()
-                .map(|r| r.id.as_str())
-                .collect::<Vec<_>>(),
-            ["b", "a", "m"]
-        );
-        let label = match sort {
-            Sort::Duration { .. } => "Duration",
-            Sort::Size { .. } => "Size",
-            _ => "Frame Rate",
-        };
-        assert_eq!(Sort::Name.click_header(label), Some(sort));
-        assert_eq!(sort.click_header(label), Some(sort.reversed()));
-        assert_eq!(sort.popup_check(), None);
-        q.sort = sort.reversed();
-        assert_eq!(
-            q.apply(&snapshot)
-                .iter()
-                .map(|r| r.id.as_str())
-                .collect::<Vec<_>>(),
-            ["a", "b", "m"]
-        );
-    }
-}
-#[test]
 fn reviewed_duplicate_clears_only_nonmatching_search_before_select_and_rename() {
     let mut c = ready();
     c.query.text = "Film".into();
@@ -1405,4 +895,108 @@ fn reviewed_duplicate_clears_only_nonmatching_search_before_select_and_rename() 
     );
     assert_eq!(c.selected.as_deref(), Some("copy"));
     assert_eq!(c.rename.as_ref().unwrap().id, "copy");
+}
+#[test]
+fn filter_uses_service_recents_and_does_not_mix_trash() {
+    let snapshot = sample();
+    assert_eq!(
+        Query {
+            section: Section::Recents,
+            ..Default::default()
+        }
+        .apply(&snapshot)
+        .iter()
+        .map(|r| &r.id)
+        .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+    assert_eq!(
+        Query {
+            section: Section::Deleted,
+            ..Default::default()
+        }
+        .apply(&snapshot)[0]
+            .id,
+        "c"
+    );
+    assert_eq!(
+        Query {
+            text: "LAUNCH".into(),
+            ..Default::default()
+        }
+        .apply(&snapshot)
+        .len(),
+        1
+    );
+    let mut snapshot = snapshot;
+    snapshot.rows[0].modified_ms = Some(10);
+    snapshot.rows[1].modified_ms = Some(20);
+    assert_eq!(Query::default().apply(&snapshot)[0].id, "b");
+}
+#[test]
+fn rename_escape_empty_and_unchanged_match_finder_behavior() {
+    let mut c = ready();
+    let count = c.port.sent.len();
+    c.menu("a", MenuAction::Rename).unwrap();
+    c.rename.as_mut().unwrap().text = "Changed".into();
+    c.escape();
+    assert!(c.rename.is_none());
+    assert_eq!(c.port.sent.len(), count);
+    for value in ["", "   ", "Launch Film"] {
+        c.menu("a", MenuAction::Rename).unwrap();
+        c.rename.as_mut().unwrap().text = value.into();
+        c.commit_rename().unwrap();
+        assert_eq!(c.port.sent.len(), count);
+    }
+    c.menu("a", MenuAction::Rename).unwrap();
+    c.rename.as_mut().unwrap().text = "  New Film  ".into();
+    c.commit_rename().unwrap();
+    assert_eq!(
+        c.port.sent.last().unwrap().command,
+        Command::Rename {
+            id: "a".into(),
+            name: "New Film".into()
+        }
+    );
+}
+#[test]
+fn double_click_opens_by_id() {
+    for option in [false, true] {
+        let mut c = ready();
+        c.double_click("b", option).unwrap();
+        assert_eq!(
+            c.port.sent.last().unwrap().command,
+            Command::Open("b".into())
+        );
+    }
+}
+#[test]
+fn trash_requires_confirmation() {
+    let mut c = ready();
+    let count = c.port.sent.len();
+    c.menu("a", MenuAction::Trash).unwrap();
+    let (serial, prompt) = alert(&mut c);
+    assert_eq!(prompt.message, "Move “Launch Film” to the Trash?");
+    assert_eq!(prompt.detail, "You can put it back from Recently Deleted.");
+    assert_eq!(prompt.buttons, vec!["Move to Trash", "Cancel"]);
+    assert_eq!(prompt.default, 0);
+    assert!(!prompt.critical);
+    assert_eq!(c.port.sent.len(), count);
+    c.answer(serial, Some(0)).unwrap();
+    assert_eq!(
+        c.port.sent.last().unwrap().command,
+        Command::Trash("a".into())
+    );
+}
+#[test]
+fn card_facts_omit_missing_values_and_zero_dimensions() {
+    let mut r = row("a", "Launch Film", false);
+    assert_eq!(r.facts("Yesterday"), Some("Yesterday · 1920×1080".into()));
+    r.modified_ms = None;
+    assert_eq!(r.facts(""), Some("1920×1080".into()));
+    r.summary.as_mut().unwrap().width = Some(0);
+    assert_eq!(r.facts(""), None);
+    r.modified_ms = Some(42);
+    r.summary = None;
+    assert_eq!(r.facts("Yesterday"), Some("Yesterday".into()));
 }

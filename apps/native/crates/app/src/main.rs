@@ -5,7 +5,7 @@ mod colour;
 mod colour_panel;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
-pub mod dialogs;
+mod dialogs;
 mod error_log;
 mod export_coordinator;
 mod extension_authoring;
@@ -14,13 +14,11 @@ mod first_run;
 mod gizmo;
 mod keyframe_sheets;
 
-#[path = "surfaces/editing.rs"]
-pub mod editing;
 #[cfg(test)]
 mod gizmo_tests;
 mod layer_commands;
 #[path = "surfaces/library.rs"]
-pub mod library_surface;
+mod library_surface;
 mod lifecycle;
 mod mcp;
 mod mcp_services;

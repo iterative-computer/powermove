@@ -1,3 +1,0 @@
-# This lane's tests are browser-free and need no unrelated app/spike harness.
-[test]
-preload = []

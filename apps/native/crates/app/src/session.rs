@@ -1061,46 +1061,31 @@ impl Controller {
             let _operation = operation;
             let mut result = pending.await;
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
-                let recovery = crate::surfaces::recovery_kernel::PreparedRecovery::from_reply(
+                let recovery = crate::surfaces::recovery::PreparedRecovery::from_reply(
                     reply, &name, false, saved,
                 );
                 if let Some(recovery) = recovery {
-                    use crate::surfaces::recovery::{Owner, Prompt, RecoverySurface};
-                    if let RecoverySurface::Alert(alert) = recovery.surface.clone() {
-                        let prompt = Prompt {
-                            id: pm_kernel::new_id("recovery"),
-                            revision: 0,
-                            owner: Owner::Window(name.clone()),
-                            alert,
-                        };
-                        let answer = this.update(cx, |v, _| {
-                            if matches!(
-                                reply,
-                                ShellReply::RecoveryRequired {
-                                    recovery: RecoveryResult::Unrecoverable { .. },
-                                    ..
-                                }
-                            ) {
-                                v.errors.borrow_mut().push("Project", &prompt.alert.message);
+                    let answer = this.update(cx, |v, _| {
+                        if matches!(
+                            reply,
+                            ShellReply::RecoveryRequired {
+                                recovery: RecoveryResult::Unrecoverable { .. },
+                                ..
                             }
-                            v.recovery_pending = true;
-                            v.mcp.awaiting_recovery(Some(name.clone()));
-                            crate::surfaces::recovery_macos::sheet(
-                                &prompt,
-                                &v.host.borrow().window,
-                            )
-                        });
-                        let response = match answer {
-                            Ok(rx) => rx.recv().await.ok(),
-                            Err(_) => None,
-                        };
-                        let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
-                        let call = response
-                            .and_then(|r| r.action)
-                            .and_then(|action| recovery.decision(action));
-                        if let Some(call) = call {
-                            result = kernel.shell(call).await;
+                        ) {
+                            v.errors.borrow_mut().push("Project", &recovery.alert.message);
                         }
+                        v.recovery_pending = true;
+                        v.mcp.awaiting_recovery(Some(name.clone()));
+                        crate::surfaces::recovery::sheet(&recovery.alert, &v.host.borrow().window)
+                    });
+                    let response = match answer {
+                        Ok(rx) => rx.recv().await.ok().flatten(),
+                        Err(_) => None,
+                    };
+                    let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
+                    if let Some(call) = response.and_then(|action| recovery.decision(action)) {
+                        result = kernel.shell(call).await;
                     }
                 }
             }

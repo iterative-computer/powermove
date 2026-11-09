@@ -40,9 +40,6 @@ impl Controller {
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
                 Outbound::Opened { reply, name, file } => v.adopt_reply(*reply, name, file, cx),
-                Outbound::Focus => {
-                    gpui_macos::child_window::raise_if_active(&v.host.borrow().window)
-                }
                 Outbound::FocusProject(id) => v.focus_project(&id, cx),
                 Outbound::Message(text) => {
                     v.message = text;
@@ -221,9 +218,7 @@ impl Controller {
         self.message = match error {
             DialogError::Invalid(text) => text.into(),
             DialogError::Stale => "The project was changed, so the dialog closed.".into(),
-            DialogError::MissingBacking(_)
-            | DialogError::Kernel(_)
-            | DialogError::InvalidPayload => {
+            DialogError::MissingBacking(_) | DialogError::Kernel(_) => {
                 "That change couldn’t be made. The project wasn’t changed.".into()
             }
         };

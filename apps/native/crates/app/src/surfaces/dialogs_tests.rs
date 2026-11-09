@@ -1,10 +1,12 @@
-use super::Key;
+#![allow(unused_imports)]
 use super::kernel::*;
 use super::*;
 use pm_kernel::{
     Call, Caller, HistoryCall, KernelActor, KernelConfig, KernelHandle, OpenSource, Reply, Request,
 };
 use pm_model::{Value, json::parse};
+use std::collections::{BTreeMap, VecDeque};
+use std::time::{Duration, Instant};
 
 fn id() -> DialogId {
     DialogId("dialog".into())
@@ -141,29 +143,9 @@ fn composition_all_validation_bounds_and_nonfinite() {
     assert_eq!(c.errors().get("name"), Some(&NAME_ERROR));
 }
 #[test]
-fn composition_resolution_menu_and_custom() {
-    let mut c = comp();
-    for (label, w, h) in RESOLUTIONS {
-        assert!(c.choose_resolution(label));
-        assert_eq!((c.width, c.height), (*w, *h));
-        assert_eq!(c.resolution(), *label);
-    }
-    c.width = 2000.;
-    assert_eq!(c.resolution(), "Custom");
-    assert!(!c.choose_resolution("bogus"));
-}
-#[test]
 fn composition_names_fill_first_gap() {
     assert_eq!(unique_name("Comp", &ids(&["Comp 1", "Comp 3"])), "Comp 2");
     assert_eq!(unique_name("Pre-comp", &ids(&["Pre-comp 1"])), "Pre-comp 2");
-}
-#[test]
-fn timecode_input_retains_frame_time_and_refuses_invalid() {
-    assert_eq!(duration_input("00:01:02:15", 30.), Some(62.5));
-    assert_eq!(duration_input("0.1", 30.), Some(0.1));
-    for s in ["00:99:00:00", "00:00:00:30", "1:2", "NaN", "Infinity"] {
-        assert_eq!(duration_input(s, 30.), None);
-    }
 }
 #[test]
 fn precompose_exact_copy_and_enabled_states() {
@@ -191,51 +173,6 @@ fn precompose_exact_copy_and_enabled_states() {
     assert!(s.fields[3].enabled);
 }
 #[test]
-fn delete_composition_copy_counts_and_safe_default() {
-    for n in [0, 1, 4] {
-        let s = delete_composition(id(), owner(), "Title", n);
-        assert_eq!(s.title, "Delete “Title”?");
-        assert_eq!(
-            s.line,
-            Some(if n == 0 {
-                "You can undo this.".into()
-            } else if n == 1 {
-                "It’s used in 1 other composition. Those layers are removed too. You can undo this."
-                    .into()
-            } else {
-                format!(
-                    "It’s used in {n} other compositions. Those layers are removed too. You can undo this."
-                )
-            })
-        );
-        assert!(s.buttons[1].destructive);
-        assert!(!s.buttons[1].default);
-        assert_eq!(s.keyboard(Key::Return), KeyEffect::Cancel);
-    }
-}
-#[test]
-fn keyframe_copy_single_multiple_and_two_wells() {
-    assert_eq!(
-        KEYFRAME_MENU,
-        &["Edit Value…", "Keyframe Velocity…", "Scale Keyframes…"]
-    );
-    let s = keyframe_value(
-        id(),
-        owner(),
-        "Position",
-        "00:00:01:00",
-        1,
-        &[mixed(&[1.]), mixed(&[2.])],
-        "px",
-    );
-    assert_eq!(s.title, "Keyframe Value");
-    assert_eq!(s.line.as_deref(), Some("Position at 00:00:01:00"));
-    assert_eq!(s.fields[0].values, vec!["1", "2"]);
-    let s = keyframe_value(id(), owner(), "Opacity", "", 3, &[mixed(&[1., 2.])], "%");
-    assert_eq!(s.line.as_deref(), Some("Opacity · 3 keyframes"));
-    assert_eq!(s.fields[0].placeholder, Some("Mixed"));
-}
-#[test]
 fn mixed_empty_preserves_component_invalid_gets_field_error() {
     let mut m = mixed(&[1., 2.]);
     assert_eq!(m.parsed(), Ok(None));
@@ -248,26 +185,6 @@ fn mixed_empty_preserves_component_invalid_gets_field_error() {
     }
     m.draft = "-1.5".into();
     assert_eq!(m.parsed(), Ok(Some(-1.5)));
-}
-#[test]
-fn velocity_exact_copy_units_groups_mixed_and_bounds() {
-    let mut d = velocity();
-    let s = d.surface(id(), owner(), 3, "px");
-    assert_eq!(s.title, "Keyframe Velocity");
-    assert_eq!(s.line.as_deref(), Some("3 keyframes"));
-    assert_eq!(VELOCITY_GROUPS, &["Incoming", "Outgoing"]);
-    assert_eq!(s.fields[0].unit, "px/s");
-    assert_eq!(s.fields[1].unit, "%");
-    for n in ["0", "100.1", "NaN"] {
-        d.incoming_influence.draft = n.into();
-        let s = d.surface(id(), owner(), 3, "px");
-        assert_eq!(s.fields[0].error, Some(VELOCITY_ERROR));
-        assert!(!s.buttons[1].enabled);
-    }
-    for n in ["0.1", "100"] {
-        d.incoming_influence.draft = n.into();
-        assert!(d.valid());
-    }
 }
 #[test]
 fn scale_default_non_numeric_error_and_invalid_states() {
@@ -291,197 +208,6 @@ fn scale_default_non_numeric_error_and_invalid_states() {
         d.time_percent = n;
         assert!(!d.valid());
     }
-}
-#[test]
-fn expression_copy_buttons_keyboard_and_native_text_config() {
-    let mut d = ExpressionDraft::new("value".into(), "Title".into(), "Opacity".into());
-    d.preview = Preview::Value("100 %".into());
-    let s = d.surface(id(), owner());
-    assert_eq!(s.title, "Expression");
-    assert_eq!(s.line.as_deref(), Some("Title · Opacity"));
-    assert_eq!(s.fields[0].voiceover_label(), "Expression for Opacity");
-    assert_eq!(
-        s.buttons.iter().map(|b| b.label).collect::<Vec<_>>(),
-        vec!["Remove Expression", "Cancel", "Apply"]
-    );
-    for k in [Key::Return, Key::Tab] {
-        assert_eq!(s.keyboard(k), KeyEffect::Type);
-    }
-    assert_eq!(s.keyboard(Key::CommandReturn), KeyEffect::Apply);
-    assert_eq!(s.keyboard(Key::ControlTab), KeyEffect::LeaveEditor);
-    assert_eq!(s.keyboard(Key::Escape), KeyEffect::Cancel);
-    assert_eq!(EXPRESSION_TEXT.lines, 10);
-    const {
-        assert!(!EXPRESSION_TEXT.smart_quotes);
-    }
-    const {
-        assert!(!EXPRESSION_TEXT.smart_dashes);
-    }
-    const {
-        assert!(!EXPRESSION_TEXT.substitutions);
-    }
-    const {
-        assert!(!EXPRESSION_TEXT.spell_checking);
-    }
-    const {
-        assert!(!EXPRESSION_TEXT.syntax_colouring);
-    }
-    const {
-        assert!(!EXPRESSION_TEXT.line_numbers);
-    }
-    assert_eq!(EXPRESSION_TEXT.font, "SF Mono");
-    assert_eq!(INSERT_TITLE, "Insert ⌄");
-}
-#[test]
-fn expression_syntax_blocks_runtime_allows_apply() {
-    let mut d = ExpressionDraft::new(String::new(), "Title".into(), "Opacity".into());
-    for (p, enabled) in [
-        (
-            Preview::Syntax {
-                line: 2,
-                message: "Syntax".into(),
-            },
-            false,
-        ),
-        (
-            Preview::Runtime {
-                line: 1,
-                message: "Runtime".into(),
-            },
-            true,
-        ),
-        (Preview::Value("100 %".into()), true),
-        (Preview::Pending, false),
-        (Preview::Unavailable, false),
-    ] {
-        d.preview = p;
-        assert_eq!(d.surface(id(), owner()).buttons[1].enabled, enabled);
-    }
-    assert_eq!(
-        Preview::Value("100 %".into()).line().as_deref(),
-        Some("At the playhead: 100 %")
-    );
-    assert_eq!(
-        Preview::Runtime {
-            line: 3,
-            message: "Oops".into()
-        }
-        .line()
-        .as_deref(),
-        Some("Line 3: Oops")
-    );
-}
-#[test]
-fn expression_debounce_latest_only_and_announcement_change_detection() {
-    let now = Instant::now();
-    let mut d = ExpressionDraft::new(String::new(), "L".into(), "P".into());
-    d.edit("value".into(), now);
-    assert!(d.take_job(now + Duration::from_millis(249)).is_none());
-    let old = d.take_job(now + Duration::from_millis(250)).unwrap();
-    assert!(d.take_job(now + Duration::from_secs(1)).is_none());
-    d.edit("time".into(), now + Duration::from_millis(260));
-    assert!(!d.complete(&old, Preview::Value("0".into())));
-    assert!(d.take_job(now + Duration::from_millis(509)).is_none());
-    let job = d.take_job(now + Duration::from_millis(510)).unwrap();
-    assert!(d.complete(&job, Preview::Value("1 s".into())));
-    assert!(!d.complete(&job, Preview::Value("1 s".into())));
-}
-#[test]
-fn expression_insert_uses_cocoa_utf16_caret_and_preserves_authored_text() {
-    let mut d = ExpressionDraft::new("🦀+value".into(), "L".into(), "P".into());
-    assert!(!d.insert(1..2, "time", Instant::now()));
-    assert!(d.insert(3..8, "time", Instant::now()));
-    assert_eq!(d.source, "🦀+time");
-}
-#[test]
-fn preset_exact_alerts_menu_parent_and_accessory() {
-    let export = DialogId("export".into());
-    for s in [
-        replace_preset(id(), owner(), export.clone(), "Film"),
-        delete_preset(id(), owner(), export.clone(), "Film"),
-        rename_preset(id(), owner(), export.clone(), "Film"),
-    ] {
-        assert_eq!(s.piece, NativePiece::Alert);
-        assert_eq!(s.parent_sheet, Some(export.clone()));
-    }
-    assert_eq!(
-        replace_preset(id(), owner(), export.clone(), "Film").title,
-        "A preset named “Film” already exists. Do you want to replace it?"
-    );
-    let s = delete_preset(id(), owner(), export.clone(), "Film");
-    assert_eq!(s.title, "Delete the preset “Film”?");
-    assert!(s.buttons[1].destructive);
-    assert!(s.buttons[0].default);
-    let s = rename_preset(id(), owner(), export, "Film");
-    assert_eq!(s.title, "Rename Preset");
-    assert_eq!(s.fields[0].values, vec!["Film"]);
-    assert_eq!(PRESET_RENAME_ACCESSORY_WIDTH, 240.);
-    assert_eq!(
-        preset_menu(Some("Film")),
-        vec!["", "Rename “Film”…", "Delete “Film”"]
-    );
-    assert!(preset_menu(None).is_empty());
-}
-#[test]
-fn queue_serializes_per_window_deduplicates_and_restores_focus() {
-    let mut q = DialogQueue::default();
-    let mut h = HeadlessHost::default();
-    let a = delete_composition(id(), owner(), "A", 0);
-    let mut b = a.clone();
-    b.id = DialogId("B".into());
-    assert!(q.present(a.clone(), &mut h));
-    assert!(!q.present(a, &mut h));
-    assert!(q.present(b.clone(), &mut h));
-    assert_eq!(h.events.len(), 1);
-    let mut c = b.clone();
-    c.id = DialogId("C".into());
-    c.owner = WindowId("other".into());
-    assert!(q.present(c, &mut h));
-    assert_eq!(h.events.len(), 2);
-    assert!(q.close(&id(), &mut h));
-    assert!(matches!(
-        &h.events[2],
-        HostEvent::Close {
-            restore_trigger: false,
-            ..
-        }
-    ));
-    assert!(matches!(&h.events[3],HostEvent::Present(s) if s.id==b.id));
-    assert!(q.close(&b.id, &mut h));
-    assert!(matches!(
-        &h.events[4],
-        HostEvent::Close {
-            restore_trigger: true,
-            ..
-        }
-    ));
-    assert!(!q.close(&b.id, &mut h));
-}
-#[test]
-fn stale_target_closes_with_exact_banner_and_medium_ax() {
-    let mut q = DialogQueue::default();
-    let mut h = HeadlessHost::default();
-    q.present(comp().surface(id(), owner(), true, 0), &mut h);
-    assert!(q.stale(&id(), "Composition", &mut h));
-    assert!(
-        matches!(&h.events[2],HostEvent::Banner {text,announcement:Announcement::Medium,..} if text=="Composition was changed, so the dialog closed.")
-    );
-}
-#[test]
-fn sheet_token_references_and_full_keyboard_labels() {
-    let s = comp().surface(id(), owner(), false, 0);
-    assert_eq!(s.width_token, "metrics.sheet_width");
-    assert_eq!(s.inset_token, "metrics.sheet_inset");
-    assert_eq!(s.value_column_token, "metrics.sheet_value_column");
-    assert!(s.fields.iter().all(|f| !f.voiceover_label().is_empty()));
-    assert_eq!(s.keyboard(Key::Tab), KeyEffect::NextInReadingOrder);
-    assert_eq!(s.keyboard(Key::Return), KeyEffect::Apply);
-    assert_eq!(s.keyboard(Key::Escape), KeyEffect::Cancel);
-    assert!(
-        DESIGN_TODOS
-            .iter()
-            .all(|s| s.starts_with("DESIGN-TODO(opus):"))
-    );
 }
 
 #[test]
@@ -566,25 +292,6 @@ fn kernel_key_edits_exclude_locked_and_undo_as_one() {
     assert_eq!(root(&h), before);
 }
 #[test]
-fn kernel_blank_components_leave_values_unchanged() {
-    let (_actor, h, c) = fixture();
-    let before = root(&h);
-    apply(
-        c.component_values(&[
-            (ids(&["K1"]), mixed(&[1., 2.])),
-            (ids(&["K2"]), mixed(&[99.])),
-        ])
-        .unwrap(),
-        &h,
-        1,
-    );
-    assert_eq!(key(&root(&h), "K1").get("v"), key(&before, "K1").get("v"));
-    assert_eq!(
-        key(&root(&h), "K2").get("v").and_then(Value::as_f64),
-        Some(99.)
-    );
-}
-#[test]
 fn kernel_velocity_sets_bezier_disables_auto_and_sets_each_side() {
     let (_actor, h, c) = fixture();
     apply(c.velocity(&ids(&["K1", "K2"]), &velocity()).unwrap(), &h, 1);
@@ -640,226 +347,6 @@ fn kernel_scale_exact_about_earliest_and_single_undo() {
     assert_eq!(key(&r, "K2").get("t").and_then(Value::as_f64), Some(1.5));
     assert_eq!(key(&r, "K2").get("v").and_then(Value::as_f64), Some(40.));
 }
-#[test]
-fn kernel_expression_preserves_source_and_remove_undo() {
-    let (_actor, h, c) = fixture();
-    let source = "value + time";
-    apply(
-        c.expression("L", "opacity", Some(source.into())).unwrap(),
-        &h,
-        1,
-    );
-    assert_eq!(
-        key(&root(&h), "L")
-            .get("p")
-            .unwrap()
-            .get("opacity")
-            .unwrap()
-            .get("expr")
-            .and_then(Value::as_str),
-        Some(source)
-    );
-    let c = Context::capture(&h, "P").unwrap();
-    apply(c.expression("L", "opacity", None).unwrap(), &h, 2);
-    assert_eq!(
-        key(&root(&h), "L")
-            .get("p")
-            .unwrap()
-            .get("opacity")
-            .unwrap()
-            .get("expr"),
-        Some(&Value::Null)
-    );
-}
-#[test]
-fn kernel_invalid_expression_never_applies() {
-    let (_actor, h, c) = fixture();
-    let before = root(&h);
-    assert!(
-        c.expression("L", "opacity", Some("value + (".into()))
-            .is_err()
-    );
-    assert_eq!(root(&h), before);
-}
-#[test]
-fn kernel_fences_revision_and_reopened_document_session() {
-    let (_actor, h, c) = fixture();
-    let first = c.values(&ids(&["K1"]), &mixed(&[42.])).unwrap();
-    let stale = c.values(&ids(&["K2"]), &mixed(&[43.])).unwrap();
-    apply(first, &h, 1);
-    assert!(matches!(
-        stale.submit(&h, 2).wait().unwrap().unwrap().reply,
-        Reply::Throw(_)
-    ));
-    let fresh = Context::capture(&h, "P").unwrap();
-    let stale = fresh.values(&ids(&["K1"]), &mixed(&[44.])).unwrap();
-    let saved = root(&h);
-    assert!(h.close("P").wait().unwrap());
-    h.open("P", OpenSource::Untitled(saved.clone()))
-        .wait()
-        .unwrap()
-        .unwrap();
-    assert!(!fresh.current(&h));
-    assert!(matches!(
-        stale.submit(&h, 3).wait().unwrap().unwrap().reply,
-        Reply::Throw(_)
-    ));
-    assert_eq!(root(&h), saved);
-}
-#[derive(Default)]
-struct Archive {
-    entries: Vec<Value>,
-    fail: bool,
-}
-impl PresetArchive for Archive {
-    fn archive(&mut self, e: &Value) -> Result<(), ServiceCode> {
-        if self.fail {
-            return Err(ServiceCode::DiskFull);
-        }
-        self.entries.push(e.clone());
-        Ok(())
-    }
-}
-fn preset_fixture(h: &KernelHandle) -> Presets {
-    let p = Presets::capture(h).unwrap();
-    let p = p
-        .save(
-            "one",
-            "Film",
-            parse(r#"{"name":"output","format":"mp4","unknown":{"preserve":true}}"#).unwrap(),
-            false,
-            &mut Archive::default(),
-        )
-        .unwrap();
-    p.submit(h).wait().unwrap().unwrap();
-    Presets::capture(h).unwrap()
-}
-#[test]
-fn preset_kernel_save_select_excludes_output_name_retains_unknown_fields() {
-    let (_actor, h, _) = fixture();
-    let p = preset_fixture(&h);
-    let o = p.select("one").unwrap();
-    assert!(o.get("name").is_none());
-    assert!(o.get("unknown").is_some());
-    assert!(p.select("missing").is_none());
-}
-#[test]
-fn preset_replace_requires_confirmation_archives_full_old_entry() {
-    let (_actor, h, _) = fixture();
-    let p = preset_fixture(&h);
-    let mut archive = Archive::default();
-    assert!(matches!(
-        p.save("two", "Film", parse("{}").unwrap(), false, &mut archive),
-        Err(PresetError::NeedsReplace)
-    ));
-    assert!(archive.entries.is_empty());
-    let p = p
-        .save("two", "Film", parse("{}").unwrap(), true, &mut archive)
-        .unwrap();
-    assert_eq!(archive.entries.len(), 1);
-    assert!(
-        archive.entries[0]
-            .get("options")
-            .unwrap()
-            .get("unknown")
-            .is_some()
-    );
-    assert_eq!(p.entries().len(), 1);
-    p.submit(&h).wait().unwrap().unwrap();
-    assert!(Presets::capture(&h).unwrap().select("two").is_some());
-}
-#[test]
-fn preset_delete_archive_failure_keeps_every_byte_and_exact_error() {
-    let (_actor, h, _) = fixture();
-    let p = preset_fixture(&h);
-    let before = p.entries().to_vec();
-    let error = p
-        .delete(
-            "one",
-            &mut Archive {
-                fail: true,
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-    assert_eq!(
-        error.inline(),
-        Some((
-            "Couldn’t save the preset.",
-            "Free some space and try again."
-        ))
-    );
-    assert_eq!(Presets::capture(&h).unwrap().entries(), before);
-}
-#[test]
-fn preset_delete_archives_and_rename_preserves_payload() {
-    let (_actor, h, _) = fixture();
-    let p = preset_fixture(&h);
-    let renamed = p.rename("one", "New").unwrap();
-    assert_eq!(
-        renamed.entries()[0].get("options"),
-        p.entries()[0].get("options")
-    );
-    renamed.submit(&h).wait().unwrap().unwrap();
-    let p = Presets::capture(&h).unwrap();
-    let mut archive = Archive::default();
-    p.delete("one", &mut archive)
-        .unwrap()
-        .submit(&h)
-        .wait()
-        .unwrap()
-        .unwrap();
-    assert_eq!(archive.entries, p.entries());
-    assert!(Presets::capture(&h).unwrap().entries().is_empty());
-}
-#[test]
-fn preset_state_race_refuses_overwrite() {
-    let (_actor, h, _) = fixture();
-    let p = preset_fixture(&h);
-    let a = p.rename("one", "A").unwrap();
-    let b = p.rename("one", "B").unwrap();
-    a.submit(&h).wait().unwrap().unwrap();
-    assert!(b.submit(&h).wait().unwrap().is_err());
-    assert_eq!(
-        Presets::capture(&h).unwrap().entries()[0]
-            .get("name")
-            .and_then(Value::as_str),
-        Some("A")
-    );
-}
-#[test]
-fn preset_rename_missing_and_empty_validation() {
-    let (_actor, h, _) = fixture();
-    let p = preset_fixture(&h);
-    assert!(matches!(
-        p.rename("missing", "New"),
-        Err(PresetError::Missing)
-    ));
-    assert!(matches!(p.rename("one", "  "), Err(PresetError::EmptyName)));
-}
-#[test]
-fn all_service_codes_use_approved_informative_copy() {
-    for code in [
-        ServiceCode::Offline,
-        ServiceCode::NotFound,
-        ServiceCode::TooLarge,
-        ServiceCode::InvalidProject,
-        ServiceCode::PermissionDenied,
-        ServiceCode::DiskFull,
-        ServiceCode::InvalidInput,
-        ServiceCode::InvalidData,
-        ServiceCode::Unavailable,
-        ServiceCode::Unknown,
-    ] {
-        let (message, info) = PresetError::Service(code).inline().unwrap();
-        assert_eq!(message, PRESET_FAILURE);
-        assert!(!info.contains("Help ▸"));
-    }
-    assert_eq!(
-        ServiceCode::Unknown.informative(),
-        "Try again. If it keeps happening, choose Window ▸ Error Log for details."
-    );
-}
 
 #[test]
 fn kernel_velocity_blank_fields_preserve_each_keys_native_ease() {
@@ -881,93 +368,6 @@ fn kernel_velocity_blank_fields_preserve_each_keys_native_ease() {
         }
     }
 }
-#[test]
-fn expression_insert_menu_matches_frozen_names_and_order() {
-    let (_actor, _h, c) = fixture();
-    assert_eq!(
-        c.expression_names(),
-        &[
-            "time",
-            "t",
-            "T",
-            "fps",
-            "value",
-            "layer",
-            "comp",
-            "ch",
-            "idx",
-            "PI",
-            "Math",
-            "clamp",
-            "lerp",
-            "linear",
-            "ease",
-            "random",
-            "wiggle",
-            "bounce",
-            "loop",
-            "pingpong",
-            "param",
-            "sample",
-            "motionPath",
-            "abs",
-            "acos",
-            "asin",
-            "atan",
-            "atan2",
-            "ceil",
-            "cos",
-            "exp",
-            "floor",
-            "log",
-            "max",
-            "min",
-            "pow",
-            "round",
-            "sign",
-            "sin",
-            "sqrt",
-            "tan"
-        ]
-    );
-}
-
-#[test]
-fn expression_preview_uses_real_engine_without_writing_document() {
-    let (_actor, h, c) = fixture();
-    let before = root(&h);
-    let job = EvaluationJob {
-        generation: 1,
-        source: "value + 5".into(),
-    };
-    assert_eq!(
-        c.evaluate_expression(&job, "L", "opacity", 0., "%"),
-        Preview::Value("15 %".into())
-    );
-    let syntax = c.evaluate_expression(
-        &EvaluationJob {
-            generation: 2,
-            source: "value +\n(".into(),
-        },
-        "L",
-        "opacity",
-        0.,
-        "%",
-    );
-    assert!(matches!(syntax, Preview::Syntax { line: 2, .. }));
-    let runtime = c.evaluate_expression(
-        &EvaluationJob {
-            generation: 3,
-            source: "1 / 0".into(),
-        },
-        "L",
-        "opacity",
-        0.,
-        "%",
-    );
-    assert!(matches!(runtime, Preview::Runtime { .. }), "{runtime:?}");
-    assert_eq!(root(&h), before);
-}
 
 #[test]
 fn clearing_a_uniform_value_is_invalid_but_mixed_can_stay_empty() {
@@ -976,39 +376,7 @@ fn clearing_a_uniform_value_is_invalid_but_mixed_can_stay_empty() {
     assert_eq!(uniform.parsed(), Err(NUMBER_ERROR));
     assert_eq!(mixed(&[1., 2.]).parsed(), Ok(None));
 }
-#[test]
-fn headless_and_native_alerts_share_the_same_presentation_trait() {
-    fn drive(host: &mut impl AlertHost<Error = &'static str>, surface: &Surface) {
-        host.show_alert(surface).unwrap();
-    }
-    let mut host = HeadlessHost::default();
-    let surface = delete_preset(id(), owner(), DialogId("export".into()), "Film");
-    drive(&mut host, &surface);
-    assert_eq!(host.events, vec![HostEvent::Present(surface)]);
-    assert_eq!(
-        host.show_alert(&comp().surface(id(), owner(), false, 0)),
-        Err("not an alert")
-    );
-}
 
-#[test]
-fn expression_result_change_announces_once_at_medium_priority() {
-    let now = Instant::now();
-    let mut d = ExpressionDraft::new("value".into(), "L".into(), "Opacity".into());
-    d.edit("value".into(), now);
-    let job = d.take_job(now + Duration::from_millis(250)).unwrap();
-    let mut host = HeadlessHost::default();
-    assert!(d.complete_with_host(&job, Preview::Value("10 %".into()), owner(), &mut host));
-    assert!(!d.complete_with_host(&job, Preview::Value("10 %".into()), owner(), &mut host));
-    assert_eq!(
-        host.events,
-        vec![HostEvent::Announce {
-            owner: owner(),
-            text: "At the playhead: 10 %".into(),
-            priority: Announcement::Medium
-        }]
-    );
-}
 #[test]
 fn velocity_groups_are_part_of_the_inspectable_surface() {
     let s = velocity().surface(id(), owner(), 2, "px");
@@ -1018,38 +386,6 @@ fn velocity_groups_are_part_of_the_inspectable_surface() {
     );
     assert_eq!(s.groups[0].fields, vec!["in.speed", "in.influence"]);
     assert_eq!(s.groups[1].fields, vec!["out.speed", "out.influence"]);
-}
-
-#[test]
-fn expression_diagnostics_without_spans_never_fabricate_line_numbers() {
-    let (_actor, _h, c) = fixture();
-    let result = c.evaluate_expression(
-        &EvaluationJob {
-            generation: 1,
-            source: "value +\nunknown_name".into(),
-        },
-        "L",
-        "opacity",
-        0.,
-        "%",
-    );
-    assert!(matches!(result, Preview::SyntaxUnlocated { .. }));
-    assert!(result.line().is_some_and(|line| !line.starts_with("Line ")));
-    let result = c.evaluate_expression(
-        &EvaluationJob {
-            generation: 2,
-            source: "1 /\n0".into(),
-        },
-        "L",
-        "opacity",
-        0.,
-        "%",
-    );
-    assert!(matches!(result, Preview::RuntimeUnlocated { .. }));
-    assert!(result.line().is_some_and(|line| !line.starts_with("Line ")));
-    let mut d = ExpressionDraft::new("1 /\n0".into(), "L".into(), "Opacity".into());
-    d.preview = result;
-    assert!(d.surface(id(), owner()).buttons.last().unwrap().enabled);
 }
 
 #[test]
@@ -1111,105 +447,6 @@ fn settings_fractional_rate_stays_exact_and_subframe_duration_never_silently_cla
 }
 
 #[test]
-fn whitespace_only_expression_removes_but_nonempty_source_stays_exact() {
-    let (_actor, h, c) = fixture();
-    apply(
-        c.expression("L", "opacity", Some("  value + 1  ".into()))
-            .unwrap(),
-        &h,
-        1,
-    );
-    assert_eq!(
-        key(&root(&h), "L")
-            .get("p")
-            .unwrap()
-            .get("opacity")
-            .unwrap()
-            .get("expr")
-            .and_then(Value::as_str),
-        Some("  value + 1  ")
-    );
-    let c = Context::capture(&h, "P").unwrap();
-    apply(
-        c.expression("L", "opacity", Some(" \n ".into())).unwrap(),
-        &h,
-        2,
-    );
-    assert_eq!(
-        key(&root(&h), "L")
-            .get("p")
-            .unwrap()
-            .get("opacity")
-            .unwrap()
-            .get("expr"),
-        Some(&Value::Null)
-    );
-}
-
-#[test]
-fn validation_and_option_copy_is_frozen_to_the_opus_spec() {
-    assert_eq!(
-        [
-            NAME_ERROR,
-            SIZE_ERROR,
-            RATE_ERROR,
-            DURATION_ERROR,
-            NUMBER_ERROR,
-            VELOCITY_ERROR,
-            COLLISION_ERROR,
-            SCALE_TOOLTIP,
-            ADJUST_DURATION,
-            MOVE_ATTRIBUTES,
-            MOVE_DESCRIPTION,
-            LEAVE_DESCRIPTION,
-            LEAVE_DISABLED,
-            PRESET_FAILURE
-        ],
-        [
-            "Enter a name.",
-            "Enter a size from 16 to 8192 pixels.",
-            "Enter a frame rate from 1 to 240 fps.",
-            "Enter a duration up to 1 hour.",
-            "Enter a number.",
-            "Enter a speed, and an influence from 0.1 % to 100 %.",
-            "This would overlap another keyframe or go past the layer’s end.",
-            "Only number values can be scaled.",
-            "Adjust composition duration to the time span of the selected layers",
-            "Move all attributes into the new composition",
-            "Places the selected layers together into a new composition.",
-            "Creates a composition with only this layer’s source in it. The new composition becomes the source of the layer.",
-            "Available for a single layer with a source.",
-            "Couldn’t save the preset."
-        ]
-    );
-    assert_eq!(
-        RESOLUTIONS.iter().map(|r| r.0).collect::<Vec<_>>(),
-        vec![
-            "4K UHD · 3840×2160",
-            "HD 1080p · 1920×1080",
-            "HD 720p · 1280×720",
-            "Vertical HD · 1080×1920",
-            "Portrait 4:5 · 1080×1350",
-            "Square · 1080×1080"
-        ]
-    );
-}
-#[test]
-fn expression_result_is_inspectable_with_its_error_state() {
-    let mut d = ExpressionDraft::new("value".into(), "L".into(), "Opacity".into());
-    d.preview = Preview::Value("10 %".into());
-    let s = d.surface(id(), owner());
-    assert_eq!(s.result_line.as_deref(), Some("At the playhead: 10 %"));
-    assert!(!s.result_error);
-    d.preview = Preview::Runtime {
-        line: 1,
-        message: "Nonfinite".into(),
-    };
-    let s = d.surface(id(), owner());
-    assert_eq!(s.result_line.as_deref(), Some("Line 1: Nonfinite"));
-    assert!(s.result_error);
-}
-#[test]
 fn legacy_velocity_handles_are_adopted_before_preserving_mixed_components() {
     let (_actor, h, _c) = fixture();
     let mut p = root(&h);
@@ -1270,25 +507,6 @@ fn legacy_velocity_handles_are_adopted_before_preserving_mixed_components() {
 }
 
 #[test]
-fn keyframe_menu_is_disabled_when_only_locked_or_no_keys_remain() {
-    let (_actor, _h, c) = fixture();
-    for selection in [vec![], ids(&["KL"]), ids(&["missing"])] {
-        let menu = c.keyframe_menu(&selection).unwrap();
-        assert_eq!(
-            menu.iter().map(|i| i.label).collect::<Vec<_>>(),
-            vec!["Edit Value…", "Keyframe Velocity…", "Scale Keyframes…"]
-        );
-        assert!(menu.iter().all(|i| !i.enabled));
-    }
-    assert!(
-        c.keyframe_menu(&ids(&["K1", "KL"]))
-            .unwrap()
-            .iter()
-            .all(|i| i.enabled)
-    );
-}
-
-#[test]
 fn reviewed_precompose_disabled_label_and_scale_errors_are_exact() {
     let d = PrecomposeDraft {
         name: "Pre-comp".into(),
@@ -1311,89 +529,4 @@ fn reviewed_precompose_disabled_label_and_scale_errors_are_exact() {
     assert_eq!(s.fields[0].error, Some(TIME_PERCENT_ERROR));
     assert_eq!(s.fields[1].error, Some(NUMBER_ERROR));
     assert!(!s.buttons[1].enabled);
-}
-#[test]
-fn reviewed_preview_preserves_last_line_while_pending_and_shows_unlocated_message() {
-    let mut d = ExpressionDraft::new("value".into(), "Layer".into(), "Opacity".into());
-    assert_eq!(d.surface(id(), owner()).result_line, None);
-    d.preview = Preview::Value("42 %".into());
-    d.edit("value + 1".into(), Instant::now());
-    assert_eq!(
-        d.surface(id(), owner()).result_line.as_deref(),
-        Some("At the playhead: 42 %")
-    );
-    d.edit("value + 2".into(), Instant::now());
-    assert_eq!(
-        d.surface(id(), owner()).result_line.as_deref(),
-        Some("At the playhead: 42 %")
-    );
-    assert_eq!(
-        Preview::SyntaxUnlocated {
-            message: "Unexpected token".into()
-        }
-        .line()
-        .as_deref(),
-        Some("Unexpected token")
-    );
-    assert_eq!(
-        Preview::Unavailable.line().as_deref(),
-        Some("No value at the playhead.")
-    );
-}
-#[test]
-fn reviewed_preset_rename_validation_disables_empty_duplicate_and_cancels_unchanged() {
-    for (draft, expected) in [
-        (" ", RenameValidation::Empty),
-        ("Current", RenameValidation::Unchanged),
-        ("Taken", RenameValidation::Duplicate),
-        (" New ", RenameValidation::Ready("New".into())),
-    ] {
-        let state = RenameValidation::check("Current", draft, &["Taken".into()]);
-        assert_eq!(state, expected);
-        let mut s = rename_preset(id(), owner(), DialogId("export".into()), draft);
-        state.apply(&mut s);
-        assert_eq!(
-            s.buttons[0].enabled,
-            matches!(
-                state,
-                RenameValidation::Ready(_) | RenameValidation::Unchanged
-            )
-        );
-        assert_eq!(
-            s.fields[0].error,
-            if matches!(state, RenameValidation::Duplicate) {
-                Some(PRESET_NAME_ERROR)
-            } else {
-                None
-            }
-        );
-        if state == RenameValidation::Unchanged {
-            assert_eq!(state.key_effect(), KeyEffect::Cancel);
-            assert_eq!(s.keyboard(Key::Return), KeyEffect::Cancel);
-        }
-    }
-}
-
-#[test]
-fn pending_keeps_error_semantics_and_equal_preview_does_not_reannounce() {
-    let now = Instant::now();
-    let mut d = ExpressionDraft::new("x".into(), "L".into(), "Opacity".into());
-    d.preview = Preview::RuntimeUnlocated {
-        message: "Division by zero".into(),
-    };
-    d.edit("y".into(), now);
-    let s = d.surface(id(), owner());
-    assert!(s.result_error);
-    assert_eq!(s.result_line.as_deref(), Some("Division by zero"));
-    let job = d.take_job(now + Duration::from_millis(250)).unwrap();
-    let mut host = HeadlessHost::default();
-    assert!(d.complete_with_host(
-        &job,
-        Preview::RuntimeUnlocated {
-            message: "Division by zero".into()
-        },
-        owner(),
-        &mut host
-    ));
-    assert!(host.events.is_empty());
 }

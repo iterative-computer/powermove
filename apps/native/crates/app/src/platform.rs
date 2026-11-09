@@ -4,6 +4,10 @@ use objc2_app_kit::*;
 use objc2_foundation::NSString;
 use std::path::PathBuf;
 
+// `UTType` is looked up by name for open panels; load its framework.
+#[link(name = "UniformTypeIdentifiers", kind = "framework")]
+unsafe extern "C" {}
+
 static TERMINATE: std::sync::OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
     std::sync::OnceLock::new();
 static TERMINATE_HEARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

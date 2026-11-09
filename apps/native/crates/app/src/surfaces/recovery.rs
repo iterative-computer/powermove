@@ -1,38 +1,20 @@
-//! S001/S013/S053/S054, design/surfaces/recovery.md (2026-11-01).
-//!
-//! Worker-owned, inspectable surface models. Platform methods enqueue, never wait
-//! for JavaScript, file IO, or a modal run loop (N7/N8). IDs and revisions fence
-//! delayed native callbacks; dispatch never guesses a choice after dismissal.
-//!
-//! Decisions: spec punctuation supersedes tagged Electron copy (N3/quirk policy);
-//! Discard requires a confirmed Recently Deleted archive capability (N4);
-//! no old consumers removed (prune rule). Visuals remain provisional for Opus.
-use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
+//! S001 recovery alert, design/surfaces/recovery.md (2026-11-01): the kernel's
+//! RecoveryRequired reply as an NSAlert sheet, and the answer as its decision.
+//! Discard requires a confirmed Recently Deleted archive capability (N4).
+use objc2::{MainThreadMarker, rc::Retained};
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSEventModifierFlags, NSModalResponse, NSWindow,
+};
+use objc2_foundation::NSString;
+use pm_kernel::session::{RecoveryDecision, RecoveryResult, ShellCall, ShellReply};
 
-#[path = "recovery_notices.rs"]
-pub mod notices;
-#[path = "recovery_panels.rs"]
-pub mod panels;
-#[path = "recovery_status.rs"]
-pub mod status;
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Owner {
-    Window(String),
-    Application,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    Reload,
-    CloseWindow,
     Recover,
     OpenAsCopy,
     Discard,
     OpenSavedVersion,
     Acknowledge,
-    Wait,
-    StopExtension,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Button {
@@ -72,44 +54,6 @@ pub struct Alert {
     /// Listed order is NSAlert order; first button is rightmost.
     pub buttons: Vec<Button>,
 }
-impl Alert {
-    pub fn key(&self, key: Key) -> Option<Action> {
-        self.buttons
-            .iter()
-            .find(|b| match key {
-                Key::Return => b.default,
-                Key::Escape => b.escape,
-            })
-            .map(|b| b.action)
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-    Return,
-    Escape,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EditorFailure {
-    OutOfMemory,
-    UnexpectedStop,
-}
-pub fn editor_failure(reason: EditorFailure) -> Alert {
-    let reason = match reason {
-        EditorFailure::OutOfMemory => "The editor ran out of memory.",
-        EditorFailure::UnexpectedStop => "The editor stopped unexpectedly.",
-    };
-    Alert {
-        message: "Powermove needs to reload this window.".into(),
-        informative: format!(
-            "{reason} Reload restores the latest local recovery. The most recent edits may be missing."
-        ),
-        // No Esc action: neither button leaves the failed window as it is.
-        buttons: vec![
-            Button::new("Reload", Action::Reload).default(),
-            Button::new("Close Window", Action::CloseWindow),
-        ],
-    }
-}
 pub fn ask_recovery(name: &str, truncated: bool, can_archive_recently_deleted: bool) -> Alert {
     let mut buttons = vec![
         Button::new("Recover", Action::Recover).default(),
@@ -144,188 +88,94 @@ pub fn unrecoverable(name: &str, saved_file_exists: bool) -> Alert {
         buttons,
     }
 }
-pub fn unresponsive_extension(extension: &str) -> Alert {
-    Alert {
-        message: format!("“{extension}” isn’t responding."),
-        informative: "You can wait, or stop it. A stopped extension stays off until you turn it on in Settings ▸ Extensions.".into(),
-        buttons: vec![Button::new("Wait", Action::Wait).default(), Button::new("Stop Extension", Action::StopExtension).destructive()],
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RecoveryState {
-    None,
-    Recovered { truncated: bool },
-    OfferCopy { truncated: bool },
-    Unrecoverable,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RecoverySurface {
-    Alert(Alert),
-    Banner(notices::Banner),
-}
-/// `asking` comes from ShellReply::RecoveryRequired, not RecoveryResult alone.
-pub fn recovery_surface(
-    name: &str,
-    state: RecoveryState,
-    asking: bool,
-    can_archive: bool,
-    saved_exists: bool,
-) -> Option<RecoverySurface> {
-    match state {
-        RecoveryState::None => None,
-        RecoveryState::Unrecoverable => {
-            Some(RecoverySurface::Alert(unrecoverable(name, saved_exists)))
-        }
-        RecoveryState::Recovered { truncated } if !asking => Some(RecoverySurface::Banner(
-            notices::Banner::recovered(name, truncated),
-        )),
-        RecoveryState::Recovered { truncated } | RecoveryState::OfferCopy { truncated } => Some(
-            RecoverySurface::Alert(ask_recovery(name, truncated, can_archive)),
-        ),
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prompt {
-    /// Allocated by the app, never by extension content. Never reuse in a session.
-    pub id: String,
-    pub revision: u64,
-    pub owner: Owner,
+
+/// A RecoveryRequired reply's alert, and the ticket its answer decides.
+#[derive(Clone, Debug)]
+pub struct PreparedRecovery {
+    ticket: String,
     pub alert: Alert,
+    archive_recently_deleted: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Presentation {
-    Show(Prompt),
-    Dismiss { id: String, owner: Owner },
-}
-/// A macOS implementation uses NSAlert sheets for Window, app-modal only for
-/// Application. One active alert per owner; native callbacks return id/revision.
-pub trait RecoveryPlatform {
-    type Error;
-    fn enqueue(&mut self, presentation: Presentation) -> Result<(), Self::Error>;
-}
-#[derive(Default)]
-pub struct HeadlessPlatform {
-    pub events: Vec<Presentation>,
-    pub fail_next: bool,
-}
-impl RecoveryPlatform for HeadlessPlatform {
-    type Error = &'static str;
-    fn enqueue(&mut self, presentation: Presentation) -> Result<(), Self::Error> {
-        if std::mem::take(&mut self.fail_next) {
-            return Err("injected queue failure");
-        }
-        self.events.push(presentation);
-        Ok(())
+impl PreparedRecovery {
+    /// Archive stays false until the kernel/library exposes a confirmed Recently
+    /// Deleted destination; archive_session alone is insufficient (N4).
+    pub fn from_reply(
+        reply: &ShellReply,
+        name: &str,
+        archive_recently_deleted: bool,
+        saved_exists: bool,
+    ) -> Option<Self> {
+        let ShellReply::RecoveryRequired { ticket, recovery } = reply else {
+            return None;
+        };
+        // The developer reason of an unrecoverable journal never enters the copy.
+        let alert = match recovery {
+            RecoveryResult::None => return None,
+            RecoveryResult::Recovered { truncated }
+            | RecoveryResult::OfferCopy { truncated, .. } => {
+                ask_recovery(name, *truncated, archive_recently_deleted)
+            }
+            RecoveryResult::Unrecoverable { .. } => unrecoverable(name, saved_exists),
+        };
+        Some(Self {
+            ticket: ticket.clone(),
+            alert,
+            archive_recently_deleted,
+        })
     }
-}
-#[derive(Debug, PartialEq, Eq)]
-pub enum QueueError<E> {
-    DuplicateId,
-    Stale,
-    InvalidAction,
-    Platform(E),
-}
-#[derive(Default)]
-pub struct AlertQueue {
-    owners: BTreeMap<Owner, VecDeque<Prompt>>,
-    visible: std::collections::BTreeSet<Owner>,
-    /// Retain retired IDs, so a late callback cannot hit a replacement prompt.
-    issued: std::collections::BTreeSet<String>,
-}
-impl AlertQueue {
-    pub fn active(&self, owner: &Owner) -> Option<&Prompt> {
-        self.owners.get(owner)?.front()
-    }
-    pub fn push<P: RecoveryPlatform>(
-        &mut self,
-        prompt: Prompt,
-        host: &mut P,
-    ) -> Result<(), QueueError<P::Error>> {
-        if prompt.id.is_empty() || self.issued.contains(&prompt.id) {
-            return Err(QueueError::DuplicateId);
+    /// The call to submit with KernelHandle::shell (never .wait()), for an
+    /// action this alert offered.
+    pub fn decision(&self, action: Action) -> Option<ShellCall> {
+        if !self.alert.buttons.iter().any(|b| b.action == action) {
+            return None;
         }
-        let queue = self.owners.entry(prompt.owner.clone()).or_default();
-        if queue.is_empty() {
-            host.enqueue(Presentation::Show(prompt.clone()))
-                .map_err(QueueError::Platform)?;
-        }
-        if queue.is_empty() {
-            self.visible.insert(prompt.owner.clone());
-        }
-        self.issued.insert(prompt.id.clone());
-        queue.push_back(prompt);
-        Ok(())
-    }
-    /// Resolve only a visible button. An aborted sheet is not a default choice.
-    pub fn respond<P: RecoveryPlatform>(
-        &mut self,
-        owner: &Owner,
-        id: &str,
-        revision: u64,
-        action: Action,
-        _host: &mut P,
-    ) -> Result<Action, QueueError<P::Error>> {
-        if !self.visible.contains(owner) {
-            return Err(QueueError::Stale);
-        }
-        let prompt = self.active(owner).ok_or(QueueError::Stale)?;
-        if prompt.id != id || prompt.revision != revision {
-            return Err(QueueError::Stale);
-        }
-        if !prompt.alert.buttons.iter().any(|b| b.action == action) {
-            return Err(QueueError::InvalidAction);
-        }
-        self.owners
-            .get_mut(owner)
-            .ok_or(QueueError::Stale)?
-            .pop_front();
-        self.visible.remove(owner);
-        Ok(action)
-    }
-    /// Call after the previous sheet has ended. Separating response from the
-    /// next publication means a failed show cannot swallow the accepted action.
-    pub fn pump<P: RecoveryPlatform>(
-        &mut self,
-        owner: &Owner,
-        host: &mut P,
-    ) -> Result<(), QueueError<P::Error>> {
-        if self.visible.contains(owner) {
-            return Ok(());
-        }
-        if let Some(next) = self.active(owner) {
-            host.enqueue(Presentation::Show(next.clone()))
-                .map_err(QueueError::Platform)?;
-            self.visible.insert(owner.clone());
-        }
-        Ok(())
-    }
-    /// Closing an owner invalidates every queued prompt without dispatching work.
-    pub fn close<P: RecoveryPlatform>(
-        &mut self,
-        owner: &Owner,
-        host: &mut P,
-    ) -> Result<(), QueueError<P::Error>> {
-        let dismiss = self
-            .visible
-            .contains(owner)
-            .then(|| self.active(owner).cloned())
-            .flatten();
-        // Window closure is authoritative even when native dismissal delivery
-        // fails. No late callback may retain permission to mutate its project.
-        self.owners.remove(owner);
-        self.visible.remove(owner);
-        if let Some(prompt) = dismiss {
-            host.enqueue(Presentation::Dismiss {
-                id: prompt.id,
-                owner: owner.clone(),
-            })
-            .map_err(QueueError::Platform)?;
-        }
-        Ok(())
+        let decision = match action {
+            Action::Recover => RecoveryDecision::Recover,
+            Action::OpenAsCopy => RecoveryDecision::OpenAsCopy,
+            Action::Discard if self.archive_recently_deleted => RecoveryDecision::Discard,
+            // Never Discard: this one keeps the unreadable journal, set aside.
+            Action::OpenSavedVersion => RecoveryDecision::OpenSavedVersion,
+            _ => return None,
+        };
+        Some(ShellCall::DecideRecovery {
+            ticket: self.ticket.clone(),
+            decision,
+        })
     }
 }
 
-pub const LOADING_DELAY: Duration = Duration::from_millis(500);
+/// The alert as a sheet on `window`; the receiver gets the chosen action.
+pub fn sheet(alert: &Alert, window: &NSWindow) -> async_channel::Receiver<Option<Action>> {
+    let mtm = MainThreadMarker::new().expect("NSAlert must be presented on main");
+    let native = NSAlert::new(mtm);
+    native.setMessageText(&NSString::from_str(&alert.message));
+    native.setInformativeText(&NSString::from_str(&alert.informative));
+    for b in &alert.buttons {
+        let button = native.addButtonWithTitle(&NSString::from_str(b.label));
+        let key = if b.default {
+            "\r"
+        } else if b.escape {
+            "\u{1b}"
+        } else {
+            ""
+        };
+        button.setKeyEquivalent(&NSString::from_str(key));
+        button.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+        button.setHasDestructiveAction(b.destructive);
+    }
+    let (tx, rx) = async_channel::bounded(1);
+    let buttons: Vec<Action> = alert.buttons.iter().map(|b| b.action).collect();
+    let retained: Retained<NSAlert> = native.clone();
+    let done = block2::RcBlock::new(move |r: NSModalResponse| {
+        let _keep_alive = &retained;
+        let action = usize::try_from(r - NSAlertFirstButtonReturn)
+            .ok()
+            .and_then(|index| buttons.get(index).copied());
+        let _ = tx.try_send(action);
+    });
+    native.beginSheetModalForWindow_completionHandler(window, Some(&done));
+    rx
+}
 
 #[cfg(test)]
 #[path = "recovery_tests.rs"]

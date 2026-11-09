@@ -17,15 +17,6 @@ pub const FORM_ROWS: &[&str] = &[
     "Duration",
     "Background",
 ];
-pub const FIELD_LABELS: &[&str] = &[
-    "Name",
-    "Resolution",
-    "Width",
-    "Height",
-    "Frame Rate",
-    "Duration",
-    "Background",
-];
 pub const NAME_ERROR: &str = "Enter a name.";
 pub const SIZE_ERROR: &str = "Enter a size from 16 to 8192 pixels.";
 pub const FPS_ERROR: &str = "Enter a frame rate from 1 to 240 fps.";
@@ -33,11 +24,7 @@ pub const DURATION_ERROR: &str = "Enter a duration up to 1 hour.";
 pub const DROP_FRAME_ERROR: &str = "Use colons for timecode at this frame rate.";
 pub const LINK_AX: &str = "Lock aspect ratio";
 pub const SHEET_TITLE: &str = "New Project";
-pub const SHEET_BUTTONS: &[&str] = &["Cancel", "Create"];
 pub const CUSTOM_PRESET: &str = "Custom";
-pub const UNITS: &[&str] = &["px", "fps", "s"];
-pub const INITIAL_FOCUS: &str = "Name";
-pub const SELECT_INITIAL_CONTENTS: bool = true;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Format {

@@ -8,10 +8,9 @@ use pm_kernel::commands::keyframes::{
     EaseSide, HandleValue, Interpolation, KeyframeCommand, TemporalEase,
 };
 use pm_kernel::{
-    Call, Caller, Command, CompCommand, DocumentStore, KernelHandle, Origin, PropertyCommand,
-    Published, Request,
+    Call, Caller, Command, CompCommand, DocumentStore, KernelHandle, Origin, Published, Request,
 };
-use pm_model::{Map, Value};
+use pm_model::Value;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,7 +19,6 @@ pub enum DialogError {
     Invalid(&'static str),
     MissingBacking(&'static str),
     Kernel(String),
-    InvalidPayload,
 }
 #[derive(Clone, Debug)]
 pub struct Context {
@@ -38,12 +36,6 @@ impl Context {
     }
     pub fn project(&self) -> &str {
         &self.publication.project
-    }
-    pub fn current(&self, handle: &KernelHandle) -> bool {
-        handle.published(self.project()).is_some_and(|p| {
-            p.snapshot.doc_id == self.publication.snapshot.doc_id
-                && p.snapshot.open_comp().as_deref() == Some(&self.composition)
-        })
     }
     fn root(&self) -> Result<Value, DialogError> {
         self.publication
@@ -85,22 +77,6 @@ impl Context {
         Ok(array(&self.comp()?, "layers")
             .iter()
             .filter(|l| number(l, "from", 0.) + number(l, "dur", 0.) > duration)
-            .count())
-    }
-    pub fn composition_users(&self, id: &str) -> Result<usize, DialogError> {
-        let root = self.root()?;
-        Ok(root
-            .get("comps")
-            .and_then(Value::as_object)
-            .ok_or(DialogError::Stale)?
-            .iter()
-            .filter(|(key, c)| {
-                key.as_str() != Some(id)
-                    && array(c, "layers").iter().any(|l| {
-                        text(l, "type") == "precomp"
-                            && l.get("d").is_some_and(|d| text(d, "comp") == id)
-                    })
-            })
             .count())
     }
     pub fn composition_edit(
@@ -154,15 +130,6 @@ impl Context {
         }
         Ok(edit)
     }
-    pub fn delete_composition(&self, id: &str) -> Result<PreparedEdit, DialogError> {
-        self.prepare(
-            "Delete Composition",
-            vec![Command::Comp(CompCommand::Delete {
-                comp_id: id.into(),
-                fallback: None,
-            })],
-        )
-    }
     /// Snapshot-derived key selection excludes locked ancestors, not just the layer.
     pub fn keys(&self, ids: &[String]) -> Result<Vec<Key>, DialogError> {
         let comp = self.comp()?;
@@ -187,9 +154,6 @@ impl Context {
         keys.retain(|k| ids.contains(&k.id));
         Ok(keys)
     }
-    pub fn keyframe_menu(&self, ids: &[String]) -> Result<Vec<KeyframeMenuItem>, DialogError> {
-        Ok(super::keyframe_menu(self.keys(ids)?.len()))
-    }
     pub fn values(&self, ids: &[String], value: &MixedNumber) -> Result<PreparedEdit, DialogError> {
         let keys = self.keys(ids)?;
         if keys.is_empty() {
@@ -210,27 +174,6 @@ impl Context {
                 })
                 .collect(),
         )
-    }
-    /// Two-part properties call this once with each component's key-id set.
-    /// Both components are staged in the same transaction; blank = unchanged.
-    pub fn component_values(
-        &self,
-        components: &[(Vec<String>, MixedNumber)],
-    ) -> Result<PreparedEdit, DialogError> {
-        let mut commands = Vec::new();
-        for (ids, draft) in components {
-            let Some(value) = draft.parsed().map_err(DialogError::Invalid)? else {
-                continue;
-            };
-            for key in self.keys(ids)? {
-                commands.push(Command::Keyframe(KeyframeCommand::Edit {
-                    key_id: key.id,
-                    time: None,
-                    value: Some(Value::Number(value)),
-                }));
-            }
-        }
-        self.prepare("Keyframe Value", commands)
     }
     /// The existing value-edit planner adopts temporal handles. Reapply each
     /// unchanged value on a frozen scratch tree to read exact legacy/native
@@ -403,21 +346,6 @@ impl Context {
         }
         Ok(edit)
     }
-    pub fn expression(
-        &self,
-        layer: &str,
-        channel: &str,
-        source: Option<String>,
-    ) -> Result<PreparedEdit, DialogError> {
-        self.prepare(
-            "Expression",
-            vec![Command::Property(PropertyCommand::SetExpression {
-                layer_id: layer.into(),
-                channel: channel.into(),
-                expression: source.filter(|source| !source.trim().is_empty()),
-            })],
-        )
-    }
     /// Pure frozen preflight. Call on a worker; never publish the scratch store.
     fn prepare(&self, label: &str, commands: Vec<Command>) -> Result<PreparedEdit, DialogError> {
         let root = self.root()?;
@@ -437,97 +365,6 @@ impl Context {
             label: label.into(),
             after,
         })
-    }
-    /// Engine-only worker preview. This never changes a publication, history or
-    /// the source text. Units are supplied by the existing inspector metadata.
-    pub fn evaluate_expression(
-        &self,
-        job: &EvaluationJob,
-        layer: &str,
-        channel: &str,
-        time: f64,
-        unit: &str,
-    ) -> Preview {
-        let mut scratch = match self.root() {
-            Ok(root) => DocumentStore::new_untitled(root),
-            Err(_) => return Preview::Unavailable,
-        };
-        if !job.source.trim().is_empty() {
-            let diagnostic = object([
-                ("op", Value::from("expressionDiagnostic")),
-                ("source", Value::from(job.source.as_str())),
-            ]);
-            match scratch.queries().query(&diagnostic) {
-                Ok(Value::String(message)) => {
-                    let message = message.to_string_lossy();
-                    let Some(offset) = message
-                        .rsplit_once(" at ")
-                        .and_then(|(_, n)| n.parse::<usize>().ok())
-                    else {
-                        return Preview::SyntaxUnlocated { message };
-                    };
-                    let line = 1 + job
-                        .source
-                        .encode_utf16()
-                        .take(offset)
-                        .filter(|u| *u == 10)
-                        .count();
-                    return Preview::Syntax { line, message };
-                }
-                Ok(Value::Null) => {}
-                _ => return Preview::Unavailable,
-            }
-        }
-        let command = Command::Property(PropertyCommand::SetExpression {
-            layer_id: layer.into(),
-            channel: channel.into(),
-            expression: if job.source.trim().is_empty() {
-                None
-            } else {
-                Some(job.source.clone())
-            },
-        });
-        if scratch.execute(command, Origin::Interface).is_err() {
-            return Preview::Unavailable;
-        }
-        let value = match scratch
-            .queries()
-            .evaluate(Some(&self.composition), layer, channel, time)
-        {
-            Ok(value) => value,
-            Err(_) => return Preview::Unavailable,
-        };
-        let error = object([
-            ("op", Value::from("expressionError")),
-            ("comp", Value::from(self.composition.as_str())),
-            ("layerId", Value::from(layer)),
-            ("key", Value::from(channel)),
-        ]);
-        match scratch.queries().query(&error) {
-            Ok(Value::String(message)) => {
-                if job.source.contains('\n') {
-                    Preview::RuntimeUnlocated {
-                        message: message.to_string_lossy(),
-                    }
-                } else {
-                    Preview::Runtime {
-                        line: 1,
-                        message: message.to_string_lossy(),
-                    }
-                }
-            }
-            Ok(Value::Null) => Preview::Value(format!(
-                "{}{}{}",
-                pm_model::json::to_canonical_string(&value),
-                if unit.is_empty() { "" } else { " " },
-                unit
-            )),
-            _ => Preview::Unavailable,
-        }
-    }
-    /// Frozen v1.2.0 EXPRESSION_NAMES order; no native-only names are inserted.
-    pub fn expression_names(&self) -> &'static [&'static str] {
-        SHIPPED_EXPRESSION_NAMES
     }
 }
 #[derive(Clone, Debug)]
@@ -655,229 +492,3 @@ fn number(v: &Value, key: &str, default: f64) -> f64 {
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
-fn object<const N: usize>(entries: [(&str, Value); N]) -> Value {
-    let mut m = Map::new();
-    for (k, v) in entries {
-        m.insert(k, v);
-    }
-    Value::Object(m)
-}
-
-/// Presets retain the exact legacy array and every unknown field. A backing
-/// service must durably archive complete replaced/deleted entries first (N4).
-/// No archive service exists yet: do not turn this into an in-memory production
-/// fallback or place archive metadata in the v1–3 renderPresets array (N6).
-pub trait PresetArchive {
-    fn archive(&mut self, entry: &Value) -> Result<(), ServiceCode>;
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ServiceCode {
-    Offline,
-    NotFound,
-    TooLarge,
-    InvalidProject,
-    PermissionDenied,
-    DiskFull,
-    InvalidInput,
-    InvalidData,
-    Unavailable,
-    Unknown,
-}
-impl ServiceCode {
-    pub fn informative(self) -> &'static str {
-        match self {
-            Self::Offline => "Check your internet connection and try again.",
-            Self::NotFound => "It may have been moved or deleted.",
-            Self::TooLarge | Self::InvalidProject => "",
-            Self::PermissionDenied => "Check its sharing and permissions in Finder.",
-            Self::DiskFull => "Free some space and try again.",
-            Self::InvalidInput | Self::InvalidData => "The file may be damaged.",
-            Self::Unavailable | Self::Unknown => {
-                "Try again. If it keeps happening, choose Window ▸ Error Log for details."
-            }
-        }
-    }
-}
-#[derive(Clone, Debug)]
-pub struct Presets {
-    entries: Vec<Value>,
-    revision: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PresetError {
-    Service(ServiceCode),
-    Missing,
-    NeedsReplace,
-    DesignTodo,
-    EmptyName,
-    DuplicateName,
-    Malformed,
-}
-impl PresetError {
-    pub fn inline(&self) -> Option<(&'static str, &'static str)> {
-        match self {
-            Self::Service(c) => Some((PRESET_FAILURE, c.informative())),
-            _ => None,
-        }
-    }
-}
-impl Presets {
-    pub fn entries(&self) -> &[Value] {
-        &self.entries
-    }
-    pub fn capture(handle: &KernelHandle) -> Result<Self, PresetError> {
-        let state = handle.state();
-        let entries = match state.settings.get("renderPresets") {
-            None => vec![],
-            Some(Value::Array(a)) => a.clone(),
-            _ => return Err(PresetError::Malformed),
-        };
-        Ok(Self {
-            entries,
-            revision: state.revision,
-        })
-    }
-    pub fn select(&self, id: &str) -> Option<Value> {
-        self.entries
-            .iter()
-            .find(|e| text(e, "id") == id)
-            .and_then(|e| e.get("options"))
-            .cloned()
-    }
-    pub fn save(
-        &self,
-        id: &str,
-        name: &str,
-        mut options: Value,
-        replace: bool,
-        archive: &mut impl PresetArchive,
-    ) -> Result<Self, PresetError> {
-        if id.is_empty() || name.trim().is_empty() || options.as_object().is_none() {
-            return Err(PresetError::DesignTodo);
-        }
-        let name = name.trim();
-        let old: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|e| text(e, "name") == name || text(e, "id") == id)
-            .collect();
-        if !old.is_empty() && !replace {
-            return Err(PresetError::NeedsReplace);
-        }
-        for e in &old {
-            archive.archive(e).map_err(PresetError::Service)?;
-        }
-        options.as_object_mut().expect("checked").remove("name");
-        let mut next = self.clone();
-        next.entries
-            .retain(|e| text(e, "name") != name && text(e, "id") != id);
-        next.entries.push(object([
-            ("id", Value::from(id)),
-            ("name", Value::from(name)),
-            ("options", options),
-        ]));
-        Ok(next)
-    }
-    pub fn rename(&self, id: &str, name: &str) -> Result<Self, PresetError> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(PresetError::EmptyName);
-        }
-        if self
-            .entries
-            .iter()
-            .any(|e| text(e, "id") != id && text(e, "name") == name)
-        {
-            return Err(PresetError::DuplicateName);
-        }
-        let original = self
-            .entries
-            .iter()
-            .find(|e| text(e, "id") == id)
-            .ok_or(PresetError::Missing)?;
-        if text(original, "name") == name {
-            return Ok(self.clone());
-        }
-        let mut next = self.clone();
-        let entry = next
-            .entries
-            .iter_mut()
-            .find(|e| text(e, "id") == id)
-            .ok_or(PresetError::Missing)?;
-        entry
-            .as_object_mut()
-            .ok_or(PresetError::Malformed)?
-            .insert("name", Value::from(name));
-        Ok(next)
-    }
-    pub fn delete(&self, id: &str, archive: &mut impl PresetArchive) -> Result<Self, PresetError> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| text(e, "id") == id)
-            .ok_or(PresetError::Missing)?;
-        archive.archive(entry).map_err(PresetError::Service)?;
-        let mut next = self.clone();
-        next.entries.retain(|e| text(e, "id") != id);
-        Ok(next)
-    }
-    pub fn submit(
-        self,
-        handle: &KernelHandle,
-    ) -> pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::kernel::KernelFailure>>
-    {
-        handle.state_transaction(pm_kernel::state::StateTransaction {
-            expected_revision: Some(self.revision),
-            ops: vec![pm_kernel::state::StateOp::Setting {
-                key: "renderPresets".into(),
-                value: Some(Value::Array(self.entries)),
-            }],
-        })
-    }
-}
-
-/// Vendored from v1.2.0 legacy/core/expression.ts (EXPRESSION_NAMES,
-/// HELPERS and Object.keys(MATH_FUNCTIONS)); no runtime source-file dependency.
-pub const SHIPPED_EXPRESSION_NAMES: &[&str] = &[
-    "time",
-    "t",
-    "T",
-    "fps",
-    "value",
-    "layer",
-    "comp",
-    "ch",
-    "idx",
-    "PI",
-    "Math",
-    "clamp",
-    "lerp",
-    "linear",
-    "ease",
-    "random",
-    "wiggle",
-    "bounce",
-    "loop",
-    "pingpong",
-    "param",
-    "sample",
-    "motionPath",
-    "abs",
-    "acos",
-    "asin",
-    "atan",
-    "atan2",
-    "ceil",
-    "cos",
-    "exp",
-    "floor",
-    "log",
-    "max",
-    "min",
-    "pow",
-    "round",
-    "sign",
-    "sin",
-    "sqrt",
-    "tan",
-];

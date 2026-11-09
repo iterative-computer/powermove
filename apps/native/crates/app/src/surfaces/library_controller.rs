@@ -1,18 +1,18 @@
 //! ID-driven reducer and nonblocking host/service seams.
 use super::{form::*, model::*};
-use std::{collections::VecDeque, ops::Range, time::Duration};
+use pm_services::ServiceErrorCode;
+use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Load(Query),
-    Open { id: String, new_window: bool },
+    Open(String),
     Create(NewProject),
     Rename { id: String, name: String },
     Duplicate { id: String, name: String },
     Trash(String),
     PutBack(String),
     Archive(String),
-    PutBackAndSave(String),
 }
 #[derive(Clone, Debug)]
 pub struct Request {
@@ -21,16 +21,10 @@ pub struct Request {
 }
 #[derive(Clone, Debug)]
 pub enum Outcome {
-    Loaded {
-        snapshot: Snapshot,
-        rows: Vec<Row>,
-    },
+    Loaded { snapshot: Snapshot, rows: Vec<Row> },
     Changed,
     Duplicated(String),
-    Opened {
-        reply: pm_kernel::session::ShellReply,
-        new_window: bool,
-    },
+    Opened(pm_kernel::session::ShellReply),
     Focus(String),
 }
 #[derive(Clone, Debug)]
@@ -49,10 +43,7 @@ pub trait LibraryPort {
 pub enum Content {
     Projects,
     Empty(EmptyState),
-    /// Placeholder wells keep card geometry. Spinner starts only after 0.5 s.
-    Loading {
-        spinner: bool,
-    },
+    Loading,
     Unavailable {
         message: &'static str,
         action: &'static str,
@@ -64,35 +55,10 @@ pub struct RenameDraft {
     pub original: String,
     pub text: String,
 }
-#[derive(Clone, Debug, PartialEq)]
-pub struct Presentation {
-    pub query: Query,
-    pub view: View,
-    pub content: Content,
-    pub selected: Option<String>,
-    pub rename: Option<RenameDraft>,
-    pub rows: Vec<Row>,
-    pub total_rows: usize,
-    /// AXList/AXGroup for grid; native table semantics for list.
-    pub ax_container: &'static str,
-    pub ax_item: &'static str,
-    pub searching: bool,
-    pub anchor: Option<String>,
-    pub form: Option<NewProjectForm>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AlertOwner {
-    Library,
-    Editor(String),
-    NewProject(String),
-}
-
 #[derive(Clone, Debug)]
 pub enum HostEffect {
     /// Host must maintain one autosaved, standard titled library window.
     ShowLibrary,
-    FocusSearch,
     Rename {
         id: String,
     },
@@ -100,65 +66,30 @@ pub enum HostEffect {
     CloseNewProject,
     Alert {
         serial: u64,
-        owner: AlertOwner,
         alert: Alert,
     },
     Reveal(std::path::PathBuf),
     FocusProject(String),
     OpenEditor {
         reply: pm_kernel::session::ShellReply,
-        new_window: bool,
         /// For the alerts that open may need.
         name: String,
         file: Option<std::path::PathBuf>,
     },
-    SaveAs(String),
-    /// Host owns per-window subtitle; no extra copy is generated.
-    Subtitle {
-        id: String,
-        text: Option<&'static str>,
-    },
-    Banner(&'static str),
     /// Standard medium announcement; errors are high priority.
-    Announce {
-        text: String,
-        high: bool,
-    },
+    Announce(String),
     /// Technical gap only, never displayed as product copy.
     IntegrationGap(&'static str),
 }
-/// The AppKit/GPUI adapter consumes this on its main executor. The renderer
-/// owns AppKit focus, keyboard equivalents, sheet placement and AX announcements.
-/// It must use NATIVE_PIECES, UI-kit EmptyState and pm-design token values.
-pub trait LibraryHost {
-    fn effect(&mut self, effect: HostEffect);
-    fn publish(&mut self, presentation: Presentation, metrics: WindowMetrics);
-}
-#[derive(Default)]
-pub struct HeadlessHost {
-    pub effects: Vec<HostEffect>,
-    pub presentations: Vec<(Presentation, WindowMetrics)>,
-}
-impl LibraryHost for HeadlessHost {
-    fn effect(&mut self, effect: HostEffect) {
-        self.effects.push(effect);
-    }
-    fn publish(&mut self, presentation: Presentation, metrics: WindowMetrics) {
-        self.presentations.push((presentation, metrics));
-    }
-}
-
 #[derive(Clone, Debug)]
 enum PromptAction {
     Trash(String),
     Archive(String),
-    Save(String),
     Error,
 }
 #[derive(Clone, Debug)]
 struct Prompt {
     serial: u64,
-    owner: AlertOwner,
     alert: Alert,
     action: PromptAction,
 }
@@ -166,7 +97,6 @@ struct Prompt {
 pub struct LibraryController<P> {
     pub port: P,
     pub query: Query,
-    pub view: View,
     pub form: Option<NewProjectForm>,
     pub rename: Option<RenameDraft>,
     pub snapshot: Snapshot,
@@ -177,9 +107,7 @@ pub struct LibraryController<P> {
     loaded: bool,
     failed: bool,
     mutation: Option<Request>,
-    undo_trash: Vec<String>,
     pending_duplicate: Option<String>,
-    anchor: Option<String>,
     prompts: VecDeque<Prompt>,
     effects: VecDeque<HostEffect>,
 }
@@ -192,7 +120,6 @@ impl<P: LibraryPort> LibraryController<P> {
                 section: Section::Recents,
                 ..Default::default()
             },
-            view: View::Grid,
             form: None,
             rename: None,
             snapshot: Snapshot::default(),
@@ -203,9 +130,7 @@ impl<P: LibraryPort> LibraryController<P> {
             loaded: false,
             failed: false,
             mutation: None,
-            undo_trash: Vec::new(),
             pending_duplicate: None,
-            anchor: None,
             prompts: VecDeque::new(),
             effects: VecDeque::new(),
         }
@@ -239,63 +164,23 @@ impl<P: LibraryPort> LibraryController<P> {
         self.query = query;
         self.refresh()
     }
-    pub fn presentation(&self, elapsed: Duration, range: Range<usize>) -> Presentation {
-        let content = if self.failed {
+    pub fn content(&self) -> Content {
+        if self.failed {
             Content::Unavailable {
                 message: "Your projects can’t be shown right now.",
                 action: "Try Again",
             }
         } else if self.load.is_some() && !self.loaded {
-            Content::Loading {
-                spinner: elapsed >= Duration::from_millis(500),
-            }
+            Content::Loading
         } else if self.rows.is_empty() {
             Content::Empty(empty_state(&self.query))
         } else {
             Content::Projects
-        };
-        let end = range.end.min(self.rows.len());
-        let start = range.start.min(end);
-        Presentation {
-            query: self.query.clone(),
-            view: self.view,
-            content,
-            selected: self.selected.clone(),
-            rename: self.rename.clone(),
-            rows: self.rows[start..end].to_vec(),
-            total_rows: self.rows.len(),
-            ax_container: if self.view == View::Grid {
-                "AXList"
-            } else {
-                "AXTable"
-            },
-            ax_item: if self.view == View::Grid {
-                "AXGroup"
-            } else {
-                "AXRow"
-            },
-            searching: self.load.is_some() && self.loaded,
-            anchor: self.anchor.clone(),
-            form: self.form.clone(),
         }
     }
-    pub fn render(
-        &mut self,
-        host: &mut impl LibraryHost,
-        tokens: &pm_design::Tokens,
-        elapsed: Duration,
-        range: Range<usize>,
-    ) {
-        while let Some(effect) = self.effects.pop_front() {
-            host.effect(effect);
-        }
-        host.publish(
-            self.presentation(elapsed, range),
-            WindowMetrics::resolve(tokens),
-        );
-    }
-    pub fn set_scroll_anchor(&mut self, id: Option<String>) {
-        self.anchor = id;
+    /// What the host must do, in order.
+    pub fn take_effects(&mut self) -> Vec<HostEffect> {
+        self.effects.drain(..).collect()
     }
     pub fn select(&mut self, id: &str) -> Result<(), Failure> {
         if !self.rows.iter().any(|r| r.id == id) {
@@ -317,75 +202,18 @@ impl<P: LibraryPort> LibraryController<P> {
         });
         self.selected = Some(self.rows[next].id.clone());
     }
-    /// Native type-select supplies its accumulated text (system timing/IME).
-    pub fn type_select(&mut self, text: &str) {
-        if self.rename.is_some() || self.form.is_some() {
+    /// Escape leaves a rename, or a New Project sheet that isn't submitting.
+    /// AppKit owns an alert's keys: nothing reaches the sheet under it.
+    pub fn escape(&mut self) {
+        if !self.prompts.is_empty() {
             return;
         }
-        let prefix = text.to_lowercase();
-        if let Some(row) = self
-            .rows
-            .iter()
-            .find(|r| r.name.to_lowercase().starts_with(&prefix))
-        {
-            self.selected = Some(row.id.clone());
+        if self.rename.is_some() {
+            self.rename = None;
+        } else if self.form.as_ref().is_some_and(|f| !f.submitting) {
+            self.form = None;
+            self.effects.push_back(HostEffect::CloseNewProject);
         }
-    }
-    pub fn key(&mut self, key: Key, columns: usize) -> Result<(), Failure> {
-        // AppKit owns the alert's Return/Escape; do not send keystrokes through
-        // a modal focus scope to the underlying sheet or collection.
-        if !self.prompts.is_empty() {
-            return Ok(());
-        }
-        match key {
-            Key::Escape if self.rename.is_some() => {
-                self.rename = None;
-            }
-            Key::Return if self.rename.is_some() => {
-                self.commit_rename()?;
-            }
-            Key::Escape if self.form.as_ref().is_some_and(|f| !f.submitting) => {
-                self.form = None;
-                self.effects.push_back(HostEffect::CloseNewProject);
-            }
-            Key::Return if self.form.is_some() => {
-                self.create()?;
-            }
-            _ if self.rename.is_some() || self.form.is_some() => {}
-            Key::Find => self.effects.push_back(HostEffect::FocusSearch),
-            Key::NewProject => self.effects.push_back(HostEffect::ShowNewProject),
-            Key::Left => self.move_selection(-1),
-            Key::Right => self.move_selection(1),
-            Key::Up => self.move_selection(
-                -isize::try_from(if self.view == View::Grid {
-                    columns.max(1)
-                } else {
-                    1
-                })
-                .unwrap_or(isize::MAX),
-            ),
-            Key::Down => self.move_selection(
-                isize::try_from(if self.view == View::Grid {
-                    columns.max(1)
-                } else {
-                    1
-                })
-                .unwrap_or(isize::MAX),
-            ),
-            Key::Return => {
-                if let Some(id) = self.selected.clone() {
-                    self.menu(&id, MenuAction::Open)?;
-                }
-            }
-            Key::Trash => {
-                if let Some(id) = self.selected.clone() {
-                    self.menu(&id, MenuAction::Trash)?;
-                }
-            }
-            Key::Undo => self.undo_move_to_trash()?,
-            Key::Escape | Key::Other => {}
-        }
-        Ok(())
     }
     fn row(&self, id: &str) -> Result<&Row, Failure> {
         self.snapshot
@@ -403,10 +231,7 @@ impl<P: LibraryPort> LibraryController<P> {
             return Err(Failure::Stale);
         }
         match action {
-            MenuAction::Open | MenuAction::OpenNewWindow => self.send(Command::Open {
-                id: id.into(),
-                new_window: action == MenuAction::OpenNewWindow,
-            })?,
+            MenuAction::Open | MenuAction::OpenNewWindow => self.send(Command::Open(id.into()))?,
             MenuAction::Reveal => self
                 .effects
                 .push_back(HostEffect::Reveal(row.file.ok_or(Failure::Stale)?)),
@@ -493,52 +318,16 @@ impl<P: LibraryPort> LibraryController<P> {
         self.form.as_mut().expect("form").submitting = true;
         Ok(())
     }
-    /// Host calls on window/project generation invalidation, before publishing
-    /// any sheet action. No apply can target a replacement project.
-    pub fn owner_changed(&mut self, owner: &str) {
-        if self.form.as_ref().is_some_and(|f| f.owner == owner) {
-            self.form = None;
-            self.effects.push_back(HostEffect::CloseNewProject);
-            self.effects.push_back(HostEffect::Banner(
-                "The project was changed, so the dialog closed.",
-            ));
-            self.effects.push_back(HostEffect::Announce {
-                text: "The project was changed, so the dialog closed.".into(),
-                high: false,
-            });
-        }
-    }
-    /// Returns true when the caller must defer normal save to this prompt.
-    pub fn before_save(&mut self, id: &str) -> Result<bool, Failure> {
-        let row = self.row(id)?.clone();
-        if !row.trashed {
-            return Ok(false);
-        }
-        self.prompt(
-            Alert::save_in_trash(&row.name),
-            PromptAction::Save(id.into()),
-        );
-        Ok(true)
-    }
     fn prompt(&mut self, alert: Alert, action: PromptAction) {
         let serial = self.serial();
-        let owner = match &action {
-            PromptAction::Save(id) => AlertOwner::Editor(id.clone()),
-            PromptAction::Error => self.form.as_ref().map_or(AlertOwner::Library, |f| {
-                AlertOwner::NewProject(f.owner.clone())
-            }),
-            _ => AlertOwner::Library,
-        };
         if self.prompts.is_empty() {
             self.effects.push_back(HostEffect::Alert {
                 serial,
-                owner: owner.clone(),
                 alert: alert.clone(),
             });
         }
         self.prompts.push_back(Prompt {
             serial,
-            owner,
             alert,
             action,
         });
@@ -560,17 +349,11 @@ impl<P: LibraryPort> LibraryController<P> {
         let result = match (prompt.action, button) {
             (PromptAction::Trash(id), Some(0)) => self.send(Command::Trash(id)),
             (PromptAction::Archive(id), Some(1)) => self.send(Command::Archive(id)),
-            (PromptAction::Save(id), Some(0)) => self.send(Command::PutBackAndSave(id)),
-            (PromptAction::Save(id), Some(1)) => {
-                self.effects.push_back(HostEffect::SaveAs(id));
-                Ok(())
-            }
             _ => Ok(()),
         };
         if let Some(next) = self.prompts.front() {
             self.effects.push_back(HostEffect::Alert {
                 serial: next.serial,
-                owner: next.owner.clone(),
                 alert: next.alert.clone(),
             });
         }
@@ -588,15 +371,6 @@ impl<P: LibraryPort> LibraryController<P> {
         self.mutation = Some(request);
         Ok(())
     }
-    pub fn undo_label(&self) -> Option<&'static str> {
-        (!self.undo_trash.is_empty()).then_some("Undo Move to Trash")
-    }
-    pub fn undo_move_to_trash(&mut self) -> Result<(), Failure> {
-        if let Some(id) = self.undo_trash.last().cloned() {
-            self.send(Command::PutBack(id))?;
-        }
-        Ok(())
-    }
     pub fn poll(&mut self) {
         while let Some(completion) = self.port.poll() {
             if self.load == Some(completion.serial) {
@@ -607,12 +381,6 @@ impl<P: LibraryPort> LibraryController<P> {
                         self.rows = rows;
                         self.loaded = true;
                         self.failed = false;
-                        self.undo_trash.retain(|id| {
-                            self.snapshot
-                                .rows
-                                .iter()
-                                .any(|row| &row.id == id && row.trashed)
-                        });
                         if self
                             .selected
                             .as_ref()
@@ -652,19 +420,12 @@ impl<P: LibraryPort> LibraryController<P> {
                                 }
                             }
                         }
-                        for row in self.snapshot.rows.iter().filter(|r| r.open) {
-                            self.effects.push_back(HostEffect::Subtitle {
-                                id: row.id.clone(),
-                                text: row.trashed.then_some("In Trash"),
-                            });
-                        }
                     }
                     _ => {
                         self.failed = true;
-                        self.effects.push_back(HostEffect::Announce {
-                            text: "Your projects can’t be shown right now.".into(),
-                            high: true,
-                        });
+                        self.effects.push_back(HostEffect::Announce(
+                            "Your projects can’t be shown right now.".into(),
+                        ));
                     }
                 }
                 continue;
@@ -680,8 +441,6 @@ impl<P: LibraryPort> LibraryController<P> {
             match completion.result {
                 Ok(outcome) => {
                     match &request.command {
-                        Command::Trash(id) => self.undo_trash.push(id.clone()),
-                        Command::PutBack(id) => self.undo_trash.retain(|x| x != id),
                         Command::Create(_) => {
                             self.form = None;
                             self.effects.push_back(HostEffect::CloseNewProject);
@@ -690,21 +449,17 @@ impl<P: LibraryPort> LibraryController<P> {
                     }
                     match outcome {
                         Outcome::Duplicated(id) => self.pending_duplicate = Some(id),
-                        Outcome::Opened { reply, new_window } => {
+                        Outcome::Opened(reply) => {
                             let row = match &request.command {
-                                Command::Open { id, .. } => self.rows.iter().find(|r| &r.id == id),
+                                Command::Open(id) => self.rows.iter().find(|r| &r.id == id),
                                 _ => None,
                             };
                             let (name, file) = row.map_or_else(
                                 || ("Untitled".into(), None),
                                 |r| (r.name.clone(), r.file.clone()),
                             );
-                            self.effects.push_back(HostEffect::OpenEditor {
-                                reply,
-                                new_window,
-                                name,
-                                file,
-                            });
+                            self.effects
+                                .push_back(HostEffect::OpenEditor { reply, name, file });
                         }
                         Outcome::Focus(id) => self.effects.push_back(HostEffect::FocusProject(id)),
                         _ => {}
@@ -722,11 +477,10 @@ impl<P: LibraryPort> LibraryController<P> {
                         Command::Create(values) => values.name.clone(),
                         Command::Rename { id, .. }
                         | Command::Duplicate { id, .. }
-                        | Command::Open { id, .. }
+                        | Command::Open(id)
                         | Command::Trash(id)
                         | Command::PutBack(id)
-                        | Command::Archive(id)
-                        | Command::PutBackAndSave(id) => {
+                        | Command::Archive(id) => {
                             self.row(id).map_or(String::new(), |r| r.name.clone())
                         }
                         Command::Load(_) => String::new(),
@@ -734,13 +488,11 @@ impl<P: LibraryPort> LibraryController<P> {
                     let code = if let Failure::Service(code) = failure {
                         code
                     } else {
-                        ErrorCode::Unavailable
+                        ServiceErrorCode::Unavailable
                     };
                     let alert = Alert::error(code, &name);
-                    self.effects.push_back(HostEffect::Announce {
-                        text: alert.message.clone(),
-                        high: true,
-                    });
+                    self.effects
+                        .push_back(HostEffect::Announce(alert.message.clone()));
                     self.prompt(alert, PromptAction::Error);
                     // A rename may have applied before a subsequent save
                     // failed. Reconcile published dirty state without retrying
@@ -751,31 +503,3 @@ impl<P: LibraryPort> LibraryController<P> {
         }
     }
 }
-
-/// Mapping is deliberately finite; ⇧⌘O remains Open, never Project Library.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-    Left,
-    Right,
-    Up,
-    Down,
-    Return,
-    Escape,
-    Find,
-    Trash,
-    Undo,
-    NewProject,
-    Other,
-}
-pub const KEYBOARD: &[(&str, Key)] = &[
-    ("Left", Key::Left),
-    ("Right", Key::Right),
-    ("Up", Key::Up),
-    ("Down", Key::Down),
-    ("Return", Key::Return),
-    ("Escape", Key::Escape),
-    ("⌘F", Key::Find),
-    ("⌘⌫", Key::Trash),
-    ("⌘Z", Key::Undo),
-    ("⌥⌘N", Key::NewProject),
-];

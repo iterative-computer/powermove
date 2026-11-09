@@ -18,11 +18,7 @@ pub mod kernel;
 #[path = "dialogs_tests.rs"]
 mod tests;
 
-use std::collections::{BTreeMap, VecDeque};
-use std::time::{Duration, Instant};
-
-/// Review answers implemented on 2026-11-01 (N3: authored intent).
-pub const DESIGN_TODOS: &[&str] = &[];
+use std::collections::BTreeMap;
 
 pub const NAME_ERROR: &str = "Enter a name.";
 pub const SIZE_ERROR: &str = "Enter a size from 16 to 8192 pixels.";
@@ -32,7 +28,6 @@ pub const NUMBER_ERROR: &str = "Enter a number.";
 pub const VELOCITY_ERROR: &str = "Enter a speed, and an influence from 0.1 % to 100 %.";
 pub const COLLISION_ERROR: &str = "This would overlap another keyframe or go past the layer’s end.";
 pub const TIME_PERCENT_ERROR: &str = "Enter a percentage greater than 0.";
-pub const PRESET_NAME_ERROR: &str = "A preset with that name already exists.";
 pub const SCALE_TOOLTIP: &str = "Only number values can be scaled.";
 pub const ADJUST_DURATION: &str =
     "Adjust composition duration to the time span of the selected layers";
@@ -40,7 +35,6 @@ pub const MOVE_ATTRIBUTES: &str = "Move all attributes into the new composition"
 pub const MOVE_DESCRIPTION: &str = "Places the selected layers together into a new composition.";
 pub const LEAVE_DESCRIPTION: &str = "Creates a composition with only this layer’s source in it. The new composition becomes the source of the layer.";
 pub const LEAVE_DISABLED: &str = "Available for a single layer with a source.";
-pub const PRESET_FAILURE: &str = "Couldn’t save the preset.";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DialogId(pub String);
@@ -50,14 +44,12 @@ pub struct WindowId(pub String);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativePiece {
     Sheet,
-    Alert,
     TextField,
     NumberField,
     PopUpButton,
     Radio,
     Checkbox,
     ColourWell,
-    TextView,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
@@ -95,10 +87,6 @@ impl Field {
             unit: unit.into(),
             ..Self::new(id, label, NativePiece::NumberField, values)
         }
-    }
-    /// NSTextField labels / NSAccessibility title, never an internal ID.
-    pub fn voiceover_label(&self) -> &str {
-        &self.label
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,46 +179,6 @@ impl Surface {
             b.enabled = valid;
         }
     }
-    pub fn keyboard(&self, key: Key) -> KeyEffect {
-        match key {
-            Key::Escape => KeyEffect::Cancel,
-            Key::CommandReturn if self.expression_editor => self.apply_key(),
-            Key::Return | Key::Tab if self.expression_editor => KeyEffect::Type,
-            Key::ControlTab if self.expression_editor => KeyEffect::LeaveEditor,
-            Key::Return => self.apply_key(),
-            Key::Tab => KeyEffect::NextInReadingOrder,
-            _ => KeyEffect::Unhandled,
-        }
-    }
-    fn apply_key(&self) -> KeyEffect {
-        self.buttons
-            .iter()
-            .find(|b| b.default && b.enabled)
-            .map_or(KeyEffect::Unhandled, |b| {
-                if b.id == "cancel" {
-                    KeyEffect::Cancel
-                } else {
-                    KeyEffect::Apply
-                }
-            })
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-    Return,
-    CommandReturn,
-    Escape,
-    Tab,
-    ControlTab,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyEffect {
-    Apply,
-    Cancel,
-    Type,
-    LeaveEditor,
-    NextInReadingOrder,
-    Unhandled,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -325,12 +273,6 @@ impl CompositionDraft {
         s.valid();
         s
     }
-    pub fn resolution(&self) -> &'static str {
-        RESOLUTIONS
-            .iter()
-            .find(|(_, w, h)| *w == self.width && *h == self.height)
-            .map_or("Custom", |r| r.0)
-    }
     /// The resolution pop-up's entry for this size. `Custom` is the last.
     pub fn resolution_index(&self) -> usize {
         RESOLUTIONS
@@ -371,30 +313,6 @@ pub fn unique_name(prefix: &str, names: &[String]) -> String {
         .map(|n| format!("{prefix} {n}"))
         .find(|n| !names.contains(n))
         .expect("finite names")
-}
-
-/// Timecode entry uses the current composition's integer displayed frame rate;
-/// storage remains seconds. NumberField owns arithmetic and relative stepping.
-pub fn duration_input(input: &str, fps: f64) -> Option<f64> {
-    if !input.contains(':') {
-        return input.trim().parse::<f64>().ok().filter(|n| n.is_finite());
-    }
-    if !fps.is_finite() || fps <= 0. {
-        return None;
-    }
-    let parts: Vec<_> = input.trim().split(':').collect();
-    if parts.len() != 4 {
-        return None;
-    }
-    let p: Vec<u64> = parts
-        .iter()
-        .map(|s| s.parse())
-        .collect::<Result<_, _>>()
-        .ok()?;
-    if p[1] >= 60 || p[2] >= 60 || p[3] as f64 >= fps.round() {
-        return None;
-    }
-    Some(p[0] as f64 * 3600. + p[1] as f64 * 60. + p[2] as f64 + p[3] as f64 / fps)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -468,49 +386,6 @@ impl PrecomposeDraft {
     }
 }
 
-pub fn delete_composition(id: DialogId, owner: WindowId, name: &str, users: usize) -> Surface {
-    alert(
-        id,
-        owner,
-        format!("Delete “{name}”?"),
-        Some(if users == 0 {
-            "You can undo this.".into()
-        } else if users == 1 {
-            "It’s used in 1 other composition. Those layers are removed too. You can undo this."
-                .into()
-        } else {
-            format!(
-                "It’s used in {users} other compositions. Those layers are removed too. You can undo this."
-            )
-        }),
-        "Delete",
-        true,
-    )
-}
-fn alert(
-    id: DialogId,
-    owner: WindowId,
-    title: String,
-    line: Option<String>,
-    action: &'static str,
-    destructive: bool,
-) -> Surface {
-    let mut s = Surface::sheet(id, owner, &title, vec![], action);
-    s.piece = NativePiece::Alert;
-    s.line = line;
-    // NSAlert order: the first button added is rightmost and the default, so
-    // Cancel (default, Esc) goes first and the action sits to its left.
-    s.buttons = vec![
-        Button::cancel(true),
-        Button {
-            default: false,
-            destructive,
-            ..Button::action(action)
-        },
-    ];
-    s
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct MixedNumber {
     pub value: Option<f64>,
@@ -558,24 +433,6 @@ impl MixedNumber {
         f.error = self.parsed().err();
         f
     }
-}
-pub const KEYFRAME_MENU: &[&str] = &["Edit Value…", "Keyframe Velocity…", "Scale Keyframes…"];
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeyframeMenuItem {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub enabled: bool,
-}
-pub fn keyframe_menu(editable_keys: usize) -> Vec<KeyframeMenuItem> {
-    ["edit-value", "keyframe-velocity", "scale-keyframes"]
-        .into_iter()
-        .zip(KEYFRAME_MENU.iter().copied())
-        .map(|(id, label)| KeyframeMenuItem {
-            id,
-            label,
-            enabled: editable_keys > 0,
-        })
-        .collect()
 }
 pub fn keyframe_value(
     id: DialogId,
@@ -663,7 +520,6 @@ impl VelocityDraft {
         s
     }
 }
-pub const VELOCITY_GROUPS: &[&str] = &["Incoming", "Outgoing"];
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScaleDraft {
     pub time_percent: f64,
@@ -705,426 +561,5 @@ impl ScaleDraft {
         }
         s.buttons[1].enabled = self.valid();
         s
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Preview {
-    Pending,
-    Value(String),
-    Syntax { line: usize, message: String },
-    Runtime { line: usize, message: String },
-    SyntaxUnlocated { message: String },
-    RuntimeUnlocated { message: String },
-    Unavailable,
-}
-impl Preview {
-    pub fn line(&self) -> Option<String> {
-        match self {
-            Self::Value(v) => Some(format!("At the playhead: {v}")),
-            Self::Syntax { line, message } | Self::Runtime { line, message } => {
-                Some(format!("Line {line}: {message}"))
-            }
-            Self::SyntaxUnlocated { message } | Self::RuntimeUnlocated { message } => {
-                Some(message.clone())
-            }
-            Self::Unavailable => Some("No value at the playhead.".into()),
-            Self::Pending => None,
-        }
-    }
-}
-#[derive(Clone, Debug)]
-pub struct ExpressionDraft {
-    pub source: String,
-    pub existed: bool,
-    pub layer: String,
-    pub property: String,
-    pub preview: Preview,
-    previous_result: Option<String>,
-    previous_result_error: bool,
-    generation: u64,
-    due: Option<Instant>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EvaluationJob {
-    pub generation: u64,
-    pub source: String,
-}
-impl ExpressionDraft {
-    pub fn new(source: String, layer: String, property: String) -> Self {
-        Self {
-            existed: !source.is_empty(),
-            source,
-            layer,
-            property,
-            preview: Preview::Pending,
-            previous_result: None,
-            previous_result_error: false,
-            generation: 0,
-            due: Some(Instant::now() + Duration::from_millis(250)),
-        }
-    }
-    pub fn edit(&mut self, source: String, now: Instant) {
-        self.source = source;
-        self.generation += 1;
-        if !matches!(self.preview, Preview::Pending) {
-            self.previous_result = self.preview.line();
-            self.previous_result_error = matches!(
-                self.preview,
-                Preview::Syntax { .. }
-                    | Preview::Runtime { .. }
-                    | Preview::SyntaxUnlocated { .. }
-                    | Preview::RuntimeUnlocated { .. }
-            );
-        }
-        self.preview = Preview::Pending;
-        self.due = Some(now + Duration::from_millis(250));
-    }
-    /// Poll on a worker; the caller must enqueue evaluation, never run JS on main.
-    pub fn take_job(&mut self, now: Instant) -> Option<EvaluationJob> {
-        if self.due.is_some_and(|due| now >= due) {
-            self.due = None;
-            Some(EvaluationJob {
-                generation: self.generation,
-                source: self.source.clone(),
-            })
-        } else {
-            None
-        }
-    }
-    /// The host posts an NSAccessibility .medium announcement only on true.
-    pub fn complete(&mut self, job: &EvaluationJob, preview: Preview) -> bool {
-        if job.generation != self.generation || job.source != self.source {
-            return false;
-        }
-        let changed = self.preview != preview;
-        self.preview = preview;
-        changed
-    }
-    pub fn complete_with_host(
-        &mut self,
-        job: &EvaluationJob,
-        preview: Preview,
-        owner: WindowId,
-        host: &mut impl DialogHost,
-    ) -> bool {
-        let previous = if matches!(self.preview, Preview::Pending) {
-            self.previous_result.clone()
-        } else {
-            self.preview.line()
-        };
-        if !self.complete(job, preview) {
-            return false;
-        }
-        if let Some(text) = self
-            .preview
-            .line()
-            .filter(|text| Some(text) != previous.as_ref())
-        {
-            host.enqueue(HostEvent::Announce {
-                owner,
-                text,
-                priority: Announcement::Medium,
-            });
-        }
-        true
-    }
-    /// Cocoa selections use UTF-16 offsets. Invalid/split-surrogate ranges refuse.
-    pub fn insert(&mut self, range: std::ops::Range<usize>, text: &str, now: Instant) -> bool {
-        fn byte(s: &str, offset: usize) -> Option<usize> {
-            let mut n = 0;
-            for (i, c) in s.char_indices() {
-                if n == offset {
-                    return Some(i);
-                }
-                n += c.len_utf16();
-            }
-            (n == offset).then_some(s.len())
-        }
-        let (Some(start), Some(end)) = (
-            byte(&self.source, range.start),
-            byte(&self.source, range.end),
-        ) else {
-            return false;
-        };
-        if start > end {
-            return false;
-        }
-        let mut source = self.source.clone();
-        source.replace_range(start..end, text);
-        self.edit(source, now);
-        true
-    }
-    pub fn surface(&self, id: DialogId, owner: WindowId) -> Surface {
-        let f = Field::new(
-            "expression",
-            &format!("Expression for {}", self.property),
-            NativePiece::TextView,
-            vec![self.source.clone()],
-        );
-        let mut s = Surface::sheet(id, owner, "Expression", vec![f], "Apply");
-        s.width_token = "metrics.sheet_width_wide";
-        s.line = Some(format!("{} · {}", self.layer, self.property));
-        s.expression_editor = true;
-        s.result_line = if matches!(self.preview, Preview::Pending) {
-            self.previous_result.clone()
-        } else {
-            self.preview.line()
-        };
-        s.result_error = (matches!(self.preview, Preview::Pending) && self.previous_result_error)
-            || matches!(
-                self.preview,
-                Preview::Syntax { .. }
-                    | Preview::Runtime { .. }
-                    | Preview::SyntaxUnlocated { .. }
-                    | Preview::RuntimeUnlocated { .. }
-            );
-        s.buttons[1].enabled = !matches!(
-            self.preview,
-            Preview::Syntax { .. }
-                | Preview::SyntaxUnlocated { .. }
-                | Preview::Pending
-                | Preview::Unavailable
-        );
-        if self.existed {
-            s.buttons.insert(
-                0,
-                Button {
-                    id: "remove",
-                    label: "Remove Expression",
-                    default: false,
-                    destructive: true,
-                    enabled: true,
-                },
-            );
-        }
-        s
-    }
-}
-/// AppKit NSTextView configuration: P-TEXT, ten scrollable lines, MONO_FONT / t.body.
-pub const EXPRESSION_TEXT: ExpressionText = ExpressionText {
-    lines: 10,
-    smart_quotes: false,
-    smart_dashes: false,
-    substitutions: false,
-    spell_checking: false,
-    line_numbers: false,
-    syntax_colouring: false,
-    font: pm_design::MONO_FONT,
-};
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExpressionText {
-    pub lines: usize,
-    pub smart_quotes: bool,
-    pub smart_dashes: bool,
-    pub substitutions: bool,
-    pub spell_checking: bool,
-    pub line_numbers: bool,
-    pub syntax_colouring: bool,
-    pub font: &'static str,
-}
-pub const INSERT_TITLE: &str = "Insert ⌄";
-
-pub fn replace_preset(id: DialogId, owner: WindowId, export: DialogId, name: &str) -> Surface {
-    let mut s = alert(
-        id,
-        owner,
-        format!("A preset named “{name}” already exists. Do you want to replace it?"),
-        None,
-        "Replace",
-        false,
-    );
-    s.parent_sheet = Some(export);
-    s
-}
-pub fn rename_preset(id: DialogId, owner: WindowId, export: DialogId, name: &str) -> Surface {
-    let mut s = alert(id, owner, "Rename Preset".into(), None, "Rename", false);
-    s.parent_sheet = Some(export);
-    // Rename is the default here: it goes first (rightmost), Cancel after it.
-    s.buttons.reverse();
-    s.buttons[0].default = true;
-    s.buttons[1].default = false;
-    s.fields.push(Field::new(
-        "name",
-        "Name",
-        NativePiece::TextField,
-        vec![name.into()],
-    ));
-    s.first_selected = Some("name".into());
-    s
-}
-/// S043 review answer: validate without mutating or submitting an unchanged name.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RenameValidation {
-    Empty,
-    Unchanged,
-    Duplicate,
-    Ready(String),
-}
-impl RenameValidation {
-    pub fn check(original: &str, draft: &str, other_names: &[String]) -> Self {
-        let name = draft.trim();
-        if name.is_empty() {
-            Self::Empty
-        } else if name == original {
-            Self::Unchanged
-        } else if other_names.iter().any(|other| other == name) {
-            Self::Duplicate
-        } else {
-            Self::Ready(name.into())
-        }
-    }
-    pub fn apply(&self, surface: &mut Surface) {
-        surface.fields[0].error = matches!(self, Self::Duplicate).then_some(PRESET_NAME_ERROR);
-        surface.buttons[0].enabled = !matches!(self, Self::Empty | Self::Duplicate);
-        surface.buttons[0].id = if matches!(self, Self::Unchanged) {
-            "cancel"
-        } else {
-            "apply"
-        };
-    }
-    pub fn key_effect(&self) -> KeyEffect {
-        match self {
-            Self::Unchanged => KeyEffect::Cancel,
-            Self::Ready(_) => KeyEffect::Apply,
-            _ => KeyEffect::Unhandled,
-        }
-    }
-}
-pub fn delete_preset(id: DialogId, owner: WindowId, export: DialogId, name: &str) -> Surface {
-    let mut s = alert(
-        id,
-        owner,
-        format!("Delete the preset “{name}”?"),
-        None,
-        "Delete",
-        true,
-    );
-    s.parent_sheet = Some(export);
-    s
-}
-pub fn preset_menu(current: Option<&str>) -> Vec<String> {
-    current.map_or_else(Vec::new, |n| {
-        vec![
-            String::new(),
-            format!("Rename “{n}”…"),
-            format!("Delete “{n}”"),
-        ]
-    })
-}
-/// Accessory width 240 is explicit in S043.
-pub const PRESET_RENAME_ACCESSORY_WIDTH: f64 = 240.;
-
-/// Nonblocking host seam: AppKit uses NSAlert.beginSheetModal / NSWindow.beginSheet;
-/// system placement and app icon; no custom alert semantics/critical badge.
-/// Main-thread adapters enqueue ID-addressed input; they never evaluate JS.
-pub trait DialogHost {
-    fn enqueue(&mut self, event: HostEvent);
-}
-#[derive(Clone, Debug, PartialEq)]
-pub enum HostEvent {
-    Present(Surface),
-    Update(Surface),
-    Close {
-        id: DialogId,
-        restore_trigger: bool,
-    },
-    Banner {
-        owner: WindowId,
-        text: String,
-        announcement: Announcement,
-    },
-    Announce {
-        owner: WindowId,
-        text: String,
-        priority: Announcement,
-    },
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Announcement {
-    Medium,
-    High,
-}
-#[derive(Default)]
-pub struct HeadlessHost {
-    pub events: Vec<HostEvent>,
-}
-impl DialogHost for HeadlessHost {
-    fn enqueue(&mut self, event: HostEvent) {
-        self.events.push(event);
-    }
-}
-
-/// One alert per owning window, FIFO. Different document windows are independent.
-#[derive(Default)]
-pub struct DialogQueue {
-    windows: BTreeMap<WindowId, VecDeque<Surface>>,
-}
-impl DialogQueue {
-    pub fn present(&mut self, surface: Surface, host: &mut impl DialogHost) -> bool {
-        if self.windows.values().flatten().any(|s| s.id == surface.id) {
-            return false;
-        }
-        let q = self.windows.entry(surface.owner.clone()).or_default();
-        if q.is_empty() {
-            host.enqueue(HostEvent::Present(surface.clone()));
-        }
-        q.push_back(surface);
-        true
-    }
-    pub fn close(&mut self, id: &DialogId, host: &mut impl DialogHost) -> bool {
-        let Some(q) = self
-            .windows
-            .values_mut()
-            .find(|q| q.iter().any(|s| &s.id == id))
-        else {
-            return false;
-        };
-        let i = q.iter().position(|s| &s.id == id).expect("found");
-        q.remove(i);
-        if i == 0 {
-            host.enqueue(HostEvent::Close {
-                id: id.clone(),
-                restore_trigger: q.is_empty(),
-            });
-            if let Some(s) = q.front() {
-                host.enqueue(HostEvent::Present(s.clone()));
-            }
-        }
-        true
-    }
-    pub fn stale(&mut self, id: &DialogId, object: &str, host: &mut impl DialogHost) -> bool {
-        let owner = self
-            .windows
-            .values()
-            .flatten()
-            .find(|s| &s.id == id)
-            .map(|s| s.owner.clone());
-        if !self.close(id, host) {
-            return false;
-        }
-        host.enqueue(HostEvent::Banner {
-            owner: owner.expect("found"),
-            text: format!("{object} was changed, so the dialog closed."),
-            announcement: Announcement::Medium,
-        });
-        true
-    }
-}
-
-/// Platform presentation boundary shared by the real AppKit alerts and Linux
-/// double. Sheet forms use the resolved shared sheet_layout geometry.
-pub trait AlertHost {
-    type Error;
-    fn show_alert(&mut self, surface: &Surface) -> Result<(), Self::Error>;
-}
-impl AlertHost for HeadlessHost {
-    type Error = &'static str;
-    fn show_alert(&mut self, surface: &Surface) -> Result<(), Self::Error> {
-        if surface.piece != NativePiece::Alert {
-            return Err("not an alert");
-        }
-        self.enqueue(HostEvent::Present(surface.clone()));
-        Ok(())
     }
 }

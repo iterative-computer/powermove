@@ -27,13 +27,6 @@ pub mod kernel;
 #[path = "library_model.rs"]
 pub mod model;
 
-pub use controller::*;
-pub use form::*;
-pub use model::*;
-
-/// Explicit integration/design requirements, inspectable without a window.
-pub const GAPS: &[&str] = &[];
-
 #[cfg(test)]
 #[path = "library_tests.rs"]
 mod tests;
