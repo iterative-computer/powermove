@@ -57,6 +57,8 @@ struct Child {
     progressed: u64,
     /// Child question item id → the id shown in the parent's conversation.
     questions: BTreeMap<String, String>,
+    /// A result whose save failed, kept and retried before the child retires.
+    result: Option<RunResult>,
 }
 struct Lease {
     owner: String,
@@ -84,6 +86,10 @@ pub(crate) struct Tasks {
     dirty: bool,
     /// What children and continuations launch with (the panel's).
     environment: Option<launch::Environment>,
+    /// Handed-over deliveries whose outbox acknowledgement failed: (root,
+    /// run, delivery, leases), retried until saved.
+    acks: Vec<(String, String, String, Vec<Watch>)>,
+    retry_at: u64,
 }
 
 /// `Agent Tasks` files under the profile, written atomically, compared first.
@@ -253,7 +259,7 @@ fn request_json(project: &str, thread: &str, request: &Request) -> Value {
     json!({"id":request.run,"projectId":project,"threadId":thread,"provider":request.provider,
         "model":request.model,"reasoningEffort":request.effort,"access":access_name(request.access),
         "mode":if request.access == Access::Editor { "editor" } else { "autonomous" },
-        "prompt":request.prompt})
+        "prompt":request.prompt,"images":request.images,"attachments":request.files})
 }
 fn result_text(result: &RunResult) -> String {
     match result {
@@ -368,6 +374,14 @@ impl Tasks {
                 self.launched.remove(&run);
             }
         }
+    }
+    /// A task run's current request (tests read what a child was told).
+    #[cfg(test)]
+    pub(crate) fn child_request(&self, run: &str) -> Option<&Request> {
+        self.children
+            .iter()
+            .find(|c| c.run == run)
+            .map(|c| &c.request)
     }
     /// Nothing left for the delivery worker.
     pub fn idle(&self) -> bool {
@@ -499,8 +513,18 @@ impl Tasks {
             access: base.access,
             approval: base.approval,
             workspace,
-            images: vec![],
+            // Main's children keep the parent's images and attachments.
+            images: request["images"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
             role,
+            files: request["attachments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
         };
         let handle = launch::launch(&environment, child.clone())?;
         self.children.push(Child {
@@ -514,6 +538,7 @@ impl Tasks {
             finished: false,
             progressed: 0,
             questions: BTreeMap::new(),
+            result: None,
         });
         Ok(())
     }
@@ -555,16 +580,26 @@ impl Tasks {
             // Its own tasks are still stopping; try again when they settle.
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return false,
             Err(_) => {
-                // Kept in memory until quit, as main does when a save fails.
-                state.scope.note(&run, |task| {
-                    task["progress"] = json!(
-                        "The task result could not be saved. It remains available until Powermove closes."
-                    );
-                });
+                // The parent waits on this result: keep it and save it again
+                // shortly, rather than retire a child its parent never sees end.
+                let child = &mut self.children[index];
+                child.handle = None;
+                child.ended = None;
+                if child.result.replace(result.clone()).is_none()
+                    && let Some(task) = state.scope.note(&run, |task| {
+                        task["progress"] = json!(
+                            "The task result could not be saved yet. Powermove keeps trying."
+                        );
+                    })
+                {
+                    Self::emit(runs, &root, task);
+                }
+                return false;
             }
         }
         self.monitor.finish(&run, result, now_ms());
         let child = &mut self.children[index];
+        child.result = None;
         child.finished = true;
         child.ended = None;
         child.handle = None;
@@ -671,6 +706,30 @@ impl Tasks {
                 watched,
                 ..
             })) => {
+                // Record the handoff before starting it, so a retry never
+                // starts a second continuation for the same results.
+                match state.scope.accept_delivery(disk, run, &delivery) {
+                    Err(error) => {
+                        return self.turn_failed(runs, disk, root, run, &error.to_string());
+                    }
+                    Ok(false) => {
+                        // Handed over already; only its acknowledgement is missing.
+                        if self.acknowledge(disk, root, run, &delivery, &leases) {
+                            self.dirty = true;
+                        } else {
+                            self.turn_failed(
+                                runs,
+                                disk,
+                                root,
+                                run,
+                                "Subagent results could not be saved.",
+                            );
+                        }
+                        return;
+                    }
+                    Ok(true) => {}
+                }
+                let state = self.roots.get_mut(root).expect("barrier scope");
                 let prompt = state.scope.request(run).and_then(|r| r["prompt"].as_str());
                 let base = if is_root {
                     self.launched.get(run).cloned()
@@ -696,19 +755,10 @@ impl Tasks {
                             child.ended = None;
                             child.handle = Some(handle);
                         }
-                        let _ = state.scope.acknowledge_with_watches(
-                            disk,
-                            run,
-                            &delivery,
-                            &mut self.monitor,
-                            &leases,
-                        );
-                        for lease in self.leases.iter_mut().filter(|l| l.owner == run) {
-                            if !self.monitor.is_watching(&lease.watch) {
-                                lease.acknowledged = true;
-                            }
+                        if !self.acknowledge(disk, root, run, &delivery, &leases) {
+                            self.acks
+                                .push((root.into(), run.into(), delivery.clone(), leases));
                         }
-                        self.leases.retain(|l| !l.acknowledged);
                     }
                     Err(error) => self.turn_failed(runs, disk, root, run, &error),
                 }
@@ -716,6 +766,34 @@ impl Tasks {
             Ok(Barrier::Continue(_)) => {}
             Err(error) => self.turn_failed(runs, disk, root, run, &error.to_string()),
         }
+    }
+    /// Acknowledge a handed-over delivery in the outbox and release the watch
+    /// leases it carried. `false` when the save failed (retry later).
+    fn acknowledge(
+        &mut self,
+        disk: &mut Disk,
+        root: &str,
+        run: &str,
+        delivery: &str,
+        leases: &[Watch],
+    ) -> bool {
+        let Some(state) = self.roots.get_mut(root) else {
+            return true;
+        };
+        if state
+            .scope
+            .acknowledge_with_watches(disk, run, delivery, &mut self.monitor, leases)
+            .is_err()
+        {
+            return false;
+        }
+        for lease in self.leases.iter_mut().filter(|l| l.owner == run) {
+            if !self.monitor.is_watching(&lease.watch) {
+                lease.acknowledged = true;
+            }
+        }
+        self.leases.retain(|l| !l.acknowledged);
+        true
     }
     /// A node that can't go on: its tasks stop and its result is the failure.
     fn turn_failed(
@@ -791,6 +869,22 @@ impl Tasks {
             tasks.dirty = true;
         }
         changed |= tasks.poll_children(runs, &mut disk, now);
+        // Saves that failed are tried again once a second.
+        if now >= tasks.retry_at {
+            tasks.retry_at = now + 1_000;
+            for (root, run, delivery, leases) in std::mem::take(&mut tasks.acks) {
+                if !tasks.acknowledge(&mut disk, &root, &run, &delivery, &leases) {
+                    tasks.acks.push((root, run, delivery, leases));
+                }
+            }
+            for index in 0..tasks.children.len() {
+                if let Some(result) = tasks.children[index].result.clone()
+                    && !tasks.children[index].finished
+                {
+                    changed |= tasks.finish_child(runs, &mut disk, index, &result);
+                }
+            }
+        }
         if std::mem::take(&mut tasks.dirty) {
             changed = true;
             let held: Vec<(String, String, String)> = tasks
@@ -813,7 +907,11 @@ impl Tasks {
             // Stopped children settle once their own tasks have.
             for index in 0..tasks.children.len() {
                 let child = &tasks.children[index];
-                if !child.finished && child.stopping && child.handle.is_none() {
+                if !child.finished
+                    && child.stopping
+                    && child.handle.is_none()
+                    && child.result.is_none()
+                {
                     tasks.finish_child(
                         runs,
                         &mut disk,
@@ -1521,6 +1619,8 @@ impl Tasks {
         let child = &mut self.children[index];
         let executing = child.handle.is_some() && child.next.is_none();
         let mut delivery = "resumed";
+        // A private answer never joins the prompt (main's marker instead).
+        let mut private = false;
         if target.is_none()
             && let Some(message) = message
             && executing
@@ -1532,6 +1632,11 @@ impl Tasks {
                 .find(|(_, q)| q.child == child_run && q.blocking)
                 .map(|(shown, q)| (shown.clone(), q.item.clone(), q.questions.clone()));
             if let Some((shown, item, questions)) = waiting {
+                private = questions
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|q| q["secret"] == true);
                 let answers = questions
                     .as_array()
                     .into_iter()
@@ -1591,7 +1696,14 @@ impl Tasks {
                 self.children[index].handle = Some(handle);
             }
         } else {
-            next.prompt = format!("{}{direction}", next.prompt);
+            next.prompt = if delivery == "answered" && private {
+                format!(
+                    "{}\n\nA private answer was delivered to your held question.",
+                    next.prompt
+                )
+            } else {
+                format!("{}{direction}", next.prompt)
+            };
             child.request = next.clone();
         }
         let scope = &mut self.roots.get_mut(root).ok_or(GONE)?.scope;

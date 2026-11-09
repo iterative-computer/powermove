@@ -87,7 +87,13 @@ def codex():
     for line in sys.stdin:
         request = json.loads(line)
         method = request.get('method')
-        if method == 'initialize':
+        if request.get('id') == 900 and 'result' in request:
+            # The held question was answered.
+            text = 'Answered: ' + json.dumps(request['result'].get('answers', {}), sort_keys=True)
+            emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})
+            emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'answer', 'type': 'agentMessage', 'text': text}}})
+            emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': 'turn', 'status': 'completed', 'error': None}}})
+        elif method == 'initialize':
             emit({'id': request['id'], 'result': {}})
         elif method == 'account/read':
             account = {'type': 'chatgpt', 'email': 'user@example.invalid', 'planType': 'plus'}
@@ -107,7 +113,11 @@ def codex():
         elif method == 'turn/start':
             emit({'id': request['id'], 'result': {'turn': {'id': 'turn', 'status': 'inProgress'}}})
             emit({'method': 'turn/started', 'params': {'threadId': 'thread', 'turn': {'id': 'turn'}}})
-            if mode == 'stream':
+            last = request['params']['input'][0]['text'].split('\n')[-1]
+            if last.startswith('Secret:'):
+                emit({'id': 900, 'method': 'item/tool/requestUserInput', 'params': {**turn, 'itemId': 'q1', 'isBlocking': True,
+                    'questions': [{'id': 'pin', 'question': 'What is the PIN?', 'isSecret': True}]}})
+            elif mode == 'stream':
                 threading.Thread(target=stream, args=(turn,), daemon=True).start()
             elif mode != 'hold' and not request['params']['input'][0]['text'].split('\n')[-1].startswith('Hold:'):
                 if mode == 'slow':

@@ -1078,7 +1078,9 @@ fn wait_mode_status_cancel_and_send_follow_mains_contract() {
     panel.connected(Provider::Chatgpt);
     let agent = panel.agent();
     let thread = thread_id(&agent);
-    panel.send("Plan it");
+    // Its turn holds, as a real provider's does while it waits on a tool
+    // call: the run can't settle between these calls.
+    panel.send("Hold: Plan it");
     let run = live_run(&agent, &thread);
     let call = |tool: &str, args: Value| {
         let mut args = args;
@@ -1144,7 +1146,8 @@ fn wait_mode_status_cancel_and_send_follow_mains_contract() {
         task_row(state, &thread)
             .is_some_and(|r| r["task"]["taskId"] == json!(id) && r["task"]["status"] == "cancelled")
     });
-    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.click("agent-stop");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
     panel.panels.close();
 }
 #[test]
@@ -1305,6 +1308,167 @@ fn a_run_publishes_a_visual_reply_that_opens_in_its_viewer() {
             .agent_visual_reply(&json!({"agentRunId":run,"title":"Late","html":"<p>x</p>"}))
             .unwrap_err()
             .contains("no longer active")
+    );
+    panel.panels.close();
+}
+
+#[test]
+fn a_private_answer_reaches_the_subagent_but_never_its_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Hold: Coordinate");
+    let run = live_run(&agent, &thread);
+    let call = |tool: &str, args: Value| {
+        let mut args = args;
+        args["agentRunId"] = json!(run);
+        panel.panels.agent_orchestrate(tool, &args)
+    };
+    let task = call("delegate_task", json!({"task":"Secret: unlock the asset"})).unwrap();
+    let id = task["taskId"].as_str().unwrap().to_owned();
+    let child = task["childRunId"].as_str().unwrap().to_owned();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        let status = call("task_status", json!({"taskId":id})).unwrap();
+        if status["questions"]
+            .as_array()
+            .is_some_and(|q| !q.is_empty())
+        {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "{status}");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        status["questions"][0]["questions"][0]["secret"], true,
+        "{status}"
+    );
+    let sent = call("task_send", json!({"taskId":id,"message":"4921"})).unwrap();
+    assert_eq!(sent["delivery"], "answered", "{sent}");
+    let prompt = agent
+        .lock()
+        .unwrap()
+        .tasks
+        .child_request(&child)
+        .unwrap()
+        .prompt
+        .clone();
+    assert!(!prompt.contains("4921"), "{prompt}");
+    assert!(
+        prompt.ends_with("A private answer was delivered to your held question."),
+        "{prompt}"
+    );
+    // The subagent itself got the answer.
+    panel
+        .wait(|state| task_row(state, &thread).is_some_and(|r| r["task"]["status"] == "completed"));
+    let row = task_row(&agent.lock().unwrap(), &thread).unwrap();
+    assert!(row["output"].as_str().unwrap().contains("4921"), "{row}");
+    panel.click("agent-stop");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
+    panel.panels.close();
+}
+#[test]
+fn subagents_inherit_the_runs_attachments() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    panel
+        .panels
+        .agent_attach(vec![
+            json!({"id":"a1","name":"frame.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}")}),
+            json!({"id":"a2","name":"notes.txt","type":"text/plain","size":5,"content":"hello"}),
+        ])
+        .unwrap();
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Look at these");
+    let run = live_run(&agent, &thread);
+    let task = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Check the frame"}),
+        )
+        .unwrap();
+    let child = task["childRunId"].as_str().unwrap().to_owned();
+    let request = agent
+        .lock()
+        .unwrap()
+        .tasks
+        .child_request(&child)
+        .unwrap()
+        .clone();
+    assert_eq!(request.images.len(), 1, "{request:?}");
+    assert!(
+        request.images[0].ends_with("reference-0.png"),
+        "{request:?}"
+    );
+    assert_eq!(request.files.len(), 1, "{request:?}");
+    assert_eq!(request.files[0]["name"], "notes.txt");
+    // The provider was told: its prompt ends with main's ATTACHED FILES.
+    panel
+        .wait(|state| task_row(state, &thread).is_some_and(|r| r["task"]["status"] == "completed"));
+    let row = task_row(&agent.lock().unwrap(), &thread).unwrap();
+    assert!(
+        row["output"].as_str().unwrap().contains("notes.txt"),
+        "{row}"
+    );
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
+    panel.panels.close();
+}
+#[test]
+fn a_result_that_cant_be_saved_is_kept_until_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Make a card");
+    let run = live_run(&agent, &thread);
+    panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Child brief"}),
+        )
+        .unwrap();
+    // The task archive's folder stops taking writes before the child ends.
+    let folder = walk(&root.path().join("Agent Tasks"))[0]
+        .parent()
+        .unwrap()
+        .to_owned();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    panel.wait(|state| {
+        task_row(state, &thread).is_some_and(|r| {
+            r["task"]["progress"]
+                == "The task result could not be saved yet. Powermove keeps trying."
+        })
+    });
+    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        agent.lock().unwrap().runs.held(&run),
+        "the parent still waits"
+    );
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !{
+        let state = agent.lock().unwrap();
+        said(&state, &thread, RESUMED) && state.panel.session(&thread).unwrap().run.is_none()
+    } {
+        assert!(Instant::now() < deadline, "the run never resumed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let saved: Value = serde_json::from_slice(&std::fs::read(&walk(&folder)[0]).unwrap()).unwrap();
+    assert_eq!(
+        saved["records"][0]["task"]["status"], "completed",
+        "{saved}"
     );
     panel.panels.close();
 }

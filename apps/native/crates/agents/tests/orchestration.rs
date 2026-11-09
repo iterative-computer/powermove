@@ -623,3 +623,53 @@ fn stale_scope_cannot_overwrite_a_concurrent_reservation() {
     assert_eq!(host.archives[first.path()], durable);
     assert_eq!(stale.raw()["records"], json!([]));
 }
+#[test]
+fn a_handoff_is_recorded_before_it_starts_and_never_starts_twice() {
+    let mut host = Host::default();
+    let mut scope = Scope::load(&mut host, root(), 0).unwrap();
+    scope
+        .delegate(&mut host, "root", input("one"), ids(1), 1)
+        .unwrap();
+    scope
+        .finish(&mut host, "run-1", &success("done"), 2)
+        .unwrap();
+    let Barrier::Continue(Command::Continue { delivery, .. }) =
+        scope.after_turn(&mut host, "root").unwrap()
+    else {
+        panic!("missing continuation")
+    };
+    // A failed save records nothing: the host starts nothing.
+    host.fail_save = true;
+    assert!(scope.accept_delivery(&mut host, "root", &delivery).is_err());
+    host.fail_save = false;
+    assert!(scope.accept_delivery(&mut host, "root", &delivery).unwrap());
+    // Recorded, then the acknowledgement failed: the same delivery comes back
+    // (also after a restart), and accepting it again says it was handed over.
+    host.fail_save = true;
+    assert!(
+        scope
+            .acknowledge_delivery(&mut host, "root", &delivery)
+            .is_err()
+    );
+    host.fail_save = false;
+    let mut reopened = Scope::load(&mut host, root(), 3).unwrap();
+    let Barrier::Continue(Command::Continue {
+        delivery: again, ..
+    }) = reopened.after_turn(&mut host, "root").unwrap()
+    else {
+        panic!("lost delivery")
+    };
+    assert_eq!(again, delivery);
+    assert!(
+        !reopened
+            .accept_delivery(&mut host, "root", &delivery)
+            .unwrap()
+    );
+    reopened
+        .acknowledge_delivery(&mut host, "root", &delivery)
+        .unwrap();
+    assert_eq!(
+        reopened.after_turn(&mut host, "root").unwrap(),
+        Barrier::Complete
+    );
+}

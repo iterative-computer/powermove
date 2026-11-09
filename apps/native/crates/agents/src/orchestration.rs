@@ -673,6 +673,30 @@ impl Scope {
         self.stopped.extend(runs);
         Ok(commands)
     }
+    /// Durably record that the host is handing `delivery` to `parent` (its
+    /// continuation turn), before it starts that turn. `false` when it already
+    /// was: the handoff happened, so the host must not start it again.
+    pub fn accept_delivery(
+        &mut self,
+        host: &mut impl Host,
+        parent: &str,
+        delivery: &str,
+    ) -> io::Result<bool> {
+        self.parent(parent)?;
+        let mut archive = self.archive.clone();
+        let pending = archive["nativePendingDeliveries"]
+            .as_array_mut()
+            .ok_or_else(|| error("Unknown delivery"))?
+            .iter_mut()
+            .find(|d| d["id"] == delivery && d["run"] == parent)
+            .ok_or_else(|| error("Unknown delivery"))?;
+        if pending["accepted"] == true {
+            return Ok(false);
+        }
+        pending["accepted"] = json!(true);
+        self.publish(host, archive)?;
+        Ok(true)
+    }
     /// Release only the run-specific leases contained in a durably accepted
     /// continuation, leaving unrelated/new watches in place.
     pub fn acknowledge_with_watches(

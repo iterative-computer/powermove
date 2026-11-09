@@ -276,6 +276,9 @@ pub struct Request {
     pub images: Vec<String>,
     /// A subagent's `delegate_task` role (main's "Task role: …" line).
     pub role: Option<String>,
+    /// Attached non-image files (`{name,type,content}`), given to the run as
+    /// main's ATTACHED FILES section after its prompt. Subagents inherit them.
+    pub files: Vec<Value>,
 }
 impl Request {
     /// Main's additional instructions: orchestration, then the task role.
@@ -286,7 +289,14 @@ impl Request {
         }
     }
 }
-pub fn launch(environment: &Environment, request: Request) -> Result<Handle, String> {
+pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle, String> {
+    if !request.files.is_empty() {
+        request.prompt = format!(
+            "{}\n\nATTACHED FILES\n{}",
+            request.prompt,
+            Value::Array(request.files.clone())
+        );
+    }
     let authority = Authority::new(request.access, request.approval, false)?;
     let grant = grants::issue(&request.run, request.access)
         .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;

@@ -427,7 +427,7 @@ fn launch_request(
         .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
-        prompt: with_files(prompt(&state.panel, thread, text)?, &files),
+        prompt: prompt(&state.panel, thread, text)?,
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
         effort: Some(settings.effort.clone()).filter(|e| !e.is_empty()),
@@ -436,6 +436,7 @@ fn launch_request(
         workspace: directory,
         images,
         role: None,
+        files,
     };
     Ok((environment, request))
 }
@@ -484,15 +485,6 @@ fn lay_out(
         }
     }
     Ok((images, files))
-}
-fn with_files(prompt: String, files: &[Value]) -> String {
-    if files.is_empty() {
-        return prompt;
-    }
-    format!(
-        "{prompt}\n\nATTACHED FILES\n{}",
-        Value::Array(files.to_vec())
-    )
 }
 /// Standard base64 (attachment payloads); `None` for anything malformed.
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
