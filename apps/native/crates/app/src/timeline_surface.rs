@@ -613,24 +613,15 @@ impl TimelineSurface {
         }
     }
     /// The v1 `timeline` service's writes from the window's realm: its view
-    /// (`pps`, `scrollT`, `scrollY`), `graph` (shown or not, whatever it
-    /// was), `frameView` and `reveal`.
-    pub fn service_request(
-        &mut self,
-        request: &serde_json::Value,
-        time: f64,
-        cx: &mut Context<Self>,
-    ) {
+    /// (`pps`, `scrollT`, `scrollY`), `frameView` and `reveal`. `graph` is the
+    /// timeline panel's view (`Builtins::timeline_action`).
+    pub fn service_request(&mut self, request: &serde_json::Value, cx: &mut Context<Self>) {
         let number = |key: &str| request[key].as_f64();
         if ["pps", "scrollT", "scrollY"]
             .iter()
             .any(|k| number(k).is_some())
         {
             self.set_view(number("pps"), number("scrollT"), number("scrollY"), cx);
-        }
-        if let Some(shown) = request["graph"].as_bool() {
-            let id = if shown { "graph.show" } else { "graph.hide" };
-            self.command(id, time, None, false, cx);
         }
         if request["frameView"] == true {
             self.fit_time(cx);
@@ -1428,10 +1419,6 @@ impl TimelineSurface {
         self.graph_area()
             .and_then(|a| self.graph_ops(a))
             .unwrap_or_default()
-    }
-    #[cfg(test)]
-    pub fn graph_display(&self) -> pm_panel_timeline::GraphDisplay {
-        self.model.graph_display
     }
     #[cfg(test)]
     pub fn graph(&self) -> Option<Arc<Graph>> {

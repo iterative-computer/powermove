@@ -171,6 +171,17 @@ pub async fn dispatch(
             persist = true;
             Plan::default()
         }
+        // v1–3's `timeline.graph = shown`: the graph shown or not, keeping a
+        // combined view, whatever it was.
+        "graph" => {
+            if !boolean(intent, "shown")? {
+                client.model.graph_display = GraphDisplay::DopeSheet;
+            } else if client.model.graph_display == GraphDisplay::DopeSheet {
+                client.model.graph_display = GraphDisplay::Graph;
+            }
+            persist = true;
+            Plan::default()
+        }
         "snap" => {
             client.model.track_snap_disabled = !client.model.track_snap_disabled;
             persist = true;

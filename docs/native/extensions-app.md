@@ -239,7 +239,8 @@ window is open is shown in it.
   rows (`TimelineSurface::service_facts`, sent when its frame rebuilds); `pps`,
   `scrollT`, `scrollY` and `graph` write back, `frameView` and `reveal` drive it, and
   edges follow timeline.ts. `cv` is `null` (v4's `timeline.paint` paints clips).
-  `graph` is applied as asked (`graph.show`/`graph.hide`). `inspector.refresh`
+  `graph` sets the timeline panel's view as asked (v4 intent `graph`, run by
+  `Builtins::timeline_action`; the panel re-reads after a command from outside it). `inspector.refresh`
   rebuilds the v1–3 sections panel; `focusText` selects the layer, shows Properties
   and, once its text row bound to that layer shows (≤ 2 s), focuses the field with the
   text selected. `copySelectedEffects`/`pasteCopiedEffects`/`clearEffectClipboard`

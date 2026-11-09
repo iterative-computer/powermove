@@ -640,8 +640,15 @@ impl Controller {
                 let Some(timeline) = self.builtins.timeline.clone() else {
                     return;
                 };
-                let time = self.time();
-                timeline.update(cx, |t, cx| t.service_request(&request, time, cx));
+                timeline.update(cx, |t, cx| t.service_request(&request, cx));
+                // As the view switch does: the timeline panel's own view.
+                if let Some(shown) = request["graph"].as_bool()
+                    && let Some(runtime) = &self.builtins.runtime
+                    && let Err(error) =
+                        runtime.timeline_action(json!({"type": "graph", "shown": shown}))
+                {
+                    self.message = error.to_string();
+                }
             }
             Some("fonts") => self.ensure_page_fonts(&request["faces"], cx),
             Some("download") => {

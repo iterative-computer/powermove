@@ -37,5 +37,6 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
   });
   const mounted: Mounted = p;
   mounted.settle = () => p.settled();
+  mounted.refresh = () => p.session.refresh();
   return mounted;
 }
