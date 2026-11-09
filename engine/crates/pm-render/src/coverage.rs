@@ -406,6 +406,36 @@ impl InputScratch {
         self.capacity
     }
 
+    /// `batch`'s input ranges and the bytes they end at.
+    fn extent(device: &wgpu::Device, batch: &Batch) -> (InputRanges, u64) {
+        let sizes = [
+            16,
+            batch.items.len() * size_of::<[u32; 8]>(),
+            batch.edges.len() * size_of::<[i32; 4]>(),
+            batch.edge_items.len() * size_of::<u32>(),
+            batch.rows.len() * size_of::<[u32; 2]>(),
+        ];
+        let align = u64::from(device.limits().min_storage_buffer_offset_alignment.max(4));
+        let mut end = 0u64;
+        let mut ranges = [(0, 0); 5];
+        for (i, bytes) in sizes.iter().enumerate() {
+            let start = end.div_ceil(align) * align;
+            let size = (*bytes).max(16) as u64;
+            ranges[i] = (start, size);
+            end = start + size;
+        }
+        (ranges, end)
+    }
+
+    /// The bytes uploading `batch` here would allocate (0: it fits).
+    pub fn growth(&self, device: &wgpu::Device, batch: &Batch) -> u64 {
+        let (_, end) = Self::extent(device, batch);
+        if end <= self.capacity {
+            return 0;
+        }
+        bounded_capacity(end, 256, device.limits().max_buffer_size).unwrap_or(end)
+    }
+
     fn upload<'a>(
         &'a mut self,
         device: &wgpu::Device,
@@ -420,15 +450,8 @@ impl InputScratch {
             words(&batch.edge_items),
             words(&batch.rows),
         ];
-        let align = u64::from(device.limits().min_storage_buffer_offset_alignment.max(4));
-        let mut end = 0u64;
-        let mut ranges = [(0, 0); 5];
-        for (i, bytes) in inputs.iter().enumerate() {
-            let start = end.div_ceil(align) * align;
-            let size = bytes.len().max(16) as u64;
-            ranges[i] = (start, size);
-            end = start + size;
-        }
+        let (ranges, end) = Self::extent(device, batch);
+        debug_assert!(inputs.iter().zip(&ranges).all(|(b, r)| b.len().max(16) as u64 == r.1));
         let limit = device.limits().max_buffer_size;
         if end > self.capacity {
             self.capacity = bounded_capacity(end, 256, limit)?;

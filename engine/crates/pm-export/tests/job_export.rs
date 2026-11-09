@@ -1484,7 +1484,7 @@ fn stateful_frame_handlers_keep_overlapping_exports_serial() {
         )],
     );
     let media = MediaPaths::default();
-    let mut encode = |gate: &dyn GpuGate| {
+    let encode = |gate: &dyn GpuGate| {
         let counter = Arc::new(Counter::default());
         let mut renderer = Renderer::headless().unwrap();
         renderer.set_compat_rasters(Some(Arc::new(CountRaster(counter.clone()))));
