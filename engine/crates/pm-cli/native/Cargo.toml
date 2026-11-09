@@ -36,7 +36,6 @@ pm-protocol = { path = "../../pm-protocol" }
 pm-time = { path = "../../pm-time" }
 pm-export = { path = "../../pm-export" }
 pm-media = { path = "../../pm-media" }
-pm-node = { path = "../../pm-node", default-features = false }
 pm-text = { path = "../../pm-text", default-features = false, features = ["system"] }
 pm-render = { path = "../../pm-render" }
 

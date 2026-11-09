@@ -16,7 +16,6 @@ anyhow = "1"
 async-channel = "2"
 pm-scene3d = { path = "../scene3d", optional = true }
 pm-kernel = { path = "../kernel", optional = true }
-pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
 pm-engine = { path = "../../../../engine/crates/pm-engine" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-audio = { path = "../../../../engine/crates/pm-audio" }

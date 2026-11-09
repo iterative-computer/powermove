@@ -4654,16 +4654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-bridge"
-version = "0.1.0"
-dependencies = [
- "libc",
- "objc2-core-foundation",
- "objc2-io-surface",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "pm-builtins"
 version = "0.1.0"
 dependencies = [
@@ -4854,7 +4844,6 @@ dependencies = [
  "pm-kernel",
  "pm-media",
  "pm-model",
- "pm-node",
  "pm-perf",
  "pm-promedia",
  "pm-protocol",
@@ -5125,7 +5114,6 @@ dependencies = [
  "pm-media",
  "pm-model",
  "pm-native-migrate",
- "pm-node",
  "pm-panel-media",
  "pm-panel-timeline",
  "pm-panel-viewerchrome",
@@ -5247,32 +5235,6 @@ dependencies = [
  "objc2-web-kit",
  "serde_json",
  "tungstenite",
-]
-
-[[package]]
-name = "pm-node"
-version = "0.1.0"
-dependencies = [
- "libc",
- "objc2 0.6.5",
- "pm-audio",
- "pm-bridge",
- "pm-color",
- "pm-engine",
- "pm-eval",
- "pm-export",
- "pm-gpu",
- "pm-media",
- "pm-model",
- "pm-perf",
- "pm-protocol",
- "pm-render",
- "pm-text",
- "pm-wasm",
- "serde",
- "serde_json",
- "sha2",
- "wgpu",
 ]
 
 [[package]]
