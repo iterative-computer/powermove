@@ -108,6 +108,41 @@ all of them already exist in Powermove.
 
 ## Verification
 
+The 2026-11-09 import/material pass covers Inter, Geist and Geist Mono variable
+font instances, a static font, invalid-layer isolation, generated static and
+skinned animated FBX, saved-asset reopening, all eighteen physical texture
+slots, transformed UV1 sampling and LDR KTX2/Basis decoding. The Rust package
+run passes **87 checks** with OIDN and MetalFX, including both GPU traversal
+paths, lit layer IDs/coverage, Beer-Lambert attenuation and the optional
+Blender comparison. CPU skin evaluation plus BVH preparation measures
+20.5 ms median / 27.8 ms p95 for 10,000 triangles over 60 poses on the base M5;
+rendering and IPC are excluded. The benchmark script retains the measurement
+outside Git.
+
+The complete desktop unit run passes **7,368 tests**, with seven skipped
+(719 files passed, three skipped). This includes the preload Electron mock,
+Codex IPC contract and native surface authentication tests. The surface test
+builds its addon from this checkout, avoiding stale packaged artifacts.
+Svelte and main/preload type checks pass with zero errors and the existing
+IconCropper accessibility warning. Built-in extension version checks pass.
+
+The complete non-film 3D Electron run passes **71 of 71 cases**, including the
+optional UI screenshot review, with a freshly built native host. The font,
+FBX and KTX2/glTF regressions explicitly assert native Studio on macOS; FBX
+also checks the rendered pose and retained clips after saving/reopening.
+Renders and captions stay outside Git. Product-film exports were excluded
+from this pass with `--grep-invert 'product film'`.
+
+The black Inter frame came from fixed samples per outline curve multiplying
+through bevel rings until the extrusion exceeded its 500,000-vertex budget.
+Adaptive curve flattening keeps the packaged-font regression below 250,000
+vertices. Font preparation, extrusion and mesh/material extraction isolate
+malformed layers, roll back their resources and log a diagnostic with the layer
+ID, preserving healthy layers in the same frame.
+
+Historical integration evidence follows; these smaller counts predate the
+import/material pass.
+
 The earlier integration baseline passed **55 3D Electron checks**: 53 non-film cases in
 one serial run, plus the two export films in a separate run. The extended film
 uses the corrected Final quality through nested shot compositions. The earlier
@@ -179,22 +214,14 @@ operational reports are part of this repository.
 From the repository root (Electron tests run serially):
 
 ```sh
-nice -n 10 bun run --cwd apps/desktop test:unit \
-  src/renderer/src/core/scene3d src/extensions/layers-3d \
-  src/renderer/src/core/studio src/renderer/src/core/studio-native \
-  src/main/studio-native \
-  src/main/agent-export.test.ts src/main/native-ipc.test.ts \
-  src/renderer/src/legacy/core/space-3d.test.ts \
-  src/renderer/src/legacy/core/groups-3d.test.ts \
-  src/renderer/src/legacy/core/switch-3d-migration.test.ts \
-  src/renderer/src/legacy/core/frame-preparation.test.ts \
-  src/renderer/src/legacy/core/agent-frame-capture.test.ts \
-  src/renderer/src/legacy/assistant/mcp-project-tools.test.ts \
-  src/main/agent-tools/spec.test.ts
+nice -n 10 bun run --cwd apps/desktop test:unit
 
 env -u ELECTRON_RUN_AS_NODE POWERMOVE_BACKGROUND_TEST=1 \
+  PM_SHOT_DIR=/tmp/pm-shots/studio3d/ui \
+  CARGO_TARGET_DIR="$HOME/Developer/pm-target" CARGO_PROFILE_RELEASE_DEBUG=0 \
+  CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 \
   nice -n 10 bun run --cwd apps/desktop test:e2e \
-  scene3d studio --grep-invert "product film" --global-timeout=1200000
+  scene3d studio --grep-invert "product film" --global-timeout=1800000
 
 env -u ELECTRON_RUN_AS_NODE POWERMOVE_BACKGROUND_TEST=1 \
   nice -n 10 bun run --cwd apps/desktop test:e2e \
@@ -202,11 +229,14 @@ env -u ELECTRON_RUN_AS_NODE POWERMOVE_BACKGROUND_TEST=1 \
 
 nice -n 10 bun run --cwd apps/desktop typecheck
 
-CARGO_TARGET_DIR="$HOME/Developer/pm-target" nice -n 10 "$HOME/.cargo/bin/cargo" test \
+CARGO_TARGET_DIR="$HOME/Developer/pm-target" CARGO_BUILD_JOBS=2 \
+  CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 \
+  nice -n 10 "$HOME/.cargo/bin/cargo" test \
   --manifest-path engine/Cargo.toml -p pm-studio -p pm-studio-host --features oidn,metalfx
 ```
 
-The Electron harness creates and removes isolated temporary user-data folders.
+The Electron harness rebuilds the native host and creates/removes isolated
+temporary user-data folders.
 `PM_SHOTS` and `PM_FILM_STILLS` optionally direct the new comparison and film
 PNGs to an external folder; those artifacts must never be committed.
 
@@ -223,9 +253,9 @@ native and WebGPU through the same prepared buffers. Hidden scatter prototypes
 remain usable; missing sources clear their copies and Undo restores them.
 See [the document/agent contract and examples](../../apps/desktop/docs/STUDIO.md#environment-document-and-agent-contract).
 
-The environment acceptance suite adds four Electron cases. The complete
-non-film 3D command now includes 57 cases. The current targeted unit suite
-contains 356 checks across 39 files; Rust has 57 library/host/GPU/reference checks
+The earlier environment acceptance suite added four Electron cases. Its
+non-film 3D command included 57 cases. Its targeted unit suite
+contained 356 checks across 39 files; Rust had 57 library/host/GPU/reference checks
 after integrating the Cycles comparison and lighting-accuracy branch. Its
 optional Blender regression and six Python metric/LUT checks pass. See the
 [Cycles yardstick and measured limits](cycles-yardstick.md). The four environment

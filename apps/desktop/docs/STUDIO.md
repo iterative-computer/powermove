@@ -89,6 +89,12 @@ area/volume FBX lights currently use a point-light approximation. The import
 worker has memory, geometry and time limits and cannot block the renderer.
 See [import licenses](../../../docs/studio/import-licenses.md).
 
+Skinning currently runs on the CPU before rebuilding the posed mesh's BVH.
+The generated 10,000-triangle / 30,000-vertex benchmark on a base M5 measured
+20.5 ms median and 27.8 ms at the 95th percentile over 60 poses (2026-11-09).
+That measurement excludes rendering and IPC; larger animated models cost more.
+Reproduce it with `bun scripts/measure-studio-fbx.ts` from `apps/desktop`.
+
 **STEP, IGES and BREP** files import directly: OpenCascade tessellates them
 in a worker (fine enough for close-ups) into a GLB that keeps the
 assembly's parts, names and colors, so each part can take its own finish.
