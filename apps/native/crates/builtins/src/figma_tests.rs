@@ -197,7 +197,7 @@ fn nested_rotated_groups_keep_stacking_local_poses_and_fill_alpha() {
         .collect();
     assert_eq!(names, ["Card", "Top", "Bottom"]);
     let (group, top, bottom) = (&plan.layers[0], &plan.layers[1], &plan.layers[2]);
-    assert_eq!(plan.roots, [group.add.id.clone()]);
+    assert_eq!(plan.roots, std::slice::from_ref(&group.add.id));
     assert_eq!(top.group.as_deref(), Some(group.add.id.as_str()));
     assert_eq!(bottom.group.as_deref(), Some(group.add.id.as_str()));
     assert_eq!(content(top, "shape").as_str(), Some("ellipse"));
