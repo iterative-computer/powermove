@@ -33,18 +33,34 @@ impl SnapshotKind {
 pub struct CacheKey(pub [u8; 32]);
 impl CacheKey {
     pub fn new(version: &str, snapshot: &[u8], bundle: &[u8], flags: &str) -> Self {
+        Self::prefix(version, snapshot, flags).key(bundle)
+    }
+    /// Everything but the bundle, hashed once per isolate: a snapshot is
+    /// megabytes, and every eval is keyed.
+    pub fn prefix(version: &str, snapshot: &[u8], flags: &str) -> CachePrefix {
         let mut h = Sha256::new();
         for part in [
             b"pm-runtime-v8/cache/v1".as_slice(),
             version.as_bytes(),
             snapshot,
-            bundle,
             flags.as_bytes(),
         ] {
             h.update((part.len() as u64).to_le_bytes());
             h.update(part);
         }
-        Self(h.finalize().into())
+        CachePrefix(h.finalize().into())
+    }
+}
+/// The digest of a cache key's V8 version, snapshot and flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachePrefix([u8; 32]);
+impl CachePrefix {
+    pub fn key(&self, bundle: &[u8]) -> CacheKey {
+        let mut h = Sha256::new();
+        h.update(self.0);
+        h.update((bundle.len() as u64).to_le_bytes());
+        h.update(bundle);
+        CacheKey(h.finalize().into())
     }
 }
 /// Bounded cache: eviction only removes derived code, never authored sources/storage.
