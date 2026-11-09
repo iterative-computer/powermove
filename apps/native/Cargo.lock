@@ -4680,6 +4680,7 @@ dependencies = [
  "futures-lite",
  "pm-agents",
  "pm-audio",
+ "pm-captions",
  "pm-design",
  "pm-export",
  "pm-fx-defs",
