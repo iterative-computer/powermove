@@ -211,6 +211,27 @@ mod stall_sampler {
         }
     }
 
+    /// A system frame by its exported symbol (`dladdr`); the app's own frames
+    /// stay addresses for `atos -l`, as its symbols aren't exported.
+    fn frame_name(address: u64) -> String {
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        // SAFETY: dladdr only reads the loader's tables for this address.
+        let found = unsafe { libc::dladdr(address as *const libc::c_void, &mut info) } != 0;
+        let main = unsafe { _dyld_get_image_vmaddr_slide(0) } as u64 + 0x1_0000_0000;
+        if !found || info.dli_sname.is_null() || info.dli_fbase as u64 == main {
+            return format!("{address:#x}");
+        }
+        // SAFETY: dladdr returned NUL-terminated loader strings.
+        let (symbol, image) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy(),
+                std::ffi::CStr::from_ptr(info.dli_fname).to_string_lossy(),
+            )
+        };
+        let image = image.rsplit('/').next().unwrap_or_default().to_owned();
+        format!("{symbol} ({image})")
+    }
+
     fn watch(low: u64, high: u64) {
         let thread = MAIN.load(Ordering::Relaxed);
         // SAFETY: a dyld query with no preconditions.
@@ -223,7 +244,7 @@ mod stall_sampler {
             if late > 55 {
                 if stacks.len() < 8 {
                     let n = sample(thread, low, high, &mut buf);
-                    stacks.push(buf[..n].iter().map(|a| format!("{a:#x}")).collect());
+                    stacks.push(buf[..n].iter().map(|a| frame_name(*a)).collect());
                 }
             } else if !stacks.is_empty() {
                 super::line(serde_json::json!({

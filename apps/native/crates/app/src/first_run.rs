@@ -674,6 +674,11 @@ pub fn spawn_run(
             }
             finished => finished,
         };
+        // `PM_NATIVE_MAIN_TRACE`: how the copy ended, for unattended checks.
+        crate::diag::line(serde_json::json!({"migration": format!("{finished:?}")
+            .chars()
+            .take(300)
+            .collect::<String>()}));
         let _ = tx.send_blocking(Message::Finished(finished));
     });
 }
