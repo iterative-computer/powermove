@@ -324,6 +324,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -403,6 +404,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -415,6 +417,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -501,6 +504,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -513,6 +517,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -566,6 +571,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -578,6 +584,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -606,6 +613,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -908,7 +916,21 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -932,8 +954,8 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -945,21 +967,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -1293,6 +1301,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -1372,6 +1381,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -1384,6 +1394,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "supervised",
       },
@@ -1470,6 +1481,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -1482,6 +1494,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -1535,6 +1548,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -1547,6 +1561,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -1575,6 +1590,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -1877,7 +1893,21 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -1901,8 +1931,8 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -1914,21 +1944,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -2262,6 +2278,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -2341,6 +2358,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -2353,6 +2371,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -2439,6 +2458,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -2451,6 +2471,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -2504,6 +2525,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -2516,6 +2538,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -2544,6 +2567,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -2846,7 +2870,21 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -2870,8 +2908,8 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -2883,21 +2921,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -3180,6 +3204,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -3259,6 +3284,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -3271,6 +3297,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -3324,6 +3351,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -3336,6 +3364,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -3389,6 +3418,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -3401,6 +3431,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -3429,6 +3460,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -3755,7 +3787,21 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -3779,8 +3825,8 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -3792,21 +3838,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -4145,6 +4177,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -4224,6 +4257,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -4236,6 +4270,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -4289,6 +4324,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -4301,6 +4337,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -4387,6 +4424,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -4399,6 +4437,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -4427,6 +4466,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -4732,7 +4772,21 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -4756,8 +4810,8 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -4769,21 +4823,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -5263,6 +5303,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -5342,6 +5383,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -5354,6 +5396,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -5407,6 +5450,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -5419,6 +5463,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -5472,6 +5517,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -5484,6 +5530,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -5512,6 +5559,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -5836,7 +5884,21 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -5860,8 +5922,8 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -5873,21 +5935,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -6383,6 +6431,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -6462,6 +6511,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -6474,6 +6524,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -6527,6 +6578,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -6539,6 +6591,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -6592,6 +6645,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -6604,6 +6658,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -6632,6 +6687,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -6961,7 +7017,21 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -6985,8 +7055,8 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -6998,21 +7068,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -7416,6 +7472,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -7495,6 +7552,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -7507,6 +7565,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -7560,6 +7619,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -7572,6 +7632,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -7625,6 +7686,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -7637,6 +7699,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -7665,6 +7728,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -7979,7 +8043,21 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -8003,8 +8081,8 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -8018,20 +8096,6 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -8434,6 +8498,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -8513,6 +8578,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -8525,6 +8591,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -8578,6 +8645,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -8590,6 +8658,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -8643,6 +8712,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -8655,6 +8725,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -8683,6 +8754,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -8997,7 +9069,21 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -9021,8 +9107,8 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -9036,20 +9122,6 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -9543,6 +9615,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -9622,6 +9695,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -9634,6 +9708,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -9687,6 +9762,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -9699,6 +9775,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -9752,6 +9829,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -9764,6 +9842,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -9792,6 +9871,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -10119,7 +10199,21 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -10143,8 +10237,8 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -10156,21 +10250,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -10675,6 +10755,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -10754,6 +10835,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -10766,6 +10848,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -10819,6 +10902,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -10831,6 +10915,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -10884,6 +10969,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -10896,6 +10982,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -10924,6 +11011,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -11254,7 +11342,21 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -11278,8 +11380,8 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -11291,21 +11393,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -11762,6 +11850,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -11841,6 +11930,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -11853,6 +11943,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -11906,6 +11997,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -11918,6 +12010,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -11971,6 +12064,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -11983,6 +12077,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -12011,6 +12106,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -12329,7 +12425,21 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -12353,8 +12463,8 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -12366,21 +12476,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -12837,6 +12933,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -12916,6 +13013,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -12928,6 +13026,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -12981,6 +13080,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -12993,6 +13093,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -13046,6 +13147,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -13058,6 +13160,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -13086,6 +13189,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -13404,7 +13508,21 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -13428,8 +13546,8 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -13441,21 +13559,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -13783,6 +13887,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -13862,6 +13967,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -13874,6 +13980,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -13960,6 +14067,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -13972,6 +14080,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -14025,6 +14134,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -14037,6 +14147,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -14065,6 +14176,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -14367,7 +14479,21 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -14391,8 +14517,8 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -14404,21 +14530,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -14937,6 +15049,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -15016,6 +15129,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -15028,6 +15142,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -15081,6 +15196,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -15093,6 +15209,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -15146,6 +15263,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -15158,6 +15276,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -15186,6 +15305,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -15524,7 +15644,21 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -15548,8 +15682,8 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -15561,21 +15695,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -15875,6 +15995,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -15987,6 +16108,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -15999,6 +16121,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -16052,6 +16175,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -16064,6 +16188,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -16117,6 +16242,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -16129,6 +16255,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -16157,6 +16284,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -16453,7 +16581,21 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -16477,8 +16619,8 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -16490,21 +16632,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -16961,6 +17089,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -17040,6 +17169,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -17052,6 +17182,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -17105,6 +17236,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -17117,6 +17249,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -17170,6 +17303,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -17182,6 +17316,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -17210,6 +17345,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -17528,7 +17664,21 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -17552,8 +17702,8 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -17565,21 +17715,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -18036,6 +18172,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -18115,6 +18252,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -18127,6 +18265,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -18180,6 +18319,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -18192,6 +18332,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -18245,6 +18386,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -18257,6 +18399,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -18285,6 +18428,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -18603,7 +18747,21 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -18627,8 +18785,8 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -18640,21 +18798,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -19107,6 +19251,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -19186,6 +19331,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -19198,6 +19344,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -19251,6 +19398,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -19263,6 +19411,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -19316,6 +19465,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -19328,6 +19478,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -19356,6 +19507,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -19673,7 +19825,21 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -19697,8 +19863,8 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -19710,21 +19876,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -20177,6 +20329,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -20256,6 +20409,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -20268,6 +20422,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -20321,6 +20476,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -20333,6 +20489,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -20386,6 +20543,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -20398,6 +20556,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -20426,6 +20585,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -20743,7 +20903,21 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -20767,8 +20941,8 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -20780,21 +20954,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -21128,6 +21288,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -21207,6 +21368,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -21219,6 +21381,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -21305,6 +21468,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -21317,6 +21481,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -21370,6 +21535,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -21382,6 +21548,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -21410,6 +21577,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -21712,7 +21880,21 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -21736,8 +21918,8 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -21749,21 +21931,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -22097,6 +22265,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -22176,6 +22345,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -22188,6 +22358,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -22274,6 +22445,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -22286,6 +22458,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -22339,6 +22512,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -22351,6 +22525,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -22379,6 +22554,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -22681,7 +22857,21 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -22705,8 +22895,8 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -22718,21 +22908,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -23066,6 +23242,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -23145,6 +23322,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -23157,6 +23335,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "editor",
       },
@@ -23243,6 +23422,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -23255,6 +23435,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "chatgpt",
       },
@@ -23308,6 +23489,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "color": {
             "token": "colors.text",
           },
+          "flexShrink": 1,
           "fontSize": {
             "token": "typography.body",
           },
@@ -23320,6 +23502,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "minWidth": {
             "token": "metrics.hit",
           },
+          "overflow": "hidden",
         },
         "value": "GPT-6.1",
       },
@@ -23348,6 +23531,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "color": {
             "token": "colors.secondary",
           },
+          "flexShrink": 0,
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -23650,7 +23834,21 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
     "setListeners",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
     "setProps",
     "setProps",
     "insertBefore",
@@ -23674,8 +23872,8 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setListeners",
     "setProps",
     "setProps",
     "setProps",
@@ -23687,21 +23885,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "setProps",
     "setProps",
     "setProps",
-    "setProps",
     "setListeners",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setProps",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setProps",
-    "setProps",
-    "setListeners",
-    "setProps",
     "setProps",
     "insertBefore",
     "insertBefore",

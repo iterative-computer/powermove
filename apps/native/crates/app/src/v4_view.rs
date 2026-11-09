@@ -1217,8 +1217,23 @@ impl SurfaceView {
             return div().into_any_element();
         }
         if let Some(control) = self.controls.get(&id) {
-            return div()
-                .flex_none()
+            // A control whose node may shrink gives way (and truncates)
+            // before its row pushes later controls out of the panel.
+            let shrinks = node.style.flex_shrink.is_some_and(|s| s > 0.);
+            let (fill, width) = control.read_with(cx, |c, _| (c.fill, c.width()));
+            if fill != shrinks {
+                control.update(cx, |c, _| c.fill = shrinks);
+            }
+            let slot = if shrinks {
+                div()
+                    .flex_basis(px(width))
+                    .flex_shrink(1.)
+                    .min_w(px(0.))
+                    .overflow_hidden()
+            } else {
+                div().flex_none()
+            };
+            return slot
                 .child(control.clone())
                 .children(self.probe(id))
                 .into_any_element();

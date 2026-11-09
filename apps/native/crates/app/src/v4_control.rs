@@ -91,8 +91,17 @@ pub struct NativeControl {
     width: f32,
     height: f32,
     inline: bool,
+    /// Fills a slot that may be narrower than `width` (its node has
+    /// `flexShrink`); AppKit then truncates the title.
+    pub fill: bool,
 }
 impl EventEmitter<Value> for NativeControl {}
+impl NativeControl {
+    /// The width the control fits its title in.
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+}
 
 pub struct ControlSpec<'a> {
     pub kind: Kind,
@@ -235,6 +244,7 @@ impl NativeControl {
             width,
             height,
             inline,
+            fill: false,
         }
     }
     pub fn keep(&self) {
@@ -305,7 +315,12 @@ impl NativeControl {
 impl Render for NativeControl {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
-        div().relative().w(px(self.width)).h(px(self.height)).child(
+        let root = if self.fill {
+            div().w_full().max_w(px(self.width))
+        } else {
+            div().w(px(self.width))
+        };
+        root.relative().h(px(self.height)).child(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {

@@ -938,6 +938,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexShrink" => {
                 if n == Some(0.) {
                     e = e.flex_shrink_0();
+                } else if n.is_some_and(|n| n > 0.) {
+                    // Explicit, so a native control knows it may give way.
+                    e = e.flex_shrink(1.);
                 }
             }
             "flexBasis" => {
