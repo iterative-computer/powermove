@@ -360,11 +360,22 @@ impl Render for ErrorLogWindow {
         }
         // A seamless title band over the window's own material, as Settings
         // and Export (`metrics.titlebar`).
+        // The title sits centred in the band, as macOS draws window titles.
+        let band = div()
+            .flex()
+            .flex_none()
+            .h(px(m.titlebar))
+            .items_center()
+            .justify_center()
+            .text_size(px(t.typography.title))
+            .font_weight(FontWeight(t.typography.medium_weight))
+            .text_color(rgb(c.secondary))
+            .child(LOG_TITLE);
         div()
             .size_full()
             .flex()
             .flex_col()
-            .pt(px(m.titlebar))
+            .child(band)
             .bg(rgb(c.panel))
             .text_color(rgb(c.text))
             .text_size(px(t.typography.body))

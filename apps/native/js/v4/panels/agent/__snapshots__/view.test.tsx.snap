@@ -448,6 +448,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -687,6 +690,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -699,7 +703,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -725,6 +729,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -736,7 +743,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -761,6 +768,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -772,7 +782,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -844,16 +854,18 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -1417,6 +1429,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -1656,6 +1671,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -1668,7 +1684,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -1694,6 +1710,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -1705,7 +1724,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -1730,6 +1749,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -1741,7 +1763,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -1813,16 +1835,18 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -2386,6 +2410,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -2625,6 +2652,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -2637,7 +2665,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -2663,6 +2691,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -2674,7 +2705,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -2699,6 +2730,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -2710,7 +2744,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -2782,16 +2816,18 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -3470,6 +3506,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -3543,6 +3582,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -3555,7 +3595,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -3581,6 +3621,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -3592,7 +3635,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -3617,6 +3660,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -3628,7 +3674,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -3700,16 +3746,18 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -4334,6 +4382,9 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -4508,6 +4559,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -4520,7 +4572,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -4546,6 +4598,9 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -4557,7 +4612,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -4582,6 +4637,9 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -4593,7 +4651,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -4666,16 +4724,18 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -4798,12 +4858,12 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
   "focusOrder": [
     7,
     8,
-    15,
-    17,
-    22,
+    16,
+    18,
     23,
     24,
     25,
+    26,
   ],
   "nodes": {
     "0": {
@@ -4822,7 +4882,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "children": [
         2,
         9,
-        19,
+        20,
       ],
       "id": 1,
       "input": null,
@@ -4860,7 +4920,6 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         11,
         13,
         15,
-        17,
       ],
       "id": 10,
       "input": null,
@@ -4949,63 +5008,29 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "15": {
       "children": [
         16,
+        18,
       ],
       "id": 15,
       "input": null,
-      "listeners": {
-        "click": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
+      "listeners": {},
       "parent": 10,
       "props": {
-        "data-pm-component": "push-button",
-        "disabled": false,
-        "label": "Try Again",
-        "metadata": {
-          "pmKit": {
-            "buttonRole": "normal",
-          },
-        },
         "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "height": {
-            "token": "metrics.control",
-          },
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
           },
         },
       },
       "text": "",
-      "type": "button",
+      "type": "div",
     },
     "16": {
-      "children": [],
-      "id": 16,
-      "input": null,
-      "listeners": {},
-      "parent": 15,
-      "props": {},
-      "text": "Try Again",
-      "type": "text",
-    },
-    "17": {
       "children": [
-        18,
+        17,
       ],
-      "id": 17,
+      "id": 16,
       "input": null,
       "listeners": {
         "click": {
@@ -5015,7 +5040,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 10,
+      "parent": 15,
       "props": {
         "data-pm-component": "push-button",
         "disabled": false,
@@ -5046,22 +5071,113 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "button",
     },
-    "18": {
+    "17": {
       "children": [],
-      "id": 18,
+      "id": 17,
       "input": null,
       "listeners": {},
-      "parent": 17,
+      "parent": 16,
       "props": {},
       "text": "Connection Settings…",
       "type": "text",
     },
-    "19": {
+    "18": {
       "children": [
-        20,
-        21,
+        19,
       ],
+      "id": 18,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 15,
+      "props": {
+        "data-pm-component": "push-button",
+        "disabled": false,
+        "label": "Try Again",
+        "metadata": {
+          "pmKit": {
+            "buttonRole": "normal",
+          },
+        },
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "height": {
+            "token": "metrics.control",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "19": {
+      "children": [],
       "id": 19,
+      "input": null,
+      "listeners": {},
+      "parent": 18,
+      "props": {},
+      "text": "Try Again",
+      "type": "text",
+    },
+    "2": {
+      "children": [
+        3,
+        5,
+      ],
+      "id": 2,
+      "input": null,
+      "listeners": {},
+      "parent": 1,
+      "props": {
+        "id": "agent-header",
+        "label": "Agent",
+        "metadata": {
+          "apiGap": "shell",
+        },
+        "role": "group",
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "height": {
+            "token": "metrics.header",
+          },
+          "justifyContent": "space-between",
+          "paddingLeft": {
+            "token": "metrics.inset",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+        },
+        "title": "Drag to move or pin to workspace",
+      },
+      "text": "",
+      "type": "div",
+    },
+    "20": {
+      "children": [
+        21,
+        22,
+      ],
+      "id": 20,
       "input": null,
       "listeners": {},
       "parent": 1,
@@ -5116,42 +5232,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "2": {
-      "children": [
-        3,
-        5,
-      ],
-      "id": 2,
-      "input": null,
-      "listeners": {},
-      "parent": 1,
-      "props": {
-        "id": "agent-header",
-        "label": "Agent",
-        "metadata": {
-          "apiGap": "shell",
-        },
-        "role": "group",
-        "style": {
-          "alignItems": "center",
-          "display": "flex",
-          "flexDirection": "row",
-          "height": {
-            "token": "metrics.header",
-          },
-          "justifyContent": "space-between",
-          "paddingLeft": {
-            "token": "metrics.inset",
-          },
-        },
-        "title": "Drag to move or pin to workspace",
-      },
-      "text": "",
-      "type": "div",
-    },
-    "20": {
+    "21": {
       "children": [],
-      "id": 20,
+      "id": 21,
       "input": {
         "composing": false,
         "composition": null,
@@ -5177,7 +5260,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 19,
+      "parent": 20,
       "props": {
         "disabled": true,
         "id": "agent-composer-text",
@@ -5213,18 +5296,18 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "textarea",
     },
-    "21": {
+    "22": {
       "children": [
-        22,
         23,
         24,
         25,
         26,
+        27,
       ],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 19,
+      "parent": 20,
       "props": {
         "style": {
           "alignItems": "center",
@@ -5238,9 +5321,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "div",
     },
-    "22": {
+    "23": {
       "children": [],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {
         "click": {
@@ -5250,7 +5333,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 21,
+      "parent": 22,
       "props": {
         "attr": {
           "symbol": "plus",
@@ -5278,9 +5361,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "button",
     },
-    "23": {
+    "24": {
       "children": [],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {
         "change": {
@@ -5290,7 +5373,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 21,
+      "parent": 22,
       "props": {
         "binding": "",
         "control": "select",
@@ -5360,9 +5443,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "button",
     },
-    "24": {
+    "25": {
       "children": [],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {
         "change": {
@@ -5372,7 +5455,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 21,
+      "parent": 22,
       "props": {
         "binding": "",
         "control": "select",
@@ -5425,9 +5508,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "button",
     },
-    "25": {
+    "26": {
       "children": [],
-      "id": 25,
+      "id": 26,
       "input": null,
       "listeners": {
         "change": {
@@ -5437,7 +5520,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 21,
+      "parent": 22,
       "props": {
         "binding": "",
         "control": "select",
@@ -5490,9 +5573,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       "text": "",
       "type": "button",
     },
-    "26": {
+    "27": {
       "children": [],
-      "id": 26,
+      "id": 27,
       "input": null,
       "listeners": {
         "click": {
@@ -5502,7 +5585,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "preventDefault": false,
         },
       },
-      "parent": 21,
+      "parent": 22,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": true,
@@ -5593,6 +5676,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -5605,7 +5689,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -5631,6 +5715,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -5642,7 +5729,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -5667,6 +5754,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -5678,7 +5768,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -5750,16 +5840,18 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -5786,6 +5878,8 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "insertBefore",
     "create",
     "setProps",
+    "create",
+    "setProps",
     "setProps",
     "setListeners",
     "setProps",
@@ -5804,6 +5898,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "create",
     "setText",
+    "insertBefore",
     "insertBefore",
     "insertBefore",
     "insertBefore",
@@ -6202,6 +6297,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "justifyContent": "space-between",
           "paddingLeft": {
             "token": "metrics.inset",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
           },
         },
         "title": "Drag to move or pin to workspace",
@@ -6713,6 +6811,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -6725,7 +6824,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -6751,6 +6850,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -6762,7 +6864,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -6787,6 +6889,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -6798,7 +6903,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -6871,16 +6976,18 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -7385,6 +7492,9 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -7747,6 +7857,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -7759,7 +7870,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -7785,6 +7896,9 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -7796,7 +7910,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -7821,6 +7935,9 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -7832,7 +7949,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -7905,16 +8022,18 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -8403,6 +8522,9 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -8765,6 +8887,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -8777,7 +8900,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -8803,6 +8926,9 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -8814,7 +8940,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -8839,6 +8965,9 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -8850,7 +8979,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -8923,16 +9052,18 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -9423,6 +9554,9 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -9873,6 +10007,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -9885,7 +10020,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -9911,6 +10046,9 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -9922,7 +10060,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -9947,6 +10085,9 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -9958,7 +10099,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -10030,16 +10171,18 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -10555,6 +10698,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -11005,6 +11151,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -11017,7 +11164,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -11043,6 +11190,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -11054,7 +11204,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -11079,6 +11229,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -11090,7 +11243,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -11162,16 +11315,18 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -11706,6 +11861,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -12092,6 +12250,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -12104,7 +12263,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -12130,6 +12289,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -12141,7 +12303,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -12166,6 +12328,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -12177,7 +12342,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -12249,16 +12414,18 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -12781,6 +12948,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -13167,6 +13337,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -13179,7 +13350,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -13205,6 +13376,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -13216,7 +13390,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -13241,6 +13415,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -13252,7 +13429,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -13324,16 +13501,18 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -13907,6 +14086,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -14146,6 +14328,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -14158,7 +14341,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -14184,6 +14367,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "disabled": true,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -14195,7 +14381,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -14220,6 +14406,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -14231,7 +14420,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -14303,16 +14492,18 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -14725,6 +14916,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "justifyContent": "space-between",
           "paddingLeft": {
             "token": "metrics.inset",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
           },
         },
         "title": "Drag to move or pin to workspace",
@@ -15267,6 +15461,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -15279,7 +15474,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -15305,6 +15500,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -15316,7 +15514,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -15341,6 +15539,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -15352,7 +15553,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -15426,16 +15627,18 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -15917,6 +16120,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -16238,6 +16444,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -16250,7 +16457,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -16276,6 +16483,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -16287,7 +16497,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -16312,6 +16522,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -16323,7 +16536,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -16395,16 +16608,18 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -16905,6 +17120,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -17291,6 +17509,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -17303,7 +17522,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -17329,6 +17548,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -17340,7 +17562,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -17365,6 +17587,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -17376,7 +17601,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -17448,16 +17673,18 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -17980,6 +18207,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -18366,6 +18596,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -18378,7 +18609,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -18404,6 +18635,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -18415,7 +18649,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -18440,6 +18674,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -18451,7 +18688,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -18523,16 +18760,18 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -19052,6 +19291,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
       },
       "text": "",
@@ -19437,6 +19679,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -19449,7 +19692,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -19475,6 +19718,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -19486,7 +19732,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -19511,6 +19757,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Close",
+        "metadata": {
+          "symbol": "xmark",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -19522,7 +19771,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Close",
@@ -19593,16 +19842,18 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -20122,6 +20373,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
       },
       "text": "",
@@ -20507,6 +20761,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -20519,7 +20774,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -20545,6 +20800,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -20556,7 +20814,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -20581,6 +20839,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Close",
+        "metadata": {
+          "symbol": "xmark",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -20592,7 +20853,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Close",
@@ -20663,16 +20924,18 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -21252,6 +21515,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -21491,6 +21757,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -21503,7 +21770,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -21529,6 +21796,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -21540,7 +21810,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -21565,6 +21835,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -21576,7 +21849,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -21648,16 +21921,18 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -22221,6 +22496,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -22460,6 +22738,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -22472,7 +22751,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -22498,6 +22777,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -22509,7 +22791,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -22534,6 +22816,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -22545,7 +22830,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -22617,16 +22902,18 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -23190,6 +23477,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "paddingLeft": {
             "token": "metrics.inset",
           },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
         },
         "title": "Drag to move or pin to workspace",
       },
@@ -23429,6 +23719,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "label": "Switch thread",
         "metadata": {
           "apiGap": "threadPicker",
+          "symbol": "chevron.down",
         },
         "style": {
           "color": {
@@ -23441,7 +23732,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_inline",
           },
         },
         "title": "Switch thread",
@@ -23467,6 +23758,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "disabled": false,
         "id": "agent-new",
         "label": "New Thread",
+        "metadata": {
+          "symbol": "plus",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -23478,7 +23772,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "New Thread",
@@ -23503,6 +23797,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "data-pm-component": "toolbar-item",
         "id": "agent-presentation",
         "label": "Pin to Workspace",
+        "metadata": {
+          "symbol": "pin",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -23514,7 +23811,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Pin to Workspace",
@@ -23586,16 +23883,18 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "create",
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
