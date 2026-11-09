@@ -81,6 +81,7 @@ pub struct NativeHost {
     text: Mutex<Option<CanvasText>>,
     frames: Mutex<Option<crate::FrameRenderer>>,
     rasters: Mutex<Option<crate::RasterHooks>>,
+    effects: Mutex<Option<crate::EffectsSlot>>,
     /// [`crate::code_identity`] of the records this realm runs (0: unknown).
     code: std::sync::atomic::AtomicU64,
     /// The capture (`renderFrameTo`, `PM.Export.snapshot`) the realm waits for.
@@ -185,6 +186,7 @@ impl NativeHost {
             text: Mutex::new(None),
             frames: Mutex::new(None),
             rasters: Mutex::new(None),
+            effects: Mutex::new(None),
             code: std::sync::atomic::AtomicU64::new(0),
             capture: Mutex::new(None),
             nested: Mutex::new(None),
@@ -359,6 +361,10 @@ impl NativeHost {
     #[cfg(test)]
     pub(crate) fn kernel_size(&self) -> (f64, f64) {
         self.kernel.lock().unwrap().size().unwrap()
+    }
+    /// A window realm's effect clipboard (an export realm has none).
+    pub fn set_effects(&self, effects: Option<crate::EffectsSlot>) {
+        *self.effects.lock().unwrap() = effects;
     }
     pub fn set_frames(&self, frames: Option<crate::FrameRenderer>) {
         *self.frames.lock().unwrap() = frames;
@@ -1505,6 +1511,14 @@ impl EngineProxy for NativeHost {
             }
             "compat.answers" => return self.raster_answers(input),
             "fonts.families" => return Ok(json!(crate::font_families())),
+            "effects.clipboard" => {
+                let slot = self.effects.lock().unwrap().clone();
+                let hook = slot.and_then(|slot| slot.lock().unwrap().clone());
+                let hook = hook.ok_or_else(|| {
+                    Error::Host("The effect clipboard belongs to the window's panels".into())
+                })?;
+                return hook(input["op"].as_str().unwrap_or_default()).map_err(Error::Host);
+            }
             "extension.health" => {
                 self.events
                     .health(input["id"].as_str().unwrap_or_default(), &input["health"]);

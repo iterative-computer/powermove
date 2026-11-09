@@ -172,6 +172,8 @@ struct Shared {
     wake: Arc<dyn Fn() + Send + Sync>,
     /// Running exports' realms and their pages.
     exports: Mutex<export::Exports>,
+    /// The window's effect clipboard, for every realm generation.
+    effects: crate::EffectsSlot,
 }
 impl Shared {
     fn update(&self, change: impl FnOnce(&mut Published)) {
@@ -547,6 +549,7 @@ impl ExtensionHost {
             reader: AtomicU64::new(0),
             wake: config.wake.clone(),
             exports: Mutex::default(),
+            effects: Arc::default(),
         });
         let transport = Arc::new(Mutex::new(None));
         let moved = Arc::new(AtomicU8::new(0));
@@ -693,6 +696,10 @@ impl ExtensionHost {
                 Err(error) => shared.update(|p| p.toasts.push(error.to_string())),
             }
         });
+    }
+    /// The window's effect clipboard for its extensions' inspector service.
+    pub fn set_effects(&self, hook: Option<crate::EffectsHook>) {
+        *self.shared.effects.lock().unwrap() = hook;
     }
     /// The shell's current tool (`{tool}`) or viewer navigation
     /// (`{zoom, pan, fit}`), which the `tool` and `viewer` services report.
@@ -1834,6 +1841,7 @@ impl Owner {
         }
         host.set_frames(self.config.frames.clone());
         host.set_rasters(self.config.rasters.clone());
+        host.set_effects(Some(self.shared.effects.clone()));
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         crate::boot_realm(&realm, &host, "")?;

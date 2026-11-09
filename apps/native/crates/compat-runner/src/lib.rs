@@ -235,6 +235,13 @@ pub fn code_identity(records: &Value) -> u64 {
     }
     hash.finish().max(1)
 }
+/// The window's side of the app's effect clipboard (v1's inspector service):
+/// `copy` the effects selected in Effect Controls (`{copied}`), `paste` them
+/// onto the selected layers (`{pasted}`, or `{empty}` / `{reason}`), `clear`.
+pub type EffectsHook = Arc<dyn Fn(&str) -> std::result::Result<Value, String> + Send + Sync>;
+/// Where a window's realm finds its [`EffectsHook`], set once the window's
+/// panels run (they start after its extensions).
+pub type EffectsSlot = Arc<std::sync::Mutex<Option<EffectsHook>>>;
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
     Arc<dyn Fn(&FrameRequest) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
@@ -1023,19 +1030,57 @@ mod tests {
         );
     }
     /// shaderHooks reconciles `d.uniforms` with the kernel's `@param` parser,
-    /// as main's inspector did; the inspector's effect clipboard says it is
-    /// Effect Controls', not a silent success.
+    /// as main's inspector did; the inspector's effect clipboard is the app's
+    /// (`effects.clipboard`), with main's booleans, and a paste is readable
+    /// as soon as it returns, as main's `edit.apply` was.
     #[test]
     fn shader_hooks_and_inspector_service() {
         let runner = dom_runner();
+        let kernel = runner.actor.as_ref().unwrap().handle();
+        let asked = Arc::new(std::sync::Mutex::new(vec![]));
+        let log = asked.clone();
+        let hook: crate::EffectsHook = Arc::new(move |op: &str| {
+            let mut asked = log.lock().unwrap();
+            asked.push(op.to_owned());
+            Ok(match (op, asked.len()) {
+                ("copy", 1) => json!({"copied": 0}),
+                ("copy", _) => json!({"copied": 2}),
+                ("paste", 3) => json!({"empty": true}),
+                ("paste", 4) => json!({"reason": "select"}),
+                ("paste", _) => {
+                    // The app pastes through the kernel; the realm hears it now.
+                    let rename = pm_kernel::Call::Transact {
+                        label: Some("Paste Effects".into()),
+                        body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Layer(
+                            pm_kernel::LayerCommand::Set {
+                                layer_id: "sh".into(),
+                                patch: pm_kernel::commands::layers::LayerPatch {
+                                    name: Some("Pasted".into()),
+                                    ..Default::default()
+                                },
+                            },
+                        )]),
+                        expected_revision: None,
+                    };
+                    kernel
+                        .call_blocking(PROJECT, pm_kernel::Request::new(pm_kernel::Caller::native(), rename))
+                        .map_err(|e| e.to_string())?;
+                    json!({"pasted": 2})
+                }
+                _ => json!({}),
+            })
+        });
+        runner
+            .host
+            .set_effects(Some(Arc::new(std::sync::Mutex::new(Some(hook)))));
         let value = runner
             .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const h=api.services.get('shaderHooks'),i=api.services.get('inspector');
                 api.edit.apply([{type:'add_layer',id:'sh',layerType:'shader',from:0,duration:2}]);
                 const before=Object.keys(PM.L('sh').d.uniforms).sort();
                 api.history.do('Code',()=>{const L=PM.L('sh');L.d.code='uniform float uGain; // @param 2 0 4\nuniform vec3 uTint; // @param #ff0000\nvoid main(){}';h.syncShaderUniforms(L);});
                 const L=api.model.layer('sh');const after=Object.keys(L.d.uniforms).sort();
-                let refused=null;try{i.pasteCopiedEffects()}catch(e){refused=e.message}
-                return [before,after,L.d.uniforms.uGain.v,L.d.uniforms.uTint.v,i===api.services.get('inspector'),i.body,i.syncs.length,typeof i.refresh,refused]})()"#)
+                const clip=[i.copySelectedEffects(),i.copySelectedEffects(),i.pasteCopiedEffects(),i.pasteCopiedEffects(),i.pasteCopiedEffects(),api.model.layer('sh').name,i.clearEffectClipboard()];
+                return [before,after,L.d.uniforms.uGain.v,L.d.uniforms.uTint.v,i===api.services.get('inspector'),i.body,i.syncs.length,typeof i.refresh,clip]})()"#)
             .unwrap();
         assert_eq!(
             value,
@@ -1048,8 +1093,12 @@ mod tests {
                 null,
                 0,
                 "function",
-                "inspector.pasteCopiedEffects: the effect clipboard belongs to Effect Controls"
+                [false, true, false, true, true, "Pasted", null]
             ])
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["copy", "copy", "paste", "paste", "paste", "clear"]
         );
     }
     /// D7's presenter fixture: bind a canvas, resize it, read its pixels and

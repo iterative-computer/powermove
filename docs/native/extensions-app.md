@@ -227,17 +227,23 @@ window is open is shown in it.
   Layer Controls both ways; `preview` reports no source monitor (the native viewer
   has none).
 - `render.gl.init(canvas)` binds a presenter canvas (D7): each presented frame, and
-  `init`/`resize`, fills it from the engine (`renderFrameTo`) before `frame:rendered`;
-  a `resize` crop takes the whole composition at the crop's scale (≤ 8192 px).
+  `init`/`resize`, fills it from the engine (`renderFrameTo`) before `frame:rendered`,
+  at the frame's time from the realm's publication at the frame's revision (behind,
+  the realm catches up first; a frame the project moved past is dropped); a `resize`
+  crop takes the whole composition at the crop's scale (≤ 8192 px). A window realm's
+  captures always draw the publication it holds, so the override answers they ask of
+  the waiting realm are at its own revision.
   `render.gl.context` is `null`: extension code runs in V8, not the page, so WebGL2
   needs a page-side proxy (open).
 - `timeline` reads the native timeline's view, graph mode, key selection and visible
   rows (`TimelineSurface::service_facts`, sent when its frame rebuilds); `pps`,
   `scrollT`, `scrollY` and `graph` write back, `frameView` and `reveal` drive it, and
   edges follow timeline.ts. `cv` is `null` (v4's `timeline.paint` paints clips).
-  `inspector.refresh` rebuilds the v1–3 sections panel, `focusText` selects the layer
-  and shows Properties; its effect-clipboard members throw `Unavailable` until Effect
-  Controls' clipboard is app-wide. `shaderHooks.syncShaderUniforms` reconciles
+  `graph` is applied as asked (`graph.show`/`graph.hide`). `inspector.refresh`
+  rebuilds the v1–3 sections panel; `focusText` selects the layer, shows Properties
+  and, once its text row bound to that layer shows (≤ 2 s), focuses the field with the
+  text selected. `copySelectedEffects`/`pasteCopiedEffects`/`clearEffectClipboard`
+  use the app's one effect clipboard (`EffectDesk` over the window's Effect Controls). `shaderHooks.syncShaderUniforms` reconciles
   `d.uniforms` with the kernel's `@param` parser.
 - `api.scene3d`: `edit` is the Studio command MCP's `edit_3d` runs (one undo step,
   `data.result` names the layer), `describe` the kernel's evaluated scene;

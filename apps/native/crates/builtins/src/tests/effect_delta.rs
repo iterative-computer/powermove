@@ -702,3 +702,102 @@ fn ramp_on_a_text_layer_adds_and_resets_without_font_bounds() {
         .unwrap();
     assert_eq!(effect(&kernel)["p"]["startX"]["v"], 80.);
 }
+
+/// One app-wide effect clipboard: Effect Controls in one window copies
+/// through its own intent, another window's inspector service (v1's
+/// `pasteCopiedEffects`) pastes onto its selected layers as one undo step,
+/// `copySelectedEffects` reads Effect Controls' selection, and `clear` empties
+/// it for every window.
+#[test]
+fn effect_controls_and_the_inspector_service_share_one_app_clipboard() {
+    let (actor, _) = setup_with_saved_effect(Some(
+        json!({"id":"saved-tint","type":"tint","on":true,"open":true,"p":{"amount":{"v":0.5,"kf":[]}}}),
+    ));
+    let kernel = actor.handle();
+    let mut other = json!({"id":"other","name":"Other","compId":"other-root","w":160,"h":90,"fps":30,"dur":3,"bg":"#000000","assets":{},"comps":{},"layers":[
+        {"id":"b","type":"solid","name":"Target","from":0,"dur":3,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":80,"h":40,"color":"#FFFFFF"},"fx":[]},
+        {"id":"m","type":"audio","name":"Music","from":0,"dur":3,"on":true,"lock":false,"p":{},"d":{},"fx":[]}]});
+    other["layers"][0]["p"]["position.x"] = json!({"v":0,"kf":[]});
+    kernel
+        .open("other", OpenSource::Untitled(data::model(&other).unwrap()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let select = |project: &str, ids: &[&str]| {
+        kernel
+            .call(
+                project,
+                Request::new(
+                    Caller::native(),
+                    SelectionCall::Layers {
+                        ids: ids.iter().map(|id| (*id).into()).collect(),
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    let clipboard = crate::EffectClipboard::default();
+    let mut first = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    first.share_effect_clipboard(clipboard.clone());
+    first.update_facts(json!({"time":0.,"playing":false,"stage":[160.,90.]}));
+    finish(first.mount("layer-effects").unwrap());
+    let mut second = Builtins::new(kernel.clone(), "other", || {}).unwrap();
+    second.share_effect_clipboard(clipboard.clone());
+    finish(second.mount("inspector").unwrap());
+    let desk = second.effect_desk();
+    assert_eq!(desk.run("paste").unwrap(), json!({"empty": true}));
+    // Effect Controls (first window) copies its effect: Cmd+C on the row.
+    let projection = first
+        .broker
+        .entry("layer-effects")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone()
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap();
+    let args = json!({"documentId":projection["documentId"],"revision":projection["revision"],"layer":"a","intent":{"type":"copy","id":"saved-tint"}});
+    finish(
+        first
+            .realms
+            .lock()
+            .unwrap()
+            .get("layer-effects")
+            .unwrap()
+            .eval(format!("__pmBuiltin.command('panel.effect-controls',{args})"))
+            .unwrap(),
+    );
+    assert_eq!(clipboard.len(), 1);
+    // The other window's service: nothing pasteable selected, then a layer.
+    select("other", &["m"]);
+    assert_eq!(desk.run("paste").unwrap(), json!({"reason": "select"}));
+    select("other", &["b", "m"]);
+    assert_eq!(desk.run("paste").unwrap(), json!({"pasted": 1}));
+    let p = kernel.published("other").unwrap();
+    let fx = |p: &pm_kernel::Published, id: &str| {
+        let root = p.snapshot.root().unwrap();
+        let loc = pm_kernel::model::find_layer(root, id).unwrap();
+        data::wire(&pm_kernel::model::layer_at(root, &loc).unwrap().get("fx").unwrap().to_value())
+    };
+    let pasted = fx(&p, "b");
+    assert_eq!(pasted.as_array().unwrap().len(), 1);
+    assert_eq!(pasted[0]["type"], "tint");
+    assert_ne!(pasted[0]["id"], "saved-tint", "a new effect");
+    assert_eq!(fx(&p, "m"), json!([]), "audio takes no effect");
+    assert_eq!(p.history.undo_label.as_deref(), Some("Paste Effect"));
+    // copySelectedEffects reads the first window's Effect Controls selection.
+    assert_eq!(
+        first.effect_desk().run("copy").unwrap(),
+        json!({"copied": 1})
+    );
+    assert_eq!(desk.run("copy").unwrap(), json!({"copied": 0}), "no Effect Controls");
+    desk.run("clear").unwrap();
+    assert!(clipboard.is_empty());
+    assert_eq!(first.effect_desk().run("paste").unwrap(), json!({"empty": true}));
+}

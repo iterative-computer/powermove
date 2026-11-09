@@ -872,12 +872,11 @@ globalThis.__compat = {
     this.realm.services.register("timeline", timelineService);
     // Main's inspector service. The native Properties panel and Effect
     // Controls draw the inspector; v1–3 sections live in their own panel.
-    const notAttached = (name) => () => {
-      throw new PowermoveCompat.HostError(
-        "Unavailable",
-        `inspector.${name}: the effect clipboard belongs to Effect Controls`,
-      );
-    };
+    // The app's one effect clipboard, shared with Effect Controls in every
+    // window; copy reads Effect Controls' selected effects, as main's did.
+    const clipboard = (op) => runtime.engine("effects.clipboard", { op });
+    const toast = (text) => runtime.engine("ui.toast", { text, options: {} });
+    const effects = (count) => `${count} ${count === 1 ? "effect" : "effects"}`;
     const syncShaderUniforms = (layer) => {
       // As main (inspector/shader.ts:39), with the kernel's parser.
       const PM = this.realm.PM;
@@ -901,9 +900,25 @@ globalThis.__compat = {
         this.realm.PM.selectLayers([layer.id]);
         call("ui.request", { kind: "focusText", layer: String(layer.id) });
       },
-      copySelectedEffects: notAttached("copySelectedEffects"),
-      clearEffectClipboard: notAttached("clearEffectClipboard"),
-      pasteCopiedEffects: notAttached("pasteCopiedEffects"),
+      copySelectedEffects: () => {
+        const { copied } = clipboard("copy");
+        if (!copied) return false;
+        toast(`Copied ${effects(copied)}`);
+        return true;
+      },
+      clearEffectClipboard: () => void clipboard("clear"),
+      pasteCopiedEffects: () => {
+        const result = clipboard("paste");
+        if (result.empty) return false;
+        if (result.reason === "select") toast("Select a layer to paste the effect");
+        else if (result.reason === "unavailable") toast("The copied effect is not available");
+        else {
+          // As main's edit.apply: the realm reads the pasted effects at once.
+          this.realm.receive(runtime.engine("kernel.publication", {}));
+          toast(`Pasted ${effects(result.pasted)}`);
+        }
+        return true;
+      },
       syncShaderUniforms,
     });
     this.realm.services.register("shaderHooks", { syncShaderUniforms });

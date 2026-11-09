@@ -6,6 +6,7 @@ pub use agent_host::NoticeSink;
 mod agent_tasks;
 mod chrome;
 pub use agent_host::AgentCarry;
+pub use pm_panel_inspector::EffectClipboard;
 pub use models::APPLICATION_AGENT_STORE;
 pub use settings::{RESOLUTIONS, set_notification_status};
 #[cfg(test)]
@@ -193,12 +194,93 @@ struct Broker {
     painters: Mutex<(u64, std::collections::BTreeSet<String>)>,
     /// The `timeline.chrome` writer (`chrome.rs`), started on first use.
     chrome: Mutex<Option<std::sync::mpsc::Sender<chrome::ChromeEdit>>>,
+    /// The app's effect clipboard, given to each panel's inspector model.
+    effect_clipboard: Mutex<EffectClipboard>,
     /// Set while the window closes: its realms' ends are not removals.
     closing: std::sync::atomic::AtomicBool,
     /// Built-in panels parked while closed (`Builtins::park`).
     parked: Mutex<std::collections::BTreeSet<String>>,
     /// Viewer overlays an extension took down (`overlays.viewer`'s dispose).
     overlays_cleared: Mutex<Vec<String>>,
+}
+/// v1's inspector-service effect clipboard for one window: `copy` takes the
+/// effects selected in its Effect Controls, `paste` adds the clipboard's
+/// effects to each selected layer (audio aside) as one undo step, `clear`.
+#[derive(Clone)]
+pub struct EffectDesk(Arc<Broker>);
+impl EffectDesk {
+    pub fn run(&self, op: &str) -> std::result::Result<Value, String> {
+        let clipboard = self.0.effect_clipboard.lock().unwrap().clone();
+        match op {
+            "copy" => {
+                let entry = self.0.entries.lock().unwrap().get("layer-effects").cloned();
+                let copied = entry.and_then(|entry| {
+                    let entry = entry.lock().unwrap();
+                    let mut backend = entry.backend.lock().unwrap();
+                    let model = backend.model.as_mut()?;
+                    let layer = model.effects.layer.clone()?;
+                    let first = model.effects.ids.first().cloned()?;
+                    // Selected effects the layer no longer has copy nothing.
+                    model.copy_effects(&layer, &first).ok()
+                });
+                Ok(json!({"copied": copied.unwrap_or(0)}))
+            }
+            "clear" => {
+                clipboard.clear();
+                Ok(json!({}))
+            }
+            "paste" => {
+                if clipboard.is_empty() {
+                    return Ok(json!({"empty": true}));
+                }
+                // Through the window's Effect Controls (or Properties) model:
+                // its effect definitions are the window's registries.
+                let entries = self.0.entries.lock().unwrap().clone();
+                let entry = ["layer-effects", "inspector"]
+                    .iter()
+                    .find_map(|id| entries.get(*id).cloned())
+                    .ok_or("The window's panels are not running")?;
+                let entry = entry.lock().unwrap();
+                let mut backend = entry.backend.lock().unwrap();
+                backend.sync()?;
+                let caller = backend.caller;
+                let model = backend.model.as_ref().ok_or("No open project")?;
+                let targets = model
+                    .selected_layers()
+                    .iter()
+                    .filter(|id| {
+                        model.layer(id).is_ok_and(|l| {
+                            l.get("type").and_then(pm_model::Value::as_str) != Some("audio")
+                        })
+                    })
+                    .count();
+                if targets == 0 {
+                    return Ok(json!({"reason": "select"}));
+                }
+                let mut request = match model.paste_selected_effects(caller) {
+                    Ok(request) => request,
+                    Err(pm_panel_inspector::InspectorError::EmptyEdit) => {
+                        return Ok(json!({"reason": "unavailable"}));
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                let count = clipboard.len() * targets;
+                if let pm_kernel::Call::Transact { label, .. } = &mut request.call {
+                    *label = Some(if count == 1 { "Paste Effect" } else { "Paste Effects" }.into());
+                }
+                let ack = self
+                    .0
+                    .kernel
+                    .call_blocking(&self.0.project, request)
+                    .map_err(|e| e.to_string())?;
+                if let pm_kernel::Reply::Throw(error) = ack.reply {
+                    return Err(error.to_string());
+                }
+                Ok(json!({"pasted": count}))
+            }
+            _ => Err(format!("unknown effect clipboard operation {op}")),
+        }
+    }
 }
 impl Builtins {
     pub fn new(
@@ -743,6 +825,7 @@ impl Builtins {
             overlays_cleared: Default::default(),
             parked: Default::default(),
             theme_request: Default::default(),
+            effect_clipboard: Default::default(),
             painters: Default::default(),
             chrome: Default::default(),
             closing: Default::default(),
@@ -1228,6 +1311,16 @@ impl Builtins {
         self.realm_of(panel)?
             .eval(format!("__pmBuiltin.write({},{})", json!(handle), value))
     }
+    /// Every panel of this window copies and pastes effects through
+    /// `clipboard` (the app's one), from panels mounted after this on.
+    pub fn share_effect_clipboard(&self, clipboard: EffectClipboard) {
+        *self.broker.effect_clipboard.lock().unwrap() = clipboard;
+    }
+    /// v1's inspector service over this window's Effect Controls and the
+    /// app's effect clipboard, callable from any thread.
+    pub fn effect_desk(&self) -> EffectDesk {
+        EffectDesk(self.broker.clone())
+    }
     /// The layers a Properties row's binding handle in `panel` edits.
     pub fn bound_layers(&self, panel: &str, handle: &str) -> Option<std::sync::Arc<[String]>> {
         let entry = self.broker.entries.lock().unwrap().get(panel)?.clone();
@@ -1514,6 +1607,9 @@ impl EngineProxy for Broker {
                 .map_err(Error::Host)?,
             ));
             backend.lock().unwrap().native.agent_link = self.agent.clone();
+            if let Some(model) = backend.lock().unwrap().model.as_mut() {
+                model.clipboard = self.effect_clipboard.lock().unwrap().clone();
+            }
             if panel == "agent"
                 && let Some(state) = self.carried.lock().unwrap().take()
             {

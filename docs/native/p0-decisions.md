@@ -288,7 +288,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The window's compat page is transparent (`drawsBackground` off) so the stage shows the Metal viewer; contributed panel roots paint `var(--bg-panel, Canvas)`, v1's panel fill.
 - Viewer frames reach v1–3 realms coalesced to the latest (`frame_presented`); a busy realm skips frames rather than queueing them, as playback may drop frames.
 - The D7 presenter fills its canvas with the presented frame (its time, from the realm's publication at the frame's revision, caught up first when behind) before `frame:rendered`; a frame the project moved past is dropped for a bound presenter. A same-size `resize` with a crop applies on the next frame, as main's `GL.resize` returned false and rendered later.
-- `inspector.copySelectedEffects` / `pasteCopiedEffects` / `clearEffectClipboard` throw `Unavailable` rather than keep a second clipboard: Effect Controls' clipboard is per panel host today.
+- The app has one effect clipboard (raw effect objects) shared by Effect Controls in every window and the v1–3 `inspector` service; `copySelectedEffects` copies Effect Controls' selected effects in the realm's window, `pasteCopiedEffects` pastes onto the selected non-audio layers as one undo step through that window's panel model, with main's booleans and toasts.
 - `api.scene3d` view, navigation and gizmo modes report the camera view and throw `Unavailable` when asked to change: the 3D studio is not wired into the app.
 - `scene3d.describe` is the kernel's evaluated scene, not the frozen reference's `compositionScene`: the native material model has fields that schema rejects.
 - `timeline.keySelectionActive` is read-only (native timeline state); `timeline.cv` is `null`.

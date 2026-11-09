@@ -296,7 +296,22 @@ pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
         profile.join("extensions"),
     ]
 }
+/// The app's one effect clipboard: Effect Controls in every window and v1–3
+/// extensions' inspector service copy and paste through it.
+pub(crate) fn effect_clipboard() -> pm_builtins::EffectClipboard {
+    static CLIPBOARD: std::sync::LazyLock<pm_builtins::EffectClipboard> =
+        std::sync::LazyLock::new(Default::default);
+    CLIPBOARD.clone()
+}
 impl Controller {
+    /// The realm's inspector service reaches this window's Effect Controls
+    /// once both run (the panels start after the extensions).
+    pub(crate) fn wire_effect_desk(&self) {
+        if let (Some(host), Some(runtime)) = (&self.extensions.host, &self.builtins.runtime) {
+            let desk = runtime.effect_desk();
+            host.set_effects(Some(Arc::new(move |op: &str| desk.run(op))));
+        }
+    }
     /// Quitting while an extension isn't responding (D11): its sheet goes,
     /// the realm is stopped without a restart (its open entry is sealed;
     /// acknowledged kernel edits stay) and the quit goes on. `false` when no
@@ -380,6 +395,7 @@ impl Controller {
         self.extensions.doc_id = doc_id;
         self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
+        self.wire_effect_desk();
         self.sync_viewport();
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {

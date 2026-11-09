@@ -166,6 +166,7 @@ impl Controller {
             Arc::new(pm_agents::account::open_in_browser),
         );
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
+        runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
         let mut tickets = vec![];
         for panel in BUILTIN_PANELS.iter() {
             if application && !panel.application {
@@ -175,6 +176,7 @@ impl Controller {
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
+        self.wire_effect_desk();
         let check = runtime.clone();
         let mounting = project.clone();
         cx.spawn(async move |this, cx| {
