@@ -457,12 +457,16 @@ impl Store {
     pub fn remove(&self, id: &str) -> Result<(), String> {
         let model = self.model(id)?;
         let state = self.state.lock().unwrap();
-        if let Some(d) = state.downloads.get(id) {
-            d.cancel.store(true, Ordering::Relaxed);
-        }
+        // Cancel whichever download holds the id at each wake, so one started
+        // while this waited is stopped too rather than awaited to completion.
         let mut state = self
             .finished
-            .wait_while(state, |s| s.downloads.contains_key(id))
+            .wait_while(state, |s| {
+                s.downloads
+                    .get(id)
+                    .inspect(|d| d.cancel.store(true, Ordering::Relaxed))
+                    .is_some()
+            })
             .unwrap();
         let removed = [self.model_dir(id), self.partial_dir(id)]
             .into_iter()
