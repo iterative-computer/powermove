@@ -265,4 +265,15 @@ fn an_effect_with_no_installed_provider_is_bypassed_in_the_viewer_and_refused_in
     }
     renderer.set_main_effects_for_document(&plain).unwrap();
     assert!(renderer.missing_effects().is_empty());
+    // Switched off, or in a composition nothing draws: it never renders.
+    let mut chip = layer("chip", "solid", json!({"w":16,"h":16,"color":"#4080C0"}), 0., 0., 1.);
+    chip["fx"] = json!([{"id":"f","type":"acme.glow","on":false,"missing":true,"p":{}}]);
+    let mut project = project(16, 16, 1., Value::Null, vec![chip.clone()]);
+    chip["fx"][0]["on"] = json!(true);
+    project["comps"] = json!({"unused":{"id":"unused","name":"Unused","w":16,"h":16,"fps":30,"dur":1,"layers":[chip]}});
+    let quiet = load(&project);
+    renderer.set_main_effects_for_document(&quiet).unwrap();
+    assert!(renderer.missing_effects().is_empty());
+    assert!(renderer.missing_effects_in(&quiet, "Ptest-root").is_empty());
+    assert_eq!(renderer.missing_effects_in(&quiet, "unused").len(), 1);
 }

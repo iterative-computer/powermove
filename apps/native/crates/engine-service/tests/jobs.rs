@@ -397,3 +397,38 @@ fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
         "{message}"
     );
 }
+/// The fixture's first layer with an effect no installed extension provides.
+fn with_uninstalled_effect(on: bool) -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    project["layers"][0]["fx"] = serde_json::json!([
+        {"id":"e1","type":"acme.glow","on":on,"p":{}}
+    ]);
+    project.to_string()
+}
+fn finish(request: ExportRequest) -> pm_protocol::priority::JobStatus {
+    ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+        .unwrap()
+        .wait()
+        .unwrap()
+}
+#[test]
+fn a_still_capture_bypasses_an_uninstalled_effect_and_a_delivery_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let enabled = with_uninstalled_effect(true);
+    let mut capture = request_for(&enabled, dir.path().join("capture"), 1);
+    capture.bypass_missing_effects = true;
+    let done = finish(capture);
+    assert_eq!(done.state, JobState::Done, "{done:?}");
+    let refused = finish(request_for(&enabled, dir.path().join("delivery"), 1));
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(message.contains("acme.glow isn't installed"), "{message}");
+    // Switched off, it never draws, so a delivery doesn't need it.
+    let off = finish(request_for(
+        &with_uninstalled_effect(false),
+        dir.path().join("off"),
+        1,
+    ));
+    assert_eq!(off.state, JobState::Done, "{off:?}");
+}

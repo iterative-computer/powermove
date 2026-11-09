@@ -669,7 +669,16 @@ impl Renderer {
             set.missing.retain(|m| *m != definition.id);
             set.definitions.push(definition.clone());
         }
-        self.missing_effects = crate::effects::versions::missing_effects(document, &set);
+        let known = |ty: &str| {
+            set.definitions
+                .iter()
+                .any(|d| d.kind == pm_protocol::definitions::DefinitionKind::Effect && d.id.as_str() == ty)
+        };
+        self.missing_effects = document
+            .root()
+            .and_then(crate::capability::open_composition_id)
+            .map(|open| crate::effects::versions::missing_effects(document, &open, &known))
+            .unwrap_or_default();
         let failures = self.set_definitions(&set).map_err(|e| e.to_string())?;
         let (own, pinned): (Vec<_>, Vec<_>) = failures.into_iter().partition(|failure| {
             matches!(&failure.scope, ErrorScope::Definition { definition } if accepted.contains(definition))
@@ -1381,10 +1390,21 @@ impl Renderer {
         self.effects.bypass_missing = on;
     }
 
-    /// Effects the document set by [`Renderer::set_document_effects`] uses
-    /// that no installed provider defines, with how many layers use each.
+    /// Enabled effects the open composition of the document set by
+    /// [`Renderer::set_document_effects`] draws that no installed provider
+    /// defines, with how many layers use each.
     pub fn missing_effects(&self) -> &[crate::effects::versions::MissingEffect] {
         &self.missing_effects
+    }
+
+    /// The same, for what `composition` draws (an export's composition).
+    pub fn missing_effects_in(
+        &self,
+        document: &Document,
+        composition: &str,
+    ) -> Vec<crate::effects::versions::MissingEffect> {
+        let known = |ty: &str| self.effects.get(pm_protocol::definitions::DefinitionKind::Effect, ty).is_some();
+        crate::effects::versions::missing_effects(document, composition, &known)
     }
 
     /// Changes whenever a frame a scrub render asked for has decoded: a

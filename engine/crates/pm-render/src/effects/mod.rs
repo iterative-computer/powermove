@@ -1002,7 +1002,28 @@ pub(crate) fn layer_features(effects: &Effects, layer: &pm_model::Node) -> Vec<c
         ) {
             continue;
         }
+        // Switched off for good (not animated): it never draws.
+        let on = node::member(Some(fx), "on");
+        let off = match on.map(pm_model::Node::kind) {
+            Some(pm_model::NodeKind::Bool(false)) => true,
+            _ if node::is_property(on) => {
+                !node::has_kf_array(on)
+                    && matches!(
+                        node::member(on, "v").map(pm_model::Node::kind),
+                        Some(pm_model::NodeKind::Bool(false))
+                    )
+            }
+            _ => false,
+        };
+        if off {
+            continue;
+        }
         let ty = node::to_js_string(node::member(Some(fx), "type")).to_string_lossy();
+        // The planner's bypass ([`Effects::bypass_missing`]): no provider, so
+        // nothing to route; the layer draws without it.
+        if effects.bypass_missing && effects.get(DefinitionKind::Effect, &ty).is_none() {
+            continue;
+        }
         out.extend(definition_feature(effects, DefinitionKind::Effect, &ty));
     }
     out

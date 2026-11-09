@@ -622,14 +622,16 @@ pub fn run_child() -> Result<()> {
         let failures = renderer
             .set_document_effects(&doc, &request.resources.definitions)
             .map_err(anyhow::Error::msg)?;
+        // Only what this export draws: enabled effects in its composition.
+        let uninstalled = renderer.missing_effects_in(&doc, composition.as_str());
         if request.bypass_missing_effects {
             renderer.set_bypass_missing_effects(true);
-        } else if let Some(missing) = renderer.missing_effects().first() {
+        } else if let Some(missing) = uninstalled.first() {
             let uses = match missing.layers {
                 1 => "1 layer uses it".to_owned(),
                 n => format!("{n} layers use it"),
             };
-            let others = match renderer.missing_effects().len() - 1 {
+            let others = match uninstalled.len() - 1 {
                 0 => String::new(),
                 n => format!("; {n} more effects are missing too"),
             };
