@@ -95,6 +95,8 @@ pub struct Inspector {
     pub(crate) definitions: HashMap<String, crate::EffectDefinition>,
     pub(crate) effect_catalog: Option<pm_fx_defs::catalog::EffectCatalog>,
     pub(crate) definition_generation: u64,
+    /// Contributed layer types' parameters by definition id.
+    pub(crate) layer_types: HashMap<String, Vec<crate::LayerParam>>,
     pub(crate) disclosure: HashMap<(String, String), bool>,
     pub(crate) property_ids: HashMap<String, Vec<PropertyId>>,
     pub effects: EffectSelection,
@@ -112,6 +114,7 @@ impl Inspector {
             definitions: HashMap::new(),
             effect_catalog: None,
             definition_generation: 0,
+            layer_types: HashMap::new(),
             disclosure: HashMap::new(),
             property_ids: HashMap::new(),
             effects: EffectSelection::default(),
@@ -166,6 +169,17 @@ impl Inspector {
     }
     pub fn composition_mode(&self) -> bool {
         self.selected.is_empty()
+    }
+    /// The registered layer types' parameters (replaces the previous set).
+    pub fn set_layer_types(&mut self, types: HashMap<String, Vec<crate::LayerParam>>) {
+        self.layer_types = types;
+    }
+    /// A contributed layer type's parameter, for its row's label and options.
+    pub fn layer_param(&self, definition: &str, key: &str) -> Option<&crate::LayerParam> {
+        self.layer_types
+            .get(definition)?
+            .iter()
+            .find(|p| p.key == key)
     }
     pub fn register_effect(&mut self, definition: crate::EffectDefinition) {
         self.definitions

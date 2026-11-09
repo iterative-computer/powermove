@@ -5,7 +5,7 @@
 //! adopt the publication. No JS, platform UI, or blocking wait is used here.
 //! See `docs/native/panels/inspector.md` for the shipped-source inventory.
 mod catalog;
-pub use catalog::{FieldDescriptor, FieldType};
+pub use catalog::{FieldDescriptor, FieldType, LayerParam};
 pub mod content;
 mod edit;
 mod effect_definitions;

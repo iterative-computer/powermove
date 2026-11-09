@@ -66,7 +66,6 @@ type BaseState = {
   touched: boolean;
 };
 /** Exports whose frozen projects the realm keeps at once. */
-const PINNED_PROJECTS = 4;
 export class CompatRealm {
   readonly PM: Data;
   readonly keymap: CompatKeymap;
@@ -817,27 +816,9 @@ export class CompatRealm {
   private bases = new WeakMap<object, BaseState>();
   /**
    * What an override answer is for, while the realm answers it: the need's
-   * composition (a nested layer's base paints in its own composition) and,
-   * for an export, the job whose frozen project it reads.
+   * composition (a nested layer's base paints in its own composition).
    */
-  rasterContext: { composition?: string; job?: string; layer?: object } | null = null;
-  /** Each running export's frozen revision (see `pinProject`). */
-  private pins = new Map<string, number>();
-  /**
-   * An export froze the project at `revision`: its overrides answer only
-   * while this realm is at that revision, so every project read they make
-   * (`PM.proj`, layers, settings) is the export's project. No copy of a
-   * project is held. The few most recent jobs are kept.
-   */
-  pinProject(job: string, revision: number): void {
-    this.pins.delete(job);
-    this.pins.set(job, revision);
-    while (this.pins.size > PINNED_PROJECTS) this.pins.delete(this.pins.keys().next().value!);
-  }
-  /** The revision an export froze; `undefined`: the job is not pinned. */
-  pinnedRevision(job: string): number | undefined {
-    return this.pins.get(job);
-  }
+  rasterContext: { composition?: string; layer?: object } | null = null;
   /**
    * Whether `value` is the base raster of exactly `need`'s layer, frame, scale
    * and crop, untouched: an override that returns it passes the layer through.
@@ -895,7 +876,6 @@ export class CompatRealm {
     const spec: Data = {
       id,
       ...(composition ? { composition } : {}),
-      ...(context?.job ? { job: context.job } : {}),
       // The project's own layer paints from the document; any other object
       // (`{ ...L, d: { ...L.d, text } }`) paints as given.
       ...(own ? {} : { content: JSON.parse(JSON.stringify(layer)) }),

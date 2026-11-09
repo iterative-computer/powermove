@@ -55,7 +55,10 @@ impl Channel {
         }
         let route = parts.next().ok_or(Error::InvalidRequest)?.to_owned();
         if parts.next().is_some()
-            || !matches!(route.as_str(), "call" | "events" | "page" | "canvas")
+            || !matches!(
+                route.as_str(),
+                "call" | "events" | "page" | "canvas" | "font"
+            )
         {
             return Err(Error::InvalidRequest);
         }
@@ -132,7 +135,7 @@ pub(crate) fn csp(nonce: &str, trust: &Trust) -> String {
         _ => "",
     };
     format!(
-        "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline' data: blob:{remote}; img-src data: blob:{remote}; font-src data: blob:{remote}; connect-src pmcompat: data: blob:; media-src data: blob:{remote}; object-src 'none'; worker-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+        "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline' data: blob:{remote}; img-src data: blob:{remote}; font-src pmcompat: data: blob:{remote}; connect-src pmcompat: data: blob:; media-src data: blob:{remote}; object-src 'none'; worker-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
     )
 }
 #[cfg(test)]
@@ -253,6 +256,18 @@ mod tests {
         assert!(granted.contains("img-src data: blob: https:"));
         assert!(granted.contains("connect-src pmcompat: data: blob:;"));
         assert!(!granted.contains(" http:"));
+    }
+    #[test]
+    fn the_page_loads_engine_faces_from_its_own_channel_only() {
+        let c = channel();
+        assert_eq!(
+            c.route("pmcompat://host/test-capability/font?q=DM%20Sans%7C400%7C0")
+                .unwrap(),
+            ("font".to_owned(), Some("DM Sans|400|0".to_owned()))
+        );
+        assert!(c.route("pmcompat://host/other/font?q=x").is_err());
+        let trusted = csp("fixture", &Trust::Trusted);
+        assert!(trusted.contains("font-src pmcompat: data: blob:"));
     }
     #[test]
     fn debug_redacts_capability() {

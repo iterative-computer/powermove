@@ -176,13 +176,26 @@ window is open is shown in it.
   unreadable override fails that frame (the viewer holds it and does not ask again
   until an edit or new wrappers; an export fails with the extension's message).
   Answers are per document (kernel `doc_id`) and per wrapper generation (any
-  registration, removal or `PM.raster` change forgets them). An export pins its
-  frozen revision: its overrides answer only while the realm is at it, so every
-  project read they make is the export's project (behind it the export asks again;
-  past it, after an edit, the export fails rather than mix revisions). The realm
-  never holds a copy of a project (copying a 238 MB one aborted the app); base
-  rasters paint from the export's document, and the export fails if its wrappers
-  change mid-run. A capture
+  registration, removal or `PM.raster` change forgets them). A delivery (an export,
+  a render cache fill; `ExportRequest::look` is false) gets a realm of its own
+  (`compat-runner/src/host/export.rs`), started as the job starts: the window's
+  trusted extensions as compiled then, with their storage as it was then, activate in
+  a second isolate whose kernel channel is the job's frozen publication
+  (`KernelAdapter::frozen`: writes stay in that realm, history and edits are refused,
+  nothing is registered). The person keeps editing and the window's realm keeps
+  serving the viewer; the export realm, its hidden page and its cage reservation go
+  when the job ends. The page is kept running for the job (`begin_background_job`);
+  a layout read it does not answer within 10 s, or with no page at all, fails the
+  export rather than draw at a guessed place. An extension that runs in the window
+  but does not start there fails the export by name, as does one that stops
+  responding. `renderFrameTo`/`PM.Export.snapshot` there render the frozen project
+  and ask that realm inline for their overrides. **Delivery policy:** a delivery only
+  reads the outside world. `fetch` other than GET/HEAD is refused, storage writes stay
+  in the realm, and anything that needs the window's UI (sheets, menus, imports,
+  panels) is answered with an error; timers run, so polling extensions keep reading.
+  A one-frame look (an agent's still of the window's current publication) asks the
+  window's realm while it is at that exact revision, and an export realm once the
+  project moved on. A capture
   (`renderFrameTo`, snapshot) of the realm's own project answers the overrides it
   needs inline while the realm waits (`render.continue`). Cancelling an export or
   closing its window ends any wait at once; pixel files carry the job id. Override
@@ -210,16 +223,30 @@ window is open is shown in it.
   (run then close unless it returns `false`; Escape dismisses unless
   `dismissible: false`; `onClose` once on any close). The sheet's document is attached
   to the panel's remote-DOM applier, so its input reaches the realm as the panel's
-  own. Its body is a fixed 280 pt tall and scrolls. `PM.Fonts`
-  throws `Unavailable`.
+  own. Its body is a fixed 280 pt tall and scrolls.
+- `PM.Fonts` (`api.media.fonts`) is main's: `system` is this Mac's CoreText families,
+  `ensure(family, weight)` resolves once that face has settled in the page (loaded,
+  or not available; at most 15 s). Each realm asks the window for the faces its
+  project's text layers use (and `ensure` adds one); the app resolves each as a text
+  layer does (the family, else `system-ui`, else the standard font) and serves the
+  engine's own face bytes to every page under the family's name (`pmcompat://…/font`),
+  loaded as `FontFace`s before later DOM batches apply; then the realm hears `fonts`,
+  so measurements re-run.
 - `titlebar:right` has no host. `layer:context`, `timeline:context` and `viewer:context`
   rows follow the native rows in the timeline's and viewer's right-click NSMenus through
   the same gathering path as tab menus (`Controller::extension_menu`: v4 items off the
   main thread, then v1–3's within the 150 ms deadline), with v1's contexts: a layer
   gathers both `layer:context` and its surface's location (`kind: "layer"`).
-- Contributed layer types render and label their timeline row, but their parameters
-  have no Properties rows until per-kind controls are designed.
-- Layout reads are synchronous (`remote-dom.md`); the page has the system fonts only, so text a hidden element measures in a project font (`PM.Fonts`) measures in a fallback.
+- A contributed layer type's parameters (`api.layers.register` `params`) are Properties
+  rows in Content, labelled by its definition, editing the animatable `x.<key>` channels
+  in `d.params` as main's `ExtensionLayerParams` does (numbers with their range, colours,
+  toggles, selects). Its mesh asset and version notes are not shown yet.
+- Layout reads are synchronous (`remote-dom.md`). With the engine's faces the page
+  measures the font the engine draws, but WebKit lays a variable system face out at
+  its automatic optical size while the face the engine draws carries `opsz` 17 (probably the cause), so SF text
+  measures about 4% narrower (a typing caret an extension measures trails by a few letters on a real project);
+  WebKit ignores a FontFace `variationSettings` descriptor, so closing this needs an
+  instanced face or the engine's layer path to size `opsz` as its canvas path does.
 - A v4 extension adds a panel, replaces a whole built-in panel, and registers
   palette commands with shortcuts (`commands.register`). It cannot yet slot into
   part of another panel (a viewer overlay or timeline column without a fork), add

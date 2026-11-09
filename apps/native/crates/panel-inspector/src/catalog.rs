@@ -14,6 +14,22 @@ pub enum FieldType {
     Font,
     Opaque,
 }
+/// One parameter of a contributed layer type (`api.layers.register`), stored
+/// as the animatable `x.<key>` channel in the layer's `d.params`, as main's
+/// `ExtensionLayerParams` shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerParam {
+    pub key: String,
+    pub label: String,
+    pub kind: FieldType,
+    /// Its options as the definition gives them (a parameter with options is a
+    /// choice whatever its type, as on main).
+    pub options: Vec<crate::Value>,
+    /// What Reset returns it to: `def`, or for a number with `defaultFrom`
+    /// the layer's width or height times `factor` (main's `effectParameterDefault`).
+    pub default: Option<crate::Value>,
+    pub default_from: Option<(bool, f64)>,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldDescriptor {
     pub binding: Binding,
@@ -187,6 +203,14 @@ impl Inspector {
             "shader" | "extension" => {
                 content("w", number(1.0, Some(1.0), None));
                 content("h", number(1.0, Some(1.0), None));
+                let definition = d.map(|d| text(d, "definition")).unwrap_or("");
+                for param in self.layer_types.get(definition).into_iter().flatten() {
+                    out.push(FieldDescriptor {
+                        binding: Binding::Property(PropertyId::new(id, format!("x.{}", param.key))),
+                        kind: param.kind.clone(),
+                        animatable: true,
+                    });
+                }
             }
             "precomp" => {
                 let comps = self

@@ -99,7 +99,11 @@ impl Controller {
         let fill = disk.clone();
         let started = cx.background_executor().spawn(async move {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let queued = fill.start_fill(from, to, &exe, activity)?;
+            let frozen = (
+                p.revision(),
+                p.clone() as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            );
+            let queued = fill.start_fill(from, to, &exe, activity, Some(frozen))?;
             if queued > 0 {
                 follow(fill, tasks, p.project.clone(), title, queued);
             }
