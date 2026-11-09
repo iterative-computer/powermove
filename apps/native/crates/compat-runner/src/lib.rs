@@ -668,9 +668,7 @@ mod tests {
     type RasterRunner = (CompatRunner, Log<Value>, Log<Value>, Log<(bool, u64)>);
     #[test]
     fn code_identity_follows_compiled_code_not_health() {
-        let records = |hash: &str, enabled: bool, health: &str| {
-            json!([{"id":"a","enabled":enabled,"health":{"state":health},"graph":{"hash":hash}}])
-        };
+        let records = |hash: &str, enabled: bool, health: &str| json!([{"id":"a","enabled":enabled,"health":{"state":health},"graph":{"hash":hash}}]);
         let base = code_identity(&records("h1", true, "ok"));
         assert_eq!(base, code_identity(&records("h1", true, "unresponsive")));
         assert_ne!(base, code_identity(&records("h2", true, "ok")));
