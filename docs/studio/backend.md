@@ -57,7 +57,9 @@ pose evaluation, picking and gizmo math.
 The material stride is **32 floats / 128 bytes** (8 `vec4`s). The first 24
 floats retain the source branch's fields. Offsets 24–27 are ambient response,
 flags, alpha-test threshold, reserved. Flags: Casts Shadows = 1, Accepts Shadows
-= 2, Double Sided = 4, Unlit = 8, Vertex Colors = 16. Offsets 28–31 are independent
+= 2, Double Sided = 4, Unlit = 8, Vertex Colors = 16, Hidden Secondary = 32.
+Hidden Secondary skips reflection/transmission/indirect camera hits while
+retaining primary visibility and the independent shadow policy. Offsets 28–31 are independent
 roughness, metalness, AO map indexes, then normal-map scale. Map index -1 means
 absent. The legacy ORM index at offset 18 remains for older prepared scenes;
 independent maps take precedence.
@@ -77,7 +79,10 @@ picking without changing those binary buffers. `Params.opts.w = 1` selects
 orthographic camera rays; 0 selects perspective. Camera right/up extents contain
 half the orthographic frame span in that mode.
 
-Camera clipping is an optional extension of that same 208-byte Params block:
+The shared Params block is 240 bytes (15 vec4): the original 208-byte layout
+followed by iris (blade count, rotation radians, roundness, aspect) and dedicated
+Ambient RGB (with an unused fourth lane). Defaults are `[0,0,0,1]` and zero.
+Camera clipping uses the original fields in that block:
 `opts.w` bit 31 enables it; bit 0 remains the orthographic flag. Bits 1–30
 contain the positive near-plane f32 bits (the least significant mantissa bit
 is cleared). With clipping enabled, `backdrop.w` holds the far plane: positive

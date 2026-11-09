@@ -50,7 +50,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       'overcast':{elevation:45,haze:4,overcast:1,sunIntensity:.1},'blue-hour':{elevation:-5,haze:2,overcast:0,sunIntensity:0},'night':{elevation:-20,haze:2,overcast:0,sunIntensity:0}
     } as any)[data.preset],data.p || {});}
     if(existing)return sceneCommands(PM,{operation:'update_object',target:existing.id,patch:{world:{...existing.d.data.object.world,...data,p:{...existing.d.data.object.world.p,...p}}}},meta);
-    return sceneCommands(PM,{operation:'add_object',id:args.id,name:args.name || ({world:'World',fog:'Fog Volume',terrain:'Terrain',scatter:'Scatter'} as any)[kind],object:{source:{primitive:'plane'},[kind]:{...data,p}}},meta);
+    return sceneCommands(PM,{operation:'add_object',...(args.id!==undefined?{id:args.id}:{}),name:args.name || ({world:'World',fog:'Fog Volume',terrain:'Terrain',scatter:'Scatter'} as any)[kind],object:{source:{primitive:'plane'},[kind]:{...data,p}}},meta);
   }
   const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface','part']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');

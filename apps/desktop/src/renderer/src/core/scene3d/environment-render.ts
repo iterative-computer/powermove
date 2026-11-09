@@ -91,7 +91,7 @@ export function syncEnvironmentGraph(runtime:any,data:Scene3D,assets:(id:string)
   const environment=worldNode?.world ?? environmentLights[0]?.world;
   const owner=worldNode?.id ?? environmentLights[0]?.id ?? '';
   const world:StudioWorld=environment?worldForNode(environment,environmentImage(environment.source,owner,assets,composition)):{};
-  if(!worldNode && environmentLights[0]){const intensity=channelValues(environmentLights[0].p).intensity;if(world.sky){world.sky.intensity=(world.sky.intensity??1)*intensity;world.sky.sun_intensity=(world.sky.sun_intensity??1)*intensity;}if(world.hdri)world.hdri.intensity=(world.hdri.intensity??1)*intensity;}
+  if(!worldNode && environmentLights[0]){const intensity=channelValues(environmentLights[0].p).intensity;if(world.sky)world.sky.intensity=(world.sky.intensity??1)*intensity;if(world.hdri)world.hdri.intensity=(world.hdri.intensity??1)*intensity;}
   const volumes=[];
   for(const node of data.objects){
     const object=runtime.objects.get(node.id);if(!object)continue;

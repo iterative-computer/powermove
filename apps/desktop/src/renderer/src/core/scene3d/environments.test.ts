@@ -11,6 +11,7 @@ import {remapMaterialLayerLinks} from './material-maps';
 import {worldSchema,materialOptionsSchema} from './environment-data';
 import {describePreparedScene,compileSceneDescription} from '../studio/scene-description';
 import {viewOf,cameraOf} from '../studio';
+import {worldSun} from '../studio/environment';
 function editor(){
   const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');PM.proj=PM.mkProject({name:'Environment',dur:5,fps:30});PM.time=0;
   PM.layerDefinition=(id:string)=>Object.values(LAYER3D_DEFINITIONS).includes(id as any)?{id,label:'3D',version:1,params:[],defaults:{},renderer:{kind:'layer3d'}}:null;
@@ -75,10 +76,28 @@ describe('environment documents and guarded agent edits',()=>{
     const PM=editor();edit(PM,{operation:'create',scene:{objects:[{id:'model',source:{primitive:'box'}},{id:'ground',source:{primitive:'plane'},terrain:{p:{resolution:2}}},{id:'copies',source:{primitive:'plane'},scatter:{model:'model',surface:'ground',p:{count:4}}}]}});
     const scene=compositionScene(PM),scatter=scene.objects.find(o=>o.scatter)!.scatter!;expect(scene.objects.some(o=>o.id===scatter.model)).toBe(true);expect(scene.objects.some(o=>o.id===scatter.surface)).toBe(true);
   });
+  it('generates normal layer IDs when environment operations omit them',()=>{
+    const PM=editor();edit(PM,{operation:'set_world'});edit(PM,{operation:'add_fog'});
+    edit(PM,{operation:'add_terrain',terrain:{p:{resolution:2}}});
+    const terrain=compositionScene(PM).objects.find(o=>o.terrain)!;
+    edit(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}});
+    edit(PM,{operation:'add_scatter',scatter:{model:'model',surface:terrain.id,p:{count:2}}});
+    const scene=compositionScene(PM);expect(scene.objects.filter(o=>o.world||o.fog||o.terrain||o.scatter)).toHaveLength(4);
+    expect(new Set(scene.objects.map(o=>o.id)).size).toBe(5);
+  });
   it('remaps scatter and environment layer sources when a composition is copied',()=>{
     const layer={d:{data:{object:{source:{primitive:'plane'},scatter:{model:'model',surface:'ground'},world:{source:{layerId:'sky'}}}}}};
     remapMaterialLayerLinks(layer,new Map([['model','new_model'],['ground','new_ground'],['sky','new_sky']]));
     expect(layer.d.data.object.scatter).toEqual({model:'new_model',surface:'new_ground'});expect(layer.d.data.object.world.source).toEqual({layerId:'new_sky'});
+  });
+  it('scales environment-light sky and sunlight linearly with light intensity',()=>{
+    const PM=editor();edit(PM,{operation:'add_light',light:{id:'environment',type:'environment',p:{intensity:.5}}});
+    const half=(compositionRuntime(PM) as any).studioWorld,halfSun=worldSun(half)[12]!;
+    expect(half.sky.intensity).toBe(.5);expect(half.sky.sun_intensity).toBe(1);
+    edit(PM,{operation:'update_light',target:'environment',patch:{p:{intensity:1}}});
+    expect(worldSun((compositionRuntime(PM) as any).studioWorld)[12]).toBeCloseTo(halfSun*2,5);
+    edit(PM,{operation:'set_world',world:{p:{intensity:.25}}});
+    expect((compositionRuntime(PM) as any).studioWorld.sky.intensity).toBe(.25);
   });
   it('transports world, visibility policies, ambient lights, and iris through extraction',()=>{
     const PM=editor();edit(PM,{operation:'set_world',id:'world',world:{preset:'blue-hour',p:{metersPerUnit:1}}});

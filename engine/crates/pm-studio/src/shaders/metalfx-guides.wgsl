@@ -16,7 +16,7 @@ fn fx_guides(@builtin(global_invocation_id) g:vec3u) {
   let i=g.y*P.dims.x+g.x;let pixel=vec2i(g.xy);let px=vec2f(g.xy)+F.misc.zw+.5;
   seed=pcg(i^P.dims.z);let ray=camera_ray(px);let hit=primary_intersect(ray[0],ray[1],camera_limit(ray[0],ray[1]));let tf=floor_t(ray[0],ray[1]);
   var normal=vec3f(0.,1.,0.);var diffuse=vec3f(.82);var specular=vec3f(.04);var roughness=.8;var depth=1.;var point=ray[0]+ray[1]*1e5;
-  if(hit.tri>=0&&hit.t<tf){let sf=surface(ray[0],ray[1],hit);point=sf.p;normal=sf.n;diffuse=sf.m.base.xyz*(1.-sf.m.base.w)*(1.-sf.m.spec.w);specular=mix(vec3f(.04*sf.m.extra.y),sf.m.base.xyz,sf.m.base.w);roughness=sf.m.spec.x;}
+  if(hit.tri>=0&&hit.t<tf){let sf=surface(ray[0],ray[1],hit);point=sf.p;normal=sf.n;diffuse=sf.m.base.xyz*(1.-sf.m.base.w)*(1.-sf.m.spec.w);specular=fresnel_base(sf.m,1.);roughness=sf.m.spec.x;}
   else if(tf<BIG){point=ray[0]+ray[1]*tf;}
   if(dot(normal,ray[1])>0.){normal=-normal;}
   let viewz=dot(point-P.cam_pos.xyz,P.cam_fwd.xyz);let near=F.misc.x;let far=F.misc.y;

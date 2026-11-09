@@ -57,8 +57,9 @@ Surface lighting uses MIS against BSDF sampling. Radiance lookup is bilinear
 with longitude wrapping and polar clamping; the PDF remains the exact piecewise
 constant sampling distribution.
 
-Refine/Final use delta tracking for medium events and ratio tracking for shadow
-transmittance, HG phase sampling, and multiple volume/surface bounces. Live uses
+Refine/Final use delta tracking for medium events, exact analytic shadow
+transmittance for the current height/box/sphere media, HG phase sampling, and
+multiple volume/surface bounces. Live uses
 two primary-ray single-scattering steps with an ambient approximation and
 analytic height/box/sphere optical depth. Both produce geometry-dependent shafts
 and aerial perspective. Dense/very large

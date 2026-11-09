@@ -16,7 +16,11 @@ test('Studio motion blur keeps every shutter sample and deterministic final pixe
  const grab=async(blur:boolean)=>page.evaluate(async blur=>{
   const PM=(window as any).PM,options={mblur:blur,mbSamples:8,shutter:1,width:640,height:360};
   PM.agentFrameCapture=true;await PM.prepareFrame(.5,options);const c=PM.renderFrameTo(.5,640,360,options),d=c.getContext('2d').getImageData(0,0,640,360).data;PM.agentFrameCapture=false;
-  let left=640,right=0,count=0,hash=0,energy=0;for(let i=0;i<d.length;i+=4){hash=(Math.imul(hash,31)+d[i]+3*d[i+1]+7*d[i+2])|0;energy+=Math.max(0,d[i]-Math.max(d[i+1],d[i+2]));if(d[i]>d[i+1]+20 && d[i]>d[i+2]+20){const x=(i/4)%640;left=Math.min(left,x);right=Math.max(right,x);count++;}}
+  let left=640,right=0,count=0,hash=0,energy=0;const columns=new Float64Array(640);
+  for(let i=0;i<d.length;i+=4){hash=(Math.imul(hash,31)+d[i]+3*d[i+1]+7*d[i+2])|0;const red=Math.max(0,d[i]-Math.max(d[i+1],d[i+2]));energy+=red;columns[(i/4)%640]+=red;if(red>20)count++;}
+  // Shutter averaging lowers each sample's brightness. Measure spatial support
+  // relative to the frame, so material-energy corrections cannot hide samples.
+  const threshold=Math.max(...columns)*.1;for(let x=0;x<640;x++)if(columns[x]>threshold){left=Math.min(left,x);right=Math.max(right,x);}
   return {span:right-left,count,energy,hash,png:c.toDataURL()};
  },blur);
  const sharp=await grab(false),blurred=await grab(true),again=await grab(true);

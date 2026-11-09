@@ -178,11 +178,14 @@ nice -n 10 bun run --cwd apps/desktop test:unit \
   src/renderer/src/core/scene3d src/extensions/layers-3d \
   src/renderer/src/core/studio src/renderer/src/core/studio-native \
   src/main/studio-native \
+  src/main/agent-export.test.ts src/main/native-ipc.test.ts \
   src/renderer/src/legacy/core/space-3d.test.ts \
   src/renderer/src/legacy/core/groups-3d.test.ts \
   src/renderer/src/legacy/core/switch-3d-migration.test.ts \
   src/renderer/src/legacy/core/frame-preparation.test.ts \
-  src/renderer/src/legacy/core/agent-frame-capture.test.ts
+  src/renderer/src/legacy/core/agent-frame-capture.test.ts \
+  src/renderer/src/legacy/assistant/mcp-project-tools.test.ts \
+  src/main/agent-tools/spec.test.ts
 
 env -u ELECTRON_RUN_AS_NODE POWERMOVE_BACKGROUND_TEST=1 \
   nice -n 10 bun run --cwd apps/desktop test:e2e \
@@ -217,7 +220,11 @@ See [the document/agent contract and examples](../../apps/desktop/docs/STUDIO.md
 
 The environment acceptance suite adds four Electron cases. The complete
 non-film 3D command now includes 57 cases. The current targeted unit suite
-contains 354 checks across 39 files; Rust has 51 library/host/GPU checks.
+contains 356 checks across 39 files; Rust has 57 library/host/GPU/reference checks
+after integrating the Cycles comparison and lighting-accuracy branch. Its
+optional Blender regression and six Python metric/LUT checks pass. See the
+[Cycles yardstick and measured limits](cycles-yardstick.md). The four environment
+acceptance cases also pass with native transport disabled, forcing WebGPU.
 Typecheck has zero errors and the existing IconCropper accessibility warning.
 The native/WebGPU transport harness passes hero and room comparisons (mean
 RGB differences below 0.006 code values out of 255), empty-scene transitions

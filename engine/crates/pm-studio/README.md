@@ -1,8 +1,9 @@
 # pm-studio
 
 Studio, Powermove's product-shot renderer. Design and roadmap:
-`docs/3d-studio-redesign.md`. This crate is **Phase 0**: one
-GPU path tracer serving every quality tier, measured on product scenes.
+`docs/3d-studio-redesign.md`. One GPU path tracer serves every quality tier,
+the desktop's native host and its WebGPU fallback. The measurements below
+retain the original Phase 0 product-scene baseline.
 
 ## What it renders
 
@@ -18,8 +19,8 @@ GPU path tracer serving every quality tier, measured on product scenes.
   reference film) and a floor that only catches shadows and contact
   occlusion.
 - A thin-lens camera (focal length, f-stop, focus point).
-- Near-mirror coats (cover glass, lacquer) are traced on every sample, so
-  their reflections never sparkle.
+- Final/Refine trace full coat paths and attenuate emission through the coat.
+  Live splits near-mirror coats (cover glass, lacquer) to stabilize highlights.
 - Exposure → Khronos PBR Neutral → sRGB.
 
 ## Tiers
@@ -141,7 +142,9 @@ above.
   Final at 256 samples should drop well under 2 s per 1080p frame.
 - Caustics come from a photon grid (`photons` in `trace.wgsl`); very sharp
   focus lines (a lens's hot spot) are softened to the grid's cell size.
-- No multiple-scattering energy compensation, specular anti-aliasing,
-  motion blur or OIDN denoising for Final.
-- Not wired into the editor: the viewer bridge, layers, the Studio UI and
-  agent operations are Phases 1–2.
+- Isotropic unfilmed metals have multiple-scattering energy compensation;
+  anisotropic/film/dielectric compensation, specular anti-aliasing and
+  motion blur remain open. Final OIDN denoising is available with `oidn`.
+- The desktop viewer, exports and agent captures use this renderer. Document
+  and agent contracts are in `apps/desktop/docs/STUDIO.md`; implementation
+  coverage and remaining authoring gaps are in `docs/studio/parity.md`.

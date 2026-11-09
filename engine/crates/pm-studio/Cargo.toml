@@ -18,8 +18,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
+yardstick = []
 # Final-frame denoising with Intel Open Image Denoise (Apache-2.0), linked
 # from OIDN_DIR or Homebrew's open-image-denoise.
 oidn = []
 # macOS 26+ temporal denoising/upscaling; older systems use WGSL history/à-trous.
 metalfx = []
+
+[[bin]]
+name = "studio-yardstick"
+required-features = ["yardstick"]

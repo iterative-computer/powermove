@@ -343,7 +343,10 @@ fn tracking_segment(ro:vec3f,rd:vec3f,dist:f32)->vec3f {
   return vec3f(near,far,majorant);
 }
 // Exact optical depth for exponential height fog plus homogeneous local shapes.
-// Used by Live; Refine retains ratio tracking to share the heterogeneous path.
+// All current media have analytic integrals. Use these for shadow rays in every
+// tier: ratio tracking is unbiased but adds avoidable Bernoulli noise, especially
+// when a homogeneous medium equals its majorant. Free-flight collision sampling
+// still uses delta tracking, so multiple volume scattering is unchanged.
 fn live_optical_depth(ro:vec3f,rd:vec3f,end:f32)->f32 {
   let fog=world_row(2u);let h=world_row(3u);var optical=0.;
   let y0=ro.y-h.y;let y1=y0+rd.y*end;let k=h.z;
@@ -364,17 +367,7 @@ fn live_optical_depth(ro:vec3f,rd:vec3f,end:f32)->f32 {
 }
 fn medium_transmittance(ro:vec3f,rd:vec3f,dist:f32)->f32 {
   if(!world_on()){return 1.;}
-  let segment=tracking_segment(ro,rd,dist);let majorant=segment.z;let end=segment.y;
-  if(majorant<=0.){return 1.;}
-  if(P.opts.x!=0u){return exp(-live_optical_depth(ro,rd,medium_distance(dist)));}
-  var t=segment.x;var tr=1.;
-  loop {
-    t+=-log(max(1.-rnd(),1e-7))/majorant;
-    if(t>=end){break;}
-    tr*=max(0.,1.-medium_at(ro+rd*t).sigma/majorant);
-    if(tr<0.05){if(rnd()>0.1){return 0.;}tr/=0.1;}
-  }
-  return tr;
+  return exp(-live_optical_depth(ro,rd,medium_distance(dist)));
 }
 fn transmittance(ro:vec3f,rd:vec3f,dist:f32)->vec3f {
   return surface_transmittance(ro,rd,dist)*medium_transmittance(ro,rd,dist);
@@ -672,6 +665,7 @@ fn schlick(f0: vec3f, c: f32) -> vec3f { return f0 + (1.0 - f0) * pow(1.0 - clam
 fn schlick1(f0: f32, c: f32) -> f32 { return f0 + (1.0 - f0) * pow(1.0 - clamp(c, 0.0, 1.0), 5.0); }
 
 fn fresnel_dielectric(cosi: f32, eta: f32) -> f32 {
+  if (abs(eta - 1.0) < 1e-6) { return 0.0; }
   let s2 = (1.0 - cosi * cosi) / (eta * eta);
   if (s2 >= 1.0) { return 1.0; }
   let ct = sqrt(1.0 - s2);
@@ -703,22 +697,107 @@ fn spec_pdf(nv: f32, nh: f32, a: f32) -> f32 { return smith_g1(nv, a) * ggx_d(nh
 // dielectric's specular weight scales all of it, so specular 0 means no
 // reflection at any angle (OpenPBR).
 fn fresnel_base(m: Material, c: f32) -> vec3f {
-  return mix(vec3f(m.extra.y * schlick1(0.04, c)), schlick(m.base.xyz, c), m.base.w);
+  return mix(vec3f(fresnel_dielectric_base(m, c)), schlick(m.base.xyz, c), m.base.w);
 }
-fn fresnel_dielectric_base(m: Material, c: f32) -> f32 { return m.extra.y * schlick1(0.04, c); }
+fn fresnel_dielectric_base(m: Material, c: f32) -> f32 { return m.extra.y * fresnel_dielectric(c, max(m.extra.x, 1e-4)); }
 
 struct Lobes { coat: f32, spec: f32, diff: f32, trans: f32 }
 
 fn lobe_probs(m: Material, nv: f32) -> Lobes {
   let metallic = m.base.w;
   let tr = m.spec.w * (1.0 - metallic);
-  let fc = m.spec.y * schlick1(0.04, nv);
+  let fc = m.spec.y * fresnel_dielectric(nv, 1.5);
   let fs = fresnel_base(m, nv);
   let under = 1.0 - fc;
   var w = Lobes(fc, under * (1.0 - tr) * max(dot(fs, vec3f(0.333)), 0.04), under * (1.0 - metallic) * (1.0 - tr) * dot(m.base.xyz, vec3f(0.333)) * (1.0 - fs.x), under * tr);
   let s = w.coat + w.spec + w.diff + w.trans;
   if (s <= 0.0) { return Lobes(0.0, 1.0, 0.0, 0.0); }
   return Lobes(w.coat / s, w.spec / s, w.diff / s, w.trans / s);
+}
+
+// BEGIN GGX ENERGY LUT (generate_energy_lut.py, 16x16, 65536 samples/cell)
+const GGX_ENERGY = array<f32,256>(
+  1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000, 1.0000000,
+  0.9995149, 0.9975306, 0.9994009, 0.9997385, 0.9998432, 0.9998991, 0.9999433, 0.9999668, 0.9999723, 0.9999759, 0.9999785, 0.9999805, 0.9999819, 0.9999831, 0.9999839, 0.9999847,
+  0.9998668, 0.9602765, 0.9891992, 0.9953025, 0.9973423, 0.9982762, 0.9987854, 0.9990823, 0.9992651, 0.9993704, 0.9994726, 0.9995192, 0.9995876, 0.9996322, 0.9996607, 0.9996846,
+  0.9999307, 0.9009376, 0.9511613, 0.9751463, 0.9854942, 0.9905095, 0.9932714, 0.9949052, 0.9959142, 0.9966162, 0.9971459, 0.9975276, 0.9978160, 0.9979972, 0.9981541, 0.9983052,
+  0.9999513, 0.8887611, 0.9046925, 0.9353447, 0.9565657, 0.9696044, 0.9776516, 0.9828146, 0.9862361, 0.9886365, 0.9903357, 0.9916038, 0.9925431, 0.9933056, 0.9938858, 0.9943482,
+  0.9999605, 0.9002687, 0.8809377, 0.8955202, 0.9162890, 0.9342815, 0.9480350, 0.9581357, 0.9655465, 0.9710064, 0.9751239, 0.9782422, 0.9806721, 0.9825794, 0.9841018, 0.9853382,
+  0.9999657, 0.9117047, 0.8751582, 0.8698036, 0.8791993, 0.8934711, 0.9079385, 0.9207911, 0.9315839, 0.9404143, 0.9475749, 0.9533744, 0.9580838, 0.9619243, 0.9650813, 0.9677061,
+  0.9999659, 0.9170885, 0.8737513, 0.8545163, 0.8507792, 0.8558218, 0.8651345, 0.8759994, 0.8869069, 0.8971015, 0.9062713, 0.9143502, 0.9213727, 0.9274357, 0.9326716, 0.9371737,
+  0.9999630, 0.9163482, 0.8693440, 0.8415781, 0.8273902, 0.8225856, 0.8239331, 0.8290640, 0.8363204, 0.8445880, 0.8531400, 0.8615352, 0.8695126, 0.8769363, 0.8837555, 0.8899574,
+  0.9999577, 0.9105324, 0.8595980, 0.8257710, 0.8038134, 0.7906102, 0.7838689, 0.7818285, 0.7831229, 0.7867149, 0.7918238, 0.7978647, 0.8044184, 0.8111799, 0.8179316, 0.8245343,
+  0.9999506, 0.9006769, 0.8444079, 0.8050377, 0.7767564, 0.7566075, 0.7426788, 0.7335784, 0.7282349, 0.7258066, 0.7256197, 0.7271434, 0.7299465, 0.7336889, 0.7381008, 0.7429697,
+  0.9999418, 0.8876192, 0.8244663, 0.7791896, 0.7450528, 0.7188441, 0.6986497, 0.6831833, 0.6715074, 0.6629068, 0.6568176, 0.6527865, 0.6504459, 0.6494893, 0.6496649, 0.6507633,
+  0.9999316, 0.8720363, 0.8006711, 0.7489093, 0.7089376, 0.6771177, 0.6513547, 0.6302958, 0.6130032, 0.5987861, 0.5871230, 0.5776020, 0.5698929, 0.5637273, 0.5588843, 0.5551757,
+  0.9999200, 0.8544762, 0.7739133, 0.7152010, 0.6693497, 0.6322149, 0.6014422, 0.5755360, 0.5534786, 0.5345401, 0.5181758, 0.5039692, 0.4915937, 0.4807881, 0.4713397, 0.4630724,
+  0.9999073, 0.8353927, 0.7450075, 0.6791234, 0.6274775, 0.5853720, 0.5501559, 0.5201568, 0.4942426, 0.4716084, 0.4516599, 0.4339467, 0.4181179, 0.4038962, 0.3910585, 0.3794223,
+  0.9998933, 0.8151684, 0.7146655, 0.6416557, 0.5845024, 0.5379095, 0.4989024, 0.4656126, 0.4367795, 0.4115101, 0.3891471, 0.3691934, 0.3512635, 0.3350532, 0.3203184, 0.3068604,
+);
+const GGX_ENERGY_AVG = array<f32,16>(1.0000000, 0.9999307, 0.9986904, 0.9941112, 0.9841617, 0.9667984, 0.9404353, 0.9041977, 0.8580536, 0.8028883, 0.7404596, 0.6731958, 0.6038664, 0.5351917, 0.4694983, 0.4085059);
+const GGX_FRESNEL_B = array<f32,256>(
+  1.0000000, 0.7082456, 0.4889455, 0.3276800, 0.2120836, 0.1316872, 0.0777600, 0.0431513, 0.0221327, 0.0102400, 0.0041152, 0.0013485, 0.0003200, 0.0000421, 0.0000013, 0.0000000,
+  0.9105206, 0.7027009, 0.4873964, 0.3271246, 0.2118959, 0.1316543, 0.0777897, 0.0431957, 0.0221705, 0.0102664, 0.0041308, 0.0013561, 0.0003229, 0.0000429, 0.0000014, 0.0000000,
+  0.7622395, 0.6408029, 0.4695333, 0.3205270, 0.2094958, 0.1310201, 0.0778671, 0.0435003, 0.0224861, 0.0105065, 0.0042846, 0.0014365, 0.0003576, 0.0000539, 0.0000036, 0.0000003,
+  0.6117905, 0.5153683, 0.4131461, 0.2969507, 0.1999563, 0.1277173, 0.0772915, 0.0439672, 0.0231967, 0.0111252, 0.0047067, 0.0016741, 0.0004654, 0.0000907, 0.0000121, 0.0000013,
+  0.4791196, 0.4009488, 0.3306023, 0.2520753, 0.1783985, 0.1185729, 0.0742778, 0.0437013, 0.0239175, 0.0119941, 0.0053818, 0.0020895, 0.0006692, 0.0001677, 0.0000322, 0.0000037,
+  0.3701949, 0.3086247, 0.2532639, 0.1989162, 0.1472440, 0.1025750, 0.0672830, 0.0414565, 0.0238433, 0.0126570, 0.0060974, 0.0026013, 0.0009509, 0.0002854, 0.0000661, 0.0000082,
+  0.2846041, 0.2352011, 0.1913172, 0.1513156, 0.1148771, 0.0830584, 0.0569274, 0.0368262, 0.0223508, 0.0126123, 0.0065299, 0.0030433, 0.0012419, 0.0004251, 0.0001117, 0.0000147,
+  0.2192356, 0.1786037, 0.1439017, 0.1135760, 0.0870861, 0.0643722, 0.0455707, 0.0307091, 0.0195657, 0.0116841, 0.0064631, 0.0032559, 0.0014555, 0.0005523, 0.0001609, 0.0000230,
+  0.1702178, 0.1360627, 0.1083894, 0.0850407, 0.0653045, 0.0487822, 0.0352275, 0.0244359, 0.0161662, 0.0101125, 0.0059132, 0.0031802, 0.0015338, 0.0006340, 0.0002023, 0.0000317,
+  0.1338598, 0.1045334, 0.0821429, 0.0638938, 0.0489068, 0.0366484, 0.0267401, 0.0188865, 0.0128248, 0.0083028, 0.0050686, 0.0028721, 0.0014737, 0.0006547, 0.0002268, 0.0000396,
+  0.1070342, 0.0812862, 0.0628516, 0.0483515, 0.0367707, 0.0275083, 0.0201473, 0.0143701, 0.0099192, 0.0065747, 0.0041410, 0.0024415, 0.0013156, 0.0006202, 0.0002312, 0.0000451,
+  0.0872610, 0.0641189, 0.0486614, 0.0369399, 0.0278370, 0.0207200, 0.0151635, 0.0108579, 0.0075638, 0.0050890, 0.0032748, 0.0019872, 0.0011116, 0.0005498, 0.0002184, 0.0000475,
+  0.0726525, 0.0513653, 0.0381644, 0.0285269, 0.0212544, 0.0156987, 0.0114422, 0.0081912, 0.0057286, 0.0038876, 0.0025369, 0.0015709, 0.0009034, 0.0004640, 0.0001944, 0.0000468,
+  0.0618082, 0.0418000, 0.0303271, 0.0222762, 0.0163787, 0.0119797, 0.0086745, 0.0061897, 0.0043297, 0.0029504, 0.0019417, 0.0012189, 0.0007153, 0.0003782, 0.0001656, 0.0000437,
+  0.0537057, 0.0345385, 0.0244087, 0.0175861, 0.0127391, 0.0092116, 0.0066146, 0.0046944, 0.0032761, 0.0022344, 0.0014772, 0.0009356, 0.0005570, 0.0003011, 0.0001366, 0.0000390,
+  0.0476048, 0.0289511, 0.0198819, 0.0140276, 0.0099975, 0.0071379, 0.0050760, 0.0035776, 0.0024863, 0.0016935, 0.0011217, 0.0007144, 0.0004297, 0.0002362, 0.0001102, 0.0000336,
+);
+const GGX_FRESNEL_B_AVG = array<f32,16>(0.0476190, 0.0467935, 0.0457278, 0.0426717, 0.0378951, 0.0321600, 0.0263033, 0.0209327, 0.0163528, 0.0126337, 0.0097099, 0.0074579, 0.0057439, 0.0044465, 0.0034654, 0.0027218);
+// END GGX ENERGY LUT
+
+// Kulla-Conty isotropic conductor compensation. E is the directional albedo
+// of this exact single-scatter correlated-Smith GGX with Fresnel=1. The extra
+// reciprocal lobe restores missing inter-microfacet reflections. Colored Favg
+// accounts for absorption between those reflections. Film/anisotropy require
+// their own energy integrals and deliberately retain the original model.
+fn ggx_energy(roughness:f32, cosine:f32)->f32 {
+  let q=clamp(vec2f(cosine,roughness),vec2f(0.),vec2f(1.))*15.;
+  let p=vec2u(floor(q));let hi=min(p+vec2u(1u),vec2u(15u));let f=fract(q);
+  return mix(mix(GGX_ENERGY[p.y*16u+p.x],GGX_ENERGY[p.y*16u+hi.x],f.x),
+             mix(GGX_ENERGY[hi.y*16u+p.x],GGX_ENERGY[hi.y*16u+hi.x],f.x),f.y);
+}
+// Split-sum Schlick integral estimates the directional energy of the base
+// specular layer. The evaluated specular BSDF itself uses exact dielectric
+// Fresnel. This removes smooth-surface Fresnel attenuation from rough diffuse
+// layers, where it incorrectly absorbs energy at every wall bounce.
+fn dielectric_layer_albedo(m:Material,cosine:f32)->f32 {
+  let q=clamp(vec2f(cosine,m.spec.x),vec2f(0.),vec2f(1.))*15.;
+  let p=vec2u(floor(q));let hi=min(p+vec2u(1u),vec2u(15u));let f=fract(q);
+  let b=mix(mix(GGX_FRESNEL_B[p.y*16u+p.x],GGX_FRESNEL_B[p.y*16u+hi.x],f.x),
+            mix(GGX_FRESNEL_B[hi.y*16u+p.x],GGX_FRESNEL_B[hi.y*16u+hi.x],f.x),f.y);
+  let f0=fresnel_dielectric_base(m,1.);
+  return clamp(f0*ggx_energy(m.spec.x,cosine)+(m.extra.y-f0)*b,0.,0.999);
+}
+fn diffuse_layer_weight(m:Material,nv:f32,nl:f32)->f32 {
+  if(m.extra.w!=0. || m.layers.y>0.){return (1.-fresnel_dielectric_base(m,nv))*(1.-fresnel_dielectric_base(m,nl));}
+  let q=clamp(m.spec.x,0.,1.)*15.;let index=u32(floor(q));let hi=min(index+1u,15u);
+  let average=mix(GGX_ENERGY_AVG[index],GGX_ENERGY_AVG[hi],fract(q));
+  let b=mix(GGX_FRESNEL_B_AVG[index],GGX_FRESNEL_B_AVG[hi],fract(q));
+  let f0=fresnel_dielectric_base(m,1.);
+  let reflected=clamp(f0*average+(m.extra.y-f0)*b,0.,0.999);
+  // Reciprocal layered-diffuse normalization returns internally reflected
+  // energy instead of losing both entry and exit Fresnel factors forever.
+  return (1.-dielectric_layer_albedo(m,nv))*(1.-dielectric_layer_albedo(m,nl))/(1.-reflected);
+}
+fn ggx_multiscatter(m:Material,nv:f32,nl:f32)->vec3f {
+  if(m.base.w<=0. || m.extra.w!=0. || m.layers.y>0.){return vec3f(0.);}
+  let q=clamp(m.spec.x,0.,1.)*15.;let index=u32(floor(q));
+  let average=mix(GGX_ENERGY_AVG[index],GGX_ENERGY_AVG[min(index+1u,15u)],fract(q));
+  let favg=m.base.xyz+(vec3f(1.)-m.base.xyz)/21.;
+  let color=favg*favg*average/max(vec3f(1.)-favg*(1.-average),vec3f(1e-6));
+  let shape=(1.-ggx_energy(m.spec.x,nv))*(1.-ggx_energy(m.spec.x,nl))/max(1.-average,1e-6);
+  return color*(m.base.w*shape*nl/PI);
 }
 
 // BSDF × cos for reflection (coat over specular + diffuse).
@@ -740,12 +819,12 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let tr = m.spec.w * (1.0 - metallic);
   // Glass reflects through its transmission lobe (Fresnel-weighted with the
   // refraction); here only the opaque part's specular remains.
-  spec *= 1.0 - tr;
-  let diff = m.base.xyz * (1.0 - metallic) * (1.0 - tr) * (1.0 - fresnel_dielectric_base(m, nl)) * (1.0 - fresnel_dielectric_base(m, nv)) * nl / PI;
+  spec = spec * (1.0 - tr) + ggx_multiscatter(m, nv, nl);
+  let diff = m.base.xyz * (1.0 - metallic) * (1.0 - tr) * diffuse_layer_weight(m, nv, nl) * nl / PI;
   let ca = m.spec.z * m.spec.z;
-  let fc = m.spec.y * schlick1(0.04, vh);
+  let fc = m.spec.y * fresnel_dielectric(vh, 1.5);
   let coat = fc * ggx_d(nh, ca) * smith_g2(nv, nl, ca) / (4.0 * nv);
-  let atten = (1.0 - m.spec.y * schlick1(0.04, nv)) * (1.0 - m.spec.y * schlick1(0.04, nl));
+  let atten = (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * (1.0 - m.spec.y * fresnel_dielectric(nl, 1.5));
   return vec3f(coat) + (spec + diff + sheen(m, nh, nl, nv)) * atten;
 }
 
@@ -1219,18 +1298,19 @@ fn path(px: vec2f) -> Sample {
     if (!front) { n = -n; ng = -ng; }
     if (primary) { s.normal = n; s.depth = select(distance(sf.p,P.cam_pos.xyz), dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz), (P.opts.w & 1u)!=0u); s.object = sf.object + 1u; }
     let v = -rd;
-    // Emission (a product's screen, or a glowing part).
+    var nv = max(dot(n, v), 1e-4);
+    // Emission originates below the coat and loses its reflected share on exit.
     if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
-      if (primary) { s.emit += tp*m.emit.xyz; } else { s.radiance += tp * m.emit.xyz; }
+      let emitted = m.emit.xyz * (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5));
+      if (primary) { s.emit += tp * emitted; } else { s.radiance += tp * emitted; }
     }
     if ((u32(m.policy.y) & 8u) != 0u) { return s; }
-    var nv = max(dot(n, v), 1e-4);
     let p = sf.p + ng * ray_epsilon();
-    // A near-mirror coat (cover glass, lacquer) is traced on every sample
-    // instead of being picked 1 time in ~16, so its reflections never
-    // sparkle; the path continues through the base layer.
-    if (m.spec.y > 0.0 && m.spec.z < 0.05 && front && (primary || P.opts.x == 0u)) {
-      let fc = m.spec.y * schlick1(0.04, nv);
+    // Live splits near-mirror coats to keep highlights stable at one sample.
+    // Final/Refine follow the full coat BSDF: the shortcut only follows one
+    // reflection bounce and omits the incoming coat attenuation of the base.
+    if (m.spec.y > 0.0 && m.spec.z < 0.05 && front && primary && P.opts.x != 0u) {
+      let fc = m.spec.y * fresnel_dielectric(nv, 1.5);
       s.radiance += tp * fc * mirror_radiance(p, reflect(-v, n));
       tp *= 1.0 - fc;
       m.spec.y = 0.0;
@@ -1253,7 +1333,7 @@ fn path(px: vec2f) -> Sample {
     let pick = rnd();
     if (pick < w.trans) {
       // This lobe is the glass share of the surface (under any coat), chosen with probability w.trans.
-      tp *= (1.0 - m.spec.y * schlick1(0.04, nv)) * m.spec.w * (1.0 - m.base.w) / w.trans;
+      tp *= (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * m.spec.w * (1.0 - m.base.w) / w.trans;
       // Rough dielectric transmission/reflection through a sampled microfacet.
       let a = max(m.spec.x * m.spec.x, 0.0005);
       let tb = basis(n);
