@@ -1570,6 +1570,9 @@ impl Controller {
             }
             "shader.compile" => return self.shader_command(&cmd.name, cx),
             name if name.starts_with("shader.preset:") => return self.shader_command(name, cx),
+            name if name.starts_with("captions.cue:") => {
+                return self.captions_command(name, window, cx);
+            }
             name if name.starts_with("captions.layer:") => {
                 return self.captions_command(name, window, cx);
             }

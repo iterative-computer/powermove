@@ -418,6 +418,15 @@ impl Controller {
         let Some(layer) = self.captions_layer() else {
             return;
         };
+        self.captions_select_in(layer, cue, mode, cx);
+    }
+    fn captions_select_in(
+        &mut self,
+        layer: Layer,
+        cue: &str,
+        mode: SelectionMode,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(time) = self.captions.selection.select(&layer, cue, mode) {
             self.captions.chosen = Some(layer.id.clone());
             self.select_only(&layer.id, cx);
@@ -439,6 +448,31 @@ impl Controller {
             "generateCaptions" => self.generate_captions(None, cx),
             "deleteCaptions" => return self.delete_cues(cx),
             "splitCaption" => return self.split_cue(cx),
+            other if other.starts_with("captions.cue:") => {
+                // The timeline's cue: `captions.cue:<verb>:<layer>\u{1f}<cue>`.
+                let rest = &other["captions.cue:".len()..];
+                let Some((verb, ids)) = rest.split_once(':') else {
+                    return false;
+                };
+                let Some((layer, cue)) = ids.split_once('\u{1f}') else {
+                    return false;
+                };
+                let mode = match verb {
+                    "extend" => SelectionMode::Extend,
+                    "toggle" => SelectionMode::Toggle,
+                    _ => SelectionMode::Replace,
+                };
+                let Some(layer) = self
+                    .captions_doc()
+                    .and_then(|d| d.layers.iter().find(|l| l.id == layer).cloned())
+                else {
+                    return false;
+                };
+                self.captions_select_in(layer.clone(), cue, mode, cx);
+                if verb == "edit" {
+                    self.begin_edit(&layer, cue, window, cx);
+                }
+            }
             other => {
                 let Some(id) = other.strip_prefix("captions.layer:") else {
                     return false;

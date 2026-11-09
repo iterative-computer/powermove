@@ -862,6 +862,24 @@ impl TimelineSurface {
             self.press_graph(event, x, y, additive, area, cx);
             return;
         }
+        // A caption cue: selected (and edited on double-click) by itself,
+        // in step with the Captions panel; the clip isn't dragged.
+        if let Some((layer, cue)) = frame
+            .hit_op("cue:", x, y, 0.)
+            .and_then(|o| pm_panel_timeline::render::parse_cue_op(&o.id))
+        {
+            let mode = if event.modifiers.shift {
+                "extend"
+            } else if event.modifiers.platform {
+                "toggle"
+            } else {
+                "replace"
+            };
+            let verb = if event.click_count >= 2 { "edit" } else { mode };
+            self.delegate
+                .command(&format!("captions.cue:{verb}:{layer}\u{1f}{cue}"), cx);
+            return;
+        }
         let slop = ((m.hit - m.keyframe) as f64 / 2.).max(0.);
         if let Some((_, key)) = frame.hit_key(x, y, slop)
             && let Some((layer, channel, _)) = self.model.index.key(&key)
@@ -1774,6 +1792,7 @@ struct Presenter {
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
     wanted: RefCell<Vec<PathBuf>>,
+    published: Arc<Published>,
 }
 impl ModelPresenter for Presenter {
     fn accessibility_label(&self, row: &RowId) -> String {
@@ -1816,6 +1835,34 @@ impl ModelPresenter for Presenter {
             }
         })
     }
+    fn cues(&self, layer: &pm_panel_timeline::Layer) -> Vec<pm_panel_timeline::render::CueMark> {
+        if layer.kind != "captions" {
+            return vec![];
+        }
+        let Some(root) = self.published.snapshot.root() else {
+            return vec![];
+        };
+        let Some(node) = pm_kernel::model::find_layer(root, &layer.id).and_then(|at| {
+            let comp = pm_kernel::model::comp_node(root, at.comp_id.as_deref())?;
+            pm_kernel::model::layers_of(comp).nth(at.index)
+        }) else {
+            return vec![];
+        };
+        let Some(cues) = node.get("d").and_then(|d| d.get("cues")) else {
+            return vec![];
+        };
+        let cues: Vec<pm_captions::CaptionCue> =
+            serde_json::from_str(&pm_model::json::to_canonical_string(&cues.to_value()))
+                .unwrap_or_default();
+        cues.into_iter()
+            .map(|c| pm_panel_timeline::render::CueMark {
+                id: c.id,
+                start: layer.from + c.start,
+                end: layer.from + c.end,
+                text: c.text,
+            })
+            .collect()
+    }
     fn interpolation(&self, key: &pm_panel_timeline::Key) -> Interpolation {
         match key.stored.get("e").and_then(pm_model::Value::as_str) {
             Some("hold") => Interpolation::Hold,
@@ -1842,6 +1889,7 @@ fn build(
         offline,
         sources,
         wanted: Default::default(),
+        published: published.clone(),
     };
     let mut scene = Scene::from_model(&client.model, &presenter, tokens, 0.).ok()?;
     scene.bars = crate::render_frames::bars(client.model.index.comp_id.as_deref());
