@@ -87,7 +87,7 @@ impl Records {
 }
 
 /// The kernel implementation MUST compare revision and archive the old slot in
-/// the same transaction as replacement. A SettingsHook get/set pair is insufficient.
+/// the same transaction as replacement; a separate get and set is insufficient.
 /// A failure leaves the old slot intact; retries use a fresh read. No filesystem IO here.
 pub trait RecordHost {
     fn replace_retaining(&mut self, slot: &str, before: &Records, after: &[Value]) -> Result<u64>;

@@ -2,7 +2,7 @@ use super::test_storage;
 use crate::error::Result;
 use crate::service_bail as bail;
 use crate::{
-    fonts, library, settings,
+    fonts,
     storage::{self, ServiceStorage},
 };
 use serde_json::{Value, json};
@@ -186,103 +186,6 @@ fn valid_json_corruption_is_not_accepted_as_a_new_setting_value() {
     assert!(store.set("key", json!("next")).is_err());
 }
 
-#[derive(Default)]
-struct LibraryDouble {
-    entries: Vec<library::ProjectEntry>,
-    recent: Vec<String>,
-    actions: Vec<library::LibraryAction>,
-    fail: bool,
-}
-impl library::LibraryHook for LibraryDouble {
-    fn list(&mut self) -> Result<Vec<library::ProjectEntry>> {
-        Ok(self.entries.clone())
-    }
-    fn recents(&mut self) -> Result<Vec<String>> {
-        Ok(self.recent.clone())
-    }
-    fn apply(&mut self, action: library::LibraryAction) -> Result<()> {
-        if self.fail {
-            bail!("kernel refused")
-        }
-        self.actions.push(action);
-        Ok(())
-    }
-}
-#[test]
-fn library_preserves_recency_and_filters_archived_missing_duplicates() {
-    let entries = ["old", "new", "trash"]
-        .map(|id| library::ProjectEntry {
-            id: id.into(),
-            name: id.into(),
-            modified_ms: 1,
-            trashed: id == "trash",
-            summary: None,
-        })
-        .to_vec();
-    let mut service = library::LibraryService(LibraryDouble {
-        entries,
-        recent: ["new", "new", "missing", "trash", "old"]
-            .map(String::from)
-            .to_vec(),
-        ..Default::default()
-    });
-    assert_eq!(service.list(false).unwrap().len(), 2);
-    assert_eq!(service.list(true).unwrap().len(), 3);
-    assert_eq!(
-        service
-            .recents()
-            .unwrap()
-            .iter()
-            .map(|e| e.id.as_str())
-            .collect::<Vec<_>>(),
-        ["new", "old"]
-    );
-}
-#[test]
-fn checkpoint_revision_and_archive_are_forwarded_without_second_writer() {
-    let mut service = library::LibraryService(LibraryDouble::default());
-    let action = library::LibraryAction::Checkpoint {
-        id: "project".into(),
-        expected_revision: 42,
-    };
-    service.apply(action.clone()).unwrap();
-    service
-        .apply(library::LibraryAction::Archive {
-            id: "project".into(),
-        })
-        .unwrap();
-    service
-        .apply(library::LibraryAction::Restore {
-            id: "project".into(),
-        })
-        .unwrap();
-    assert_eq!(service.0.actions[0], action);
-    assert_eq!(service.0.actions.len(), 3);
-}
-#[test]
-fn library_refusal_and_invalid_duplicate_do_not_succeed() {
-    let mut service = library::LibraryService(LibraryDouble {
-        fail: true,
-        ..Default::default()
-    });
-    assert!(
-        service
-            .apply(library::LibraryAction::Open {
-                id: "project".into()
-            })
-            .is_err()
-    );
-    assert!(
-        service
-            .apply(library::LibraryAction::Duplicate {
-                id: "project".into(),
-                new_id: "project".into()
-            })
-            .is_err()
-    );
-    assert!(service.0.actions.is_empty());
-}
-
 struct FontDouble {
     versions: VecDeque<Option<u64>>,
     reads: usize,
@@ -354,56 +257,6 @@ fn empty_unknown_and_failed_fonts_can_recover() {
     assert!(fonts.families().is_ok());
 }
 
-#[derive(Default)]
-struct SettingsDouble {
-    writes: Vec<(String, Option<Value>)>,
-    value: Option<Value>,
-    fail: bool,
-}
-impl settings::SettingsHook for SettingsDouble {
-    fn get(&mut self, _: &str) -> Result<Option<Value>> {
-        Ok(self.value.clone())
-    }
-    fn apply(&mut self, key: &str, value: Option<Value>) -> Result<u64> {
-        if self.fail {
-            bail!("kernel state refused")
-        }
-        self.writes.push((key.into(), value.clone()));
-        self.value = value;
-        Ok(self.writes.len() as u64)
-    }
-}
-#[test]
-fn app_settings_delegate_null_deletion_and_unknown_values_to_kernel() {
-    let mut service = settings::SettingsService(SettingsDouble::default());
-    assert_eq!(
-        service
-            .set("unknown.future", json!({"nested":[null,true]}))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        service.get("unknown.future").unwrap(),
-        Some(json!({"nested":[null,true]}))
-    );
-    assert_eq!(service.set("unknown.future", Value::Null).unwrap(), 2);
-    assert_eq!(service.get("unknown.future").unwrap(), Some(Value::Null));
-    assert_eq!(service.archive("unknown.future").unwrap(), 3);
-    assert_eq!(service.get("unknown.future").unwrap(), None);
-    assert_eq!(service.0.writes.len(), 3);
-}
-#[test]
-fn app_settings_refuse_invalid_keys_and_propagate_kernel_errors() {
-    let mut service = settings::SettingsService(SettingsDouble {
-        fail: true,
-        ..Default::default()
-    });
-    assert!(service.set("theme", json!("dark")).is_err());
-    assert!(service.archive("theme").is_err());
-    assert!(service.get("invalid\nkey").is_err());
-    assert!(service.0.writes.is_empty());
-}
-
 #[test]
 fn font_registry_change_invalidates_previously_cached_family_list() {
     let mut fonts = font_catalog(
@@ -416,63 +269,3 @@ fn font_registry_change_invalidates_previously_cached_family_list() {
     assert_eq!(fonts.hook.reads, 2);
 }
 
-#[test]
-fn library_internal_actions_keep_mac_menu_vocabulary() {
-    let mut service = library::LibraryService(LibraryDouble::default());
-    let archive = library::LibraryAction::Archive {
-        id: "synthetic".into(),
-    };
-    let restore = library::LibraryAction::Restore {
-        id: "synthetic".into(),
-    };
-    assert_eq!(archive.trash_menu_label(), Some("Move to Trash"));
-    assert_eq!(restore.trash_menu_label(), Some("Put Back"));
-    assert_eq!(library::RECENTLY_DELETED_LABEL, "Recently Deleted");
-    service.apply(archive.clone()).unwrap();
-    service.apply(restore.clone()).unwrap();
-    assert_eq!(service.0.actions, vec![archive, restore]);
-}
-
-#[test]
-fn library_old_rows_open_without_invented_summary_or_date_copy() {
-    let row =
-        json!({"id":"synthetic", "name":"Synthetic Project", "modified_ms":1234, "trashed":true});
-    let entry: library::ProjectEntry = serde_json::from_value(row.clone()).unwrap();
-    assert_eq!(entry.summary, None);
-    assert_eq!(entry.modified_ms, 1234);
-    assert_eq!(serde_json::to_value(entry).unwrap(), row);
-}
-
-#[test]
-fn library_rows_and_recents_preserve_kernel_supplied_display_facts() {
-    let summary = library::ProjectSummary {
-        thumbnail: Some("synthetic-poster".into()),
-        duration_ms: 12_345,
-        width: 1920,
-        height: 1080,
-        fps: library::FrameRate {
-            numerator: 30_000,
-            denominator: 1001,
-        },
-    };
-    let entry = library::ProjectEntry {
-        id: "synthetic".into(),
-        name: "Synthetic Project".into(),
-        modified_ms: 1_234,
-        trashed: false,
-        summary: Some(summary),
-    };
-    let roundtrip: library::ProjectEntry =
-        serde_json::from_value(serde_json::to_value(&entry).unwrap()).unwrap();
-    assert_eq!(roundtrip, entry);
-    let mut service = library::LibraryService(LibraryDouble {
-        entries: vec![roundtrip],
-        recent: vec!["synthetic".into()],
-        ..Default::default()
-    });
-    assert_eq!(service.list(false).unwrap(), vec![entry.clone()]);
-    let mut recent = service.recents().unwrap();
-    assert_eq!(recent, vec![entry.clone()]);
-    recent[0].summary.as_mut().unwrap().thumbnail = None;
-    assert_eq!(service.recents().unwrap(), vec![entry]);
-}

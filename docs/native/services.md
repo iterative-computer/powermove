@@ -59,8 +59,8 @@ calls. Dropping the sender does not join on main; already admitted tasks drain.
 The app must submit/poll its final checkpoint/flush before dropping the worker.
 No kernel actor callback or GPUI action should call these I/O methods inline.
 
-`LibraryHook` and `SettingsHook` forward to the one existing KernelHandle. They
-must not attach a new library or create a second document/settings authority.
+Library and settings persistence go through the one existing KernelHandle; no
+service attaches a new library or creates a second document/settings authority.
 `FontHook` accesses the existing CoreText broker. `MediaHook` must probe/import
 an immutable source and deduplicate admission by job id; the kernel owns asset
 mutation and Undo. Host network/OS traits are absent until explicitly supplied.
