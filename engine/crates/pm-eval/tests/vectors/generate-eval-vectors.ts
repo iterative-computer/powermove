@@ -33,11 +33,13 @@
  * excluded (documented in pm_eval::keyframes).
  */
 import { writeFileSync } from 'node:fs';
-import { install as installEasing } from '../../../../../apps/desktop/src/renderer/src/legacy/core/easing';
-import { install as installAnim } from '../../../../../apps/desktop/src/renderer/src/legacy/core/anim';
-import { install as installModel } from '../../../../../apps/desktop/src/renderer/src/legacy/core/model';
-import * as TE from '../../../../../apps/desktop/src/renderer/src/core/anim/temporal-ease';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { install as installEasing } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/easing`);
+const { install as installAnim } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/anim`);
+const { install as installModel } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/model`);
+const TE: any = await import(`${v1Root}/apps/desktop/src/renderer/src/core/anim/temporal-ease`);
 const SCALE = Number(process.env.PM_EVAL_SCALE ?? 1);
 const OUT = process.env.PM_EVAL_OUT ?? new URL('./eval-vectors.json', import.meta.url).pathname;
 

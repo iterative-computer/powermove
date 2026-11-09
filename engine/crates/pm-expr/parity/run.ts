@@ -22,6 +22,8 @@ import { CONTEXTS, EDGE_CASES, fuzzCases, harvestCorpus, harvestRepository, matr
 const here = dirname(new URL(import.meta.url).pathname);
 const crateDir = resolve(here, '..');
 const repoRoot = resolve(crateDir, '../../..');
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 const engineDir = join(repoRoot, 'engine');
 
 const args = process.argv.slice(2);
@@ -45,7 +47,7 @@ const out = mkdtempSync(join(tmpdir(), 'pm-expr-parity-'));
 console.log(`parity: working in ${out}`);
 
 // 1. Bundle expression.ts as plain ESM.
-const source = join(repoRoot, 'apps/desktop/src/renderer/src/legacy/core/expression.ts');
+const source = join(v1Root, 'apps/desktop/src/renderer/src/legacy/core/expression.ts');
 const built = await Bun.build({ entrypoints: [source], format: 'esm', target: 'node', minify: false });
 if (!built.success) throw new Error(built.logs.join('\n'));
 const modulePath = join(out, 'expression.mjs');
@@ -103,7 +105,7 @@ writeCases(join(out, 'cases.jsonl'), contexts, allCases);
 writeCases(join(out, 'fixture-cases.jsonl'), CONTEXTS, publicCases);
 
 // 3. Reference results: V8 (authoritative) and JavaScriptCore (informational).
-const electron = join(repoRoot, 'apps/desktop/node_modules/.bin/electron');
+const electron = join(v1Root, 'apps/desktop/node_modules/.bin/electron');
 if (!existsSync(electron)) throw new Error('Electron is missing: run `bun install` in the repository root');
 const reference = join(here, 'reference.mjs');
 const v8 = { ELECTRON_RUN_AS_NODE: '1' };

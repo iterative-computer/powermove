@@ -17,7 +17,8 @@ const [file, output, secondsArg = '15'] = process.argv.slice(2);
 if (!file || !output) throw new Error('wav and outside-repository output required');
 const seconds = Number(secondsArg);
 const loadThreads = Number(process.env.PM_AUDIO_LOAD_THREADS ?? 4);
-process.env.POWERMOVE_PM_BRIDGE ??= resolve(import.meta.dir, '../../../../apps/desktop/native/pm_bridge.node');
+// The Electron app and its native bridge ship from main; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+process.env.POWERMOVE_PM_BRIDGE ??= resolve(process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0', 'apps/desktop/native/pm_bridge.node');
 
 interface Proc { pid: number; ppid: number; cpu: number; command: string }
 

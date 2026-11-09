@@ -1,6 +1,8 @@
 // Independent 3D Library card light rendered by Three.js r180 in RGBA32F.
 // Bundle this browser entry outside pm-electron-lock before the E2E test.
-import * as THREE from '../../../../apps/desktop/node_modules/three/build/three.module.js';
+import * as THREE from v1Root + '/apps/desktop/node_modules/three/build/three.module.js';
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 
 (globalThis as any).cardFloatReference = ({ width, height, view }: {
   width: number; height: number; view: any;

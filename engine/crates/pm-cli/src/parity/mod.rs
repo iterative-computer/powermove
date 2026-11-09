@@ -221,9 +221,10 @@ pub fn run(opts: &Options) -> Result<Report, String> {
         .then(|| fonts::FontService::new(opts.wasm_subsets));
     let mut runner = if opts.wasm {
         let engine = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let module = opts.wasm_module.clone().unwrap_or_else(|| {
-            engine.join("../../../apps/desktop/src/renderer/public/engine/pm_wasm.wasm")
-        });
+        let module = opts
+            .wasm_module
+            .clone()
+            .unwrap_or_else(|| engine.join("../../target/pm-wasm/pm_wasm.wasm"));
         if !module.is_file() {
             return Err(format!(
                 "{} is missing; build it with node engine/crates/pm-wasm/scripts/build.mjs",

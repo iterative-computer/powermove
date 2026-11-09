@@ -7,9 +7,11 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 
 export const repoRoot = path.resolve(import.meta.dir, '../../..');
-export const desktopRoot = path.join(repoRoot, 'apps/desktop');
+export const desktopRoot = path.join(v1Root, 'apps/desktop');
 export const desktopSrc = path.join(desktopRoot, 'src');
 export const rendererSrc = path.join(desktopSrc, 'renderer/src');
 export const fixturesDir = path.join(repoRoot, 'engine/fixtures');

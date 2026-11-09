@@ -54,3 +54,4 @@ apps/desktop/src/renderer/public/engine/
 packages/cli/prebuilds/
 __pycache__/
 *.pyc
+engine/target/pm-wasm/

@@ -19,12 +19,11 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const engineDir = resolve(here, '../../..');
-const repo = resolve(engineDir, '..');
 const args = process.argv.slice(2);
 const option = (name, fallback) => { const i = args.indexOf(name); return i >= 0 ? Number(args[i + 1]) : fallback; };
 const SEEDS = option('--seeds', 6);
 const LAYERS = option('--layers', 40);
-const modulePath = join(repo, 'apps/desktop/src/renderer/public/engine/pm_wasm.wasm');
+const modulePath = join(engineDir, 'target/pm-wasm/pm_wasm.wasm');
 
 function rng(seed) {
   return () => {

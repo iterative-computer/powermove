@@ -23,15 +23,19 @@ import { execFileSync, execSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { registerV1Resolve } from './v1-resolve';
 import { deflateSync } from 'node:zlib';
-import { cases } from './gltf-cases';
 import * as models from './gltf/models';
 import { encodePng } from './gltf/png';
 import * as tex from './gltf/textures';
+registerV1Resolve();
+const { cases } = await import('./gltf-cases');
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const crate = path.join(here, '../..');
 const repo = path.join(crate, '../../..');
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const commit = execSync('git rev-parse --short=8 HEAD', { cwd: repo }).toString().trim();
@@ -113,7 +117,7 @@ const server = Bun.serve({
   },
 });
 
-const { chromium } = await import(path.join(repo, 'apps/desktop/node_modules/playwright/index.mjs'));
+const { chromium } = await import(path.join(v1Root, 'apps/desktop/node_modules/playwright/index.mjs'));
 const browser = await chromium.launch({ headless: true, args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
 const failures: string[] = [];
 try {

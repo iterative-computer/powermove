@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../../..');
-const modulePath = join(repo, 'apps/desktop/src/renderer/public/engine/pm_wasm.wasm');
+const modulePath = join(repo, 'engine/target/pm-wasm/pm_wasm.wasm');
 const root = join(homedir(), 'Library/Application Support/Powermove Engine Corpus');
 const capture = process.argv[2] ?? join(root, readdirSync(root).filter((d) => d.startsWith('v1-')).sort().pop());
 const OPS = ['active', 'localMatrix', 'worldMatrix', 'transformParentMatrix', 'worldOpacity', 'resolveContent', 'local3D', 'parent3D'];

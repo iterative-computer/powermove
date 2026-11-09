@@ -26,21 +26,24 @@
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { install as installEasing } from '../../../../../apps/desktop/src/renderer/src/legacy/core/easing';
-import { install as installAnim } from '../../../../../apps/desktop/src/renderer/src/legacy/core/anim';
-import { install as installModel } from '../../../../../apps/desktop/src/renderer/src/legacy/core/model';
-import * as S3 from '../../../../../apps/desktop/src/renderer/src/legacy/core/space-3d';
-import * as Parenting from '../../../../../apps/desktop/src/renderer/src/legacy/core/parenting';
-import { captureSizeAnchor, sizeAnchorReference } from '../../../../../apps/desktop/src/renderer/src/legacy/core/size-anchor';
-import { captureFontAnchor, fontAnchorReference, rescaleAnchorBounds } from '../../../../../apps/desktop/src/renderer/src/legacy/core/font-anchor';
-import { leaveAttributeBounds, shiftLeaveAnchor } from '../../../../../apps/desktop/src/renderer/src/legacy/core/compositions';
-import { splitTextLayers } from '../../../../../apps/desktop/src/renderer/src/legacy/core/split-text';
-import { alignDelta, deltaInParent, unionBox, type AlignMode } from '../../../../../apps/desktop/src/extensions/inspector/align';
-import { adoptTemporalEase } from '../../../../../apps/desktop/src/renderer/src/core/anim/temporal-ease';
-import { canonicalProject } from '../../../../../apps/desktop/src/shared/canonical-json';
-import { install as installCompositor } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/compositor';
-import { install as installRaster } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/raster';
+import type { AlignMode } from '../../../../../apps/desktop/src/extensions/inspector/align';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { install as installEasing } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/easing`);
+const { install as installAnim } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/anim`);
+const { install as installModel } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/model`);
+const S3: any = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/space-3d`);
+const Parenting: any = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/parenting`);
+const { captureSizeAnchor, sizeAnchorReference } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/size-anchor`);
+const { captureFontAnchor, fontAnchorReference, rescaleAnchorBounds } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/font-anchor`);
+const { leaveAttributeBounds, shiftLeaveAnchor } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/compositions`);
+const { splitTextLayers } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/split-text`);
+const { alignDelta, deltaInParent, unionBox } = await import(`${v1Root}/apps/desktop/src/extensions/inspector/align`);
+const { adoptTemporalEase } = await import(`${v1Root}/apps/desktop/src/renderer/src/core/anim/temporal-ease`);
+const { canonicalProject } = await import(`${v1Root}/apps/desktop/src/shared/canonical-json`);
+const { install as installCompositor } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/gl/compositor`);
+const { install as installRaster } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/gl/raster`);
 const SCALE = Number(process.env.PM_EDIT_SCALE ?? 1);
 const CORPUS = process.env.PM_EDIT_CORPUS ?? '';
 const OUT = process.env.PM_EDIT_OUT ?? new URL('./edit-vectors.json.gz', import.meta.url).pathname;

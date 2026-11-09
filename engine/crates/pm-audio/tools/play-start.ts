@@ -13,7 +13,8 @@ import { launchLegacyApp } from '../../../corpus/src/app';
 const [file, output, count = '30'] = process.argv.slice(2);
 if (!file || !output) throw new Error('wav and outside-repository output required');
 // Use the packaged copy so the harness also works after build-target cleanup.
-process.env.POWERMOVE_PM_BRIDGE ??= resolve(import.meta.dir, '../../../../apps/desktop/native/pm_bridge.node');
+// The Electron app and its native bridge ship from main; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+process.env.POWERMOVE_PM_BRIDGE ??= resolve(process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0', 'apps/desktop/native/pm_bridge.node');
 const waitMs = Number(process.env.PM_AUDIO_START_WAIT_MS ?? 250);
 const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs };
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : [false, true];

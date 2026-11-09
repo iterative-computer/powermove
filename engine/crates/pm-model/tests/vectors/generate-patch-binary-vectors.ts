@@ -21,11 +21,14 @@
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { canonicalStringify } from '../../../../../apps/desktop/src/shared/canonical-json';
-import { applyPatch, diffPatches } from '../../../../../apps/desktop/src/shared/patch';
-import { encodePatchOps } from '../../../../../apps/desktop/src/shared/patch-binary';
-import { applyOps, diffOps, IdOpMismatch, type PatchOp } from '../../../../../apps/desktop/src/shared/patch-ids';
+import type { PatchOp } from '../../../../../apps/desktop/src/shared/patch-ids';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { canonicalStringify } = await import(`${v1Root}/apps/desktop/src/shared/canonical-json`);
+const { applyPatch, diffPatches } = await import(`${v1Root}/apps/desktop/src/shared/patch`);
+const { encodePatchOps } = await import(`${v1Root}/apps/desktop/src/shared/patch-binary`);
+const { applyOps, diffOps, IdOpMismatch } = await import(`${v1Root}/apps/desktop/src/shared/patch-ids`);
 export type DiffCase = {
   name: string;
   /** JSON text, or null for `undefined`. */

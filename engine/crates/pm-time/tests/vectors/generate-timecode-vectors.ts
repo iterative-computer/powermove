@@ -10,8 +10,10 @@
  */
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { formatDropFrameTimecode, parseDropFrameTimecode, timecodeBase } from '../../../../../apps/desktop/src/renderer/src/legacy/core/timecode';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { formatDropFrameTimecode, parseDropFrameTimecode, timecodeBase } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/timecode`);
 let seed = 0x2545f491;
 const random = () => {
   seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0;

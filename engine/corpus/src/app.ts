@@ -105,7 +105,7 @@ export interface LaunchOptions {
 }
 
 export async function launchLegacyApp(options: LaunchOptions = {}): Promise<LegacyApp> {
-  if (!existsSync(mainEntry)) throw new Error(`The legacy app is not built (${mainEntry} is missing). Run: bun run --cwd apps/desktop build`);
+  if (!existsSync(mainEntry)) throw new Error(`The legacy app is not built (${mainEntry} is missing). Run \`bun run build\` in the v1 checkout (PM_V1_REF, default /tmp/pm-ref-v1.2.0).`);
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-corpus-'));
   const extensions = options.extensions ?? [];
   const pageErrors: string[] = [], consoleErrors: string[] = [];

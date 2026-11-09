@@ -23,7 +23,9 @@ import { join, resolve } from 'node:path';
 
 import { REPO } from '../effects/preambles';
 
-const { chromium } = await import(join(REPO, 'apps', 'desktop', 'node_modules', 'playwright', 'index.mjs'));
+// The Electron app ships from main; its tree lives in a v1 checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { chromium } = await import(join(v1Root, 'apps', 'desktop', 'node_modules', 'playwright', 'index.mjs'));
 const args = process.argv.slice(2);
 const ROOT = join(homedir(), 'Library', 'Application Support', 'Powermove Engine Corpus');
 const flag = (name: string) => (args.includes(name) ? resolve(args[args.indexOf(name) + 1]!) : null);
@@ -40,7 +42,7 @@ const temp = await mkdtemp(join(tmpdir(), 'pm-fallback-runner-'));
 let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
 try {
   const entry = join(temp, 'entry.ts');
-  await writeFile(entry, `import * as runner from ${JSON.stringify(join(REPO, 'apps/desktop/src/renderer/src/engine-connection/shader-fallback.ts'))};\n(globalThis as any).PMShaderFallback = runner;\n`);
+  await writeFile(entry, `import * as runner from ${JSON.stringify(join(v1Root, 'apps/desktop/src/renderer/src/engine-connection/shader-fallback.ts'))};\n(globalThis as any).PMShaderFallback = runner;\n`);
   const built = await Bun.build({ entrypoints: [entry], format: 'iife', target: 'browser' });
   if (!built.success) throw new Error(built.logs.join('\n'));
   const bundle = await built.outputs[0]!.text();
