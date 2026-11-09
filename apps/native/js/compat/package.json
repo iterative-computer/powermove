@@ -6,7 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./testing": "./tests/fake-host.ts",
-    "./powermove": "./src/frozen/kernel/editor-helpers.ts"
+    "./powermove": "./src/frozen/reference/kernel/editor-helpers.ts"
   },
   "scripts": {
     "test": "bun test tests",

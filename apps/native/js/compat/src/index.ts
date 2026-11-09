@@ -20,4 +20,4 @@ export {
   chordModifierCount,
 } from "./keychord";
 
-export * as powermove from "./frozen/kernel/editor-helpers";
+export * as powermove from "./frozen/reference/kernel/editor-helpers";

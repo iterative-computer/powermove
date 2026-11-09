@@ -3,7 +3,10 @@
 import type { Data } from "../types";
 import { normalizeColorDepth } from "./color-depth";
 import { normalizeExportDefaults } from "./export-defaults";
-import { normalizeCaptionsContent, presetStyle } from "./captions-model";
+import {
+  normalizeCaptionsContent,
+  presetStyle,
+} from "../frozen/reference/captions/model";
 const CHANNELS_3D = {
   perspective: 50,
   "position.z": 0,

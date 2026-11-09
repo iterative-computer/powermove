@@ -11,7 +11,7 @@ import {
   projectPoint,
   inversePlane,
   planeContains,
-} from "../legacy/core/space-3d";
+} from "../reference/legacy/core/space-3d";
 import {
   ASSET_DRAG_MIME,
   FX_DRAG_MIME,

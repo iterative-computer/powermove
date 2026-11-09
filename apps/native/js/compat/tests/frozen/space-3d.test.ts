@@ -8,7 +8,7 @@ import {
   CHANNELS_3D,
   affinePlane,
   local3D,
-} from "../../src/frozen/legacy/core/space-3d";
+} from "../../src/frozen/reference/legacy/core/space-3d";
 const layer = (id = "a", p: any = {}) => ({
   id,
   threeD: true,

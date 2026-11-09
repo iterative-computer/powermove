@@ -205,7 +205,7 @@ const pure = [
 ];
 const store = `import {createSandboxAPI,sandboxControl,sandboxReporter} from ${JSON.stringify(join(root, "src/frozen/host/store-api.js"))};
 import {RemoteDOM} from ${JSON.stringify(join(root, "../remote-dom/src/shim.ts"))};
-import * as helpers from ${JSON.stringify(join(root, "src/frozen/kernel/editor-helpers.ts"))};
+import * as helpers from ${JSON.stringify(join(root, "src/frozen/reference/kernel/editor-helpers.ts"))};
 ${moduleImports}
 import {definitionSnapshots} from ${JSON.stringify(join(root, "src/definitions.ts"))};
 import {panelStyle} from ${JSON.stringify(join(root, "src/panels.ts"))};

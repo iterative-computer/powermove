@@ -7,7 +7,7 @@ import {
   CHANNELS_3D,
   projectPoint,
   inversePlane,
-} from "../legacy/core/space-3d";
+} from "../reference/legacy/core/space-3d";
 export class PermissionError extends Error {
   code = "full-access";
   constructor(member, alternative = "project.apply or commands") {

@@ -1,6 +1,5 @@
 /** Test-only source replay. This reads the tag, never candidate code as oracle. */
 import ts from "typescript";
-import * as space from "../../src/frozen/legacy/core/space-3d";
 import type { Data } from "../../src/types";
 export const reference = "07ed5fa17ee640659cb075f9cad1af2095011d60";
 export async function tagSource(path: string): Promise<string> {
@@ -46,6 +45,15 @@ export async function sourceFacades(PM: Data): Promise<Data> {
     target: ts.ScriptTarget.ES2023,
     module: ts.ModuleKind.ESNext,
   });
+  // The facades' 3-D helpers come from the same tag, not the candidate copy.
+  const space: Data = {};
+  new Function(
+    "exports",
+    ts.transpile(await tagSource("legacy/core/space-3d.ts"), {
+      target: ts.ScriptTarget.ES2023,
+      module: ts.ModuleKind.CommonJS,
+    }),
+  )(space);
   const helpers = Object.keys(space);
   return new Function(
     "PM",
@@ -55,7 +63,7 @@ export async function sourceFacades(PM: Data): Promise<Data> {
     )
       .map(([key, fn]) => `${key}: ${fn}(PM)`)
       .join(",")} };`,
-  )(PM, ...helpers.map((name) => (space as Data)[name]));
+  )(PM, ...helpers.map((name) => space[name]));
 }
 export async function contract(): Promise<
   Record<string, { member: string; optional: boolean }[]>

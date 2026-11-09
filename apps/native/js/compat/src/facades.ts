@@ -1,7 +1,7 @@
 /** Live PM facades, preserving the tag's argument/default/return adapters. */
 import { HostError } from "./channel";
 import { EditGesture } from "./gesture";
-import * as space from "./frozen/legacy/core/space-3d";
+import * as space from "./frozen/reference/legacy/core/space-3d";
 import * as factory from "./frozen/host/pm-facades";
 import type { Data, GestureAPI } from "./types";
 
