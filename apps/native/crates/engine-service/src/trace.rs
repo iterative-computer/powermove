@@ -23,6 +23,8 @@ pub struct Trace {
     pub display: Option<f64>,
     pub display_callback: f64,
     pub cache_hit: bool,
+    /// The disk render cache: 0 not looked at, 1 missed, 2 read.
+    pub disk: u8,
     pub gpu_ok: bool,
 }
 pub fn now() -> f64 {

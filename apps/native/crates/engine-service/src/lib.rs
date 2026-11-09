@@ -7,6 +7,7 @@ pub mod layers;
 pub mod policy;
 mod present;
 mod render;
+pub mod render_cache;
 pub mod resources;
 mod scopes;
 pub use scopes::ScopeResult;
@@ -67,7 +68,9 @@ pub struct OverlayGeometry {
 pub(crate) struct OverlayParams {
     count: u32,
     reduced: u32,
-    pad: [u32; 2],
+    /// The source is the whole composition (a disk render cache frame).
+    pub(crate) whole: u32,
+    pad: u32,
     output: [f32; 4],
     canvas: [f32; 4],
     drawable: [f32; 2],
@@ -96,7 +99,8 @@ impl OverlayGeometry {
         let mut p = OverlayParams {
             count: self.lines.len() as u32,
             reduced: 0,
-            pad: [0; 2],
+            whole: 0,
+            pad: 0,
             output: [0.; 4],
             canvas: [0.; 4],
             drawable: [0.; 2],
@@ -357,6 +361,7 @@ struct Shared {
     device: Mutex<metal::Device>,
     /// The viewer the Scopes panel analyzes, and where results go.
     scopes: Mutex<Option<(u64, ScopeTap)>>,
+    disk: render_cache::DiskFrames,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -758,6 +763,7 @@ impl EngineService {
             interactive: Arc::default(),
             device: Mutex::new(device),
             scopes: Mutex::new(None),
+            disk: render_cache::DiskFrames::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
             #[cfg(test)]
@@ -798,6 +804,11 @@ impl EngineService {
             v.dirty = true;
         }
         self.shared.wake.try_send(()).ok();
+    }
+    /// The disk render cache: Render Selection, Keep Rendered, Delete
+    /// Rendered Frames and the timeline's render bar.
+    pub fn render_cache(&self) -> render_cache::DiskFrames {
+        self.shared.disk.clone()
     }
     /// Share with ExportHandle::start_scheduled; true defers new export bands.
     pub fn export_activity(&self) -> Arc<std::sync::atomic::AtomicBool> {
@@ -1059,6 +1070,8 @@ const RETRY_SECONDS: f64 = 0.016;
 fn drawable_retry(misses: u32) -> f64 {
     (RETRY_SECONDS * f64::from(1u32 << misses.min(6))).min(1.)
 }
+/// The viewer rests this long before Render Selection's frames render.
+const RENDER_CACHE_REST_SECONDS: f64 = 0.5;
 /// A frame refused as transient this long is reported while it is retried.
 const WAITING_SHOWN_SECONDS: f64 = 3.0;
 /// A GPU lost again within this long of a rebuild backs off between these.
@@ -1072,6 +1085,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
     });
     engine.set_waker(Some(shared.wake.clone()));
+    engine.disk = Some(shared.disk.clone());
+    shared.disk.set_wake(shared.wake.clone());
+    // The scene the viewer drew last, which Render Selection's frames are
+    // rendered from while the viewer rests, and when it last drew.
+    let mut last_scene: Option<(render::Scene, u64)> = None;
+    let mut last_work = 0.;
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
     // `PM_ENGINE_TRACE`, or the app's `PMEngineTrace` default (`defaults
@@ -1236,7 +1255,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
-                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"cache_hit":t.cache_hit,
+                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"disk":t.disk,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
@@ -1611,6 +1630,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);
+            let overrides = engine
+                .compat()
+                .filter(|store| store.producing_now())
+                .map(|store| store.epoch());
+            if shared.disk.observe(&scene, engine.definitions(), overrides)
+                && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
+            }
+            last_scene = Some((scene.clone(), stamp.doc_id));
+            last_work = now;
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes
@@ -1789,6 +1819,40 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
+            // Render Selection: one frame at a time once the viewer has
+            // rested a moment, so a gesture or play never waits behind it.
+            if !busy
+                && now - last_work >= RENDER_CACHE_REST_SECONDS
+                && let Some((scene, doc_id)) = &last_scene
+                && let Some((n, time, size)) = shared.disk.next(scene)
+            {
+                drop(state);
+                engine.use_compat_document(*doc_id);
+                let result = engine.cache_frame(scene, time, size);
+                if let Some(recorder) = &recorder {
+                    recorder.record(serde_json::json!({
+                        "cache_frame": n,
+                        "result": match &result {
+                            Ok(Some(_)) => "rendered".to_owned(),
+                            Ok(None) => "pending".to_owned(),
+                            Err(e) => e.to_string(),
+                        },
+                        "at": trace::now(),
+                    }));
+                }
+                match result {
+                    Ok(Some(rgba)) => shared.disk.rendered(scene, n, &rgba),
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                    Err(_) => shared.disk.skip(n),
+                }
+                continue;
+            }
+            // Queued frames wait out the rest; then the loop comes back.
+            let fill_due = (!busy
+                && last_scene
+                    .as_ref()
+                    .is_some_and(|(scene, _)| shared.disk.next(scene).is_some()))
+            .then(|| (RENDER_CACHE_REST_SECONDS - (now - last_work)).max(0.001));
             // Only back-offs pending, nothing playing: sleep until the first is due.
             let backoff = (flights.is_empty()
                 && runtime
@@ -1831,6 +1895,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let timeout = engine
                 .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
                 .map_or(timeout, |retry| timeout.min(retry));
+            let timeout = fill_due.map_or(timeout, |due| timeout.min(Duration::from_secs_f64(due)));
             let _ = wakes.recv_timeout(timeout);
         }
     }

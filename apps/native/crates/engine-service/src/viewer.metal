@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct Line { float4 ends; float4 color; };
-struct Params { uint count; uint reduced; uint pad1; uint pad2; float4 output; float4 canvas; float2 drawable; float2 pad3; Line lines[120]; };
+struct Params { uint count; uint reduced; uint whole; uint pad2; float4 output; float4 canvas; float2 drawable; float2 pad3; Line lines[120]; };
 vertex float4 vs(uint i [[vertex_id]]) {
     float2 q=float2(float((i<<1)&2),float(i&2));
     return float4(q*2-1,0,1);
@@ -31,7 +31,10 @@ float3 mastering(float3 p,float4 u) {
 // read pixel for pixel, so paused frames equal the export.
 constexpr sampler reduced(filter::linear,address::clamp_to_edge);
 fragment half4 fs(float4 p [[position]], texture2d<half> src [[texture(0)]], constant Params& u [[buffer(0)]]) {
-    float4 c=float4(u.reduced!=0 ? src.sample(reduced,p.xy/u.drawable) : src.read(uint2(p.xy)));
+    // A rendered (disk cache) frame is the whole composition: the drawable
+    // samples its window of the canvas.
+    float4 c=float4(u.whole!=0 ? src.sample(reduced,(u.canvas.xy+p.xy)/u.canvas.zw)
+        : u.reduced!=0 ? src.sample(reduced,p.xy/u.drawable) : src.read(uint2(p.xy)));
     float3 v=c.a>0 ? c.rgb/c.a : float3(0);
     v=float3(dec(v.r),dec(v.g),dec(v.b));
     v=float3(0.8224621*v.r+0.1775380*v.g,0.0331941*v.r+0.9668058*v.g,0.0170827*v.r+0.0723974*v.g+0.9105199*v.b);

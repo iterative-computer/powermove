@@ -26,6 +26,8 @@ pm-media = { path = "../../../../engine/crates/pm-media" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-export = { path = "../../../../engine/crates/pm-export" }
 pm-time = { path = "../../../../engine/crates/pm-time" }
+pm-promedia = { path = "../promedia" }
+blake3 = "1"
 pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 wgpu-hal = { version = "30", features = ["metal"] }

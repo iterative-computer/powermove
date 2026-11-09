@@ -19,6 +19,7 @@ use std::{
 
 /// One immutable render input. Content identity rotates on document, comp,
 /// assets, definitions or fonts; it is independent of display output identity.
+#[derive(Clone)]
 pub struct Scene {
     pub doc: Arc<pm_model::Document>,
     pub comp: String,
@@ -170,6 +171,8 @@ pub struct Engine {
         async_channel::Sender<crate::scopes::ScopeResult>,
     )>,
     scopes: Option<crate::scopes::Tap>,
+    /// The disk render cache playback reads (`crate::render_cache`).
+    pub(crate) disk: Option<crate::render_cache::DiskFrames>,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -204,6 +207,7 @@ impl Engine {
             next.set_fonts(fonts.clone());
         }
         next.set_compat(self.compat.clone());
+        next.disk = self.disk.clone();
         Ok(next)
     }
     pub fn set_waker(&self, wake: Option<std::sync::mpsc::SyncSender<()>>) {
@@ -321,6 +325,7 @@ impl Engine {
             output_tone: None,
             scope_frames: None,
             scopes: None,
+            disk: None,
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
@@ -387,6 +392,10 @@ impl Engine {
     }
     /// The extension definitions the next frames render with (the viewer's
     /// pinned resource snapshot). A new snapshot installs them again.
+    /// The definitions this engine draws with (the render cache's fingerprint).
+    pub(crate) fn definitions(&self) -> &[pm_protocol::definitions::DefinitionSnapshot] {
+        &self.resources.definitions
+    }
     pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
         if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
             self.resources = resources;
@@ -487,6 +496,69 @@ impl Engine {
         }
         Ok(f.rgba)
     }
+    /// The paused viewer's frame of the whole composition at `size`, read
+    /// back (premultiplied working values in RGBA16F, top-down): what a
+    /// disk render cache keeps. `Ok(None)`: the frame is not its exact
+    /// picture yet (an override, font or shader is pending), try later.
+    pub fn cache_frame(
+        &mut self,
+        scene: &Scene,
+        time: Ticks,
+        size: Size,
+    ) -> Result<Option<Vec<f32>>> {
+        self.sync_studio(scene)?;
+        self.sync_fonts();
+        let output = Output {
+            width: size.width,
+            height: size.height,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let mut request = FrameSpec::exact(time, output).request(scene)?;
+        request.output_tone = self.output_tone;
+        self.renderer.set_isolate_layers(true);
+        let rendered = self.renderer.render(
+            &scene.doc,
+            &scene.comp,
+            time,
+            &request,
+            scene.media.as_ref(),
+        );
+        self.renderer.set_isolate_layers(false);
+        let frame = match rendered {
+            Ok(frame) => frame,
+            Err(RenderError::CompatPending(needs)) => {
+                // Asked ahead as playback asks: the next frames to render
+                // find their answers waiting.
+                if let Some(store) = &self.compat_document {
+                    store.request(needs, true);
+                }
+                return Ok(None);
+            }
+            Err(RenderError::WatchdogPending | RenderError::ShaderFallbackPending(_)) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        self.renderer.wait_idle();
+        let pending_fonts = self.fonts.as_ref().and_then(|f| f.after_render()).is_some();
+        if let Some(error) = self.failed.lock().unwrap().take() {
+            self.renderer.recycle(frame);
+            bail!("The GPU refused this frame: {error}");
+        }
+        if pending_fonts || !frame.failures.is_empty() {
+            let failed = !frame.failures.is_empty();
+            self.renderer.recycle(frame);
+            if failed {
+                bail!("layers failed to draw");
+            }
+            return Ok(None);
+        }
+        let rgba = self.renderer.read_rgba(&frame)?;
+        self.renderer.recycle(frame);
+        Ok(Some(rgba))
+    }
     pub fn frame(
         &mut self,
         scene: &Scene,
@@ -533,6 +605,25 @@ impl Engine {
             .then(|| self.cache.iter().position(|c| c.key == key))
             .flatten();
         let mut stand_ins = false;
+        // A frame Render Selection put on disk: shown while playing or
+        // scrubbing an uncropped viewer instead of drawn again (the present
+        // pass scales it to the drawable).
+        // Never upscaled: a canvas larger than the composition renders.
+        let canvas = output.crop.map_or((output.width, output.height), |c| {
+            (c.canvas_width, c.canvas_height)
+        });
+        let looked = hit.is_none() && spec.moment != Moment::Paused;
+        let disk = looked
+            .then(|| self.disk.as_ref()?.read(scene, time))
+            .flatten()
+            .filter(|(size, _)| canvas.0 <= size.width && canvas.1 <= size.height);
+        let whole = disk.is_some();
+        trace.lock().unwrap().disk = match (looked, whole) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => 2,
+        };
+        let size = disk.as_ref().map_or(size, |(size, _)| *size);
         let (surface, failures) = if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
@@ -567,57 +658,76 @@ impl Engine {
                     s
                 }
             };
-            let target = Target::wrap(surface.texture.clone());
-            let mut request = spec.request(scene)?;
-            request.output_tone = self.output_tone;
-            self.renderer.set_scrub(spec.moment == Moment::Scrub);
-            self.renderer.set_playback(spec.decode_deadline);
-            self.renderer.set_isolate_layers(true);
-            trace.lock().unwrap().render_start = now();
-            if let Some(store) = &self.compat_document {
-                store.begin_frame(spec.moment == Moment::Playing);
+            if let Some((_, pixels)) = disk {
+                self.gpu.queue.write_texture(
+                    surface.texture.as_image_copy(),
+                    &pixels,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size.width * 8),
+                        rows_per_image: Some(size.height),
+                    },
+                    surface.texture.size(),
+                );
+                self.gpu.queue.submit([]);
+                if let Some(error) = self.failed.lock().unwrap().take() {
+                    bail!("The GPU refused this frame: {error}");
+                }
+                trace.lock().unwrap().cache_hit = true;
+                (surface, Arc::from(Vec::new()))
+            } else {
+                let target = Target::wrap(surface.texture.clone());
+                let mut request = spec.request(scene)?;
+                request.output_tone = self.output_tone;
+                self.renderer.set_scrub(spec.moment == Moment::Scrub);
+                self.renderer.set_playback(spec.decode_deadline);
+                self.renderer.set_isolate_layers(true);
+                trace.lock().unwrap().render_start = now();
+                if let Some(store) = &self.compat_document {
+                    store.begin_frame(spec.moment == Moment::Playing);
+                }
+                let rendered = self.renderer.render_into(
+                    &scene.doc,
+                    &scene.comp,
+                    time,
+                    &request,
+                    scene.media.as_ref(),
+                    &target,
+                    None,
+                );
+                trace.lock().unwrap().render_submitted = now();
+                let stood_in = self
+                    .compat_document
+                    .as_ref()
+                    .map(|store| store.end_frame())
+                    .unwrap_or_default();
+                if !stood_in.is_empty()
+                    && let Some(store) = &self.compat_document
+                {
+                    store.request(stood_in.clone(), true);
+                }
+                self.renderer.set_scrub(false);
+                self.renderer.set_playback(None);
+                self.renderer.set_isolate_layers(false);
+                let rendered = rendered?;
+                if let Some(error) = self.failed.lock().unwrap().take() {
+                    bail!("The GPU refused this frame: {error}");
+                }
+                if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
+                    return Err(FontsPending(error.to_string()).into());
+                }
+                let failures: Arc<[LayerFailure]> = rendered.failures.into();
+                stand_ins = !rendered.stand_ins.is_empty() || !stood_in.is_empty();
+                // A frame with stand-ins is not the exact picture of its time.
+                if self.cache_enabled && !stand_ins {
+                    self.cache.push_back(CachedFrame {
+                        key,
+                        surface: surface.clone(),
+                        failures: failures.clone(),
+                    });
+                }
+                (surface, failures)
             }
-            let rendered = self.renderer.render_into(
-                &scene.doc,
-                &scene.comp,
-                time,
-                &request,
-                scene.media.as_ref(),
-                &target,
-                None,
-            );
-            trace.lock().unwrap().render_submitted = now();
-            let stood_in = self
-                .compat_document
-                .as_ref()
-                .map(|store| store.end_frame())
-                .unwrap_or_default();
-            if !stood_in.is_empty()
-                && let Some(store) = &self.compat_document
-            {
-                store.request(stood_in.clone(), true);
-            }
-            self.renderer.set_scrub(false);
-            self.renderer.set_playback(None);
-            self.renderer.set_isolate_layers(false);
-            let rendered = rendered?;
-            if let Some(error) = self.failed.lock().unwrap().take() {
-                bail!("The GPU refused this frame: {error}");
-            }
-            if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
-                return Err(FontsPending(error.to_string()).into());
-            }
-            let failures: Arc<[LayerFailure]> = rendered.failures.into();
-            stand_ins = !rendered.stand_ins.is_empty() || !stood_in.is_empty();
-            // A frame with stand-ins is not the exact picture of its time.
-            if self.cache_enabled && !stand_ins {
-                self.cache.push_back(CachedFrame {
-                    key,
-                    surface: surface.clone(),
-                    failures: failures.clone(),
-                });
-            }
-            (surface, failures)
         };
         if let Some((config, frames)) = &self.scope_frames {
             self.scopes
@@ -689,6 +799,7 @@ impl Engine {
             })
             .params()?;
         params.reduced = u32::from(size != Size::new(output.width, output.height));
+        params.whole = u32::from(whole);
         params.drawable = [output.width as f32, output.height as f32];
         params.canvas = match output.crop {
             Some(c) => [
