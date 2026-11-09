@@ -605,6 +605,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -616,9 +619,10 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -970,8 +974,10 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -1586,6 +1592,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -1597,9 +1606,10 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -1951,8 +1961,10 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -2567,6 +2579,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -2578,9 +2593,10 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -2932,8 +2948,10 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -3461,6 +3479,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -3472,9 +3493,10 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -3853,8 +3875,10 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -4474,6 +4498,9 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -4485,9 +4512,10 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -4842,8 +4870,10 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -5591,6 +5621,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -5602,9 +5635,10 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -5981,8 +6015,10 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -6726,6 +6762,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -6737,9 +6776,10 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -7118,8 +7158,10 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -7771,6 +7813,9 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "disabled": false,
         "id": "agent-stop",
         "label": "Stop current run",
+        "metadata": {
+          "symbol": "stop.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -7782,7 +7827,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Stop Current Run",
@@ -8149,8 +8194,9 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -8801,6 +8847,9 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "disabled": true,
         "id": "agent-stop",
         "label": "Stop current run",
+        "metadata": {
+          "symbol": "stop.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -8812,7 +8861,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
         "title": "Stop Current Run",
@@ -9179,8 +9228,9 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -9922,6 +9972,9 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -9933,9 +9986,10 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -10312,8 +10366,10 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -11066,6 +11122,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -11077,9 +11136,10 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -11459,8 +11519,10 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -12165,6 +12227,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -12176,9 +12241,10 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -12546,8 +12612,10 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -13252,6 +13320,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -13263,9 +13334,10 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -13633,8 +13705,10 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -14243,6 +14317,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -14254,9 +14331,10 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -14608,8 +14686,10 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -15376,6 +15456,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -15387,9 +15470,10 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -15777,8 +15861,10 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -16359,6 +16445,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -16370,9 +16459,10 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -16718,8 +16808,10 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -17424,6 +17516,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -17435,9 +17530,10 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -17805,8 +17901,10 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -18511,6 +18609,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -18522,9 +18623,10 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -18892,8 +18994,10 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -19594,6 +19698,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -19605,9 +19712,10 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -19974,8 +20082,10 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -20676,6 +20786,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -20687,9 +20800,10 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -21056,8 +21170,10 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -21672,6 +21788,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -21683,9 +21802,10 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -22037,8 +22157,10 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -22653,6 +22775,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -22664,9 +22789,10 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -23018,8 +23144,10 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",
@@ -23634,6 +23762,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "disabled": true,
         "id": "agent-send",
         "label": "Send",
+        "metadata": {
+          "symbol": "arrow.up.circle.fill",
+        },
         "style": {
           "color": {
             "token": "colors.secondary",
@@ -23645,9 +23776,10 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
             "token": "metrics.hit",
           },
           "symbolSize": {
-            "token": "metrics.symbol_toolbar",
+            "token": "metrics.symbol_panel",
           },
         },
+        "title": "Send",
       },
       "text": "",
       "type": "button",
@@ -23999,8 +24131,10 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "setProps",
     "setProps",
     "setProps",
-    "setListeners",
     "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
     "setProps",
     "insertBefore",
     "insertBefore",

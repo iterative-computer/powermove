@@ -790,6 +790,8 @@ export function AgentView({
               id="agent-stop"
               label="Stop current run"
               title="Stop Current Run"
+              metadata={{ symbol: "stop.circle.fill" }}
+              style={{ symbolSize: t("metrics.symbol_panel") }}
               disabled={s.stopping}
               onClick={() => {
                 if (!s.stopping) send({ type: "stop" });
@@ -799,6 +801,9 @@ export function AgentView({
             <UI.ToolbarItem
               id="agent-send"
               label="Send"
+              title="Send"
+              metadata={{ symbol: "arrow.up.circle.fill" }}
+              style={{ symbolSize: t("metrics.symbol_panel") }}
               disabled={disabled || !s.sendable}
               onClick={() => {
                 if (!disabled && s.sendable) send({ type: "submit" });
