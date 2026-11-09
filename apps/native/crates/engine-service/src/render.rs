@@ -5,6 +5,7 @@ use crate::trace::{Trace, now};
 use anyhow::{Result, anyhow, bail};
 use foreign_types::ForeignTypeRef;
 use pm_gpu::{Gpu, Target, bridge_out::surface::ExportedSurface};
+use pm_protocol::snapshot::CompatNeed;
 use pm_protocol::{
     color::Precision,
     common::{Size, Ticks},
@@ -188,8 +189,11 @@ pub struct Submission {
     pub height: u32,
     /// Layers left out of this frame, with why.
     pub failures: Arc<[LayerFailure]>,
-    /// Video drew a nearest decoded frame; the exact one is on its way.
+    /// Video drew a nearest decoded frame, or a raster override layer its
+    /// nearest answer; the exact one is on its way.
     pub stand_ins: bool,
+    /// The override layers drawn from a nearest answer (or not at all).
+    pub compat_late: Vec<CompatNeed>,
 }
 impl Engine {
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
@@ -533,6 +537,7 @@ impl Engine {
             .then(|| self.cache.iter().position(|c| c.key == key))
             .flatten();
         let mut stand_ins = false;
+        let mut compat_late = Vec::new();
         let (surface, failures) = if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
@@ -573,6 +578,9 @@ impl Engine {
             self.renderer.set_scrub(spec.moment == Moment::Scrub);
             self.renderer.set_playback(spec.decode_deadline);
             self.renderer.set_isolate_layers(true);
+            if let Some(store) = &self.compat_document {
+                store.begin_frame(spec.moment);
+            }
             trace.lock().unwrap().render_start = now();
             let rendered = self.renderer.render_into(
                 &scene.doc,
@@ -587,6 +595,11 @@ impl Engine {
             self.renderer.set_scrub(false);
             self.renderer.set_playback(None);
             self.renderer.set_isolate_layers(false);
+            compat_late = self
+                .compat_document
+                .as_ref()
+                .map(|store| store.end_frame())
+                .unwrap_or_default();
             let rendered = rendered?;
             if let Some(error) = self.failed.lock().unwrap().take() {
                 bail!("The GPU refused this frame: {error}");
@@ -595,7 +608,7 @@ impl Engine {
                 return Err(FontsPending(error.to_string()).into());
             }
             let failures: Arc<[LayerFailure]> = rendered.failures.into();
-            stand_ins = !rendered.stand_ins.is_empty();
+            stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
             // A frame with stand-ins is not the exact picture of its time.
             if self.cache_enabled && !stand_ins {
                 self.cache.push_back(CachedFrame {
@@ -731,7 +744,27 @@ impl Engine {
             height: output.height,
             failures,
             stand_ins,
+            compat_late,
         }))
+    }
+    /// The raster override answers a frame at `time` would need and that
+    /// are not answered yet, from its plan alone (playback's look-ahead).
+    pub fn compat_needs(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<CompatNeed> {
+        if self.compat_document.is_none() || self.sync_studio(scene).is_err() {
+            return Vec::new();
+        }
+        let Ok(request) = spec.request(scene) else {
+            return Vec::new();
+        };
+        self.renderer
+            .compat_missing(
+                &scene.doc,
+                &scene.comp,
+                time,
+                &request,
+                scene.media.as_ref(),
+            )
+            .unwrap_or_default()
     }
 }
 impl Submission {

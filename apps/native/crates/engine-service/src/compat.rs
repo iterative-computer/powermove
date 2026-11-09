@@ -5,18 +5,21 @@
 //!   (`render.raster`, today's `PM.raster`) on its own renderer and thread, so
 //!   an extension waiting for one never waits on the viewer's frames.
 //! - [`CompatStore`] is the viewer's producer: a frame asks it for each layer
-//!   today's compositor rasterizes; a layer it has no answer for fails the
-//!   frame with `CompatPending`, the needs go to the extension realm through
-//!   [`CompatStore::set_sink`], and the realm's answers come back through
-//!   [`CompatStore::answer_all`], which redraws the viewers. The viewer never
-//!   blocks on JavaScript.
-use std::collections::{HashMap, HashSet, VecDeque};
+//!   today's compositor rasterizes. A layer it has no answer for goes to the
+//!   extension realm through [`CompatStore::set_sink`], one batch at a time,
+//!   and the realm's answers come back through [`CompatStore::answer_all`],
+//!   which redraws the viewers. A paused frame waits for its answers
+//!   (`CompatPending`); a playing or scrubbing frame draws a late layer from
+//!   its nearest answer (plan 3.6.4: "a late override reuses its last-good
+//!   surface") and is redrawn exact when the answer lands. The viewer never
+//!   blocks on JavaScript, and never stops showing frames for it.
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pm_model::{Document, Node};
-use pm_protocol::common::PixelRect;
+use pm_protocol::common::{PixelRect, TICKS_PER_SECOND};
 use pm_protocol::snapshot::{CompatNeed, CompatSource, SnapshotPixels};
 use pm_render::Renderer;
 pub use pm_render::compat::CompatAnswer;
@@ -184,14 +187,30 @@ fn need_key(need: &CompatNeed) -> NeedKey {
     )
 }
 
-/// Frames asked ahead of one the viewer missed.
-const AHEAD: i64 = 12;
 /// The rasters one revision's frames draw from, newest last.
 const MAX_BYTES: u64 = 256 << 20;
 /// Answers kept at most (a pass-through costs no pixels but still a key).
 const MAX_ENTRIES: usize = 16_384;
-/// A need asked this long ago and never answered is asked again.
+/// A need asked this long ago and never answered is asked again; a batch
+/// unanswered this long no longer holds the next one back.
 const ASK_AGAIN: Duration = Duration::from_secs(5);
+/// What one look-ahead batch aims to cost the realm: answers land often and
+/// the realm stays free for everything else it runs.
+const BATCH_TARGET: Duration = Duration::from_millis(100);
+/// Frames one look-ahead batch asks for at most.
+const MAX_AHEAD: usize = 12;
+
+/// How a frame being drawn treats a layer without an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Late {
+    /// Wait for it: the frame fails with `CompatPending` (paused frames, exact).
+    #[default]
+    Wait,
+    /// Draw its nearest answer, or wait when it has none (scrubbing).
+    Nearest,
+    /// Draw its nearest answer, or nothing (playing: the picture keeps time).
+    NearestOrNothing,
+}
 
 #[derive(Default)]
 struct Answers {
@@ -204,11 +223,96 @@ struct Answers {
     map: HashMap<NeedKey, CompatAnswer>,
     order: VecDeque<(NeedKey, u64)>,
     bytes: u64,
+    /// Each layer's answered frames, for a late frame's nearest answer.
+    by_layer: HashMap<(String, String), BTreeMap<i64, NeedKey>>,
     /// Asked of the realm and not answered yet, and when.
     asked: HashMap<NeedKey, Instant>,
     /// Needs whose override failed: their frames fail (as main's compositor
     /// throws) and are not asked again until the revision or wrappers change.
     failed: HashSet<NeedKey>,
+    /// The frame being drawn: how it treats late layers, and which it drew
+    /// from a nearest answer.
+    late: Late,
+    stood_in: Vec<CompatNeed>,
+    /// The viewer's batch the realm is answering: when it went and its size.
+    /// One at a time, so the realm answers what the viewer needs now and
+    /// never works through a backlog of frames already gone by.
+    in_flight: Option<(Instant, usize)>,
+    /// The newest needs waiting for that batch; newer needs replace them.
+    queued: Vec<CompatNeed>,
+    /// Measured realm time per need (round trip of a batch over its size).
+    per_need: Option<Duration>,
+    /// The revision before an edit, for stand-ins only.
+    previous: Option<Previous>,
+    /// Override layers in the last look-ahead frame, and the last frame it asked.
+    layers: usize,
+    horizon: Option<i64>,
+}
+struct Previous {
+    map: HashMap<NeedKey, CompatAnswer>,
+    by_layer: HashMap<(String, String), BTreeMap<i64, NeedKey>>,
+}
+/// The nearest answered frame of a layer in one revision's answers.
+fn nearest<'a>(
+    map: &'a HashMap<NeedKey, CompatAnswer>,
+    by_layer: &HashMap<(String, String), BTreeMap<i64, NeedKey>>,
+    composition: &str,
+    layer: &str,
+    ticks: i64,
+) -> Option<&'a CompatAnswer> {
+    let times = by_layer.get(&(composition.to_owned(), layer.to_owned()))?;
+    let before = times.range(..=ticks).next_back();
+    let after = times.range(ticks..).next();
+    let key = match (before, after) {
+        (Some(b), Some(a)) if ticks - b.0 <= a.0 - ticks => b.1,
+        (Some(_), Some(a)) => a.1,
+        (Some((_, k)), None) | (None, Some((_, k))) => k,
+        (None, None) => return None,
+    };
+    map.get(key)
+}
+impl Answers {
+    /// The nearest answered frame of a late layer, this revision's first.
+    fn nearest(&self, composition: &str, layer: &str, ticks: i64) -> Option<&CompatAnswer> {
+        nearest(&self.map, &self.by_layer, composition, layer, ticks).or_else(|| {
+            let p = self.previous.as_ref()?;
+            nearest(&p.map, &p.by_layer, composition, layer, ticks)
+        })
+    }
+    fn forget(&mut self, key: &NeedKey) {
+        self.map.remove(key);
+        let layer = (key.0.clone(), key.1.clone());
+        if let Some(times) = self.by_layer.get_mut(&layer) {
+            if times.get(&key.2) == Some(key) {
+                times.remove(&key.2);
+            }
+            if times.is_empty() {
+                self.by_layer.remove(&layer);
+            }
+        }
+    }
+    /// Whether a viewer batch may go now (none in flight, or it was lost).
+    fn free(&self) -> bool {
+        self.in_flight
+            .is_none_or(|(at, _)| at.elapsed() >= ASK_AGAIN)
+    }
+    /// The needs not answered, failed or asked recently.
+    fn fresh(&self, needs: Vec<CompatNeed>) -> Vec<CompatNeed> {
+        let mut seen = HashSet::new();
+        needs
+            .into_iter()
+            .filter(|need| {
+                let key = need_key(need);
+                !self.map.contains_key(&key)
+                    && !self.failed.contains(&key)
+                    && self
+                        .asked
+                        .get(&key)
+                        .is_none_or(|at| at.elapsed() >= ASK_AGAIN)
+                    && seen.insert(key)
+            })
+            .collect()
+    }
 }
 
 /// Where needs go: the extension realm of the window showing the document,
@@ -240,11 +344,23 @@ impl CompatStore {
     pub fn set_state(&self, producing: bool, revision: u64, epoch: u64) {
         let mut answers = self.answers.lock().unwrap();
         if answers.revision != revision || answers.epoch != epoch {
-            let frame = answers.frame;
+            let old = std::mem::take(&mut *answers);
+            // An edit keeps the last revision's answers as stand-ins for
+            // playing and scrubbed frames until its own land; new wrappers
+            // don't.
+            let previous = (old.epoch == epoch).then_some(Previous {
+                map: old.map,
+                by_layer: old.by_layer,
+            });
             *answers = Answers {
                 revision,
                 epoch,
-                frame,
+                frame: old.frame,
+                late: old.late,
+                stood_in: old.stood_in,
+                per_need: old.per_need,
+                layers: old.layers,
+                previous,
                 ..Answers::default()
             };
         }
@@ -272,58 +388,127 @@ impl CompatStore {
     pub fn set_frame(&self, ticks: i64) {
         self.answers.lock().unwrap().frame = ticks.max(0);
     }
-    /// A frame's missing answers: each is asked of the realm once, and while
-    /// playing with the same layers' next frames, so playback finds them answered.
-    pub(crate) fn request(&self, needs: Vec<CompatNeed>, playing: bool) {
+    /// A paused or scrubbed frame's missing answers, asked of the realm.
+    /// While a batch is in flight they wait, replacing older waiting needs.
+    pub(crate) fn request(&self, needs: Vec<CompatNeed>) {
         let mut answers = self.answers.lock().unwrap();
-        let (revision, epoch) = (answers.revision, answers.epoch);
-        // Ahead only while playing: a still frame needs itself alone.
-        let frame = if playing { answers.frame } else { 0 };
-        let ahead = needs.iter().flat_map(|need| {
-            (1..=AHEAD).filter(move |_| frame > 0).map(move |k| {
-                let mut next = need.clone();
-                next.time = pm_render::compat::ticks_of(
-                    (need.time.get() as f64 + (k * frame) as f64)
-                        / pm_protocol::common::TICKS_PER_SECOND as f64,
-                );
-                next
-            })
-        });
-        let all: Vec<CompatNeed> = needs.iter().cloned().chain(ahead).collect();
-        // Asks the realm never answered (it stopped, or dropped them) retire.
-        if answers.asked.len() > MAX_ENTRIES {
-            answers.asked.retain(|_, at| at.elapsed() < ASK_AGAIN);
-        }
-        let now = Instant::now();
-        let answers = &mut *answers;
-        let fresh: Vec<CompatNeed> = all
-            .into_iter()
-            .filter(|need| {
-                let key = need_key(need);
-                if answers.map.contains_key(&key) || answers.failed.contains(&key) {
-                    return false;
-                }
-                match answers.asked.get(&key) {
-                    Some(at) if at.elapsed() < ASK_AGAIN => false,
-                    _ => {
-                        answers.asked.insert(key, now);
-                        true
-                    }
-                }
-            })
-            .collect();
+        let fresh = answers.fresh(needs);
         if fresh.is_empty() {
             return;
         }
-        if let Some(sink) = self.sink.lock().unwrap().clone() {
-            sink(revision, epoch, fresh);
+        if !answers.free() {
+            answers.queued = fresh;
+            return;
         }
+        self.dispatch(answers, fresh);
+    }
+    /// Playback's look-ahead at the playhead `now` (ticks, playing at
+    /// `speed`): whether to ask now, how far ahead the answers will land (the
+    /// realm's measured time for a batch) and how many frames the batch
+    /// covers, about [`BATCH_TARGET`] of realm time. `None` while a batch is
+    /// in flight or the last one still covers the frames ahead.
+    pub(crate) fn ahead(&self, now: i64, speed: f64) -> Option<(Duration, usize)> {
+        let answers = self.answers.lock().unwrap();
+        if !answers.producing || !answers.free() || !answers.queued.is_empty() {
+            return None;
+        }
+        let Some(per_need) = answers.per_need else {
+            // Not measured yet: one frame, a frame ahead.
+            return Some((Duration::ZERO, 1));
+        };
+        let per_frame = per_need * answers.layers.max(1) as u32;
+        let frames = (BATCH_TARGET.as_secs_f64() / per_frame.as_secs_f64().max(1e-6)) as usize;
+        let frames = frames.clamp(1, MAX_AHEAD);
+        let lead = per_frame * frames as u32;
+        // The last batch still covers the playhead for longer than a new one
+        // would take to land.
+        let lead_ticks = lead.as_secs_f64() * speed * TICKS_PER_SECOND as f64;
+        if let Some(horizon) = answers.horizon
+            && (horizon - now) as f64 * speed.signum() > lead_ticks.abs()
+        {
+            return None;
+        }
+        Some((lead, frames))
+    }
+    /// The needs of the frame at `at`, ahead of the playhead, and the
+    /// `frames - 1` frames after it (`step` ticks apart, negative in
+    /// reverse), as one batch.
+    pub(crate) fn request_ahead(&self, needs: Vec<CompatNeed>, at: i64, frames: usize, step: i64) {
+        let frames = frames.max(1) as i64;
+        let mut answers = self.answers.lock().unwrap();
+        answers.horizon = Some(at + (frames - 1) * step);
+        if !needs.is_empty() {
+            answers.layers = needs.len();
+        }
+        let all = (0..frames)
+            .flat_map(|k| {
+                needs.iter().map(move |need| {
+                    let mut next = need.clone();
+                    next.time = pm_protocol::common::Ticks::saturating_from_i128(
+                        i128::from(need.time.get()) + i128::from(k * step),
+                    );
+                    next
+                })
+            })
+            .collect();
+        let fresh = answers.fresh(all);
+        if fresh.is_empty() || !answers.free() {
+            return;
+        }
+        self.dispatch(answers, fresh);
+    }
+    fn dispatch(&self, mut answers: std::sync::MutexGuard<'_, Answers>, needs: Vec<CompatNeed>) {
+        let now = Instant::now();
+        if answers.asked.len() > MAX_ENTRIES {
+            answers.asked.retain(|_, at| at.elapsed() < ASK_AGAIN);
+        }
+        for need in &needs {
+            answers.asked.insert(need_key(need), now);
+        }
+        answers.in_flight = Some((now, needs.len()));
+        let (revision, epoch) = (answers.revision, answers.epoch);
+        drop(answers);
+        if let Some(sink) = self.sink.lock().unwrap().clone() {
+            sink(revision, epoch, needs);
+        } else {
+            self.answers.lock().unwrap().in_flight = None;
+        }
+    }
+    /// One frame of the open composition, in ticks.
+    pub(crate) fn frame_ticks(&self) -> i64 {
+        self.answers.lock().unwrap().frame
+    }
+    /// The frame about to be drawn: playing frames draw late layers from
+    /// their nearest answer (or not at all), scrubbed frames from their
+    /// nearest answer when there is one, paused frames wait.
+    pub(crate) fn begin_frame(&self, moment: crate::policy::Moment) {
+        let mut answers = self.answers.lock().unwrap();
+        answers.late = match moment {
+            crate::policy::Moment::Playing => Late::NearestOrNothing,
+            crate::policy::Moment::Scrub => Late::Nearest,
+            crate::policy::Moment::Paused => Late::Wait,
+        };
+        answers.stood_in.clear();
+    }
+    /// The needs the frame just drawn showed from a nearest answer (or not at
+    /// all): the frame is not exact, and these are still to be answered.
+    pub(crate) fn end_frame(&self) -> Vec<CompatNeed> {
+        let mut answers = self.answers.lock().unwrap();
+        answers.late = Late::Wait;
+        std::mem::take(&mut answers.stood_in)
     }
     /// The realm's answers for `revision` and `epoch`; stale ones are dropped.
     pub fn answer_all(&self, revision: u64, epoch: u64, answered: Vec<(CompatNeed, Reply)>) {
         let mut answers = self.answers.lock().unwrap();
         if answers.revision != revision || answers.epoch != epoch {
             return;
+        }
+        if let Some((at, n)) = answers.in_flight.take() {
+            let per_need = at.elapsed() / n.max(1) as u32;
+            answers.per_need = Some(match answers.per_need {
+                Some(before) => (before * 3 + per_need) / 4,
+                None => per_need,
+            });
         }
         let mut drew = false;
         for (need, reply) in answered {
@@ -336,6 +521,7 @@ impl CompatStore {
                         answers.failed.clear();
                     }
                     answers.failed.insert(key);
+                    drew = true;
                     continue;
                 }
                 // Asked again by the next frame that needs it.
@@ -353,6 +539,11 @@ impl CompatStore {
             };
             answers.bytes += bytes;
             answers.order.push_back((key.clone(), bytes));
+            answers
+                .by_layer
+                .entry((key.0.clone(), key.1.clone()))
+                .or_default()
+                .insert(key.2, key.clone());
             answers.map.insert(key, answer);
             drew = true;
         }
@@ -360,10 +551,17 @@ impl CompatStore {
             let Some((old, bytes)) = answers.order.pop_front() else {
                 break;
             };
-            answers.map.remove(&old);
+            answers.forget(&old);
             answers.bytes -= bytes;
         }
-        drop(answers);
+        // The needs that waited for this batch go now, less what it answered.
+        let queued = std::mem::take(&mut answers.queued);
+        let queued = answers.fresh(queued);
+        if queued.is_empty() {
+            drop(answers);
+        } else {
+            self.dispatch(answers, queued);
+        }
         if drew && let Some(redraw) = self.redraw.lock().unwrap().clone() {
             redraw();
         }
@@ -423,13 +621,29 @@ impl CompatRasters for CompatStore {
             return CompatAnswer::Native;
         }
         let ticks = pm_render::compat::ticks_of(time).get();
-        self.answers
-            .lock()
-            .unwrap()
-            .map
-            .get(&key(composition, layer, ticks, scale, crop))
-            .cloned()
-            .unwrap_or(CompatAnswer::Missing)
+        let mut answers = self.answers.lock().unwrap();
+        let key = key(composition, layer, ticks, scale, crop);
+        if let Some(answer) = answers.map.get(&key) {
+            return answer.clone();
+        }
+        // A failed override fails its frames, as main's compositor throws.
+        if answers.late == Late::Wait || answers.failed.contains(&key) {
+            return CompatAnswer::Missing;
+        }
+        let stand_in = match (answers.nearest(composition, layer, ticks), answers.late) {
+            (Some(answer), _) => answer.clone(),
+            (None, Late::NearestOrNothing) => hidden_raster(),
+            (None, _) => return CompatAnswer::Missing,
+        };
+        answers.stood_in.push(CompatNeed {
+            composition: composition.into(),
+            layer: layer.into(),
+            time: pm_render::compat::ticks_of(time),
+            source,
+            scale,
+            crop,
+        });
+        stand_in
     }
 }
 
@@ -501,7 +715,7 @@ mod tests {
         let (asked_a, asked_b) = (asking(&a), asking(&b));
         a.set_state(true, 7, 1);
         b.set_state(true, 7, 1);
-        a.request(vec![need("x")], false);
+        a.request(vec![need("x")]);
         assert_eq!(*asked_a.lock().unwrap(), vec![(1, 1)]);
         assert!(asked_b.lock().unwrap().is_empty());
         a.answer_all(7, 1, vec![(need("x"), draw(9))]);
@@ -524,7 +738,7 @@ mod tests {
         // An answer computed by the earlier wrappers is dropped.
         store.answer_all(7, 1, vec![(need("x"), draw(255))]);
         assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
-        store.request(vec![need("x")], false);
+        store.request(vec![need("x")]);
         assert_eq!(*asked.lock().unwrap(), vec![(2, 1)]);
     }
     #[test]
@@ -532,20 +746,126 @@ mod tests {
         let store = CompatStore::default();
         let asked = asking(&store);
         store.set_state(true, 7, 1);
-        store.request(vec![need("x")], false);
+        store.request(vec![need("x")]);
         store.answer_all(7, 1, vec![(need("x"), Reply::Failed)]);
         assert!(matches!(answer(&store, "x"), CompatAnswer::Missing));
-        store.request(vec![need("x")], false);
+        store.request(vec![need("x")]);
         assert_eq!(asked.lock().unwrap().len(), 1);
         // A realm that had not caught up is asked again.
-        store.request(vec![need("y")], false);
+        store.request(vec![need("y")]);
         store.answer_all(7, 1, vec![(need("y"), Reply::Retry)]);
-        store.request(vec![need("y")], false);
+        store.request(vec![need("y")]);
         assert_eq!(asked.lock().unwrap().len(), 3);
         // An edit retries the failed one.
         store.set_state(true, 8, 1);
-        store.request(vec![need("x")], false);
+        store.request(vec![need("x")]);
         assert_eq!(asked.lock().unwrap().len(), 4);
+    }
+    fn at(layer: &str, seconds: f64) -> CompatNeed {
+        let mut n = need(layer);
+        n.time = pm_render::compat::ticks_of(seconds);
+        n
+    }
+    fn answer_at(store: &CompatStore, layer: &str, seconds: f64) -> CompatAnswer {
+        store.answer("c", layer, seconds, 1., CompatSource::RasterOverride, None)
+    }
+    fn byte_of(answer: CompatAnswer) -> Option<u8> {
+        match answer {
+            CompatAnswer::Raster(r) => Some(r.data[0]),
+            _ => None,
+        }
+    }
+    #[test]
+    fn a_playing_frame_draws_a_late_layer_from_its_nearest_answer() {
+        use crate::policy::Moment;
+        let store = CompatStore::default();
+        store.set_state(true, 7, 1);
+        store.answer_all(7, 1, vec![(at("x", 1.), draw(10)), (at("x", 2.), draw(20))]);
+        // Paused frames wait for their own answer.
+        store.begin_frame(Moment::Paused);
+        assert!(matches!(answer_at(&store, "x", 1.4), CompatAnswer::Missing));
+        assert!(store.end_frame().is_empty());
+        // Playing and scrubbed frames draw the nearest answered frame and say so.
+        store.begin_frame(Moment::Playing);
+        assert_eq!(byte_of(answer_at(&store, "x", 1.4)), Some(10));
+        assert_eq!(byte_of(answer_at(&store, "x", 1.6)), Some(20));
+        assert_eq!(byte_of(answer_at(&store, "x", 2.0)), Some(20));
+        let late = store.end_frame();
+        assert_eq!(late.len(), 2, "the exact frame is not late");
+        // A layer never answered: playing draws nothing, scrubbing waits.
+        store.begin_frame(Moment::Playing);
+        assert!(
+            matches!(answer_at(&store, "y", 1.), CompatAnswer::Raster(r) if *r.data == vec![0; 4])
+        );
+        assert_eq!(store.end_frame().len(), 1);
+        store.begin_frame(Moment::Scrub);
+        assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Missing));
+        assert!(store.end_frame().is_empty());
+        // A failed override still fails its frames.
+        store.answer_all(7, 1, vec![(at("x", 3.), Reply::Failed)]);
+        store.begin_frame(Moment::Playing);
+        assert!(matches!(answer_at(&store, "x", 3.), CompatAnswer::Missing));
+        store.end_frame();
+        // An edit keeps the last revision's answers as stand-ins only.
+        store.set_state(true, 8, 1);
+        store.begin_frame(Moment::Paused);
+        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
+        store.end_frame();
+        store.begin_frame(Moment::Playing);
+        assert_eq!(byte_of(answer_at(&store, "x", 1.)), Some(10));
+        store.end_frame();
+        // New wrappers don't.
+        store.set_state(true, 8, 2);
+        store.begin_frame(Moment::Scrub);
+        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
+        store.end_frame();
+    }
+    #[test]
+    fn one_batch_at_a_time_and_the_newest_needs_go_next() {
+        let store = CompatStore::default();
+        let asked = Arc::new(Mutex::new(vec![]));
+        let log = asked.clone();
+        store.set_sink(Some(Arc::new(move |_, _, needs: Vec<CompatNeed>| {
+            log.lock().unwrap().push(needs);
+        })));
+        store.set_state(true, 7, 1);
+        store.request(vec![at("x", 1.)]);
+        // Frames gone by while the realm answers are never asked.
+        store.request(vec![at("x", 2.)]);
+        store.request(vec![at("x", 3.), at("y", 3.)]);
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        store.answer_all(7, 1, vec![(at("x", 1.), draw(1))]);
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[1], vec![at("x", 3.), at("y", 3.)]);
+    }
+    #[test]
+    fn playback_asks_ahead_by_the_realms_measured_time() {
+        let store = CompatStore::default();
+        let asked = asking(&store);
+        store.set_state(true, 7, 1);
+        // Unmeasured: one frame.
+        assert_eq!(store.ahead(0, 1.), Some((Duration::ZERO, 1)));
+        let frame = 29_400_000; // 24 fps
+        store.request_ahead(vec![at("x", 1.), at("y", 1.)], ticks(1.), 1, frame);
+        assert_eq!(*asked.lock().unwrap(), vec![(1, 2)]);
+        // In flight: nothing more.
+        assert_eq!(store.ahead(0, 1.), None);
+        std::thread::sleep(Duration::from_millis(20));
+        store.answer_all(7, 1, vec![(at("x", 1.), draw(1)), (at("y", 1.), draw(1))]);
+        // About 10 ms a need, two layers: 20 ms a frame, five frames a batch.
+        let (lead, frames) = store.ahead(ticks(1.), 1.).unwrap();
+        assert!((3..=5).contains(&frames), "{frames}");
+        assert!(lead >= Duration::from_millis(60), "{lead:?}");
+        store.request_ahead(vec![at("x", 2.), at("y", 2.)], ticks(2.), frames, frame);
+        assert_eq!(asked.lock().unwrap()[1], (1, 2 * frames));
+        store.answer_all(7, 1, vec![]);
+        // The batch covers the frames ahead: nothing new until the playhead nears its end.
+        assert_eq!(store.ahead(ticks(1.5), 1.), None);
+        assert!(store.ahead(ticks(2.) + frames as i64 * frame, 1.).is_some());
+    }
+    fn ticks(seconds: f64) -> i64 {
+        pm_render::compat::ticks_of(seconds).get()
     }
     #[test]
     fn pass_through_answers_are_bounded_too() {

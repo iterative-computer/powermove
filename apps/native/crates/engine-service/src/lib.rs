@@ -1051,6 +1051,43 @@ struct Work {
 /// How much of a frame's budget a video may wait for its exact frame.
 const DECODE_SHARE: f64 = 0.35;
 /// Clips this far ahead of the playhead open on background workers.
+/// Playback asks the extension realm for raster override layers ahead of the
+/// playhead, one batch at a time: far enough ahead that the answers land
+/// before their frames (the realm's measured time), as many frames per batch
+/// as cost about a tenth of a second. A realm slower than real time answers
+/// every few frames; the frames between draw the nearest answer.
+fn ask_ahead(
+    engine: &mut render::Engine,
+    scene: &Scene,
+    spec: FrameSpec,
+    rate: Option<pm_protocol::common::PlaybackRate>,
+) {
+    let Some(store) = engine.compat().cloned() else {
+        return;
+    };
+    let Some(rate) = rate.filter(|r| r.num != 0) else {
+        return;
+    };
+    let frame = store.frame_ticks();
+    if frame <= 0 {
+        return;
+    }
+    let speed = rate.num as f64 / rate.den.max(1) as f64;
+    let Some((lead, frames)) = store.ahead(spec.time.get(), speed) else {
+        return;
+    };
+    let step = frame * i64::from(rate.num.signum());
+    // Land a frame early, on the frame grid.
+    let ahead = lead.as_secs_f64() * speed * pm_protocol::common::TICKS_PER_SECOND as f64;
+    let frames_ahead = (ahead / frame as f64).abs().ceil() as i64 + 1;
+    let at = (spec.time.get() + frames_ahead * step).max(0);
+    let Ok(at) = Ticks::new(at) else {
+        return;
+    };
+    let needs = engine.compat_needs(scene, at, spec);
+    store.request_ahead(needs, at.get(), frames, step);
+}
+
 const PREPARE_AHEAD_SECONDS: f64 = 0.75;
 const PREPARE_EVERY_SECONDS: f64 = 0.25;
 /// A transient refusal (fonts, GPU watchdog) waits this long to try again.
@@ -1662,8 +1699,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     continue;
                 }
                 match result {
-                    Ok(Some(s)) => {
+                    Ok(Some(mut s)) => {
                         v.status.error = None;
+                        // A scrubbed frame's late override layers are asked
+                        // now; playback asks ahead of the playhead instead.
+                        let late = std::mem::take(&mut s.compat_late);
+                        if spec.moment == Moment::Scrub
+                            && !late.is_empty()
+                            && let Some(store) = engine.compat()
+                        {
+                            store.request(late);
+                        }
                         // The drawable was another size than configured (a
                         // resize whose publication lagged): later frames
                         // render at the size actually shown.
@@ -1729,7 +1775,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                             _ => None,
                         };
                         if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
-                            store.request(needs, spec.moment == policy::Moment::Playing);
+                            store.request(needs);
                         }
                         if let Some(r) = runtime.get_mut(&id) {
                             let now = trace::now();
@@ -1753,6 +1799,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             }
             state.notify();
             drop(state);
+            if spec.moment == Moment::Playing {
+                let rate = runtime.get(&id).map(|r| r.transport.rate());
+                ask_ahead(&mut engine, &scene, spec, rate);
+            }
             if let Some(at) = prepare_at {
                 let videos = engine.prepare(&scene, at, spec);
                 if let Some(r) = runtime.get_mut(&id) {
