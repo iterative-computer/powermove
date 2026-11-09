@@ -32,7 +32,8 @@ fn push_rgba8_unorm(out: &mut Vec<u8>, [r, g, b, a]: [u8; 4], pixels: SnapshotPi
         SnapshotPixels::Premultiplied => out.extend_from_slice(&[r, g, b, a]),
         SnapshotPixels::Straight if a == 0 => out.extend_from_slice(&[0, 0, 0, 0]),
         SnapshotPixels::Straight => {
-            let un = |v: u8| ((u32::from(v) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
+            let un =
+                |v: u8| ((u32::from(v) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
             out.extend_from_slice(&[un(r), un(g), un(b), a]);
         }
     }

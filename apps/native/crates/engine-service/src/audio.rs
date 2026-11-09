@@ -282,7 +282,6 @@ impl AudioLink {
         })
     }
 
-
     pub fn send(&self, ctl: AudioCtl) {
         if matches!(&ctl, AudioCtl::Play { .. } | AudioCtl::PlayAround { .. }) {
             self.status
@@ -617,8 +616,7 @@ impl Control {
             AudioCtl::Document { root, revision } => {
                 // A viewer only ever resyncs the whole document (a Replace),
                 // which cannot fail; the thread's mirror is rebuilt from it.
-                *Arc::make_mut(&mut self.doc) =
-                    pm_model::Document::from_root(root, revision.get());
+                *Arc::make_mut(&mut self.doc) = pm_model::Document::from_root(root, revision.get());
                 self.broken = false;
                 self.dirty = true;
             }
