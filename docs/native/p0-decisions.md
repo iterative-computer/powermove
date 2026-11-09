@@ -346,3 +346,14 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Properties' 3D section binds keyframeable 3D channels as ordinary properties (`m.*`, `light.*`, `camera.*`, `environment.*`) and routes pop-ups and checkboxes through the Studio panel's typed scene edits (`pm_panel_studio3d::properties`); multi-selection has no 3D section.
 - A Mixer fader drag previews the knob and readout and writes the level once on release (one Undo step), instead of today's live re-tune while dragging: kernel gestures left the level on an intermediate step when a release arrived late.
 - The Mixer's Solo is the engine's monitor solo (`Viewer::monitor_solo`), never saved; it clears when the Mixer stops being drawn.
+## Captions and transcription lane (wave 21)
+
+- Captions is panel `captions` (Window ▸ Panels); its actions (Add Caption at Playhead, Import Captions…, Generate Captions, Export Captions…) are also File ▸ Import Captions…/Export Captions… and Composition ▸ Add Caption at Playhead/Generate Captions (the Layer menu holds only W1 registry commands), so the palette lists them; inline edits use the composer field (Return commits, Shift-Return adds a line).
+- Speech to text runs in-process on one `pm-transcription` thread that keeps the last model loaded; the transcribe.cpp runtime ships in `Contents/Resources/transcribe` (dev bundles copy `PM_TRANSCRIBE_RUNTIME`); models stay in main's layout under `<profile>/models/transcription`.
+- The native binding reads transcribe.cpp's own word table (not main's token merge); the catalog's reporting lag is still removed and every other step of main's worker (windows, lead-in, seams, segments, span midpoints) is ported as is. Audio is FFmpeg-decoded and resampled to 16 kHz mono with a 32-tap windowed sinc instead of the ffmpeg CLI.
+- S091's model sheet is a native sheet with one pop-up of the models that would let captions run (recommended first), live download progress, and the waiting generation continuing when the model lands.
+- Settings speech rows gain `inUse`, `recommended` and the `use` action (additive to the settings publication); Spoken Language and Downloaded Models are ordinary rows.
+- `pm-mcp` gains the `Speech` host hook; `transcribe_media` and `generate_captions` are implemented (pending tools 16 → 14). Caption jobs belong to the MCP connection that started them and wait up to a minute per call.
+- Background Tasks gain `TaskKind::Captions` (Generating Captions) and `ProgressUnit::Seconds`.
+- Shader Lab reads its source from the document per revision and writes through one kernel gesture per editor focus; Compile is the engine's own `translate::verdict` on `SHADER_HEADER + code`, also run after each write once typing pauses.
+
