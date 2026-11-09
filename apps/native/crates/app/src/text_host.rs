@@ -49,9 +49,7 @@ pub fn query<T>(
         match f(q) {
             Err(QueryError::NeedsFonts) if fill(q) => {}
             // Ink bounds (picking text, tight boxes) read glyph outlines.
-            Err(QueryError::NeedsInk) if !q.engine_mut().font_outlines() => {
-                q.engine_mut().set_font_outlines(true);
-            }
+            Err(QueryError::NeedsInk) if q.enable_font_outlines() => {}
             other => return other,
         }
     }
@@ -62,7 +60,7 @@ fn fill(q: &mut QueryContext) -> bool {
     let Some(fonts) = FONTS.get() else {
         return false;
     };
-    let Ok(report) = serde_json::from_str::<serde_json::Value>(&q.engine_mut().font_report())
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(&q.font_report())
     else {
         return false;
     };
@@ -75,17 +73,10 @@ fn fill(q: &mut QueryContext) -> bool {
     let Ok(reply) = fonts.broker.ask(misses, pending, ASK) else {
         return false;
     };
-    let engine = q.engine_mut();
     let Ok(answers) = serde_json::to_vec(&reply.answers) else {
         return false;
     };
-    if engine.add_font_answers(&answers).is_err() {
-        return false;
-    }
-    for (blob, index, bytes) in reply.fonts {
-        engine.add_font_bytes(&blob, index, bytes);
-    }
-    true
+    q.add_fonts(&answers, reply.fonts).is_ok()
 }
 
 /// The faces the engine lays out the project's text with, for the compat

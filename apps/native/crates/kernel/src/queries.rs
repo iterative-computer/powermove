@@ -26,10 +26,10 @@
 //! for text layout/caret geometry (`textLayout`, `textRaster`), 3D object
 //! boxes and cursor hits, the `edit.*` kernels (they return patches that
 //! must become commands, never be applied directly), the interned
-//! `intern`/`ev_id`/`ev_batch` fast path for drags, and font/model preloading
-//! (`add_font_answers`, `set_font_outlines`, `set_model`; reachable through
-//! [`QueryContext::engine_mut`] today). Answers are not cached per
-//! revision/time yet (section 5.2).
+//! `intern`/`ev_id`/`ev_batch` fast path for drags, and 3D model preloading.
+//! Fonts load through [`QueryContext::font_report`] and
+//! [`QueryContext::add_fonts`]. Answers are not cached per revision/time yet
+//! (section 5.2).
 //!
 //! Answers can be *conditional*: the engine replies `fonts`, `ink`, `models`,
 //! `host`, or `unsupported` instead of a value when it lacks an input. These
@@ -54,10 +54,10 @@ pub enum QueryError {
     /// JavaScript message.
     Thrown { kind: String, message: String },
     /// Text layout met fonts the mirror does not have yet; load them (see
-    /// [`QueryContext::engine_mut`]) and ask again.
+    /// [`QueryContext::add_fonts`]) and ask again.
     NeedsFonts,
-    /// Glyph outlines are needed for ink bounds; call
-    /// `engine_mut().set_font_outlines(true)`.
+    /// Glyph outlines are needed for ink bounds; see
+    /// [`QueryContext::enable_font_outlines`].
     NeedsInk,
     /// 3D models must be loaded first (`Engine::set_model`); ids attached.
     NeedsModels(Vec<String>),
@@ -146,27 +146,43 @@ impl QueryContext {
         }
     }
 
-    /// Replaces the mirror with `document` (open, replace, resync).
     pub(crate) fn resync(&mut self, document: &Document) {
         self.engine
             .adopt_document(document.clone(), ConsistencyHash::default());
     }
 
-    /// The revision of the mirror (equals the store's current revision).
+    /// Equals the store's current revision.
     pub fn revision(&self) -> u64 {
         self.engine.revision()
     }
 
-    /// The mirror's document (read-only).
     pub fn document(&self) -> &Document {
         self.engine.document()
     }
 
-    /// The engine itself, for preloading fonts and models and for queries not
-    /// wrapped here. Do **not** call `apply`/`resync` on it: the store keeps
-    /// it at the committed revision.
-    pub fn engine_mut(&mut self) -> &mut Engine {
-        &mut self.engine
+    /// Turns on glyph outlines for ink bounds; `false` when already on.
+    pub fn enable_font_outlines(&mut self) -> bool {
+        let enabled = !self.engine.font_outlines();
+        self.engine.set_font_outlines(true);
+        enabled
+    }
+
+    /// JSON `{misses, pending}`: the fonts the last text question lacked.
+    pub fn font_report(&mut self) -> String {
+        self.engine.font_report()
+    }
+
+    /// Adds resolver `answers` (JSON) and the faces they name.
+    pub fn add_fonts(
+        &mut self,
+        answers: &[u8],
+        faces: impl IntoIterator<Item = (String, u32, pm_text::font::FontBytes)>,
+    ) -> Result<(), String> {
+        self.engine.add_font_answers(answers)?;
+        for (blob, index, bytes) in faces {
+            self.engine.add_font_bytes(&blob, index, bytes);
+        }
+        Ok(())
     }
 
     fn root(&self) -> Option<&Node> {
