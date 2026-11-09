@@ -902,3 +902,298 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+/// A slow fake provider: each turn answers after `delay` seconds.
+fn slow_environment(profile: &Path, delay: &str) -> Environment {
+    let mut environment = environment(profile, "slow");
+    environment
+        .vars
+        .insert("PM_FAKE_DELAY".into(), delay.into());
+    environment
+}
+fn live_run(agent: &agent_host::SharedAgent, thread: &str) -> String {
+    agent
+        .lock()
+        .unwrap()
+        .panel
+        .session(thread)
+        .unwrap()
+        .run
+        .as_ref()
+        .unwrap()
+        .id
+        .clone()
+}
+fn said(state: &agent_host::AgentState, thread: &str, text: &str) -> bool {
+    state
+        .panel
+        .session(thread)
+        .unwrap()
+        .conversation
+        .values()
+        .any(|m| m.to_string().contains(text))
+}
+/// The latest delegate_task row: live in the trace, or kept with the reply.
+fn task_row(state: &agent_host::AgentState, thread: &str) -> Option<Value> {
+    let session = state.panel.session(thread).unwrap();
+    let kept = session
+        .conversation
+        .values()
+        .flat_map(|m| m["steps"].as_array().cloned().unwrap_or_default());
+    session
+        .trace
+        .rows
+        .values()
+        .cloned()
+        .chain(kept)
+        .filter(|row| row["toolName"] == "delegate_task")
+        .last()
+}
+const RESUMED: &str = "Saw: Review these results, verify changes where needed";
+#[test]
+fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Make a title card");
+    let run = live_run(&agent, &thread);
+    // What the run's own MCP session sends (`--agent-run`).
+    let capabilities = panel
+        .panels
+        .agent_orchestrate("orchestrator_capabilities", &json!({"agentRunId":run}))
+        .unwrap();
+    assert_eq!(
+        capabilities["parentThreadId"],
+        json!(thread),
+        "{capabilities}"
+    );
+    assert_eq!(capabilities["features"]["maxParallelTasks"], 8);
+    let chatgpt = &capabilities["providers"][0];
+    assert_eq!(chatgpt["canRunChildTask"], true, "{capabilities}");
+    assert_eq!(chatgpt["models"][0]["id"], "fixture-5", "{capabilities}");
+    assert_eq!(
+        chatgpt["models"][0]["options"][0]["options"][1]["label"],
+        "High"
+    );
+    let delegated = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Child brief","title":"Child","clientRequestId":"round-1"}),
+        )
+        .unwrap();
+    assert_eq!(delegated["status"], "running", "{delegated}");
+    let task = delegated["taskId"].as_str().unwrap().to_owned();
+    // A retry with the same key is the same task; another brief is refused.
+    let again = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Child brief","title":"Child","clientRequestId":"round-1"}),
+        )
+        .unwrap();
+    assert_eq!(again["taskId"], json!(task));
+    assert!(
+        panel
+            .panels
+            .agent_orchestrate(
+                "delegate_task",
+                &json!({"agentRunId":run,"task":"Other","clientRequestId":"round-1"}),
+            )
+            .unwrap_err()
+            .contains("already belongs to a different task")
+    );
+    // The root's turn ends before the child's: it waits, then resumes.
+    panel.wait(|state| {
+        state.runs.held(&run)
+            && state.panel.session(&thread).unwrap().activity == "Waiting for 1 subagent to finish…"
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let agent2 = agent.clone();
+    while !{
+        let state = agent2.lock().unwrap();
+        said(&state, &thread, RESUMED) && state.panel.session(&thread).unwrap().run.is_none()
+    } {
+        assert!(Instant::now() < deadline, "the run never resumed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let state = agent.lock().unwrap();
+    let row = task_row(&state, &thread).expect("task row");
+    assert_eq!(row["status"], "done", "{row}");
+    assert_eq!(row["output"], "Saw: Child brief", "{row}");
+    assert!(state.tasks.idle());
+    drop(state);
+    // Main's archive layout, with the result delivered (acknowledged).
+    let archives = walk(&root.path().join("Agent Tasks"));
+    assert_eq!(archives.len(), 1, "{archives:?}");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&archives[0]).unwrap()).unwrap();
+    let record = &saved["records"][0];
+    assert_eq!(record["task"]["status"], "completed", "{saved}");
+    assert_eq!(record["task"]["summary"], "Saw: Child brief");
+    assert_eq!(record["acknowledged"], true);
+    assert_eq!(record["clientRequestId"], "round-1");
+    // The run is over: its tools answer as main's do.
+    assert_eq!(
+        panel
+            .panels
+            .agent_orchestrate("task_status", &json!({"agentRunId":run,"taskId":task}))
+            .unwrap_err(),
+        "This agent run is no longer active."
+    );
+    panel.panels.close();
+}
+#[test]
+fn wait_mode_status_cancel_and_send_follow_mains_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.6"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Plan it");
+    let run = live_run(&agent, &thread);
+    let call = |tool: &str, args: Value| {
+        let mut args = args;
+        args["agentRunId"] = json!(run);
+        panel.panels.agent_orchestrate(tool, &args)
+    };
+    // wait returns the finished result and acknowledges it.
+    let waited = call(
+        "delegate_task",
+        json!({"task":"Quick look","mode":"wait","timeoutMs":20000}),
+    )
+    .unwrap();
+    assert_eq!(waited["status"], "completed", "{waited}");
+    assert_eq!(waited["summary"], "Saw: Quick look");
+    assert_eq!(waited["waitTimedOut"], false);
+    // Cancelling a finished task keeps its result.
+    let kept = call("task_cancel", json!({"taskId":waited["taskId"]})).unwrap();
+    assert_eq!(kept["status"], "completed", "{kept}");
+    assert!(
+        call("task_status", json!({"taskId":"nope"}))
+            .unwrap_err()
+            .contains("does not belong")
+    );
+    // A wait that times out never cancels: the task goes on.
+    let short = call(
+        "delegate_task",
+        json!({"task":"Longer look","mode":"wait","timeoutMs":0}),
+    )
+    .unwrap();
+    assert_eq!(short["waitTimedOut"], true, "{short}");
+    let id = short["taskId"].as_str().unwrap().to_owned();
+    let status = call("task_status", json!({"taskId":id})).unwrap();
+    assert_eq!(status["workState"], "working", "{status}");
+    assert_eq!(status["questions"], json!([]));
+    // App Server takes new direction live; new settings interrupt and resume.
+    let sent = call(
+        "task_send",
+        json!({"taskId":id,"message":"Also check the end","clientRequestId":"u1"}),
+    )
+    .unwrap();
+    assert_eq!(sent["delivery"], "live", "{sent}");
+    let resumed = call(
+        "task_send",
+        json!({"taskId":id,"target":{"options":{"reasoningEffort":"high"}}}),
+    )
+    .unwrap();
+    assert_eq!(resumed["delivery"], "resumed", "{resumed}");
+    assert_eq!(resumed["reasoningEffort"], "high", "{resumed}");
+    let repeat = call(
+        "task_send",
+        json!({"taskId":id,"message":"Also check the end","clientRequestId":"u1"}),
+    )
+    .unwrap();
+    assert_eq!(repeat["delivery"], "already_sent");
+    assert!(
+        call("task_send", json!({"taskId":id}))
+            .unwrap_err()
+            .contains("Supply message")
+    );
+    let cancelled = call("task_cancel", json!({"taskId":id,"reason":"Not needed"})).unwrap();
+    assert_eq!(cancelled["status"], "cancel_requested", "{cancelled}");
+    panel.wait(|state| {
+        task_row(state, &thread)
+            .is_some_and(|r| r["task"]["taskId"] == json!(id) && r["task"]["status"] == "cancelled")
+    });
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
+    panel.panels.close();
+}
+#[test]
+fn a_watched_thread_run_resumes_the_watcher_with_its_result() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Coordinate");
+    let run = live_run(&agent, &thread);
+    let side = panel
+        .panels
+        .agent_thread_control(
+            "thread_launch",
+            &json!({"title":"Side","message":"Side work","callerAccess":"editor"}),
+        )
+        .unwrap();
+    let side_thread = side["threadId"].as_str().unwrap().to_owned();
+    assert!(
+        panel
+            .panels
+            .agent_orchestrate("thread_watch", &json!({"agentRunId":run,"threadId":thread}))
+            .unwrap_err()
+            .contains("cannot watch its own run")
+    );
+    let watched = panel
+        .panels
+        .agent_orchestrate(
+            "thread_watch",
+            &json!({"agentRunId":run,"threadId":side_thread}),
+        )
+        .unwrap();
+    assert_eq!(watched["watching"], true, "{watched}");
+    assert_eq!(watched["status"], "running");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !{
+        let state = agent.lock().unwrap();
+        said(&state, &thread, RESUMED) && state.panel.session(&thread).unwrap().run.is_none()
+    } {
+        assert!(Instant::now() < deadline, "the watcher never resumed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(said(&agent.lock().unwrap(), &side_thread, "Saw: Side work"));
+    panel.panels.close();
+}
+#[test]
+fn stopping_a_run_that_waits_for_its_subagent_stops_both() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.3"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.send("Go");
+    let run = live_run(&agent, &thread);
+    // A child that never answers.
+    panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":run,"task":"Hold: forever"}),
+        )
+        .unwrap();
+    panel.wait(|state| state.runs.held(&run));
+    panel.click("agent-stop");
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle());
+    let state = agent.lock().unwrap();
+    let row = task_row(&state, &thread).expect("task row");
+    assert_eq!(row["task"]["status"], "cancelled", "{row}");
+    assert_eq!(
+        state.panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    drop(state);
+    panel.panels.close();
+}

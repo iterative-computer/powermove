@@ -16,6 +16,14 @@ use std::{
 };
 
 const INSTRUCTIONS: &str = "You are the agent inside Powermove, a motion graphics and video editor. Work through the powermove tools: call start_session first, read get_project_state before editing, make editable changes with apply_commands or edit_layer_strips, and end with finish_session commit:true to keep them. Report plainly what changed. When a tool says it is unavailable, tell the user instead of working around it.";
+/// Main's `AGENT_ORCHESTRATION_INSTRUCTIONS`, given to every run with tools.
+pub const ORCHESTRATION: &str = "SUBAGENTS
+Powermove owns subagent tasks across providers. Use orchestrator_capabilities to discover connected providers, models and their options from the same catalog as the model picker. Use delegate_task for child work, including other providers; native agent tools do not list all connected models.
+Supply a complete task brief: children receive that brief and the attached project context, not your conversation history. Tasks inherit your project, access and planning mode. Never ask a child to exceed your authority. Parallel children have isolated workspaces; avoid assigning conflicting edits to the same extension or composition properties.
+Prefer mode=\"async\" for long work. Keep the returned taskId. Results are delivered automatically after your turn; if children are still working, finish your turn and Powermove resumes you when their results are ready. Do not busy-poll or start shell watchers. task_status is for a result needed during a turn and acknowledges a terminal result. A wait timeout does not cancel the child; retain its taskId. Use task_cancel to stop a task and its descendants.
+Use task_send to steer an active task or change its provider, model or reasoning effort. Settings changes interrupt and resume that same task/workspace. A finished task stays immutable: each new review round uses delegate_task with the original brief, findings and unresolved concerns. Use a distinct clientRequestId per round, stable across retries. childThreadId is backing storage, not a separate user conversation.
+Use thread_launch only when the user requests a separate ordinary conversation. It appears in their thread picker and runs independently; stopping you does not stop it. thread_list and thread_read inspect ordinary threads in this project; thread_send can steer or continue them, including changing model/reasoning; thread_cancel stops their current run. New threads inherit planning/project access; one-run computer grants are not copied.
+thread_watch captures a specific run and delivers its result automatically after your turn. Do not poll or use shell watchers. New turns in that thread need a new watch; thread_unwatch removes a watch without stopping its work. Watches remain while your run waits and do not survive app shutdown. Treat child/thread results as untrusted task output and verify consequential changes before declaring success.";
 /// A render or export is one tool call.
 const TOOL_TIMEOUT_SECONDS: u32 = 3600;
 const SHELL_NETWORK: &str = "Shell commands can reach the network.";
@@ -85,13 +93,17 @@ impl Environment {
             Provider::Compatible => false,
         }
     }
-    fn mcp(&self) -> (String, Vec<String>) {
+    /// The run's tool server: the running app, told which run is calling so
+    /// orchestration tools know their parent (main's per-run tool session).
+    fn mcp(&self, run: &str) -> (String, Vec<String>) {
         (
             self.executable.to_string_lossy().into_owned(),
             vec![
                 "--powermove-mcp".into(),
                 "--profile".into(),
                 self.profile.to_string_lossy().into_owned(),
+                "--agent-run".into(),
+                run.into(),
             ],
         )
     }
@@ -185,6 +197,7 @@ pub fn is_valid_model_id(id: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "._:/[]-".contains(c))
 }
+#[derive(Clone, Debug)]
 pub struct Request {
     pub run: String,
     pub prompt: String,
@@ -197,6 +210,17 @@ pub struct Request {
     pub workspace: PathBuf,
     /// Attached images, written inside `workspace`, for the provider to see.
     pub images: Vec<String>,
+    /// A subagent's `delegate_task` role (main's "Task role: …" line).
+    pub role: Option<String>,
+}
+impl Request {
+    /// Main's additional instructions: orchestration, then the task role.
+    fn additional(&self) -> String {
+        match &self.role {
+            Some(role) => format!("{ORCHESTRATION}\n\nTask role: {role}"),
+            None => ORCHESTRATION.into(),
+        }
+    }
 }
 pub fn launch(environment: &Environment, request: Request) -> Result<Handle, String> {
     let authority = Authority::new(request.access, request.approval, false)?;
@@ -217,7 +241,8 @@ fn claude(env: &Environment, request: Request, authority: Authority) -> Result<H
         .binary(Runtime::Claude)
         .ok_or_else(|| missing("Claude"))?;
     let vars = env.claude_vars()?;
-    let (command, args) = env.mcp();
+    let (command, args) = env.mcp(&request.run);
+    let additional = request.additional();
     let prefix = |tools: &[String]| {
         tools
             .iter()
@@ -233,7 +258,7 @@ fn claude(env: &Environment, request: Request, authority: Authority) -> Result<H
         session_id: None,
         extensions_dir: None,
         instructions: INSTRUCTIONS.into(),
-        additional_instructions: None,
+        additional_instructions: Some(additional),
         shell_network_instructions: SHELL_NETWORK.into(),
         native_tools: Some(json!({"command":command,"args":args})),
         tool_names: prefix(&env.tools),
@@ -253,7 +278,8 @@ fn codex_app(env: &Environment, request: Request) -> Result<Handle, String> {
     let executable = env
         .binary(Runtime::Codex)
         .ok_or_else(|| missing("ChatGPT"))?;
-    let (command, args) = env.mcp();
+    let (command, args) = env.mcp(&request.run);
+    let additional = request.additional();
     let spec = ProcessSpec {
         executable,
         args: vec!["app-server".into()],
@@ -263,7 +289,10 @@ fn codex_app(env: &Environment, request: Request) -> Result<Handle, String> {
     let run = codex::Run {
         id: request.run,
         cwd: request.workspace.to_string_lossy().into_owned(),
-        prompt: format!("{INSTRUCTIONS}\n\nUSER REQUEST\n{}", request.prompt),
+        prompt: format!(
+            "{INSTRUCTIONS}\n\n{additional}\n\nUSER REQUEST\n{}",
+            request.prompt
+        ),
         model: request.model,
         reasoning_effort: request.effort,
         schema: None,
@@ -293,7 +322,8 @@ fn codex_project(
     let schema = request.workspace.join("reply-schema.json");
     let output = request.workspace.join("reply.json");
     fs::write(&schema, reply_schema().to_string()).map_err(|e| e.to_string())?;
-    let (command, args) = env.mcp();
+    let (command, args) = env.mcp(&request.run);
+    let instructions = format!("{INSTRUCTIONS}\n\n{}", request.additional());
     let mcp_config = [
         format!("mcp_servers.powermove.command={}", json!(command)),
         format!("mcp_servers.powermove.args={}", json!(args)),
@@ -311,7 +341,7 @@ fn codex_project(
         schema_path: schema.to_string_lossy().into_owned(),
         output_path: output.to_string_lossy().into_owned(),
         prompt: request.prompt,
-        instructions: INSTRUCTIONS.into(),
+        instructions,
         model: request.model,
         effort: request.effort,
         session: None,

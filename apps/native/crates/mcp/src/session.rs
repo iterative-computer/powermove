@@ -43,6 +43,16 @@ fn live_layout(mut saved: Value, live: &Value) -> Value {
     saved["registeredPanels"] = json!(panels);
     saved
 }
+/// Main's orchestrator tools, answered by the window that runs the caller.
+const ORCHESTRATION_TOOLS: &[&str] = &[
+    "orchestrator_capabilities",
+    "delegate_task",
+    "task_status",
+    "task_send",
+    "task_cancel",
+    "thread_watch",
+    "thread_unwatch",
+];
 struct Transaction {
     snapshot: Value,
     mark: ActorHistoryMark,
@@ -74,6 +84,9 @@ struct Active {
 pub struct McpSession {
     host: Arc<Mutex<Automation>>,
     active: Option<Active>,
+    /// The provider run that launched this connection (`--agent-run`):
+    /// orchestration tools act as that run.
+    agent_run: Option<String>,
     writer: u32,
     closed: bool,
 }
@@ -83,12 +96,16 @@ impl McpSession {
         Self {
             host,
             active: None,
+            agent_run: None,
             writer: NEXT.fetch_add(1, Ordering::Relaxed),
             closed: false,
         }
     }
     pub fn tools(&self) -> Value {
         json!(catalog::tools())
+    }
+    pub fn set_agent_run(&mut self, run: &str) {
+        self.agent_run = Some(run.to_owned());
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
         if name == "project_memory" {
@@ -367,6 +384,27 @@ impl McpSession {
                 _ => live,
             });
         }
+        if ORCHESTRATION_TOOLS.contains(&name) {
+            // Tasks and watches belong to the window's Agent panel runs.
+            let surfaces = host
+                .surfaces
+                .clone()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let run = self.agent_run.clone().ok_or_else(|| {
+                Error::invalid(
+                    "Subagents and thread watches belong to a Powermove agent run. Ask in Powermove's Agent panel, or use thread_launch and thread_read.",
+                )
+            })?;
+            let project = session.project.clone();
+            drop(host);
+            let mut call = args.clone();
+            call["agentRunId"] = json!(run);
+            return surfaces.call(name, project.as_deref(), &call);
+        }
         if ["thread_launch", "thread_send", "thread_cancel"].contains(&name) {
             // The window's Agent panel owns provider runs; only the app has one.
             let surfaces = host
@@ -382,6 +420,9 @@ impl McpSession {
             let mut call = args.clone();
             call["callerAccess"] = json!(session.access);
             call["callerRunId"] = json!(session.run);
+            if let Some(run) = &self.agent_run {
+                call["agentRunId"] = json!(run);
+            }
             return surfaces.call(name, project.as_deref(), &call);
         }
         if ["thread_list", "thread_read"].contains(&name) {
@@ -397,6 +438,14 @@ impl McpSession {
             drop(host);
             let project = session.project.clone();
             let mut read = threads.read(name, project.as_deref(), args)?;
+            // Reading a finished run acknowledges this run's watch on it.
+            if name == "thread_read"
+                && let (Some(surfaces), Some(run)) = (&surfaces, &self.agent_run)
+            {
+                let mut call = args.clone();
+                call["agentRunId"] = json!(run);
+                let _ = surfaces.call("thread_acknowledge", project.as_deref(), &call);
+            }
             // A live run's trace and open questions come from the window's panel.
             if name == "thread_read"
                 && let Some(surfaces) = surfaces

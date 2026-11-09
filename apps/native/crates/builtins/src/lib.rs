@@ -2,6 +2,7 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+mod agent_tasks;
 mod chrome;
 pub use agent_host::AgentCarry;
 pub use models::APPLICATION_AGENT_STORE;
@@ -521,6 +522,32 @@ impl Builtins {
             );
         }
         Ok(result)
+    }
+    /// Main's orchestrator tools for the run named by `agentRunId` (its MCP
+    /// session's `--agent-run`): subagent tasks and run watches, through this
+    /// window's Agent panel runs. Call it off the main thread.
+    pub fn agent_orchestrate(
+        &self,
+        tool: &str,
+        args: &Value,
+    ) -> std::result::Result<Value, String> {
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| {
+                "Open the Agent panel in this project's window before delegating.".to_owned()
+            })?;
+            let backend = backend.lock().unwrap();
+            let agent = backend
+                .native
+                .agent
+                .clone()
+                .ok_or("This agent run is no longer active.")?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let result = agent_tasks::call(&agent, &link, tool, args);
+        agent_host::ensure_worker(&agent, &link, &self.broker.kernel, self.broker.application);
+        link.touch();
+        link.publish_now();
+        result
     }
     /// Files the person chose with Add Attachments, as attachment records
     /// (`{id, name, type, size, dataUrl | content | dataBase64}`), into the

@@ -103,6 +103,13 @@ pub struct Session {
     next_message: u64,
 }
 impl Session {
+    /// The thread's latest run, live or finished.
+    pub fn last_run(&self) -> Option<&str> {
+        self.run
+            .as_ref()
+            .map(|r| r.id.as_str())
+            .or(self.last_run.as_deref())
+    }
     fn from_record(v: &Value) -> Result<Self> {
         if v.get("provider").is_some_and(|p| {
             !p.is_null() && !matches!(p.as_str(), Some("chatgpt" | "claude" | "compatible"))

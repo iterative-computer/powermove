@@ -53,7 +53,13 @@ impl SurfaceHook for Bridge {
                 cancelled: cancelled.clone(),
             })
             .map_err(|_| Error::unavailable("The app is closing."))?;
-        answer.recv_timeout(Duration::from_secs(30)).map_err(|_| {
+        // delegate_task and thread_watch may wait up to 90 s (mode "wait").
+        let limit = if ["delegate_task", "thread_watch"].contains(&tool) {
+            120
+        } else {
+            30
+        };
+        answer.recv_timeout(Duration::from_secs(limit)).map_err(|_| {
             cancelled.store(true, Ordering::Release);
             Error::invalid(format!("Powermove timed out while running {tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed."))
         })?
@@ -184,7 +190,18 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
     let panel = args["panelId"].as_str().unwrap_or_default().to_owned();
     match call.tool.as_str() {
         // The Agent panel's runs reach the kernel and disk: off the main thread.
-        "thread_launch" | "thread_send" | "thread_cancel" | "thread_live" => {
+        "thread_launch"
+        | "thread_send"
+        | "thread_cancel"
+        | "thread_live"
+        | "orchestrator_capabilities"
+        | "delegate_task"
+        | "task_status"
+        | "task_send"
+        | "task_cancel"
+        | "thread_watch"
+        | "thread_unwatch"
+        | "thread_acknowledge" => {
             let runtime = target.with(cx, |c, _, _, cx| {
                 c.read(cx).builtins.runtime.clone().ok_or_else(|| {
                     Error::invalid("Open the Agent panel in this project's window before controlling its threads.")
@@ -201,8 +218,15 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                         let thread = args["threadId"].as_str().unwrap_or_default();
                         return Ok(runtime.agent_thread_live(thread).unwrap_or(Value::Null));
                     }
+                    if tool.starts_with("thread_launch")
+                        || ["thread_send", "thread_cancel"].contains(&tool.as_str())
+                    {
+                        return runtime
+                            .agent_thread_control(&tool, &args)
+                            .map_err(Error::invalid);
+                    }
                     runtime
-                        .agent_thread_control(&tool, &args)
+                        .agent_orchestrate(&tool, &args)
                         .map_err(Error::invalid)
                 })
                 .await

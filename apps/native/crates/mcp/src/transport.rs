@@ -97,11 +97,16 @@ fn recover_descriptor(file: &Path) -> Result<()> {
 }
 
 pub trait ToolConnection {
+    /// The provider run that launched this connection's tool server, if any.
+    fn bind_agent_run(&mut self, _run: &str) {}
     fn list(&mut self) -> Result<Value>;
     fn invoke(&mut self, name: &str, args: Value) -> Result<Value>;
     fn disconnect(&mut self) -> Result<()>;
 }
 impl ToolConnection for McpSession {
+    fn bind_agent_run(&mut self, run: &str) {
+        self.set_agent_run(run);
+    }
     fn list(&mut self) -> Result<Value> {
         Ok(self.tools())
     }
@@ -291,6 +296,9 @@ fn connection<T: ToolConnection>(
                     break;
                 }
                 authorized = true;
+                if let Some(run) = m["agentRun"].as_str() {
+                    session.bind_agent_run(run);
+                }
                 reader.get_ref().set_read_timeout(None)?;
                 write_json(&mut stream, &json!({"id":id,"result":{"connected":true}}))?;
                 continue;
@@ -444,14 +452,18 @@ impl Drop for LoopbackServer {
 }
 /// Client mode for --powermove-mcp, matching the shipped proxy. Native profiles
 /// are explicit. Never discover or start the Electron host implicitly.
-pub fn proxy_stdio(profile: &Path) -> Result<()> {
+/// `agent_run`: the provider run whose tool server this is (`--agent-run`).
+pub fn proxy_stdio(profile: &Path, agent_run: Option<String>) -> Result<()> {
     serve_stdio(
         std::io::stdin().lock(),
         std::io::stdout().lock(),
-        Bridge::open(profile)?,
+        Bridge::open(profile, agent_run)?,
     )
 }
-fn bridge_channel(profile: &Path) -> Result<(TcpStream, BufReader<TcpStream>)> {
+fn bridge_channel(
+    profile: &Path,
+    agent_run: Option<&str>,
+) -> Result<(TcpStream, BufReader<TcpStream>)> {
     let descriptor: Value =
         serde_json::from_slice(&std::fs::read(profile.join("mcp/connection.json"))?)
             .map_err(|_| Error::invalid("Invalid MCP descriptor"))?;
@@ -467,10 +479,11 @@ fn bridge_channel(profile: &Path) -> Result<(TcpStream, BufReader<TcpStream>)> {
         return Err(Error::invalid("Invalid MCP descriptor version"));
     }
     let mut stream = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))?;
-    write_json(
-        &mut stream,
-        &json!({"id":0,"method":"connect","token":token}),
-    )?;
+    let mut connect = json!({"id":0,"method":"connect","token":token});
+    if let Some(run) = agent_run {
+        connect["agentRun"] = json!(run);
+    }
+    write_json(&mut stream, &connect)?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let response: Value = serde_json::from_slice(
         &line(&mut reader)?.ok_or_else(|| Error::invalid("MCP host closed"))?,
@@ -483,14 +496,16 @@ fn bridge_channel(profile: &Path) -> Result<(TcpStream, BufReader<TcpStream>)> {
 }
 struct Bridge {
     profile: PathBuf,
+    agent_run: Option<String>,
     channel: Option<(TcpStream, BufReader<TcpStream>)>,
     next: u64,
 }
 impl Bridge {
-    fn open(profile: &Path) -> Result<Self> {
+    fn open(profile: &Path, agent_run: Option<String>) -> Result<Self> {
         Ok(Self {
             profile: profile.to_path_buf(),
-            channel: Some(bridge_channel(profile)?),
+            channel: Some(bridge_channel(profile, agent_run.as_deref())?),
+            agent_run,
             next: 1,
         })
     }
@@ -505,7 +520,7 @@ impl Bridge {
         // Reconnect only on a later explicit request. An uncertain mutation is
         // never replayed; a fresh channel creates a fresh server-side session.
         if self.channel.is_none() {
-            self.channel = Some(bridge_channel(&self.profile)?);
+            self.channel = Some(bridge_channel(&self.profile, self.agent_run.as_deref())?);
         }
         let outcome = (|| {
             let (stream, reader) = self.channel.as_mut().expect("connected channel");
@@ -634,6 +649,7 @@ mod teardown_tests {
         let reader = BufReader::new(stream.try_clone().unwrap());
         let mut bridge = Bridge {
             profile: PathBuf::new(),
+            agent_run: None,
             channel: Some((stream, reader)),
             next: 1,
         };

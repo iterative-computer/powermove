@@ -109,9 +109,9 @@ def codex():
             emit({'method': 'turn/started', 'params': {'threadId': 'thread', 'turn': {'id': 'turn'}}})
             if mode == 'stream':
                 threading.Thread(target=stream, args=(turn,), daemon=True).start()
-            elif mode != 'hold':
+            elif mode != 'hold' and not request['params']['input'][0]['text'].split('\n')[-1].startswith('Hold:'):
                 if mode == 'slow':
-                    time.sleep(0.4)
+                    time.sleep(float(os.environ.get('PM_FAKE_DELAY', '0.4')))
                 text = 'Saw: ' + request['params']['input'][0]['text'].split('\n')[-1]
                 emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})
                 emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'answer', 'type': 'agentMessage', 'text': text}}})

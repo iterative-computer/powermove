@@ -111,11 +111,21 @@ fn main() -> Result<()> {
     }
     let mcp_mode = args.iter().any(|a| a == "--powermove-mcp");
     let mut launch = None;
+    let mut agent_run = None;
     let mut profile = std::env::var_os("PM_NATIVE_PROFILE").map(PathBuf::from);
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--powermove-mcp" {
             // Same app executable and newline-delimited stdio contract.
+        } else if args[i] == "--agent-run" && mcp_mode {
+            // The provider run this tool server belongs to (orchestration).
+            i += 1;
+            agent_run = Some(
+                args.get(i)
+                    .context("--agent-run needs a run id")?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         } else if args[i] == "--profile" {
             i += 1;
             profile = Some(PathBuf::from(
@@ -159,7 +169,7 @@ fn main() -> Result<()> {
                 launch.is_none(),
                 "Open projects in the running app before attaching MCP"
             );
-            return std::thread::spawn(move || pm_mcp::transport::proxy_stdio(&profile))
+            return std::thread::spawn(move || pm_mcp::transport::proxy_stdio(&profile, agent_run))
                 .join()
                 .map_err(|_| anyhow::anyhow!("MCP proxy panicked"))?
                 .map_err(Into::into);
