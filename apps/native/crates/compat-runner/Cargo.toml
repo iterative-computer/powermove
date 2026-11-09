@@ -13,6 +13,7 @@ pm-runtime-v8 = { path = "../runtime-v8" }
 pm-recorder = { path = "../recorder" }
 pm-kernel = { path = "../kernel" }
 pm-mcp = { path = "../mcp" }
+pm-scene3d = { path = "../scene3d" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-store-host = { path = "../store-host" }
 pm-compat-host = { path = "../compat-host" }

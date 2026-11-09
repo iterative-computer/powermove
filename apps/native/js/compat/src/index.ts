@@ -9,6 +9,7 @@ export type { ExtensionOptions, ExtensionHandle } from "./extensions";
 export { HostChannel, HostError } from "./channel";
 export { DocumentMirror } from "./mirror";
 export { createServicesRegistry } from "./services";
+export { scene3dAPI } from "./scene3d";
 export { RecorderCanvas, NativeImage } from "./canvas";
 export type { RecorderHost, SurfaceVersion, NativeSurface } from "./canvas";
 export type * from "./remote-dom";

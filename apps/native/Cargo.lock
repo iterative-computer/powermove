@@ -4761,6 +4761,7 @@ dependencies = [
  "pm-recorder",
  "pm-remote-dom",
  "pm-runtime-v8",
+ "pm-scene3d",
  "pm-store-host",
  "png",
  "regex",

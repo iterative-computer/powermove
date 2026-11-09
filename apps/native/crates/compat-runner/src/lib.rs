@@ -1100,6 +1100,41 @@ mod tests {
         // whole composition at the crop's scale (8 px across 160 of 320).
         assert_eq!(*asked.lock().unwrap(), [(4, 2), (8, 2), (8, 2), (16, 9)]);
     }
+    /// `api.scene3d` edits through the native Studio command (one undo
+    /// step), describes and selects as main; the studio-only view controls
+    /// say they are missing.
+    #[test]
+    fn scene3d_edits_through_the_native_studio_command() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const s=api.scene3d;const heard=[];api.events.on('scene3d:selection',x=>heard.push(x));
+                const made=s.edit({operation:'add_object',id:'cube',name:'Cube'});
+                api.history.undo();const undone=api.model.layer('cube');api.history.redo();
+                const scene=s.describe();s.select(null,['cube']);
+                let refused=null;try{s.setView('editor')}catch(e){refused=e.message}
+                const facts=[made.ok,made.data.result.layerId,scene.objects.map(o=>o.id),s.selection(),heard,s.isGroup('cube'),s.convert('cube').message,
+                  s.createScene().lights.length,s.createObject('o1').source.primitive,s.createLight('l1','point').type,s.getView(),refused];
+                return [...facts,undone]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                true,
+                "cube",
+                ["cube"],
+                {"layerId": "cube", "ids": ["cube"]},
+                [{"layerId": "cube", "ids": ["cube"]}],
+                false,
+                "Already a 3D layer",
+                1,
+                "box",
+                "point",
+                "camera",
+                "scene3d.setView('editor') needs the 3D studio, which this build does not have",
+                null
+            ])
+        );
+    }
     #[test]
     fn ui_modal_keeps_main_semantics_with_native_frame_data() {
         let runner = dom_runner();

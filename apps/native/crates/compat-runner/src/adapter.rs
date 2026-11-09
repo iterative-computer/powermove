@@ -707,6 +707,43 @@ impl KernelAdapter {
                 return Ok(reply);
             }
             "edit.mutateAbort" => HistoryCall::Rollback.into(),
+            // v1–3's `scene3d.edit`: the Studio command MCP's edit_3d runs, as
+            // one undoable edit; `data.result` names the layer it made or changed.
+            "scene3d.edit" => {
+                let selection = p.selection.layers().to_vec();
+                let before = wire(&realized(&p));
+                let batch = match pm_mcp::scene3d::batch(
+                    &p.snapshot,
+                    &args["args"],
+                    &selection,
+                    time,
+                    &pm_scene3d::geometry::NoAssets,
+                ) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        return Ok(
+                            json!({"value":{"ok":false,"message":error.message},"publication":self.publication()?}),
+                        );
+                    }
+                };
+                let label = args["meta"]["label"].as_str().unwrap_or("Edit 3D layers");
+                let mut reply = self.execute(
+                    txid,
+                    EditCall::Apply {
+                        body: WriteBody::Commands(batch.commands),
+                        base_revision: None,
+                        label: Some(label.to_owned()),
+                    }
+                    .into(),
+                )?;
+                if reply["value"]["ok"] == true {
+                    let after = wire(&realized(&*self.published()?));
+                    let id = pm_mcp::scene3d::result_id(&before, &after, &args["args"], &selection);
+                    let layer = id.clone().or_else(|| args["args"]["target"].as_str().map(str::to_owned)).or_else(|| selection.first().cloned());
+                    reply["value"]["data"] = json!({"result":{"id":id,"layerId":layer}});
+                }
+                return Ok(reply);
+            }
             "edit.apply" | "edit.dispatch" => {
                 let commands = match self.plan(args, &p, time) {
                     Ok(commands) => commands.unwrap_or_default(),
@@ -777,6 +814,14 @@ impl KernelAdapter {
                     },
                 );
                 Ok(hit.map_or(Value::Null, |hit| json!(hit.layer_id)))
+            }
+            // `scene3d.describe`: the open composition's evaluated scene, as
+            // MCP's 3D inspection builds it.
+            Some("scene3d.describe") => {
+                let document = wire(&realized(&p));
+                let mut ev = pm_mcp::inspection::Evaluation::new(&document);
+                pm_mcp::scene3d::evaluated_scene(&document, time, &mut ev)
+                    .map_err(|e| Error::Host(e.message))
             }
             // The inspector's `@param` annotations, as the kernel parses them.
             Some("shader.parameters") => {

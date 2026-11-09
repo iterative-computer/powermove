@@ -346,6 +346,12 @@ globalThis.__compat = {
         reload: (id) => this.loader.reload(id),
       },
       assets: this.assets,
+      scene3d: PowermoveCompat.scene3dAPI(
+        new Proxy({}, { get: (_, key) => this.realm.PM[key] }),
+        (args, meta) => this.realm.scene3dEdit(args, meta),
+        (time) => host.query("scene3d.describe", { time }),
+        (selection) => this.realm.kernel.events.emit("scene3d:selection", selection),
+      ),
       panelsBackend: Object.fromEntries(
         ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
           (name) => [

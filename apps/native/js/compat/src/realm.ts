@@ -587,6 +587,10 @@ export class CompatRealm {
     if (failed) throw failure;
   }
 
+  /** `api.scene3d.edit`: the native Studio command, one undoable edit. */
+  scene3dEdit(args: Data, meta: Data = {}): any {
+    return this.call("scene3d.edit", { args: copy(args), meta: copy(meta) });
+  }
   private call(method: string, args: Data = {}): any {
     this.live();
     this.flush();
