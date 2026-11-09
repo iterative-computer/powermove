@@ -4,7 +4,7 @@ import { initStudioGpu, studioGpuReady, StudioTarget } from './gpu';
 
 /*
  * Finish swatches rendered by Studio itself: each preset on a sphere under
- * two softboxes on the studio backdrop, 32 samples, read back as an image.
+ * two softboxes, 32 samples, on a transparent background for either UI theme.
  * Rendered once per preset and cached.
  */
 
@@ -50,12 +50,12 @@ export async function studioSwatch(id: string, p: Record<string, number | string
         position: [e[12]!, e[13]!, e[14]!], forward: [-e[8]!, -e[9]!, -e[10]!], right: [e[0]!, e[1]!, e[2]!], up: [e[4]!, e[5]!, e[6]!],
         tanY: Math.tan(THREE.MathUtils.degToRad(14)), aspect: 1, lensRadius: 0, focus: 4.4,
       },
-      exposure: 1, backdrop: [0.965, 0.961, 0.973], backdropOpaque: true, shadowCatcher: false, shadows: true, floorY: 0,
+      exposure: 1, backdrop: [0, 0, 0], backdropOpaque: false, shadowCatcher: false, shadows: true, floorY: 0,
       environment: { zenith: [0.35, 0.35, 0.37], horizon: [0.22, 0.22, 0.24], ground: [0.08, 0.08, 0.09] },
     });
     target.trace(32, 6, true, 64);
     target.resolve(2);
-    const gpuCanvas = target.present(`swatch:${id}`, -1, true);
+    const gpuCanvas = target.present(`swatch:${id}`, 0, false);
     // Copy out in the same task, before the WebGPU canvas is presented.
     const out = document.createElement('canvas');
     out.width = out.height = SIZE;

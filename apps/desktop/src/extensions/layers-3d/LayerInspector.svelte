@@ -32,7 +32,7 @@
     {#if object.source.assetId}<Row {api} label="From file"><span class="from-file" title="Use the materials stored in the model file. Turn off to give the whole model one simple material."><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Use the model file’s materials" /></span></Row>{/if}
     {#if !object.useSourceMaterials}
       <Section {api} title="Material" />
-      <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${finish.p.color};${swatches[finish.id]?`background-image:url(${swatches[finish.id]});background-size:cover`:""}`} onclick={()=>studioEdit({operation:"apply_material",preset:finish.id},finish.label)}></button>{/each}</div>
+      <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${swatches[finish.id]?'transparent':finish.p.color};${swatches[finish.id]?`background-image:url(${swatches[finish.id]});background-size:cover`:""}`} onclick={()=>studioEdit({operation:"apply_material",preset:finish.id},finish.label)}></button>{/each}</div>
       {#each baseFields as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}
     <Row {api} label="Cast shadows"><ToggleField {api} get={()=>object.castShadow} edit={structural('update_object','castShadow','Cast shadows')} label="Cast shadows" /></Row>
