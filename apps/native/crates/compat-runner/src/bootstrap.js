@@ -484,14 +484,31 @@ globalThis.__compat = {
             return id ? (this.realm.PM.L?.(id) ?? null) : null;
           },
           compileError: () => null,
-          // The composition window the viewer drew last, in composition
-          // pixels; null while all of it shows.
+          // The composition window the viewer drew last (or a presenter asked
+          // for), in composition pixels; null while all of it shows.
           get previewViewport() {
-            return viewport();
+            return presenter.viewport ?? viewport();
           },
-          canvas: null,
-          init: () => null,
-          resize: () => undefined,
+          // D7: a canvas bound with init presents the viewer's frames by
+          // readback, at its own size: slower than main, same contract.
+          get canvas() {
+            return presenter.canvas;
+          },
+          init: (canvas) => {
+            if (typeof canvas?.getContext !== "function") return false;
+            presenter.canvas = canvas;
+            this.present();
+            return true;
+          },
+          resize: (width, height, previewViewport = null) => {
+            presenter.viewport = previewViewport?.width > 0 ? previewViewport : null;
+            const canvas = presenter.canvas;
+            if (!canvas || (canvas.width === width && canvas.height === height)) return false;
+            canvas.width = width;
+            canvas.height = height;
+            this.present();
+            return true;
+          },
         },
         assets: {
           get: (id) => this.realm.PM.proj.assets?.[id],
@@ -675,6 +692,42 @@ globalThis.__compat = {
       return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
     };
     // Main's overlay pass: the viewer clears its canvas, then listeners draw.
+    // The presenter canvas fills from the engine, its crop drawn from a
+    // frame of the whole composition at the crop's scale (at most 8192 px).
+    const presenter = { canvas: null, viewport: null };
+    this.present = () => {
+      const canvas = presenter.canvas;
+      const PM = this.realm.PM;
+      if (!canvas?.width || !canvas?.height) return;
+      const crop = presenter.viewport;
+      if (!crop) {
+        PM.renderFrameTo(PM.time, canvas.width, canvas.height, {}, canvas);
+        return;
+      }
+      const project = PM.proj;
+      const scale = Math.min(
+        canvas.width / crop.width,
+        8192 / Math.max(project.w, project.h),
+      );
+      const whole = PM.renderFrameTo(
+        PM.time,
+        Math.max(1, Math.round(project.w * scale)),
+        Math.max(1, Math.round(project.h * scale)),
+      );
+      const context = canvas.getContext("2d");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(
+        whole,
+        crop.x * scale,
+        crop.y * scale,
+        crop.width * scale,
+        crop.height * scale,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+    };
     this.overlay = () => {
       if (stage.ovUsed) {
         const context = stage.ov.getContext("2d");
@@ -1010,6 +1063,7 @@ globalThis.__compat = {
    * overlay pass that follows each compositor frame. */
   presented(frame) {
     this.realm.task(() => {
+      this.present();
       this.realm.PM.bus.emit("preview:presented", {
         time: frame.time,
         viewport: this.realm.PM.GL.previewViewport,

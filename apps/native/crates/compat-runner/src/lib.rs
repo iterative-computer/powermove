@@ -1051,6 +1051,55 @@ mod tests {
             ])
         );
     }
+    /// D7's presenter fixture: bind a canvas, resize it, read its pixels and
+    /// observe frame events; frames reach it by readback from the engine.
+    #[test]
+    fn presenter_canvas_is_filled_by_readback_before_frame_events() {
+        let runner = dom_runner();
+        let asked = Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = asked.clone();
+        runner.host.set_frames(Some(Arc::new(move |frame: &crate::FrameRequest| {
+            seen.lock().unwrap().push((frame.width, frame.height));
+            let (w, h) = (frame.width, frame.height);
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, w, h);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            // Left half red, right half blue: a crop shows which part it took.
+            let row: Vec<u8> = (0..w)
+                .flat_map(|x| if x < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] })
+                .collect();
+            writer.write_image_data(&row.repeat(h as usize)).unwrap();
+            drop(writer);
+            Ok(png)
+        })));
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const gl=api.render.gl;
+                const canvas=document.createElement('canvas');canvas.width=4;canvas.height=2;
+                const px=(x)=>[...canvas.getContext('2d').getImageData(x,0,1,1).data];
+                const bound=[gl.init({}),gl.init(canvas),PM.GL.canvas===canvas,px(0),px(3)];
+                const resized=[gl.resize(4,2),gl.resize(8,2),canvas.width];
+                let heard=null;api.events.on('frame:rendered',()=>{heard=px(7)});
+                __compat.presented({time:0,version:1,quality:1});
+                const cropped=gl.resize(8,2,{x:160,y:0,width:160,height:180});__compat.presented({time:0,version:2,quality:1});
+                return [bound,resized,heard,cropped,px(0),gl.previewViewport.x]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                [false, true, true, [255, 0, 0, 255], [0, 0, 255, 255]],
+                [false, true, 8],
+                [0, 0, 255, 255],
+                false,
+                [0, 0, 255, 255],
+                160
+            ])
+        );
+        // init, resize, a presented frame, then a frame with the crop: the
+        // whole composition at the crop's scale (8 px across 160 of 320).
+        assert_eq!(*asked.lock().unwrap(), [(4, 2), (8, 2), (8, 2), (16, 9)]);
+    }
     #[test]
     fn ui_modal_keeps_main_semantics_with_native_frame_data() {
         let runner = dom_runner();
