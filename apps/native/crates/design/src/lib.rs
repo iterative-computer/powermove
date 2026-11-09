@@ -4,6 +4,7 @@
 //! generated table in `docs/native/design/tokens.md` is checked against this file
 //! by `tests/spec.rs`. Change a value here, then regenerate the table with
 //! `PM_UPDATE_DESIGN_SNAPSHOT=1 cargo test -p pm-design`.
+pub mod motion;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
@@ -706,6 +707,18 @@ impl Tokens {
     /// The window ground needs a behind-window blur under it.
     pub fn translucent(&self) -> bool {
         self.translucency.window < 1.
+    }
+    /// The spring for `preset` under the current accessibility settings:
+    /// Reduce Motion snaps anything that moves or scales and turns fades into
+    /// the `motion.reduced` cross-fade.
+    pub fn spring(&self, preset: motion::Preset) -> motion::Spring {
+        if !self.accessibility.reduce_motion {
+            preset.spring(&self.motion)
+        } else if preset.moves() {
+            motion::Spring::SNAP
+        } else {
+            motion::Spring::settling(self.motion.reduced)
+        }
     }
     pub fn material(&self, surface: Surface, glass_available: bool) -> Material {
         if !surface.permits_glass() || self.accessibility.reduce_transparency {
