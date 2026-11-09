@@ -349,11 +349,13 @@ test("accessibility exposes dialog, exact control labels, units and actual progr
 });
 test("drag/drop, multi-select and 60k rows are N/A; the sheet declares no list or drag listeners", async () => {
   const f = await mounted();
+  const nodes = [...f.root.host.nodes.values()];
+  expect(nodes.some((n) => n.type === "virtual-list")).toBe(false);
+  // Only the option body scrolls (capped at metrics.sheet_body_max) so the
+  // sheet and its footer stay on screen.
   expect(
-    [...f.root.host.nodes.values()].some((n) =>
-      ["virtual-list", "scroll"].includes(n.type),
-    ),
-  ).toBe(false);
+    nodes.filter((n) => n.type === "scroll").map((n) => n.props.id),
+  ).toEqual(["export.options"]);
   expect(JSON.stringify(f.commits)).not.toMatch(
     /dragstart|dragover|drop|multiselect/,
   );

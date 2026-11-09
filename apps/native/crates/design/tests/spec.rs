@@ -384,6 +384,10 @@ const ROLES: &[(&str, &str)] = &[
     ),
     ("metrics.tab", "Text tab and full-height segmented control"),
     (
+        "metrics.sheet_body_max",
+        "Tallest sheet option body before it scrolls",
+    ),
+    (
         "metrics.segment_radius",
         "Segment and tab corner inside a pill (concentric)",
     ),

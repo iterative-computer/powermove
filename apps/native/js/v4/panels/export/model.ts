@@ -84,7 +84,10 @@ export interface ExportSnapshot {
   /** Native generation-owned draft bindings, registered before this projection. */
   bindings: Record<string, string>;
   presets: { id: string; name: string; options: Options }[];
-  capabilities: Record<Format, { available: boolean; reason?: string }>;
+  capabilities: Record<
+    Format,
+    { available: boolean; reason?: string; detail?: string }
+  >;
   run: Run;
 }
 const object = (x: unknown): x is Record<string, unknown> =>

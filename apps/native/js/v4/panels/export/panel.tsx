@@ -169,6 +169,15 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     }
   };
   const progressSheet = isProgress(s.run);
+  // Why the chosen format can't export (offline originals, no encoder): said
+  // in the footer instead of a silently disabled button.
+  const blocked =
+    s.capabilities[o.format]?.available === false
+      ? (s.capabilities[o.format].reason ?? undefined)
+      : undefined;
+  const summary = model.planningError
+    ? `Can’t export with these settings: ${model.planningError}`
+    : (blocked ?? p.summary);
   return (
     <UI.SheetAnchor
       id="export.sheet"
@@ -355,7 +364,17 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               </div>
             </UI.FormGroup>
           ) : (
-            <>
+            <scroll
+              id="export.options"
+              role="group"
+              label="Export options"
+              style={{
+                // A long option list scrolls; the sheet stays on screen.
+                ...stack,
+                gap: token("metrics.inset"),
+                maxHeight: token("metrics.sheet_body_max"),
+              }}
+            >
               <Group label="Output">
                 {select(
                   "format",
@@ -501,7 +520,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 ) : null}
                 <text style={detail}>{colorNote}</text>
               </Group>
-            </>
+            </scroll>
           )}
           <div
             role="group"
@@ -517,28 +536,25 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             <div style={stack}>
               <text
                 id="export.summary"
-                label={
-                  model.planningError
-                    ? `Can’t export with these settings: ${model.planningError}`
-                    : p.summary
-                }
+                label={summary}
+                title={blocked ? s.capabilities[o.format].detail : undefined}
                 metadata={{
                   export: { announce: "polite" },
-                  ...(model.planningError
+                  ...(model.planningError || blocked
                     ? { symbol: "exclamationmark.triangle.fill" }
                     : {}),
                 }}
                 style={{
                   color: token(
-                    model.planningError ? "colors.warning" : "colors.secondary",
+                    model.planningError || blocked
+                      ? "colors.warning"
+                      : "colors.secondary",
                   ),
                   fontSize: token("typography.body"),
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {model.planningError
-                  ? `Can’t export with these settings: ${model.planningError}`
-                  : p.summary}
+                {summary}
               </text>
               {p.note ? <text style={detail}>{p.note}</text> : null}
             </div>

@@ -384,6 +384,11 @@ impl SurfaceView {
             .map(str::to_owned);
         if let Some(control) = self.controls.get(&id) {
             control.update(cx, |v, _| v.display(display.as_deref()));
+            if matches!(kind, crate::v4_control::Kind::Push)
+                && let Some(label) = node.props.get("label").and_then(Value::as_str)
+            {
+                control.update(cx, |v, cx| v.retitle(label, cx));
+            }
             let options = node
                 .props
                 .get("options")
@@ -1204,7 +1209,14 @@ impl SurfaceView {
             element = element.debug_selector(|| name);
         }
         if let Some(scroll) = self.scrolls.get(&id) {
-            element = element.flex_1().min_h(px(0.)).track_scroll(scroll);
+            // A scroll region with a max height (a sheet body) keeps its
+            // content height up to that cap; panel scrollers fill their dock.
+            element = if node.style.max_size.height.is_some() {
+                element.flex_grow(1.).flex_shrink(1.)
+            } else {
+                element.flex_1()
+            };
+            element = element.min_h(px(0.)).track_scroll(scroll);
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }

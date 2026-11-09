@@ -295,3 +295,6 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Development builds accept `--open cmd[,cmd]` (`PM_NATIVE_REVIEW_OPEN`) to run commands in the first editor window for review captures.
 - Development builds accept `--draw-occluded 1` (`PM_NATIVE_DRAW_OCCLUDED`, vendored GPUI) so covered windows keep drawing for background review; release builds always pause occluded windows.
 - Project Library: New Project is the window's one prominent (accent) action, rows are quiet name + facts with an ink-wash selection; sidebar selections everywhere are the neutral on state, never `selected_fill`.
+- Export sheet: the option groups scroll inside a body capped at `metrics.sheet_body_max` (440), so the sheet and footer stay on screen; a scroll region with a max height keeps its content height (others still fill their dock). The footer names why the chosen format can't export (capability `reason`, full list as tooltip `detail`); the engine's unsupported list is summarised to one sentence, offline originals are counted.
+- Native push buttons follow their panel label (Export's action renames with the format).
+- Development builds accept `--save-dir <dir>` (`PM_NATIVE_REVIEW_SAVE_DIR`): export destinations go to `<dir>/<suggested name>` with no panel, because the out-of-process save panel can't be driven in background checks.

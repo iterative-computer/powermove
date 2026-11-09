@@ -303,22 +303,29 @@ pub fn portable(
 pub fn portable_capability(snapshot: &Snapshot, originals: &BTreeMap<String, PathBuf>) -> Value {
     let check = (|| -> Result<(), String> {
         let root = snapshot.root().ok_or("Project closed")?;
-        if let Some(assets) = root.get("assets") {
-            let pm_model::NodeKind::Object(assets) = assets.kind() else {
-                return Err("Invalid media catalog".into());
-            };
-            for id in assets.keys() {
-                let path = originals
+        let Some(assets) = root.get("assets") else {
+            return Ok(());
+        };
+        let pm_model::NodeKind::Object(assets) = assets.kind() else {
+            return Err("Invalid media catalog".into());
+        };
+        // Count every unreadable original so the sheet can say how many to relink.
+        let offline = assets
+            .keys()
+            .filter(|id| {
+                !originals
                     .get(&id.to_string_lossy())
-                    .ok_or_else(|| format!("Original media is unavailable: {id}"))?;
-                let file = std::fs::File::open(path)
-                    .map_err(|e| format!("Original media is unavailable: {id}: {e}"))?;
-                if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-                    return Err(format!("Original media is not a file: {id}"));
-                }
-            }
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .is_some_and(|m| m.is_file())
+            })
+            .count();
+        match offline {
+            0 => Ok(()),
+            1 => Err("1 media file is offline. Relink it to save a portable project.".into()),
+            n => Err(format!(
+                "{n} media files are offline. Relink them to save a portable project."
+            )),
         }
-        Ok(())
     })();
     match check {
         Ok(()) => json!({"available":true}),
@@ -397,12 +404,52 @@ pub fn capabilities(
         })();
         result[name] = match check {
             Ok(()) => json!({"available":true}),
-            Err(reason) => json!({"available":false,"reason":reason}),
+            Err(reason) => unavailable(&reason),
         };
     }
     result
 }
 
+/// An unavailable format: one short sentence for the sheet, the planner's full
+/// list as `detail` (the footer's tooltip). The engine's unsupported list names
+/// every layer and can run to pages.
+pub fn unavailable(reason: &str) -> Value {
+    const UNSUPPORTED: &str = "the new engine cannot render this yet: ";
+    let Some(list) = reason.strip_prefix(UNSUPPORTED) else {
+        return json!({"available":false,"reason":reason});
+    };
+    let items: Vec<&str> = list.split("; ").filter(|i| !i.trim().is_empty()).collect();
+    let mut kinds: Vec<&str> = Vec::new();
+    for item in &items {
+        let kind = item.split([':', '(']).next().unwrap_or(item).trim();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    let short = format!(
+        "{} {} in this project can’t be rendered natively yet ({}).",
+        items.len(),
+        if items.len() == 1 { "part" } else { "parts" },
+        kinds.join(", ")
+    );
+    json!({"available":false,"reason":short,"detail":reason})
+}
+
+#[cfg(test)]
+mod unavailable_tests {
+    #[test]
+    fn the_engines_list_becomes_one_sentence_with_the_list_as_detail() {
+        let full = "the new engine cannot render this yet: effects (layer a in C); text: no font (layer b in C); effects (layer c in C)";
+        let v = super::unavailable(full);
+        assert_eq!(v["available"], false);
+        assert_eq!(
+            v["reason"],
+            "3 parts in this project can’t be rendered natively yet (effects, text)."
+        );
+        assert_eq!(v["detail"], full);
+        assert_eq!(super::unavailable("No encoder")["reason"], "No encoder");
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -240,6 +240,21 @@ impl NativeControl {
     pub fn keep(&self) {
         self.slot.keep();
     }
+    /// A push button's title follows the panel (Export's action names the
+    /// chosen format); its width follows the new title.
+    pub fn retitle(&mut self, title: &str, cx: &mut Context<Self>) {
+        let Control::Button(button) = &self.control else {
+            return;
+        };
+        let title = NSString::from_str(title);
+        if button.title() == title {
+            return;
+        }
+        button.setTitle(&title);
+        button.setAccessibilityLabel(Some(&title));
+        self.width = (button.fittingSize().width as f32).max(self.height);
+        cx.notify();
+    }
     /// A pop-up's own title, shown instead of its selected row; the row
     /// keeps its checkmark. `None` shows the selected row.
     pub fn display(&mut self, title: Option<&str>) {

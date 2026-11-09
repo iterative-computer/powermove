@@ -358,6 +358,7 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
         "--open" => Some("PM_NATIVE_REVIEW_OPEN"),
         "--draw-occluded" => Some("PM_NATIVE_DRAW_OCCLUDED"),
+        "--save-dir" => Some("PM_NATIVE_REVIEW_SAVE_DIR"),
         _ => None,
     }
 }

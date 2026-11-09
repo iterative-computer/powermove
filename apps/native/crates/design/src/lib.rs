@@ -200,6 +200,9 @@ pub struct Metrics {
     pub sheet_value_column: f32,
     /// Width of wide sheets (Export, Expression).
     pub sheet_width_wide: f32,
+    /// Tallest a sheet's option body grows before it scrolls, so the sheet
+    /// and its footer stay on screen.
+    pub sheet_body_max: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
@@ -542,6 +545,7 @@ impl Tokens {
                 sheet_inset: 20.,
                 sheet_value_column: 240.,
                 sheet_width_wide: 600.,
+                sheet_body_max: 440.,
                 composer_max_lines: 10.,
                 group_radius: 10.,
                 form_row: 40.,

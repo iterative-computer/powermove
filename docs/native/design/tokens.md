@@ -181,6 +181,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.settings_height` | Settings window height | 520 | 520 | 520 | 520 |
 | `metrics.settings_sidebar` | Settings sidebar width | 180 | 180 | 180 | 180 |
 | `metrics.settings_width` | Settings window width | 760 | 760 | 760 | 760 |
+| `metrics.sheet_body_max` | Tallest sheet option body before it scrolls | 440 | 440 | 440 | 440 |
 | `metrics.sheet_inset` | Content inset inside sheets and Settings panes | 20 | 20 | 20 | 20 |
 | `metrics.sheet_value_column` | Shared value column in sheets | 240 | 240 | 240 | 240 |
 | `metrics.sheet_width` | Default sheet width | 480 | 480 | 480 | 480 |
