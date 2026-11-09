@@ -22,6 +22,12 @@ def blender_path(override=None):
     return None
 
 
+def exporter_script():
+    script = (HERE/'blender_scene.py').read_text()
+    return script.replace('# BEGIN MAPPING HELPERS\n# END MAPPING HELPERS',
+                          '# BEGIN MAPPING HELPERS\n'+(HERE/'mapping.py').read_text()+'\n# END MAPPING HELPERS')
+
+
 def run_logged(command, log, timeout):
     with log.open('w') as stream:
         subprocess.run(['nice', '-n', '10', *map(str, command)], stdout=stream, stderr=subprocess.STDOUT,
@@ -38,6 +44,10 @@ def masks_for(data, ids, rgba, ref):
     product = data['shadow_catcher']
     valid = (rgba[..., 3] > .98) & (ref[..., 3] > .98) if product else np.ones(ids.shape, bool)
     mask = {name: np.zeros(ids.shape, bool) for name in ['metal', 'glass', 'floor', 'shadows', 'sky']}
+    # Keep every material visible in the report; a broad metal/glass average
+    # otherwise hides unrelated model and exporter errors in the Materials row.
+    for index in sorted({obj['material'] for obj in data['objects']}):
+        mask[f'material-{index}'] = np.zeros(ids.shape, bool)
     assignments = {}
     if data['instances']:
         for inst in data['instances']:
@@ -52,6 +62,7 @@ def masks_for(data, ids, rgba, ref):
         obj = data['objects'][index]
         m = data['materials'][obj['material']]
         part = ids == layer
+        mask[f"material-{obj['material']}"] |= part
         if m['metallic'] > .5:
             mask['metal'] |= part
         if m['transmission'] > .5 or m['coat'] > .8:
@@ -267,14 +278,14 @@ def main():
                 previous = json.loads((original/'manifest.json').read_text())
                 if ((original/'scene.json').read_bytes() != (out/'scene.json').read_bytes()
                         or previous['size'] != json.loads((out/'manifest.json').read_text())['size']
-                        or (original/'render_cycles.py').read_text() != (HERE/'blender_scene.py').read_text()):
+                        or (original/'render_cycles.py').read_text() != exporter_script()):
                     raise ValueError(f'{name}: reference scene, exporter or size changed; rerender Cycles')
                 for filename in ['cycles.exr','cycles.npy','cycles-meta.json']:
                     shutil.copy2(original/filename,out/filename)
             else:
                 script = out/'render_cycles.py'
                 # Concrete replay script alongside each exported scene, with no .blend file.
-                script.write_text((HERE/'blender_scene.py').read_text())
+                script.write_text(exporter_script())
                 run_logged([blender,'-b','--factory-startup','--threads','2','--python-exit-code','1',
                             '--python',script,'--',out,args.cycles_samples],out/'cycles.log',175)
         result = compare(out)
