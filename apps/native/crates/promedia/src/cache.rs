@@ -139,6 +139,37 @@ impl RenderCache {
         }
         Ok(())
     }
+    /// Whether a frame is on disk (a regular file of a plausible size), and
+    /// whether it is kept, from metadata alone: indexing a composition's
+    /// frames must not read them. `get` still verifies a frame it reads.
+    pub fn presence(&self, key: &RenderKey) -> io::Result<Option<bool>> {
+        let path = self.path(key)?;
+        let meta = match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+            Ok(meta) => meta,
+        };
+        if !meta.file_type().is_file() || meta.len() < HEADER as u64 {
+            return Ok(None);
+        }
+        Ok(Some(
+            fs::symlink_metadata(self.keep_path(key)?).is_ok_and(|m| m.file_type().is_file()),
+        ))
+    }
+    /// Deletes a frame and its Keep Rendered mark (Delete Rendered Frames).
+    pub fn remove(&self, key: &RenderKey) -> io::Result<()> {
+        for path in [self.keep_path(key)?, self.path(key)?] {
+            match fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    regular(&path)?;
+                    fs::remove_file(&path)?;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
     /// Always query with the current semantic graph/media digest. A changed
     /// digest immediately returns Missing (or Rendering for its own queued job),
     /// even while old kept bytes remain on disk. Never reuse an old bar snapshot

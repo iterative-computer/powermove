@@ -190,6 +190,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - `pm_protocol::priority` gains `ProxySize::Full` and `ProxyFormat::ProResHq` (additive; bindings regenerated).
 - Pro media renditions are keyed by the original's content (media-cache object name or a once-per-stamp BLAKE3), not its path and mtime; Clear… keeps anything another original, attached record, task or the open project references (wave 16 review).
 - The direct glyph cache charges and evicts whole chunk textures, and still prefetch counts decoded bytes from the worker's decode and drops stills no frame asked for within 4 s (wave 16 review).
+- App exports submit whole frames once the viewer has been quiet for 1 s; within it, submissions bounded to 8 ms of measured GPU time, or the rest of the frame when bands cost about a whole frame (wave 18 perf: banding every frame made Paper 30× slower).
+- Disk render cache (wave 18 perf): whole-composition fingerprint (document, definitions, sampled media content, fonts, output tone, binary digest, override session); frames render in an `--engine-job` child as the paused viewer draws them (RGBA16F at the composition size, uncompressed) into Storage › Renders under Settings › Media › Render Files Limit (default 25 GB); Render Selection = the selected layer's span, else the work area; playback and scrubbing read ahead on a reader thread; paused frames render; not offered while the viewer tone-maps HDR.
+- Playing frames retry a transient refusal every tick (no backoff); paused frames keep the 16 ms doubling backoff.
+- Background Tasks ▸ Cancel routes one way for every non-media row, by kind and task id: Render Selection asks its task to stop, an export (the person's or an agent's) cancels exactly that export.
+- Render-cache fills draw the viewer's picture (`preview`: offline media as the Media Offline card, failing layers isolated, missing effects bypassed), never an export's "without offline" picture.
 ## Extension backends (compat lane, wave 16)
 
 - Realm images decode natively on the realm worker: ImageIO for rasters (embedded profile to sRGB, EXIF orientation, as WebKit shows them), resvg for SVG, rasterized at the scale it is drawn (×2 for Retina) instead of stretched. An SVG's intrinsic size is usvg's (`viewBox` when width/height are missing), not Chromium's 300×150 fallback.

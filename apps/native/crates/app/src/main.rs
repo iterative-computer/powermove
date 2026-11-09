@@ -38,6 +38,7 @@ mod playback;
 mod pro_media;
 mod project_library;
 mod raster_overrides;
+mod render_frames;
 mod rows;
 mod session;
 mod shape_tool;

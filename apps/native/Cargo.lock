@@ -4832,6 +4832,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "blake3",
  "block",
  "core-graphics-types",
  "foreign-types",
@@ -4854,6 +4855,7 @@ dependencies = [
  "pm-model",
  "pm-node",
  "pm-perf",
+ "pm-promedia",
  "pm-protocol",
  "pm-render",
  "pm-scene3d",

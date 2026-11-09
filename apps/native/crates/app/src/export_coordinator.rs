@@ -281,7 +281,7 @@ async fn observe(runtime: &pm_builtins::Builtins, run: Value) {
 async fn execute(
     frozen: Frozen,
     job: Job,
-    activity: Arc<AtomicBool>,
+    activity: pm_engine_service::jobs::Activity,
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
@@ -403,7 +403,7 @@ struct TaskAdmission<'a> {
 async fn execute_inner(
     frozen: &Frozen,
     job: &Job,
-    activity: Arc<AtomicBool>,
+    activity: pm_engine_service::jobs::Activity,
     runtime: &pm_builtins::Builtins,
     executor: &gpui::BackgroundExecutor,
     task: TaskAdmission<'_>,

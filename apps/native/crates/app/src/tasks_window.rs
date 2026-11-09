@@ -66,14 +66,27 @@ pub fn detail(task: &Task) -> String {
 }
 
 impl TasksWindow {
-    /// Media tasks act through the service. An export can only be cancelled,
-    /// by its task: it has no pause.
+    /// Media tasks act through the service. Every other row is cancelled by
+    /// kind and task id, never "whichever job this window has": a Render
+    /// Selection row asks its task to stop (its follower stops the child); an
+    /// export, the person's or an agent's, cancels exactly that export. Neither
+    /// has a pause.
     fn act(&self, media: bool, id: pm_promedia::tasks::TaskId, action: TaskAction) {
         if media {
             let _ = self.pro.act(id, action);
         } else if action == TaskAction::Cancel {
-            // By task id: never "whichever export this window has".
-            crate::export_coordinator::cancel_export(id);
+            let tasks = crate::export_coordinator::tasks();
+            let mut tasks = tasks.lock().unwrap();
+            match tasks.get(id).map(|t| t.kind.clone()) {
+                Some(pm_promedia::tasks::TaskKind::Render) => {
+                    let _ = tasks.cancel(id);
+                }
+                Some(pm_promedia::tasks::TaskKind::Export) => {
+                    drop(tasks);
+                    crate::export_coordinator::cancel_export(id);
+                }
+                _ => {}
+            }
         }
     }
 

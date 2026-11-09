@@ -7,6 +7,7 @@ pub mod layers;
 pub mod policy;
 mod present;
 mod render;
+pub mod render_cache;
 pub mod resources;
 mod scopes;
 pub use scopes::ScopeResult;
@@ -67,7 +68,9 @@ pub struct OverlayGeometry {
 pub(crate) struct OverlayParams {
     count: u32,
     reduced: u32,
-    pad: [u32; 2],
+    /// The source is the whole composition (a disk render cache frame).
+    pub(crate) whole: u32,
+    pad: u32,
     output: [f32; 4],
     canvas: [f32; 4],
     drawable: [f32; 2],
@@ -96,7 +99,8 @@ impl OverlayGeometry {
         let mut p = OverlayParams {
             count: self.lines.len() as u32,
             reduced: 0,
-            pad: [0; 2],
+            whole: 0,
+            pad: 0,
             output: [0.; 4],
             canvas: [0.; 4],
             drawable: [0.; 2],
@@ -352,11 +356,12 @@ type ScopeTap = (
 struct Shared {
     state: Mutex<State>,
     wake: std::sync::mpsc::SyncSender<()>,
-    interactive: Arc<std::sync::atomic::AtomicBool>,
+    interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
     device: Mutex<metal::Device>,
     /// The viewer the Scopes panel analyzes, and where results go.
     scopes: Mutex<Option<(u64, ScopeTap)>>,
+    disk: render_cache::DiskFrames,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -385,9 +390,7 @@ impl Viewer {
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
         f(v)?;
-        self.shared
-            .interactive
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.shared.interactive.set(true);
         self.shared.wake.try_send(()).ok();
         Ok(())
     }
@@ -636,9 +639,7 @@ impl Viewer {
             v.stamp.generation += 1;
             v.stamp.sequence += 1;
             v.dirty = true;
-            self.shared
-                .interactive
-                .store(true, std::sync::atomic::Ordering::Release);
+            self.shared.interactive.set(true);
             self.shared.wake.try_send(()).ok();
         }
         Ok(())
@@ -755,9 +756,10 @@ impl EngineService {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             wake,
-            interactive: Arc::default(),
+            interactive: jobs::Activity::default(),
             device: Mutex::new(device),
             scopes: Mutex::new(None),
+            disk: render_cache::DiskFrames::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
             #[cfg(test)]
@@ -799,8 +801,13 @@ impl EngineService {
         }
         self.shared.wake.try_send(()).ok();
     }
+    /// The disk render cache: Render Selection, Keep Rendered, Delete
+    /// Rendered Frames and the timeline's render bar.
+    pub fn render_cache(&self) -> render_cache::DiskFrames {
+        self.shared.disk.clone()
+    }
     /// Share with ExportHandle::start_scheduled; true defers new export bands.
-    pub fn export_activity(&self) -> Arc<std::sync::atomic::AtomicBool> {
+    pub fn export_activity(&self) -> jobs::Activity {
         self.shared.interactive.clone()
     }
     /// Coalesced status edges. Read status() after every wake; idle is silent.
@@ -894,9 +901,7 @@ impl EngineService {
 impl Drop for EngineService {
     fn drop(&mut self) {
         self.shared.state.lock().unwrap().stop = true;
-        self.shared
-            .interactive
-            .store(false, std::sync::atomic::Ordering::Release);
+        self.shared.interactive.set(false);
         self.shared.wake.try_send(()).ok();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -1109,16 +1114,34 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
     });
     engine.set_waker(Some(shared.wake.clone()));
+    engine.disk = Some(shared.disk.clone());
+    shared.disk.set_wake(shared.wake.clone());
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
-    let recorder =
-        std::env::var_os("PM_ENGINE_TRACE").and_then(|path| match trace::Recorder::open(path) {
-            Ok(recorder) => Some(recorder),
-            Err(error) => {
-                eprintln!("Viewer diagnostic trace unavailable: {error}");
-                None
-            }
-        });
+    // `PM_ENGINE_TRACE`, or for a development bundle launched without a
+    // custom environment (`com.powermove.native.dev.*`) its own
+    // `PMEngineTrace` default; a shipped app never reads the default.
+    let trace_path = std::env::var_os("PM_ENGINE_TRACE").or_else(|| {
+        let bundle = objc2_foundation::NSBundle::mainBundle().bundleIdentifier()?;
+        if !bundle.to_string().starts_with("com.powermove.native.dev.") {
+            return None;
+        }
+        let key = objc2_foundation::NSString::from_str("PMEngineTrace");
+        // The app's own domain only, never an inherited (global) default.
+        objc2_foundation::NSUserDefaults::standardUserDefaults()
+            .persistentDomainForName(&bundle)?
+            .objectForKey(&key)?
+            .downcast::<objc2_foundation::NSString>()
+            .ok()
+            .map(|path| path.to_string().into())
+    });
+    let recorder = trace_path.and_then(|path| match trace::Recorder::open(path) {
+        Ok(recorder) => Some(recorder),
+        Err(error) => {
+            eprintln!("Viewer diagnostic trace unavailable: {error}");
+            None
+        }
+    });
     // Diagnostic A/B only: the pre-latency-pass schedule (re-present every
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
@@ -1266,7 +1289,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
-                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"cache_hit":t.cache_hit,
+                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"disk":t.disk,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
@@ -1597,7 +1620,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         }
         // A view waiting out a missing drawable can't draw: exports go ahead.
         let now = trace::now();
-        shared.interactive.store(
+        shared.interactive.set(
             !flights.is_empty()
                 || work.is_some()
                 || state.views.iter().any(|(id, v)| {
@@ -1605,7 +1628,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         || !v.commands.is_empty()
                 })
                 || runtime.values().any(|r| r.transport.running()),
-            std::sync::atomic::Ordering::Release,
         );
         if changed {
             state.notify();
@@ -1641,6 +1663,20 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);
+            let overrides = engine
+                .compat()
+                .filter(|store| store.producing_now())
+                .map(|store| store.epoch());
+            if shared.disk.observe(
+                &scene,
+                engine.definitions(),
+                overrides,
+                engine.tone_identity(),
+                stamp.doc_id,
+            ) && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({"render_cache_state": true, "at": now}));
+            }
             let landed_before = engine.media_landed();
             let tap = shared
                 .scopes
@@ -1777,10 +1813,25 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
                             store.request(needs);
                         }
+                        if let Some(recorder) = &recorder {
+                            recorder.record(serde_json::json!({
+                                "refused": refusal_kind(&e),
+                                "time": spec.time.get(),
+                                "at": trace::now(),
+                            }));
+                        }
                         if let Some(r) = runtime.get_mut(&id) {
                             let now = trace::now();
                             r.refusals = r.refusals.saturating_add(1);
-                            r.not_before = now + drawable_retry(r.refusals - 1);
+                            // A playing frame retries at once each tick: a
+                            // backoff doubled up to 1 s held playback for a
+                            // second after a few refusals (a shader compiling).
+                            r.not_before = now
+                                + if spec.moment == policy::Moment::Playing {
+                                    RETRY_SECONDS
+                                } else {
+                                    drawable_retry(r.refusals - 1)
+                                };
                             // Retried for good, but never silently: past a few
                             // seconds the viewer says what it waits for.
                             let since = *r.waiting_since.get_or_insert(now);
@@ -2268,5 +2319,17 @@ mod worker_tests {
         v.scrub(Ticks::ZERO).unwrap();
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().pixels.unwrap(), good);
+    }
+}
+
+/// What kind of transient refusal a frame met, for the diagnostic trace
+/// (never its message: messages can name documents, media or paths).
+fn refusal_kind(error: &anyhow::Error) -> &'static str {
+    match error.downcast_ref::<pm_render::RenderError>() {
+        Some(pm_render::RenderError::CompatPending(_)) => "raster-override",
+        Some(pm_render::RenderError::WatchdogPending) => "watchdog",
+        Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
+        _ if error.is::<render::CompilerBusy>() => "shader-compiler",
+        _ => "fonts",
     }
 }

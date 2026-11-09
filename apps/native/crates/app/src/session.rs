@@ -254,9 +254,11 @@ impl Controller {
         let pro_media = Arc::new(crate::pro_media::ProMedia::new(
             profile.clone(),
             crate::media::objects_dir(&profile),
-            engine.export_activity(),
+            engine.export_activity().flag(),
         ));
         pro_media.refresh_usage();
+        crate::render_frames::install(engine.render_cache());
+        sync_render_storage(&pro_media, &engine);
         let pro_events = pro_media.event_receiver.clone();
         cx.spawn(async move |this, cx| {
             while let Ok(first) = pro_events.recv().await {
@@ -1814,6 +1816,21 @@ impl Drop for Controller {
         }
     }
 }
+/// Points the engine's disk render cache at Storage › Renders (and finds its
+/// frames again after Clear…), off the main thread.
+pub(crate) fn sync_render_storage(
+    pro_media: &Arc<crate::pro_media::ProMedia>,
+    engine: &Arc<EngineService>,
+) {
+    let (pro_media, disk) = (pro_media.clone(), engine.render_cache());
+    std::thread::Builder::new()
+        .name("pm-render-storage".into())
+        .spawn(move || {
+            let _ = disk.set_storage(pro_media.render_frames());
+        })
+        .ok();
+}
+
 #[cfg(test)]
 mod save_note_tests {
     use super::*;

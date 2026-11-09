@@ -51,6 +51,37 @@ pub struct ExportRequest {
     /// delivery capture.
     #[serde(default)]
     pub preview: bool,
+    /// Render these frames into the disk render cache instead of delivering
+    /// a file (`crate::render_cache`).
+    #[serde(default)]
+    pub cache: Option<crate::render_cache::CacheFill>,
+}
+
+/// The viewer's activity, as exports and cache fills see it: whether it is
+/// drawing or playing now, and an epoch that rises every time it starts, so
+/// an activity shorter than any sampling interval is still seen.
+#[derive(Clone, Default)]
+pub struct Activity {
+    busy: Arc<AtomicBool>,
+    epoch: Arc<std::sync::atomic::AtomicU64>,
+}
+impl Activity {
+    pub fn set(&self, busy: bool) {
+        if busy {
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+        }
+        self.busy.store(busy, Ordering::Release);
+    }
+    pub fn busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+    /// The bare flag, for workers that only defer while the viewer is busy.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.busy.clone()
+    }
 }
 /// An export frame's raster override answer from the window that has the
 /// document open.
@@ -218,7 +249,7 @@ fn watch_disk(
         std::thread::sleep(every);
     }
 }
-const LOW_DISK: &str = "The export stopped because the destination disk is almost full. Free some space and export again.";
+pub(crate) const LOW_DISK: &str = "The export stopped because the destination disk is almost full. Free some space and export again.";
 impl ExportRequest {
     pub fn new(
         job: JobId,
@@ -245,6 +276,7 @@ impl ExportRequest {
             bypass_missing_effects: false,
             without_offline: false,
             preview: false,
+            cache: None,
         })
     }
 }
@@ -284,19 +316,24 @@ pub struct ExportHandle {
     cancel: Arc<AtomicBool>,
     status: Arc<Mutex<JobStatus>>,
     reader: Option<std::thread::JoinHandle<()>>,
+    submissions: Arc<std::sync::atomic::AtomicU64>,
+    asks: Arc<std::sync::atomic::AtomicU64>,
 }
 impl ExportHandle {
     /// Call from a job worker: process spawn and snapshot serialization are
     /// deliberately excluded from the UI event path.
     pub fn start(executable: &Path, request: ExportRequest) -> Result<Self> {
-        Self::start_scheduled(executable, request, Arc::default())
+        Self::start_scheduled(executable, request, Activity::default())
     }
-    /// Interactive service activity takes precedence at every export band.
-    /// One already admitted band cannot be preempted by Metal.
+    /// Interactive service activity takes precedence at every submission:
+    /// none is granted while the viewer is busy; within [`QUIET`] of its
+    /// last activity a grant admits work bounded by [`BAND_BUDGET_US`] (see
+    /// [`ChildGate`]); after that, whole frames. One already admitted
+    /// submission cannot be preempted by Metal.
     pub fn start_scheduled(
         executable: &Path,
         mut request: ExportRequest,
-        interactive: Arc<AtomicBool>,
+        interactive: Activity,
     ) -> Result<Self> {
         // An export draws what the viewer draws: a raster override's layers too.
         let session = match &request.spec {
@@ -365,7 +402,15 @@ impl ExportHandle {
         let events = state.clone();
         let id = request.job;
         let compat_input = input.clone();
+        let submissions = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let granted = submissions.clone();
+        let asks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let asked = asks.clone();
         let reader = std::thread::spawn(move || {
+            // The viewer's activity epoch at the last grant, and when it was
+            // last seen to move (an epoch moved since counts as now).
+            let mut seen = interactive.epoch();
+            let mut active_at: Option<std::time::Instant> = None;
             for line in std::io::BufReader::new(output).lines() {
                 if let Ok(text) = line.as_deref()
                     && text.starts_with("{\"compat\"")
@@ -391,20 +436,24 @@ impl ExportHandle {
                     continue;
                 }
                 if matches!(line.as_deref(), Ok("\"gpu\"")) {
-                    while interactive.load(Ordering::Acquire)
-                        && !gate_cancel.load(Ordering::Acquire)
-                    {
+                    asked.fetch_add(1, Ordering::Release);
+                    while interactive.busy() && !gate_cancel.load(Ordering::Acquire) {
+                        active_at = Some(std::time::Instant::now());
                         std::thread::sleep(std::time::Duration::from_millis(2));
                     }
                     if !gate_cancel.load(Ordering::Acquire) {
+                        let epoch = interactive.epoch();
+                        if epoch != seen {
+                            seen = epoch;
+                            active_at = Some(std::time::Instant::now());
+                        }
+                        let quiet = active_at.is_none_or(|t| t.elapsed() >= QUIET);
+                        let grant: &[u8] = if !quiet { b"grant\n" } else { b"grant frame\n" };
                         let mut input = gate_input.lock().unwrap();
-                        if input
-                            .write_all(b"grant\n")
-                            .and_then(|_| input.flush())
-                            .is_err()
-                        {
+                        if input.write_all(grant).and_then(|_| input.flush()).is_err() {
                             break;
                         }
+                        granted.fetch_add(1, Ordering::Relaxed);
                     }
                     continue;
                 }
@@ -433,10 +482,21 @@ impl ExportHandle {
             cancel,
             status: state,
             reader: Some(reader),
+            submissions,
+            asks,
         })
     }
     pub fn status(&self) -> JobStatus {
         self.status.lock().unwrap().clone()
+    }
+    /// GPU submissions granted so far: one per frame while the viewer is
+    /// quiet, one per band of a frame after viewer activity.
+    pub fn submissions(&self) -> u64 {
+        self.submissions.load(Ordering::Relaxed)
+    }
+    /// GPU submissions the child has asked for, granted or still waiting.
+    pub fn gpu_requests(&self) -> u64 {
+        self.asks.load(Ordering::Acquire)
     }
     pub fn cancel(&mut self) -> Result<()> {
         self.cancel.store(true, Ordering::Release);
@@ -495,8 +555,8 @@ pub fn run_child() -> Result<()> {
                 replies.reply(text);
                 continue;
             }
-            if matches!(line.as_deref(), Ok("grant")) {
-                let _ = grant.send(());
+            if let Ok(text @ ("grant" | "grant frame")) = line.as_deref() {
+                let _ = grant.send(text == "grant frame");
                 continue;
             }
             if matches!(line.as_deref(), Ok("cancel")) {
@@ -555,7 +615,8 @@ pub fn run_child() -> Result<()> {
     let worker_cancel = cancel.clone();
     let worker = std::thread::spawn(move || -> Result<PathBuf> {
         let cancel = worker_cancel;
-        let gate = ChildGate(Mutex::new(permits));
+        let gate = ChildGate::new(permits);
+        let fill = request.cache;
         let JobSpec::Export {
             composition,
             settings,
@@ -667,6 +728,21 @@ pub fn run_child() -> Result<()> {
         #[cfg(feature = "kernel")]
         crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
         fonts.sync(&mut renderer, &mut None);
+        if let Some(fill) = fill {
+            let job = request.job.clone();
+            return fill_cache(
+                &mut renderer,
+                Arc::new(doc),
+                composition.as_str(),
+                media,
+                &fill,
+                &gate,
+                &cancel,
+                &mut |fraction| {
+                    let _ = emit(status(&job, JobState::Running, fraction, None, None));
+                },
+            );
+        }
         let job = pm_export::render::ExportJob {
             document: Arc::new(doc),
             composition: composition.as_str().to_owned(),
@@ -903,11 +979,147 @@ impl pm_render::compat::CompatRasters for JobRasters {
         mine
     }
 }
-/// Inherited-pipe admission. Exactly one renderer band per grant; never a
-/// whole-frame burst. Cancellation and parent EOF interrupt a deferred export.
-struct ChildGate(Mutex<std::sync::mpsc::Receiver<()>>);
+/// Renders `fill`'s frames as the paused viewer draws them (the viewer's
+/// request at the composition's size, RGBA16F) into the render cache folder
+/// captured when the fill started, stopping before the volume or the Render
+/// Files Limit is full (`crate::render_cache`).
+#[allow(clippy::too_many_arguments)]
+fn fill_cache(
+    renderer: &mut pm_render::Renderer,
+    doc: Arc<pm_model::Document>,
+    composition: &str,
+    media: pm_export::render::MediaPaths,
+    fill: &crate::render_cache::CacheFill,
+    gate: &ChildGate,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(f64),
+) -> Result<PathBuf> {
+    use crate::render_cache::{DISK_FULL, LIMIT_FULL};
+    let cache = pm_promedia::cache::RenderCache::open(&fill.dir, fill.quota)?;
+    let scene = crate::render::Scene {
+        doc: doc.clone(),
+        comp: composition.to_owned(),
+        media: Arc::new(media),
+        content: 0,
+    };
+    let size = pm_protocol::common::Size::new(fill.width, fill.height);
+    let output = crate::policy::Output {
+        width: size.width,
+        height: size.height,
+        display: 0,
+        headroom: 1.,
+        crop: None,
+    };
+    let pass = pm_export::render::pass_key(2, size);
+    renderer.set_isolate_layers(true);
+    let total = fill.frames.len().max(1) as f64;
+    for (i, frame) in fill.frames.iter().enumerate() {
+        if cancel.load(Ordering::Acquire) {
+            anyhow::bail!("cancelled");
+        }
+        let time = pm_protocol::common::Ticks::new(frame.ticks)?;
+        let request = crate::render::FrameSpec::exact(time, output).request(&scene)?;
+        let read = pm_export::render::render_frame_reusing(
+            renderer,
+            &doc,
+            composition,
+            time,
+            &request,
+            &scene.media,
+            gate,
+            pass,
+            cancel,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let bytes: Vec<u8> = read
+            .rgba
+            .iter()
+            .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+            .collect();
+        if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
+            anyhow::bail!(DISK_FULL);
+        }
+        cache.put(&frame.key, &bytes).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::StorageFull {
+                anyhow::anyhow!(DISK_FULL)
+            } else if e.to_string().contains("quota") {
+                anyhow::anyhow!(LIMIT_FULL)
+            } else {
+                anyhow::Error::from(e)
+            }
+        })?;
+        progress((i + 1) as f64 / total);
+    }
+    renderer.release_frame_reuse();
+    Ok(fill.dir.clone())
+}
+
+/// How long the viewer stays quiet before an export submits whole frames
+/// again; until then submissions are bounded by [`BAND_BUDGET_US`].
+const QUIET: std::time::Duration = std::time::Duration::from_secs(1);
+/// GPU time one submission may take within [`QUIET`] of viewer activity
+/// (half a 60 Hz frame): a scrub or play that resumes waits behind at most
+/// this, or one indivisible unit (Metal cannot preempt a submission).
+const BAND_BUDGET_US: f64 = 8_000.;
+
+/// What a job's submissions measured: per unit, and per whole frame.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct Costs {
+    /// Units in a whole frame (the most a frame's first admission asked).
+    frame_units: u32,
+    whole_us: Option<f64>,
+    unit_us: Option<f64>,
+    /// Bands cost about a whole frame (a precomp or a multi-pass effect
+    /// renders whole for any region): splitting buys no latency.
+    indivisible: bool,
+}
+impl Costs {
+    fn record(&mut self, units: u32, us: f64) {
+        if units == 0 || !us.is_finite() {
+            return;
+        }
+        if units >= self.frame_units {
+            self.whole_us = Some(us);
+        } else if self.whole_us.is_some_and(|whole| us >= 0.75 * whole) {
+            self.indivisible = true;
+        }
+        self.unit_us = Some(us / f64::from(units));
+    }
+    /// Units of `remaining` to submit within the budget: one unit to probe
+    /// a job not measured yet, as many as fit otherwise, and the rest of the
+    /// frame when bands cost a whole frame anyway.
+    fn bounded(&self, remaining: u32) -> u32 {
+        if self.indivisible {
+            return remaining;
+        }
+        match self.unit_us {
+            None => 1,
+            Some(unit) => ((BAND_BUDGET_US / unit.max(1.)).floor() as u32).clamp(1, remaining),
+        }
+    }
+}
+
+/// Inherited-pipe admission: `grant frame` admits the rest of the frame (the
+/// viewer has been quiet for [`QUIET`]), `grant` a submission bounded by
+/// [`Costs::bounded`]. Cancellation and parent EOF interrupt a deferred job.
+struct ChildGate {
+    permits: Mutex<std::sync::mpsc::Receiver<bool>>,
+    costs: Mutex<Costs>,
+}
+impl ChildGate {
+    fn new(permits: std::sync::mpsc::Receiver<bool>) -> Self {
+        Self {
+            permits: Mutex::new(permits),
+            costs: Mutex::default(),
+        }
+    }
+}
 impl pm_export::render::GpuGate for ChildGate {
-    fn admit(&self, _: u64, _: u32, cancel: &AtomicBool) -> Option<u32> {
+    fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        {
+            let mut costs = self.costs.lock().unwrap();
+            costs.frame_units = costs.frame_units.max(units);
+        }
         {
             let mut out = std::io::stdout().lock();
             if out
@@ -918,22 +1130,47 @@ impl pm_export::render::GpuGate for ChildGate {
                 return None;
             }
         }
-        let permits = self.0.lock().unwrap();
+        let permits = self.permits.lock().unwrap();
         while !cancel.load(Ordering::Acquire) {
             match permits.recv_timeout(std::time::Duration::from_millis(5)) {
-                Ok(()) => return Some(1),
+                Ok(true) => return Some(units),
+                Ok(false) => return Some(self.costs.lock().unwrap().bounded(units)),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return None,
             }
         }
         None
     }
-    fn finished(&self, _: u64, _: u32, _: f64) {}
+    fn finished(&self, _: u64, units: u32, measured_us: f64) {
+        self.costs.lock().unwrap().record(units, measured_us);
+    }
     fn abandoned(&self, _: u64) {}
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Within the quiet period a submission fits the budget, or is one
+    /// unit; bands that cost a whole frame give way to whole frames.
+    #[test]
+    fn bounded_admission_fits_the_budget_unless_bands_cost_a_frame() {
+        let mut costs = Costs {
+            frame_units: 68,
+            ..Costs::default()
+        };
+        assert_eq!(costs.bounded(68), 1, "an unmeasured job probes one unit");
+        costs.record(68, 34_000.);
+        assert_eq!(costs.bounded(68), 16, "0.5 ms units: 16 fit 8 ms");
+        costs.record(1, 30_000.);
+        assert!(costs.indivisible);
+        assert_eq!(costs.bounded(67), 67, "a band costing a frame: no split");
+        let mut cheap = Costs {
+            frame_units: 12,
+            ..Costs::default()
+        };
+        cheap.record(12, 1_200.);
+        assert_eq!(cheap.bounded(12), 12, "a cheap frame fits whole");
+    }
     /// A disk that fills during an export stops it; a finished export is
     /// left alone.
     #[test]
