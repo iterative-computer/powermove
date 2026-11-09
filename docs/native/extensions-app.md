@@ -213,10 +213,38 @@ window is open is shown in it.
   `tool` bus event on change); `setTool` and its writable `tool`/`toolShape` change at
   once, as main, and run the shell's tool command (the native Shape tool draws
   rectangles whatever the shape). `viewer` reports the viewer's zoom, pan and fit plus
-  `worldBounds`; `setZoom` leaves fit at the clamped zoom as main. The native viewer
-  is Metal under no DOM, so `viewer.stage` and `ov` are `null`: an extension drawing a
-  DOM overlay on the viewer (displacement-origin-guide) finds no stage and draws
-  nothing. `timeline`, `inspector` and `shaderHooks` are not registered.
+  `worldBounds`; `setZoom` leaves fit at the clamped zoom as main.
+- Viewer stage: the first read of `viewer.stage` or `ov` builds main's
+  `#stage` / `#stage-inner` / `#overlay` in the window's page, and the shell keeps
+  them on the viewer slot and composition frame (`Controller::sync_viewer_stage`).
+  From then on the page shows through the viewer slot as a page region (above the
+  Metal layer, below GPUI's gizmos); GPUI keeps the pointer there, so stage content
+  is display-only. The page is transparent; panel roots paint `--bg-panel`. Each
+  presented viewer frame reaches the realm (`ExtensionHost::frame_presented`,
+  coalesced) as main's `frame:rendered`, then the overlay pass (`ov` cleared, then
+  `overlay`); pan and zoom repaint the overlay and a slot resize is a `layout`.
+  `layerAtPoint` and `render.gl.pick` answer with the layer. `showControls` is View ▸
+  Layer Controls both ways; `preview` reports no source monitor (the native viewer
+  has none).
+- `render.gl.init(canvas)` binds a presenter canvas (D7): each presented frame, and
+  `init`/`resize`, fills it from the engine (`renderFrameTo`) before `frame:rendered`;
+  a `resize` crop takes the whole composition at the crop's scale (≤ 8192 px).
+  `render.gl.context` is `null`: extension code runs in V8, not the page, so WebGL2
+  needs a page-side proxy (open).
+- `timeline` reads the native timeline's view, graph mode, key selection and visible
+  rows (`TimelineSurface::service_facts`, sent when its frame rebuilds); `pps`,
+  `scrollT`, `scrollY` and `graph` write back, `frameView` and `reveal` drive it, and
+  edges follow timeline.ts. `cv` is `null` (v4's `timeline.paint` paints clips).
+  `inspector.refresh` rebuilds the v1–3 sections panel, `focusText` selects the layer
+  and shows Properties; its effect-clipboard members throw `Unavailable` until Effect
+  Controls' clipboard is app-wide. `shaderHooks.syncShaderUniforms` reconciles
+  `d.uniforms` with the kernel's `@param` parser.
+- `api.scene3d`: `edit` is the Studio command MCP's `edit_3d` runs (one undo step,
+  `data.result` names the layer), `describe` the kernel's evaluated scene;
+  `selection`, `select`, `isGroup`, `convert` and the factories behave as main. The
+  viewer shows the camera view only, so `setView('editor')`, other navigation or
+  gizmo modes, `frame`, `createGizmo`/`createNavigation` and multi-file
+  `prepareImport` throw `Unavailable` (the 3D studio is not in the app).
 - `ui.modal` is a native sheet on the window: AppKit title and buttons (primary last,
   on Return), the extension's body DOM in a child web view the page moves it into; a
   button clicks a hidden twin in the realm, so actions run there with main's rules

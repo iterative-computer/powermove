@@ -281,3 +281,15 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Disk render cache frames are coded losslessly with LZFSE over left-difference byte planes (format `rgba16f-viewer-lzfse-v2`; earlier frames are never read and age out under the limit).
 - Raster-override frames in the disk render cache are keyed by the code identity of the compiled records the window realm runs (`pm_compat_runner::code_identity`: each record's id, enabled and module-graph content hash; the records an export realm pins at start) plus the realm's wrapper generation (unknown: this process only), so they survive relaunch while the extensions are unchanged. Overrides that depend on state outside their code (extension storage, time, network) can show a kept frame drawn before that state changed, as they already could within a session.
 - Exports overlap whole frames (`GpuGate::overlaps`; the CLI and the export child opt in): frame n+1 is admitted and submitted before frame n's readback (a two-slot ring) is waited for, so its CPU work runs during n's GPU work; a frame admitted in bands waits for the one before; exports with a `frame:rendered` pass (`frame_post`) or compatibility sources (raster overrides) never overlap, since their state carries from one frame into the next; overlapped frames report wall time to the gate; the last frame waits for every watchdog judgement before its pixels go.
+
+## Compat services lane (wave 20)
+
+- v1's viewer stage is display-only over the native viewer: GPUI keeps the pointer in the viewer slot (gizmos, tools), so stage elements never take input. No corpus or Store extension puts interactive content there.
+- The window's compat page is transparent (`drawsBackground` off) so the stage shows the Metal viewer; contributed panel roots paint `var(--bg-panel, Canvas)`, v1's panel fill.
+- Viewer frames reach v1–3 realms coalesced to the latest (`frame_presented`); a busy realm skips frames rather than queueing them, as playback may drop frames.
+- The D7 presenter fills its canvas from the engine before `frame:rendered`; a same-size `resize` with a crop applies on the next frame, as main's `GL.resize` returned false and rendered later.
+- `inspector.copySelectedEffects` / `pasteCopiedEffects` / `clearEffectClipboard` throw `Unavailable` rather than keep a second clipboard: Effect Controls' clipboard is per panel host today.
+- `api.scene3d` view, navigation and gizmo modes report the camera view and throw `Unavailable` when asked to change: the 3D studio is not wired into the app.
+- `scene3d.describe` is the kernel's evaluated scene, not the frozen reference's `compositionScene`: the native material model has fields that schema rejects.
+- `timeline.keySelectionActive` is read-only (native timeline state); `timeline.cv` is `null`.
+- `render.gl.context` stays `null`: extension code runs in V8, so WebGL2 needs a page-side command proxy with synchronous getters (open; EXT-WGL-1 unmeasured).
