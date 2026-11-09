@@ -54,7 +54,7 @@ the running binary in both directions.
 | `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A window: only the headless `--powermove-mcp` host refuses these. The running app answers them on its main thread (`app/src/panel_bridge.rs`). |
 | `generate_captions`, `transcribe_media` | A local transcription runtime. |
 | `publish_visual_reply` | A safe viewer and its input validator. |
-| `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | The signed Store envelope and install host. |
+| `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | Install and update: the Store serves no release signature yet (`GET /v1/store/releases/<id>/signature`, [store-host.md](store-host.md)), and public hashes come over the same channel as the bytes, so nothing can be verified. Library, uninstall and publish: main's provenance, update checks and publish confirmation aren't ported. |
 | `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_watch`, `thread_unwatch` | Root-owned task records and run watches that resume the calling agent. |
 | `thread_launch`, `thread_send`, `thread_cancel` | A window: only the headless host refuses these. The app runs them on the window's Agent panel (`Builtins::agent_thread_control`). |
 <!-- refused-tools -->
