@@ -162,6 +162,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     // `--quality=full|half|quarter` pins the resolution (Auto by default),
     // so two builds compare the same frames under different machine load.
+    viewer.adapt_drags(true)?;
     viewer.quality(match arg("quality", "auto").as_str() {
         "full" => pm_engine_service::policy::Quality::Full,
         "half" => pm_engine_service::policy::Quality::Half,
@@ -186,7 +187,8 @@ pub fn run() -> anyhow::Result<()> {
     // (memory over a long playback); by default the range is the run.
     let span: f64 = arg("loop", &seconds.to_string()).parse()?;
     let start = Ticks::from_whole_seconds(from.floor() as i32);
-    let end = Ticks::from_whole_seconds((from.floor() + span.min(seconds)).min(duration).ceil() as i32);
+    let end =
+        Ticks::from_whole_seconds((from.floor() + span.min(seconds)).min(duration).ceil() as i32);
     if start != Ticks::ZERO {
         viewer.scrub(start)?;
     }
@@ -335,7 +337,7 @@ pub fn run() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_micros(100));
     };
-    let summary =|v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
+    let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
     let result = json!({
         "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
         "output":[width,height],"open_s":OPEN_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,"first_frame_s":first_frame_s,

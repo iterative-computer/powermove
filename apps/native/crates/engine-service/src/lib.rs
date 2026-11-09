@@ -321,6 +321,9 @@ struct View {
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
+    /// Auto draws dragged frames of a slow project reduced (an editor's
+    /// viewer); otherwise every paused frame is exact.
+    adapt_drags: bool,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
 }
@@ -506,6 +509,15 @@ impl Viewer {
                 v.stamp.sequence += 1;
                 v.dirty = true;
             }
+            Ok(())
+        })
+    }
+    /// Auto draws this viewer's dragged frames at reduced resolution while
+    /// the project is slower than a refresh, and the frame exact once the
+    /// playhead stops (`policy::SCRUB_SETTLE_SECONDS`): the editor's viewer.
+    pub fn adapt_drags(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.adapt_drags = on;
             Ok(())
         })
     }
@@ -893,6 +905,7 @@ impl EngineService {
                 mastering: Default::default(),
                 resources: Arc::default(),
                 quality: Quality::Auto,
+                adapt_drags: false,
                 media_mode: MediaMode::default(),
                 paths,
             },
@@ -1635,7 +1648,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     time,
                     output: v.config.output,
                     moment,
-                    scale: v.quality.scale(&r.auto, moment),
+                    // A capture reads the exact picture: Auto never adapts it.
+                    scale: v.quality.scale(
+                        &r.auto,
+                        if capture || (moment == Moment::Scrub && !v.adapt_drags) {
+                            Moment::Paused
+                        } else {
+                            moment
+                        },
+                    ),
                     decode_deadline: playing.then(|| {
                         std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
                     }),

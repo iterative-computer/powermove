@@ -246,12 +246,32 @@ mod tests {
         auto.record_still(41., 16.67, 1.);
         assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), AUTO_FLOOR);
         auto.record_still(12., 16.67, AUTO_FLOOR);
-        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), AUTO_FLOOR, "still slow at half");
-        assert_eq!(Quality::Auto.scale(&auto, Moment::Paused), 1., "a stop is exact");
-        assert_eq!(Quality::Full.scale(&auto, Moment::Scrub), 1., "Full means full");
-        assert_eq!(Quality::Auto.scale(&auto, Moment::Playing), 1., "playback has its own ladder");
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            AUTO_FLOOR,
+            "still slow at half"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Paused),
+            1.,
+            "a stop is exact"
+        );
+        assert_eq!(
+            Quality::Full.scale(&auto, Moment::Scrub),
+            1.,
+            "Full means full"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Playing),
+            1.,
+            "playback has its own ladder"
+        );
         auto.record_still(9., 16.67, 1.);
-        assert_eq!(Quality::Auto.scale(&auto, Moment::Scrub), 1., "a cheap place drags exact");
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            1.,
+            "a cheap place drags exact"
+        );
         // One slow still (a first frame compiling its programs) costs one
         // reduced drag frame: that one is cheap enough to go back to full.
         auto.record_still(300., 16.67, 1.);

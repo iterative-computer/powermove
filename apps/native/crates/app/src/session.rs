@@ -1297,7 +1297,11 @@ impl Controller {
             end: Some((self.duration * TICKS_PER_SECOND as f64) as i64),
             audio: true,
         }) {
-            Ok(viewer) => self.viewer = Some(viewer),
+            Ok(viewer) => {
+                // The editor's viewer drags a slow project at reduced resolution.
+                let _ = viewer.adapt_drags(true);
+                self.viewer = Some(viewer)
+            }
             Err(e) => self.message = format!("Viewer failed: {e}"),
         }
         self.apply_extension_resources();
