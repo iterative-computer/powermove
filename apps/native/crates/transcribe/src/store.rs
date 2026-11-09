@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -70,6 +70,7 @@ pub fn catalog() -> Vec<Model> {
 }
 /// Headroom kept free on the disk after a model lands.
 const DISK_HEADROOM: u64 = 256 * 1024 * 1024;
+const CANCELLED: &str = "The download was cancelled.";
 pub fn format_bytes(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1e9 {
@@ -106,6 +107,8 @@ struct State {
     downloads: BTreeMap<String, Download>,
     errors: BTreeMap<String, String>,
     partial: BTreeMap<String, u64>,
+    /// Why the last automatic choice of active model wasn't saved.
+    settings_error: Option<String>,
 }
 /// The models folder. Clone freely; all clones share one state.
 #[derive(Clone)]
@@ -113,6 +116,8 @@ pub struct Store {
     root: PathBuf,
     models: Arc<Vec<Model>>,
     state: Arc<Mutex<State>>,
+    /// Signalled under `state` whenever a download worker finishes.
+    finished: Arc<Condvar>,
     changed: Arc<dyn Fn() + Send + Sync>,
 }
 fn size_of(path: &Path) -> Option<u64> {
@@ -124,7 +129,12 @@ fn size_of(path: &Path) -> Option<u64> {
 impl Store {
     /// Scan `root` (main's `ModelStore.load`). `changed` runs on a worker
     /// whenever status changes (progress at most every 200 ms).
-    pub fn open(root: &Path, models: Vec<Model>, changed: Arc<dyn Fn() + Send + Sync>) -> Self {
+    /// A settings file that is missing or not JSON gives main's defaults.
+    pub fn open(
+        root: &Path,
+        models: Vec<Model>,
+        changed: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self, String> {
         let store = Self {
             root: root.to_owned(),
             models: Arc::new(models),
@@ -132,13 +142,17 @@ impl Store {
                 language: "auto".into(),
                 ..Default::default()
             })),
+            finished: Arc::new(Condvar::new()),
             changed,
         };
-        let _ = std::fs::create_dir_all(root);
-        let settings: Value = std::fs::read(root.join("settings.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let unopened =
+            |e: std::io::Error| format!("The transcription models folder couldn’t be opened: {e}");
+        std::fs::create_dir_all(root).map_err(unopened)?;
+        let settings: Value = match std::fs::read(root.join("settings.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(e) => return Err(unopened(e)),
+        };
         let mut state = store.state.lock().unwrap();
         state.active = settings["activeModelId"].as_str().map(str::to_owned);
         if let Some(language) = settings["language"].as_str().filter(|l| valid_language(l)) {
@@ -170,7 +184,7 @@ impl Store {
                 .map(|m| m.id.clone());
         }
         drop(state);
-        store
+        Ok(store)
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -285,7 +299,11 @@ impl Store {
             })
             .collect();
         let active = state.active.clone().filter(|id| state.ready.contains(id));
-        json!({"models":models,"activeModelId":active,"available":true,"language":state.language,"storageBytes":storage})
+        let mut status = json!({"models":models,"activeModelId":active,"available":true,"language":state.language,"storageBytes":storage});
+        if let Some(error) = &state.settings_error {
+            status["settingsError"] = json!(error);
+        }
+        status
     }
     /// The active model and its folder, or `None` when none is ready.
     pub fn active(&self) -> Option<(Model, PathBuf)> {
@@ -318,21 +336,36 @@ impl Store {
     pub fn language(&self) -> String {
         self.state.lock().unwrap().language.clone()
     }
-    fn persist(&self, state: &State) {
+    /// Writes the settings file; the caller publishes them only once it is saved.
+    fn persist(&self, active: Option<&str>, language: &str) -> Result<(), String> {
         let file = self.root.join("settings.json");
         let staged = self
             .root
             .join(format!("settings.json.{}.tmp", std::process::id()));
-        let text = format!(
-            "{}\n",
-            json!({"activeModelId":state.active,"language":state.language})
-        );
-        if std::fs::write(&staged, text)
+        let text = format!("{}\n", json!({"activeModelId":active,"language":language}));
+        std::fs::write(&staged, text)
             .and_then(|()| std::fs::rename(&staged, &file))
-            .is_err()
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&staged);
+                format!("Transcription settings couldn’t be saved: {e}")
+            })
+    }
+    /// Keeps the active model a ready one: main's choice is the first ready
+    /// model in catalog order. Readiness stands even if saving the choice fails.
+    fn reselect(&self, state: &mut State) {
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|id| state.ready.contains(id))
         {
-            let _ = std::fs::remove_file(staged);
+            return;
         }
+        state.active = self
+            .models
+            .iter()
+            .find(|m| state.ready.contains(&m.id))
+            .map(|m| m.id.clone());
+        state.settings_error = self.persist(state.active.as_deref(), &state.language).err();
     }
     pub fn set_active(&self, id: &str) -> Result<(), String> {
         self.model(id)?;
@@ -340,8 +373,9 @@ impl Store {
         if !state.ready.contains(id) {
             return Err("Download this model before using it.".into());
         }
+        self.persist(Some(id), &state.language)?;
         state.active = Some(id.into());
-        self.persist(&state);
+        state.settings_error = None;
         drop(state);
         (self.changed)();
         Ok(())
@@ -351,8 +385,9 @@ impl Store {
             return Err("Choose a language.".into());
         }
         let mut state = self.state.lock().unwrap();
+        self.persist(state.active.as_deref(), language)?;
         state.language = language.into();
-        self.persist(&state);
+        state.settings_error = None;
         drop(state);
         (self.changed)();
         Ok(())
@@ -378,7 +413,7 @@ impl Store {
         drop(state);
         (self.changed)();
         let store = self.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("pm-transcription-download".into())
             .spawn(move || {
                 let outcome = store.fetch(&model, &received, &cancel);
@@ -388,14 +423,7 @@ impl Store {
                     Ok(()) => {
                         state.ready.insert(model.id.clone());
                         state.partial.remove(&model.id);
-                        if state
-                            .active
-                            .as_ref()
-                            .is_none_or(|a| !state.ready.contains(a))
-                        {
-                            state.active = Some(model.id.clone());
-                            store.persist(&state);
-                        }
+                        store.reselect(&mut state);
                     }
                     Err(error) => {
                         state
@@ -406,10 +434,16 @@ impl Store {
                         }
                     }
                 }
+                store.finished.notify_all();
                 drop(state);
                 (store.changed)();
-            })
-            .map_err(|e| e.to_string())?;
+            });
+        if let Err(e) = spawned {
+            self.state.lock().unwrap().downloads.remove(id);
+            self.finished.notify_all();
+            (self.changed)();
+            return Err(format!("The download couldn’t start: {e}"));
+        }
         Ok(())
     }
     /// Stop a download; what arrived stays for the next attempt.
@@ -418,32 +452,33 @@ impl Store {
             d.cancel.store(true, Ordering::Relaxed);
         }
     }
+    /// Cancels its download and waits for the worker to stop, so nothing it
+    /// publishes outlives the removal. Status then reports what is left on disk.
     pub fn remove(&self, id: &str) -> Result<(), String> {
-        self.model(id)?;
-        self.cancel(id);
-        for _ in 0..100 {
-            if !self.state.lock().unwrap().downloads.contains_key(id) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let model = self.model(id)?;
+        let state = self.state.lock().unwrap();
+        if let Some(d) = state.downloads.get(id) {
+            d.cancel.store(true, Ordering::Relaxed);
         }
-        let mut state = self.state.lock().unwrap();
-        state.ready.remove(id);
+        let mut state = self
+            .finished
+            .wait_while(state, |s| s.downloads.contains_key(id))
+            .unwrap();
+        let removed = [self.model_dir(id), self.partial_dir(id)]
+            .into_iter()
+            .try_for_each(|dir| match std::fs::remove_dir_all(dir) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            });
+        if !self.complete(model) {
+            state.ready.remove(id);
+        }
         state.errors.remove(id);
-        state.partial.remove(id);
-        let _ = std::fs::remove_dir_all(self.model_dir(id));
-        let _ = std::fs::remove_dir_all(self.partial_dir(id));
-        if state.active.as_deref() == Some(id) {
-            state.active = self
-                .models
-                .iter()
-                .find(|m| state.ready.contains(&m.id))
-                .map(|m| m.id.clone());
-            self.persist(&state);
-        }
+        state.partial.insert(id.into(), self.partial_size(model));
+        self.reselect(&mut state);
         drop(state);
         (self.changed)();
-        Ok(())
+        removed.map_err(|e| format!("The model couldn’t be removed: {e}"))
     }
     fn fetch(
         &self,
@@ -473,6 +508,9 @@ impl Store {
             }
             before += file.size;
             received.store(before, Ordering::Relaxed);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
         }
         let manifest = json!({"id":model.id,"files":model.files.iter().map(|f| json!({"name":f.name,"size":f.size,"sha256":f.sha256})).collect::<Vec<_>>(),
             "completedAt":completed_at()});
@@ -533,7 +571,7 @@ impl Store {
                     if cancel.load(Ordering::Relaxed) {
                         let _ = child.kill();
                         let _ = child.wait();
-                        return Err("The download was cancelled.".into());
+                        return Err(CANCELLED.into());
                     }
                     received.store(before + size_of(part).unwrap_or(0), Ordering::Relaxed);
                     (self.changed)();
@@ -565,16 +603,19 @@ impl Store {
                     });
                 }
             }
-            return verify(file, part);
+            return verify(file, part, cancel);
         }
-        verify(file, part)
+        verify(file, part, cancel)
     }
 }
-fn verify(file: &File, part: &Path) -> Result<(), String> {
+fn verify(file: &File, part: &Path, cancel: &AtomicBool) -> Result<(), String> {
     let mut hash = Sha256::new();
     let mut input = std::fs::File::open(part).map_err(|e| e.to_string())?;
     let mut buf = vec![0; 1 << 20];
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
         let n = input.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
@@ -659,7 +700,8 @@ mod tests {
         let partial = root.join("models/.partial").join(&id);
         std::fs::create_dir_all(&partial).unwrap();
         std::fs::write(partial.join("model.gguf.part"), [7u8; 1000]).unwrap();
-        let store = Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {}));
+        let store =
+            Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {})).unwrap();
         assert_eq!(store.status()["models"][0]["downloadedBytes"], 1000);
         store.download(&id).unwrap();
         wait(&store, &id);
@@ -676,7 +718,8 @@ mod tests {
         assert_eq!(manifest["files"][0]["sha256"], json!(model.files[0].sha256));
         assert!(!root.join("models/.partial").join(&id).exists());
         // Reopening finds it; settings name it active.
-        let again = Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {}));
+        let again =
+            Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {})).unwrap();
         assert_eq!(again.active().unwrap().0.id, id);
         again.remove(&id).unwrap();
         assert!(!dir.exists());
@@ -688,7 +731,8 @@ mod tests {
         let root = scratch("checksum");
         let mut model = fixture(&root, b"not the model");
         model.files[0].sha256 = "0".repeat(64);
-        let store = Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {}));
+        let store =
+            Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {})).unwrap();
         store.download(&model.id).unwrap();
         wait(&store, &model.id);
         let status = store.status();
@@ -703,7 +747,7 @@ mod tests {
     #[test]
     fn languages_and_activity_follow_mains_rules() {
         let root = scratch("settings");
-        let store = Store::open(&root, catalog(), Arc::new(|| {}));
+        let store = Store::open(&root, catalog(), Arc::new(|| {})).unwrap();
         assert_eq!(store.language(), "auto");
         store.set_language("pt-BR").unwrap();
         assert_eq!(
@@ -715,10 +759,85 @@ mod tests {
             "Download this model before using it."
         );
         assert_eq!(
-            Store::open(&root, catalog(), Arc::new(|| {})).language(),
+            Store::open(&root, catalog(), Arc::new(|| {}))
+                .unwrap()
+                .language(),
             "pt-BR"
         );
         assert_eq!(format_bytes(731_357_568), "731 MB");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_setting_that_isnt_saved_is_neither_reported_nor_kept() {
+        let root = scratch("unsaved");
+        let store = Store::open(&root, catalog(), Arc::new(|| {})).unwrap();
+        store.set_language("de").unwrap();
+        // A directory where the file goes makes the rename fail.
+        std::fs::remove_file(root.join("settings.json")).unwrap();
+        std::fs::create_dir_all(root.join("settings.json/blocked")).unwrap();
+        assert!(
+            store
+                .set_language("fr")
+                .unwrap_err()
+                .starts_with("Transcription settings couldn’t be saved")
+        );
+        assert_eq!(store.language(), "de");
+        assert!(
+            Store::open(&root, catalog(), Arc::new(|| {}))
+                .err()
+                .unwrap()
+                .starts_with("The transcription models folder couldn’t be opened")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), "{not json").unwrap();
+        assert_eq!(
+            Store::open(&root, catalog(), Arc::new(|| {}))
+                .unwrap()
+                .language(),
+            "auto"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_downloaded_model_stays_ready_when_its_selection_cant_be_saved() {
+        let root = scratch("unsaved-active");
+        let model = fixture(&root, &[3u8; 4096]);
+        let store =
+            Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {})).unwrap();
+        std::fs::create_dir_all(root.join("models/settings.json/blocked")).unwrap();
+        store.download(&model.id).unwrap();
+        wait(&store, &model.id);
+        let status = store.status();
+        assert_eq!(status["models"][0]["state"], "ready", "{status}");
+        assert_eq!(status["activeModelId"], json!(model.id));
+        assert!(
+            status["settingsError"]
+                .as_str()
+                .unwrap()
+                .starts_with("Transcription settings couldn’t be saved")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn removing_a_model_mid_download_leaves_nothing_and_it_downloads_again() {
+        let root = scratch("remove-mid-download");
+        let model = fixture(&root, &[5u8; 64 << 20]);
+        let store =
+            Store::open(&root.join("models"), vec![model.clone()], Arc::new(|| {})).unwrap();
+        for _ in 0..3 {
+            store.download(&model.id).unwrap();
+            store.remove(&model.id).unwrap();
+            let status = store.status();
+            assert_eq!(status["models"][0]["state"], "absent", "{status}");
+            assert_eq!(status["models"][0]["downloadedBytes"], Value::Null);
+            assert_eq!(status["activeModelId"], Value::Null);
+            assert!(!root.join("models").join(&model.id).exists());
+            assert!(!root.join("models/.partial").join(&model.id).exists());
+        }
+        store.download(&model.id).unwrap();
+        wait(&store, &model.id);
+        assert_eq!(store.status()["models"][0]["state"], "ready");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
