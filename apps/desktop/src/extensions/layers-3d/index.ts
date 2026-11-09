@@ -50,8 +50,8 @@ export default function activate(api:PowermoveAPI):void {
   const {x:cx,y:cy,z:cz,...cameraP}=scene.camera.p;
   for(const def of [
     {id:'powermove.3d.object',label:'3D Model',icon:'cube',role:'object',data:{object:objectData}},
-    {id:'powermove.3d.light',label:'Light',icon:'sun',role:'light',data:{light:{type:light.type,p:lightP,castShadow:true}}},
-    {id:'powermove.3d.camera',label:'Camera',icon:'camera',role:'camera',data:{camera:{projection:scene.camera.projection,p:cameraP},environment:scene.environment}}
+    {id:'powermove.3d.light',label:'Light',icon:'lightbulb',role:'light',data:{light:{type:light.type,p:lightP,castShadow:true}}},
+    {id:'powermove.3d.camera',label:'Camera',icon:'cam',role:'camera',data:{camera:{projection:scene.camera.projection,p:cameraP},environment:scene.environment}}
   ])api.layers.register({id:def.id,label:def.label,icon:def.icon,version:1,params:[],defaults:def.data as any,renderer:{kind:'layer3d',role:def.role}} as ExtensionLayerDefinition);
   const convert=(id?:unknown)=>{const target=typeof id==='string'?id:api.selection.layers()[0];if(!target)return false;const result=api.scene3d.convert(target);if(!result.ok)api.ui.toast(result.message,{error:true});api.transport.invalidate();return result;};
   const commands=[

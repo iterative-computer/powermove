@@ -34,6 +34,9 @@
   );
   const firstLayer = $derived(selectedLayers[0]);
   const meta = untrack(() => api.model.TYPE_META) as Record<string, { effects?: boolean }>;
+  const placedIn3D = (layer: any) => layer?.threeD === true || String(layer?.d?.definition ?? '').startsWith('powermove.3d.');
+  /* A World, Ambient or Environment light surrounds the scene: no place, so no Transform. */
+  const surrounds = (layer: any) => !!layer?.d?.data?.object?.world || ['ambient', 'environment'].includes(layer?.d?.data?.light?.type);
   const takesEffects = $derived(!!firstLayer && meta[firstLayer.type]?.effects !== false);
 
   $effect(() => {
@@ -44,7 +47,8 @@
 
 <InspectorSurface {panelId} scrollKey={JSON.stringify(selectedLayers.map(layer => layer.id))}>
   {#if firstLayer}<InspectorHeader layer={firstLayer} />{/if}
-  {#if firstLayer && selectedLayers.every((layer: any) => layer.type !== 'audio')}<AlignmentStrip layers={selectedLayers} />{/if}
+  <!-- Aligning to the frame is a 2D act: 3D layers place themselves in the scene. -->
+  {#if firstLayer && selectedLayers.every((layer: any) => layer.type !== 'audio') && !selectedLayers.every(placedIn3D)}<AlignmentStrip layers={selectedLayers} />{/if}
 
   {#if selectedLayers.length === 0}
     <CompositionSection />
@@ -67,7 +71,7 @@
         <ContentSection layer={firstLayer} {fontsVersion} />
       {/if}
       <ContributedSections {api} after="content" layerIds={selectedLayers.map(layer => layer.id)} />
-      {#if firstLayer.type !== 'audio'}<TransformSection layer={firstLayer} />{/if}
+      {#if firstLayer.type !== 'audio' && !surrounds(firstLayer)}<TransformSection layer={firstLayer} />{/if}
       <ContributedSections {api} after="transform" layerIds={selectedLayers.map(layer => layer.id)} />
       <StructuredSection layer={firstLayer} />
       {#if firstLayer.type !== 'audio'}

@@ -18,6 +18,9 @@
   let navigation=$state(untrack(()=>api.scene3d.getNavigationMode()));
   const navigationSubscription=untrack(()=>api.scene3d.onNavigationChange(next=>navigation=next));
   let view=$state(untrack(()=>api.scene3d.getView()));
+  let layout=$state(untrack(()=>api.scene3d.views.get().layout));
+  const layoutSubscription=untrack(()=>api.scene3d.views.onChange(()=>layout=api.scene3d.views.get().layout));
+  onDestroy(()=>layoutSubscription.dispose());
   const viewSubscription=untrack(()=>api.scene3d.onViewChange(next=>view=next));
   /* Two views a newcomer can tell apart. The internal ids stay camera/editor. */
   let light=$state(untrack(()=>api.scene3d.lights.getTool()));
@@ -52,6 +55,9 @@
 {:else}
 <Segmented label="3D preview" options={[{id:"fast",label:"Fast"},{id:"quality",label:"Quality"}]} value={preview} onChange={next=>api.scene3d.studio.setPreview(next as typeof preview)} />
 <Segmented label="3D view" options={views} value={view} onChange={next=>api.scene3d.setView(next as typeof view)} />
+<div style="width:84px" title="View layout — 1 View, or 2 or 4 views side by side, each looking through the Active Camera, Front, Left, Top… Click a view to work in it">
+  <SelectField {api} label="View layout" get={()=>layout} edit={{mode:'local',label:'View layout',set:(next:unknown)=>api.scene3d.views.setLayout(Number(next) as 1|2|4)}} options={[{v:1,label:'1 View'},{v:2,label:'2 Views'},{v:4,label:'4 Views'}]} />
+</div>
 <div style="width:96px" title="3D navigation — Orbit, pan or dolly the Free View, frame the scene, or look from the Front, Left, Top, Back, Right or Bottom. F frames the selection, Home frames everything. Your camera and render don’t change">
   <SelectField {api} label="3D navigation" get={()=>navigation} edit={{mode:'local',label:'3D navigation',set:(next:unknown)=>api.scene3d.setNavigationMode(next as typeof navigation)}} options={viewOptions}
     onChange={navigate} />

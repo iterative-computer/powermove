@@ -105,6 +105,8 @@ export function collectLightMarkers(api: PowermoveAPI, rect: ViewerRect, stage: 
     let state: LightViewerState | null = null;
     try { state = scene.lightViewerState(layer.id, time, rect); } catch { state = null; }
     if (!state || !(api.anim.active(layer, time) ?? true)) continue;
+    // Ambient and Environment light come from everywhere: no place to mark.
+    if (['ambient', 'environment'].includes(String(state.type ?? (layer as any).d?.data?.light?.type))) continue;
     const isSelected = selected.has(layer.id);
     let guides: LightViewerGuides | null = null;
     try { guides = scene.lightViewerGuides?.(layer.id, time, rect) ?? null; } catch { guides = null; }

@@ -1749,7 +1749,7 @@ function bindStage(stage: any, inner: any): () => void {
     listeners.push([target, type, handler, options]);
   };
   const guarded = (handler: (event: any) => void) => ((event: any) => {
-    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, #light-panel, [contenteditable]')) return;
+    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, #light-panel, .viewer-pane-label, [contenteditable]')) return;
     handler(event);
   }) as EventListener;
   const capture = undefined;

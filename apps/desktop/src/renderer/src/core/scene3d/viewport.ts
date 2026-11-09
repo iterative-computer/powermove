@@ -6,7 +6,7 @@ import {layer3DRole} from './layers';
 export type ViewCamera=THREE.PerspectiveCamera|THREE.OrthographicCamera;
 export type ViewPose={position:THREE.Vector3;target:THREE.Vector3;zoom:number};
 export type ViewMode='camera'|'editor';
-type ViewState={camera:ViewCamera|null;target:THREE.Vector3;mode:ViewMode};
+type ViewState={camera:ViewCamera|null;target:THREE.Vector3;mode:ViewMode;side:ViewSide|null};
 const states=new WeakMap<object,Map<string,ViewState>>();
 const revisions=new WeakMap<object,number>();
 const listeners=new WeakMap<object,Set<(mode:ViewMode)=>void>>();
@@ -14,7 +14,7 @@ const composition=(PM:any)=>PM.curComp?.()||PM.proj;
 function state(PM:any):ViewState {
   let comps=states.get(PM);if(!comps){comps=new Map();states.set(PM,comps);}
   const comp=composition(PM),key=`${PM.proj.id}:${comp.compId||comp.id}`;let entry=comps.get(key);
-  if(!entry){entry={camera:null,target:new THREE.Vector3(),mode:'camera'};comps.set(key,entry);}return entry;
+  if(!entry){entry={camera:null,target:new THREE.Vector3(),mode:'camera',side:null};comps.set(key,entry);}return entry;
 }
 export const getViewportMode=(PM:any):ViewMode=>state(PM).mode;
 export const viewportRevision=(PM:any):number=>revisions.get(PM)||0;
@@ -45,7 +45,7 @@ export function setViewportMode(PM:any,mode:ViewMode):void {
 }
 export function applyViewportPose(PM:any,pose:ViewPose):void {
   const entry=state(PM);if(!entry.camera||entry.mode==='camera')initialize(PM,entry);
-  entry.mode='editor';entry.target.copy(pose.target);
+  entry.mode='editor';entry.side=null;entry.target.copy(pose.target);
   entry.camera!.position.copy(pose.position);entry.camera!.zoom=pose.zoom;
   entry.camera!.lookAt(pose.target);entry.camera!.updateProjectionMatrix();entry.camera!.updateMatrixWorld(true);changed(PM);
 }
@@ -61,4 +61,13 @@ export function lookFrom(PM:any,side:ViewSide):void {
   // Straight up/down needs a hair of depth so the view keeps a stable "up".
   const direction=new THREE.Vector3(...axis);if(side==='top'||side==='bottom')direction.z=1e-4;
   applyViewportPose(PM,{target:pose.target,position:pose.target.clone().addScaledVector(direction.normalize(),distance),zoom:pose.zoom});
+  state(PM).side=side;changed(PM);
 }
+/** The axis the Free View looks along (Front, Top…), until it is orbited; null for the camera or a custom view. */
+export const viewportSide=(PM:any):ViewSide|null=>{const entry=state(PM);return entry.mode==='editor'?entry.side:null;};
+/** Put the Free View at a pose that looks along an axis, and remember that axis. */
+export function applySidePose(PM:any,side:ViewSide,pose:ViewPose):void {applyViewportPose(PM,pose);state(PM).side=side;changed(PM);}
+export const sideDirection=(side:ViewSide):THREE.Vector3=>{const d=new THREE.Vector3(...SIDES[side]);if(side==='top'||side==='bottom')d.z=1e-4;return d.normalize();};
+export const VIEW_SIDES=Object.keys(SIDES) as ViewSide[];
+/** Key of the open composition's view state. */
+export const viewportKey=(PM:any):string=>{const comp=composition(PM);return `${PM.proj.id}:${comp.compId||comp.id}`;};

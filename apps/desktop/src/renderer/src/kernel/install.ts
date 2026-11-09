@@ -51,6 +51,7 @@ import { retryPendingWorkspaceAppearance } from './workspace-appearance';
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
+import { layer3DKind } from '../core/scene3d/layers';
 import { records as storeRecords } from './extensions.svelte';
 import { installRuntimeGlobals } from './runtime-globals';
 import { installKernelSignals } from './signals.svelte';
@@ -233,6 +234,15 @@ function makeModel(PM: LegacyPM): ModelAPI {
     cloneLayer: (layer) => PM?.cloneLayer?.(layer),
     normalizeFill: (value, fallback) => PM?.normalizeFill?.(value, fallback),
     layerDefinition: (id) => PM?.layerDefinition?.(id),
+    layerKind: (layer) => {
+      if (!layer) return null;
+      const kind = layer3DKind(layer);
+      if (kind) return kind;
+      const definition = layer.type === 'extension' ? PM?.layerDefinition?.(String((layer as any).d?.definition ?? '')) : null;
+      if (definition) return { label: definition.label, icon: definition.icon || 'puzzle' };
+      const meta = (PM?.TYPE_META ?? {})[layer.type];
+      return meta ? { label: meta.label, icon: meta.icon } : null;
+    },
     curComp: () => PM?.curComp?.() ?? PM?.proj,
     layer: (id) => PM?.L?.(id) ?? null,
     byName: (name) => PM?.byName?.(name) ?? null

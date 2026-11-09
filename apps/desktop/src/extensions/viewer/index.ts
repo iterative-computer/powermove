@@ -3,6 +3,7 @@ import type { PowermoveAPI } from 'powermove';
 import { createViewerRuntime, viewerPanelOptions } from './viewer';
 import { installSourcePreview } from './source-preview';
 import { mountViewerChrome, VIEWER_CHROME_STYLES } from './viewer-chrome';
+import { mountViewPanes } from './view-panes';
 
 const VIEWER_STYLES = `
   .canvas-text-input::selection{background:transparent;color:transparent}
@@ -39,7 +40,11 @@ export default function activate(api: PowermoveAPI): void {
   api.onDispose(() => disposeRuntime());
   api.services.register('viewer', runtime);
   let disposeChrome: (() => void) | null = null;
-  const chrome = (body: HTMLElement) => { disposeChrome?.(); disposeChrome = mountViewerChrome(api, body, runtime); };
+  const chrome = (body: HTMLElement) => {
+    disposeChrome?.();
+    const disposeHead = mountViewerChrome(api, body, runtime), disposePanes = mountViewPanes(api, body, runtime);
+    disposeChrome = () => { disposePanes(); disposeHead(); };
+  };
   api.onDispose(() => disposeChrome?.());
 
   // Tab opens the composition mini-flowchart, as in After Effects.
