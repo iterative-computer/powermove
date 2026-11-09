@@ -95,7 +95,6 @@ impl Drop for FrameOutline {
 
 pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let layers = PlaybackLayers::new(MainThreadMarker::new().unwrap());
-    // The playhead's 11 pt rounded head, drawn in the ruler (language §11).
     let head: objc2::rc::Retained<objc2::runtime::AnyObject> =
         unsafe { objc2::rc::Retained::from_raw(msg_send![objc2::class!(CALayer), new]).unwrap() };
     let host = entity.read(cx).host.clone();

@@ -299,10 +299,10 @@ function overlaysFor(env: { rootOptions: any }): Overlays {
     },
   };
 }
-/** v1–3's timeline chrome (`workspace.chrome.timeline`) for v4. */
 /** This realm's clip painter (`timeline.paint`), run when clips move. */
 let clipPainter: ((clips: Json[]) => unknown) | null = null;
 const timelineApi: Timeline = {
+  /** v1–3's timeline chrome (`workspace.chrome.timeline`) for v4. */
   chrome(patch) {
     if (!patch || typeof patch !== "object")
       throw new Error("Timeline chrome is an object of fields");

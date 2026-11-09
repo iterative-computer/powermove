@@ -591,7 +591,6 @@ impl Controller {
             .and_then(|r| r.get("name"))
             .and_then(crate::node_string)
             .unwrap_or("Untitled");
-        // `Saving…` under the title while a save runs, then `Edited` or nothing.
         self.host.borrow().set_document_metadata(
             title,
             pm_shell::document_subtitle(p.dirty, saving),
