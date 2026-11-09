@@ -8,7 +8,7 @@ use crate::{
     adapter::KernelAdapter,
     compile::{self, ModuleGraph},
     discovery::{self, Discovered},
-    recorder::{CanvasText, NativeHost, RealmEvents},
+    recorder::{CanvasText, NativeHost, RealmEvents, SyncLayout},
     store_kernel::update_state,
     transport::{Transport, TransportOwner},
 };
@@ -279,9 +279,9 @@ impl RealmEvents for Arc<Events> {
     }
     /// The owner routes the page's answer here (`Owner::page`) while the
     /// realm waits; the main thread never waits for it.
-    fn measure_sync(&self, request: u64) -> Option<Value> {
+    fn measure_sync(&self, request: u64) -> SyncLayout {
         let rx = match self.measuring.lock().unwrap().wait(request) {
-            Ok(answer) => return Some(answer),
+            Ok(answer) => return SyncLayout::Answer(answer),
             Err(rx) => rx,
         };
         self.dom_ready();
@@ -291,18 +291,22 @@ impl RealmEvents for Arc<Events> {
         // Without a window (headless) no page ever comes: only one read waits.
         let reading =
             self.shared.reader.load(Ordering::Acquire) == u64::from(self.writer.generation);
-        let first = !reading && !self.page_missed.load(Ordering::Acquire);
-        let wait = if first {
-            SYNC_LAYOUT_FIRST_WAIT
-        } else {
-            SYNC_LAYOUT_WAIT
+        let missed = self.page_missed.load(Ordering::Acquire);
+        let wait = match (reading, missed) {
+            (false, true) => Duration::ZERO,
+            (false, false) => SYNC_LAYOUT_FIRST_WAIT,
+            (true, _) => SYNC_LAYOUT_WAIT,
         };
-        let answer = rx.recv_timeout(wait).ok();
-        if first && answer.is_none() {
-            self.page_missed.store(true, Ordering::Release);
-        }
+        let answer = rx.recv_timeout(wait);
         self.measuring.lock().unwrap().waiting = None;
-        answer
+        match answer {
+            Ok(answer) => SyncLayout::Answer(answer),
+            Err(_) if reading => SyncLayout::TimedOut,
+            Err(_) => {
+                self.page_missed.store(true, Ordering::Release);
+                SyncLayout::NoPage
+            }
+        }
     }
 }
 

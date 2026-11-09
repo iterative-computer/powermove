@@ -46,11 +46,28 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn activating(&self, _id: Option<&str>) {}
     /// A task has run past the watchdog's limit; the user decides (D11).
     fn unresponsive(&self, _execution: u64) {}
-    /// A synchronous layout read: the page's `layout` answer to measure
-    /// `request` (already sent with the realm's last batch), or `None` when
-    /// the page doesn't answer in time. Blocks the realm's worker only.
-    fn measure_sync(&self, _request: u64) -> Option<Value> {
-        None
+    /// A synchronous layout read of measure `request` (already sent with the
+    /// realm's last batch). Blocks the realm's worker only.
+    fn measure_sync(&self, _request: u64) -> SyncLayout {
+        SyncLayout::NoPage
+    }
+}
+/// How a synchronous layout read ended.
+pub enum SyncLayout {
+    /// The page's `layout` answer.
+    Answer(Value),
+    /// No page reads this realm's batches, so none will answer.
+    NoPage,
+    /// A page reads them but did not answer in time.
+    TimedOut,
+}
+impl SyncLayout {
+    fn into_json(self) -> Value {
+        match self {
+            Self::Answer(layout) => layout,
+            Self::NoPage => json!({"unavailable": "no-page"}),
+            Self::TimedOut => json!({"unavailable": "timeout"}),
+        }
     }
 }
 pub struct NoEvents;
@@ -1556,7 +1573,7 @@ impl EngineProxy for NativeHost {
             let request = input["request"]
                 .as_u64()
                 .ok_or(Error::Invalid("measure request"))?;
-            return Ok(self.events.measure_sync(request).unwrap_or(Value::Null));
+            return Ok(self.events.measure_sync(request).into_json());
         }
         if operation == "dom.batch" {
             let mut state = self.state.lock().unwrap();

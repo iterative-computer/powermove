@@ -449,9 +449,10 @@ export type ShimOptions = {
    * A layout read the page has not measured since the document changed (a
    * browser's forced synchronous layout): the batch carrying the measure
    * request has been sent; this waits, bounded, for the page's `layout`
-   * reply to it and returns it, or null (the cached layout is used).
+   * reply to it. Unanswered, the cached layout is used: `no-page` when no
+   * page reads the batches, `timeout` when one reads them but was too slow.
    */
-  measureSync?: (request: number) => PageMessage | null;
+  measureSync?: (request: number) => PageMessage | { unavailable: 'no-page' | 'timeout' };
 };
 
 export class RemoteDOM {
@@ -935,14 +936,15 @@ export class RemoteDOM {
       }
     ) as unknown as CSSStyleDeclaration;
   }
-  /** Synchronous layout reads are off for a moment after one went unanswered. */
-  private syncPausedUntil = 0;
+  /** A page too slow to answer a synchronous read gets none until it answers
+   * a layout request again. */
+  private syncSuspended = false;
   /**
    * Makes `node`'s layout (and `styles`) current, as a browser's forced
    * layout does: when the page has not measured it since the document last
    * changed, the pending changes and a measure request go now and the realm
    * waits for the page's answer (`measureSync`). Without a host for it, or
-   * when the page does not answer, the cached layout stays and a refresh is
+   * when no page answers, the cached layout stays and a refresh is
    * requested.
    */
   fresh(node: N, styles: string[] = []) {
@@ -961,20 +963,18 @@ export class RemoteDOM {
       styles.every((name) => name in (known.entry.styles ?? {}))
     )
       return;
-    if (Date.now() < this.syncPausedUntil) return this.requestLayout(node);
+    if (this.syncSuspended) return this.requestLayout(node);
     const request = ++this.request;
     this.commands.push({ op: 'measure', request, ids: [this.id(node)], styles });
     // Everything up to the request reaches the page first.
     for (let i = 0; i < 64; i++) {
       if (!this.flush() || !(this.pending || this.backlog.length || this.commands.length)) break;
     }
-    const reply = this.pending ? null : measure(request);
-    if (reply?.kind === 'layout' && sameSession(reply.session, this.session)) {
-      this.applyLayout(reply, true);
-    } else {
-      this.syncPausedUntil = Date.now() + 1000;
-      this.requestLayout(node);
-    }
+    const reply = this.pending ? { unavailable: 'timeout' } : measure(request);
+    if ('kind' in reply && reply.kind === 'layout' && sameSession(reply.session, this.session))
+      return this.applyLayout(reply, true);
+    if (!('unavailable' in reply && reply.unavailable === 'no-page')) this.syncSuspended = true;
+    this.requestLayout(node);
   }
   observeResize(observer: RemoteResizeObserver, node: N, enabled: boolean) {
     let observers = this.resizeTargets.get(node);
@@ -1057,6 +1057,7 @@ export class RemoteDOM {
     }
     if (message.applied < this.applied || message.applied > this.seq) return false;
     if (message.kind === 'layout') {
+      this.syncSuspended = false;
       this.applyLayout(message, false);
       if (message.request !== null) {
         const wait = this.waits.get(message.request);
