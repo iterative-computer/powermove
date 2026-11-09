@@ -1293,6 +1293,38 @@ mod scene_pool_tests {
         assert!(cache.bytes <= SceneOutlines::MAX_BYTES);
     }
 
+    /// Two scenes recorded into one frame's encoder (one submit) each keep
+    /// their own uploads: the second's queue writes never replace the
+    /// first's inputs or paint data.
+    #[test]
+    fn scenes_recorded_into_one_encoder_keep_their_own_uploads() {
+        let gpu = pm_gpu::Gpu::new("scene frame test").expect("GPU");
+        let rect = PixelRect::new(0, 0, 64, 64);
+        let a = scene(2.25, 3.5, 30.0);
+        let b = scene(19.75, 18.25, 21.0);
+        let mut cache = VectorCache::new();
+        cache.begin_frame();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let (out_a, _) = cache
+            .render_scene(&gpu.device, &gpu.queue, Some(&mut encoder), &a, rect, Precision::Float16)
+            .expect("A records");
+        let (out_b, _) = cache
+            .render_scene(&gpu.device, &gpu.queue, Some(&mut encoder), &b, rect, Precision::Float16)
+            .expect("B records");
+        gpu.queue.submit([encoder.finish()]);
+        let fresh = |s: &CoverageScene| {
+            VectorCache::new()
+                .render_scene(&gpu.device, &gpu.queue, None, s, rect, Precision::Float16)
+                .expect("fresh renders")
+                .0
+        };
+        let (want_a, want_b) = (fresh(&a), fresh(&b));
+        let read = |texture| pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, texture).unwrap();
+        assert_eq!(read(&out_a), read(&want_a));
+        assert_eq!(read(&out_b), read(&want_b));
+        assert_ne!(read(&want_a), read(&want_b), "the scenes differ");
+    }
+
     #[test]
     fn pooled_scene_inputs_preserve_prior_submissions_and_trim() {
         let gpu = pm_gpu::Gpu::new("scene pool test").expect("GPU");
@@ -1303,18 +1335,18 @@ mod scene_pool_tests {
         // Both render calls submit before either result is read. Reusing one
         // input buffer without queue ordering would overwrite A with B.
         let (out_a, _) = pooled
-            .render_scene(&gpu.device, &gpu.queue, &a, rect, Precision::Float16)
+            .render_scene(&gpu.device, &gpu.queue, None, &a, rect, Precision::Float16)
             .expect("A renders");
         let (out_b, _) = pooled
-            .render_scene(&gpu.device, &gpu.queue, &b, rect, Precision::Float16)
+            .render_scene(&gpu.device, &gpu.queue, None, &b, rect, Precision::Float16)
             .expect("B renders");
         let mut fresh_a = VectorCache::new();
         let (want_a, _) = fresh_a
-            .render_scene(&gpu.device, &gpu.queue, &a, rect, Precision::Float16)
+            .render_scene(&gpu.device, &gpu.queue, None, &a, rect, Precision::Float16)
             .expect("A fresh renders");
         let mut fresh_b = VectorCache::new();
         let (want_b, _) = fresh_b
-            .render_scene(&gpu.device, &gpu.queue, &b, rect, Precision::Float16)
+            .render_scene(&gpu.device, &gpu.queue, None, &b, rect, Precision::Float16)
             .expect("B fresh renders");
         let read = |texture| pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, texture).unwrap();
         assert_eq!(read(&out_a), read(&want_a));
