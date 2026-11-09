@@ -295,7 +295,7 @@ impl Controller {
             p.as_deref(),
             self.opening
                 || self.recovery_pending
-                || self.host.borrow().window.attachedSheet().is_some(),
+                || !crate::alert::dismiss_notice(&self.host.borrow().window),
             self.save_pending,
         ) {
             CloseState::Saving => {
