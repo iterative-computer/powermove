@@ -1,4 +1,5 @@
 //! Powermove Studio's isolated, headless native process. No Electron/Node dependency.
+mod budget;
 mod packed;
 mod protocol;
 mod scene;
@@ -137,6 +138,7 @@ struct Host {
     screen: Option<(u32, u32, u32, Vec<u8>)>,
     start: Instant,
     frame_counter: u64,
+    live_budget: budget::LiveBudget,
     #[cfg(feature = "oidn")]
     oidn: Option<pm_studio::oidn::Denoiser>,
 }
@@ -153,11 +155,13 @@ impl Host {
             screen: None,
             start: Instant::now(),
             frame_counter: u64::from(std::process::id()) << 32,
+            live_budget: budget::LiveBudget::new(),
             #[cfg(feature = "oidn")]
             oidn: None,
         }
     }
     fn install(&mut self, r: ResidentScene) {
+        self.live_budget.reset();
         self.packed = None;
         self.resident = Some(r);
         self.revision += 1;
@@ -200,6 +204,7 @@ impl Host {
         let value = match command {
             Command::Prepared { upload } => {
                 self.packed = Some(packed::PackedScene::new(upload, binary)?);
+                self.live_budget.reset();
                 self.resident = None;
                 self.revision += 1;
                 self.geometry += 1;
@@ -476,14 +481,8 @@ impl Host {
                         let r = self.resident.as_ref().ok_or("no scene")?;
                         (r.placements.len(), r.prepared.lights.len())
                     };
-                    if instances > 128 || lights > 32 {
-                        (
-                            width.saturating_mul(2).div_ceil(5).max(1),
-                            height.saturating_mul(2).div_ceil(5).max(1),
-                        )
-                    } else {
-                        (width.div_ceil(2), height.div_ceil(2))
-                    }
+                    self.live_budget
+                        .size(width, height, instances > 128 || lights > 32)
                 } else {
                     (width, height)
                 };
@@ -611,6 +610,9 @@ impl Host {
                     denoiser = if is_live && denoise { "atrous" } else { "none" };
                     renderer.finish(if is_live && denoise { 3 } else { 0 })
                 };
+                if is_live && spp > 0 && init_ms < 1. {
+                    self.live_budget.observe(trace_ms + post_ms);
+                }
                 target.denoiser = denoiser;
                 target.quality_denoise = denoise;
                 target.time = time;
@@ -845,6 +847,34 @@ mod tests {
         let layer = hit["layer"].as_str().unwrap();
         let subset = packed.bounds(Some(layer)).unwrap();
         assert!(subset.0.cmpge(actual.0).all() && subset.1.cmple(actual.1).all());
+    }
+
+    #[test]
+    fn accepts_empty_prepared_scenes_with_gpu_padding() {
+        let mut h = Host::new();
+        h.handle(
+            Command::Preset {
+                name: "hero".into(),
+                finish: blue(),
+                time: 0.,
+            },
+            &[],
+        )
+        .unwrap();
+        let (mut value, binary) = h.snapshot().unwrap();
+        value["key"] = json!("empty");
+        value["instanceCount"] = json!(0);
+        value["lightCount"] = json!(0);
+        value["objects"] = json!([]);
+        value["topNodes"] = json!(1);
+        value["positions"]["length"] = json!(48);
+        value["tris"]["length"] = json!(96);
+        value["nodes"]["length"] = json!(64);
+        value["sdata"]["length"] = json!(16);
+        let empty =
+            packed::PackedScene::new(serde_json::from_value(value).unwrap(), &binary).unwrap();
+        assert!(empty.bounds(None).is_none());
+        assert!(empty.pick(10., 10., 20, 20).is_none());
     }
 
     #[test]

@@ -165,7 +165,8 @@ impl PackedScene {
             || u.top_nodes > nodes.len()
             || u.instance_count > 65535
             || u.light_count > 65535
-            || sdata.len() != u.light_count * 4 + u.instance_count * 9
+            || (sdata.len() != u.light_count * 4 + u.instance_count * 9
+                && !(u.light_count == 0 && u.instance_count == 0 && sdata.len() == 1))
         {
             return Err("invalid prepared scene buffer sizes".into());
         }

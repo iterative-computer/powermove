@@ -25,6 +25,7 @@ await build({ stdin: { contents: main, resolveDir: desktop, sourcefile: 'studio-
 const renderer = `
 import * as THREE from 'three';
 import {nativeEnvironment} from './scripts/studio-native-environments';
+import {extractScene} from './src/renderer/src/core/studio/extract';
 import {NativeStudioBackend} from './src/renderer/src/core/studio-native/backend';
 import {RecoveringStudioBackend} from './src/renderer/src/core/studio-native/recovery';
 import {WebGpuStudioBackend} from './src/renderer/src/core/studio/webgpu-backend';
@@ -41,10 +42,10 @@ window.runStudioNative=async(name,size,frames)=>{
  }
  const native=new NativeStudioBackend(bridge);const recovery=new RecoveringStudioBackend(native,()=>new WebGpuStudioBackend(),{invalidate:()=>{}});await recovery.initialize();const description=()=>{throw new Error('binary fast path should not build JSON mesh copies');};recovery.setPreparedScene(scene,maps,description);recovery.setView(m.view);
  const request={tier:'live',size,samples:1,background:true};const coldStart=performance.now();let frame=await native.render(request);const inputSize={width:native.lastFrame.host.inputWidth,height:native.lastFrame.host.inputHeight};frame.release?.();const coldMs=performance.now()-coldStart;
- const inputPixels=[],hostTimes=[],traceTimes=[],postTimes=[],roundTrips=[],canvasMs=[];
+ const inputSizes=new Map();const inputPixels=[],hostTimes=[],traceTimes=[],postTimes=[],roundTrips=[],canvasMs=[];
  const display=document.createElement('canvas');display.width=size.width;display.height=size.height;document.body.append(display);const ctx=display.getContext('2d',{willReadFrequently:true});
  for(let i=0;i<frames;i++){
-  const start=performance.now();const view=structuredClone(m.view);view.camera.position[0]+=i*.02;native.setView(view);native.setTime(i/60);frame=await native.render(request);ctx.drawImage(frame.source,0,0,size.width,size.height);ctx.getImageData(size.width>>1,size.height>>1,1,1);inputPixels.push(performance.now()-start);hostTimes.push(native.lastFrame.host.timings.hostMs);traceTimes.push(native.lastFrame.host.timings.traceMs);postTimes.push(native.lastFrame.host.timings.postMs);roundTrips.push(native.lastFrame.roundTripMs);canvasMs.push(native.lastFrame.pixelsMs);frame.release?.();
+  const start=performance.now();const view=structuredClone(m.view);view.camera.position[0]+=i*.02;native.setView(view);native.setTime(i/60);frame=await native.render(request);ctx.drawImage(frame.source,0,0,size.width,size.height);ctx.getImageData(size.width>>1,size.height>>1,1,1);inputPixels.push(performance.now()-start);inputSizes.set(native.lastFrame.host.inputWidth+"x"+native.lastFrame.host.inputHeight,{width:native.lastFrame.host.inputWidth,height:native.lastFrame.host.inputHeight});hostTimes.push(native.lastFrame.host.timings.hostMs);traceTimes.push(native.lastFrame.host.timings.traceMs);postTimes.push(native.lastFrame.host.timings.postMs);roundTrips.push(native.lastFrame.roundTripMs);canvasMs.push(native.lastFrame.pixelsMs);frame.release?.();
  }
  const livePng=capture(display);const liveTransport=native.lastFrame.host.transport??'rgba-pipe';native.setView(m.view);native.setTime(0);const refineStart=performance.now();const refined=await native.render({tier:'refine',size,samples:16,background:true,accumulate:false});const refineSeconds=(performance.now()-refineStart)/1000;const nativePng=capture(refined.source);refined.release?.();
  const nativeMetrics={...native.lastFrame};
@@ -56,12 +57,16 @@ window.runStudioNative=async(name,size,frames)=>{
  let absolute=0,peak=0;for(let i=0;i<webPixels.length;i++){if(i%4===3)continue;const d=Math.abs(webPixels[i]-nativePixels[i]);absolute+=d;peak=Math.max(peak,d);}const meanCodeDifference=absolute/(compareSize.width*compareSize.height*3);
  const webSeconds=(performance.now()-webStart)/1000;const webPng=capture(webCanvas);
  const peakNativeRssMiB=(await bridge.request(native.session,{op:"hello"})).result.peakRssMiB;
+ let emptyScenePassed=null;
+ if(${JSON.stringify(process.env.PM_STUDIO_EMPTY === '1')}){
+   const empty=extractScene(new THREE.Scene(),()=>true,{sky:new THREE.Color(),ground:new THREE.Color(),intensity:0});native.setPreparedScene(empty,[],description);native.setView(m.view);const frame=await native.render(request);const c=document.createElement('canvas');c.width=1;c.height=1;c.getContext('2d').drawImage(frame.source,0,0,1,1);if(c.getContext('2d').getImageData(0,0,1,1).data[3]<250 || await native.bounds()!==null)throw new Error('Empty native scene failed');frame.release?.();emptyScenePassed=true;
+ }
  let crashRecovery=null;
  if(${JSON.stringify(process.env.PM_STUDIO_RECOVERY === '1')}){
    const hello=await bridge.request(native.session,{op:'hello'});await window.killNativeHostForTest(hello.result.pid);
    const start=performance.now();const recovered=await recovery.render({tier:'live',size:compareSize,samples:1,background:true});const canvas=document.createElement('canvas');canvas.width=compareSize.width;canvas.height=compareSize.height;const ctx=canvas.getContext('2d');ctx.drawImage(recovered.source,0,0,canvas.width,canvas.height);const pixels=ctx.getImageData(0,0,canvas.width,canvas.height).data;let min=255,max=0;for(let i=0;i<pixels.length;i+=4){min=Math.min(min,pixels[i]);max=Math.max(max,pixels[i]);}if(recovery.id!=='webgpu'||max-min<16)throw new Error('Native crash recovery failed');crashRecovery={backend:recovery.id,inputToPixelsMs:performance.now()-start};recovered.release?.();
  }
- const sorted=[...inputPixels].sort((a,b)=>a-b);const result={scene:name,size,inputSize,triangles:scene.triangles,instances:scene.instanceCount,lights:scene.lightCount,coldMs,peakNativeRssMiB,crashRecovery,pickMedianMs,picks,inputToPixelsMedianMs:median(inputPixels),inputToPixelsP95Ms:sorted[Math.floor((sorted.length-1)*.95)],hostMedianMs:median(hostTimes),traceMedianMs:median(traceTimes),postMedianMs:median(postTimes),pipeMedianMs:median(roundTrips),canvasUploadMedianMs:median(canvasMs),refineSeconds,hardwareRt:nativeMetrics.host.hardwareRt,denoiser:nativeMetrics.host.denoiser,transport:nativeMetrics.host.transport??'rgba-pipe',webFinal64Seconds:webSeconds,meanCodeDifference,peakCodeDifference:peak,liveTransport,livePng,nativePng,nativeComparePng,webPng};
+ const sorted=[...inputPixels].sort((a,b)=>a-b);const result={scene:name,size,inputSize,inputSizes:[...inputSizes.values()],triangles:scene.triangles,instances:scene.instanceCount,lights:scene.lightCount,coldMs,peakNativeRssMiB,emptyScenePassed,crashRecovery,pickMedianMs,picks,inputToPixelsMedianMs:median(inputPixels),inputToPixelsMaxMs:Math.max(...inputPixels),inputToPixelsP95Ms:sorted[Math.floor((sorted.length-1)*.95)],hostMedianMs:median(hostTimes),traceMedianMs:median(traceTimes),postMedianMs:median(postTimes),pipeMedianMs:median(roundTrips),canvasUploadMedianMs:median(canvasMs),refineSeconds,hardwareRt:nativeMetrics.host.hardwareRt,denoiser:nativeMetrics.host.denoiser,transport:nativeMetrics.host.transport??'rgba-pipe',webFinal64Seconds:webSeconds,meanCodeDifference,peakCodeDifference:peak,liveTransport,livePng,nativePng,nativeComparePng,webPng};
  nativeReference.release?.();recovery.dispose();portable.dispose();environment?.dispose();display.remove();return result;
 };
 window.studioReady=true;
