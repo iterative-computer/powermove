@@ -91,7 +91,7 @@ test('Connect opens the trusted ChatGPT browser flow and enters waiting state', 
 test('large images and files cross the real renderer-to-main agent boundary', async () => {
   const session = await launchApp({
     env: {
-      CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex.sh')
+      CODEX_BINARY: path.join(repoRoot, 'e2e/fixtures/fake-project-codex.mjs')
     }
   });
   try {

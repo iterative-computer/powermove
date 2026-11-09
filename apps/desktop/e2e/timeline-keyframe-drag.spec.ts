@@ -9,6 +9,7 @@ for (const path of ['c.color', 'position.y']) test(`drag ${path} keyframes witho
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Keyframe drag', dur: 6 }));
     const L = PM.mkLayer('text', { dur: 6 });
+    if (path === 'position.y') L.separateDimensions = true;
     PM.proj.layers.push(L); PM.selectLayers(L.id);
     for (const [time, value] of path === 'c.color' ? [[1, '#ff0000'], [3, '#0000ff']] : [[1, 100], [3, 300]]) {
       PM.Edit.apply({ type: 'set_property', target: L.id, path, time, value, mode: 'keyframe', preserveHandEdits: false });

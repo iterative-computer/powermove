@@ -27,6 +27,7 @@ test('track property values support typing, axis-specific dragging, cancellation
     const PM = (window as any).PM;
     const project = PM.mkProject({ w: 640, h: 360, dur: 5 });
     const layer = PM.mkLayer('solid', { name: 'Track value QA', from: 0, dur: 5 }, project);
+    layer.separateDimensions = true;
     layer.scaleLinked = false;
     layer.p['scale.y'].v = 50;
     project.layers = [layer];

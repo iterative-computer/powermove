@@ -9,6 +9,8 @@ test('reference graph supports combined editing, persistent handles, and group s
     PM.theme.apply('dark');
     PM.replaceProject(PM.mkProject({ name: 'Curve editor', dur: 8 }));
     const layer = PM.mkLayer('shape', { name: 'Motion', dur: 8, d: { w: 120, h: 120, color: '#f36870' } });
+    // Position is joined by default; this test edits independent axis curves.
+    layer.separateDimensions = true;
     PM.proj.layers.push(layer);
     PM.animate(layer, 'position.x', [{ t: 1, v: 0 }, { t: 2, v: 60 }, { t: 3, v: 230 }, { t: 5, v: 140 }, { t: 6, v: -15 }], { ease: 'easeInOut' });
     PM.animate(layer, 'position.y', [{ t: 1, v: -120 }, { t: 3, v: 160 }, { t: 4, v: 210 }, { t: 6, v: 195 }], { ease: 'easeInOut' });

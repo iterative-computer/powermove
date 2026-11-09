@@ -129,6 +129,8 @@ test('dragging a timeline value adjusts the same property on every selected laye
     PM.replaceProject(PM.mkProject({ name: 'Bulk value drag', dur: 5 }));
     const a = PM.mkLayer('shape', { name: 'A', dur: 5, p: { 'position.x': 100, 'position.y': 0 }, d: { w: 60, h: 60 } });
     const b = PM.mkLayer('shape', { name: 'B', dur: 5, p: { 'position.x': 300, 'position.y': 500 }, d: { w: 60, h: 60 } });
+    // This gesture targets Y alone, with Separate Dimensions enabled.
+    a.separateDimensions = b.separateDimensions = true;
     PM.proj.layers = [a, b]; PM.ProjectIndex.invalidate(); PM.touch();
     PM.selectLayers([a.id, b.id]); PM.sel.chan = 'position.y';
     timeline.reveal(a, ['position.y']); timeline.reveal(b, ['position.y']);

@@ -18,9 +18,10 @@ test('AE property toggles and global M disclosure use actual timeline rows', asy
   });
   const rows = () => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline.rows.filter((r: any) => r.kind === 'prop').map((r: any) => r.key); });
   await page.keyboard.press('p');
-  await expect.poll(rows).toEqual(['position.x', 'position.y']);
+  // Separate Dimensions is off by default: P reveals the joined Position row.
+  await expect.poll(rows).toEqual(['position']);
   await page.keyboard.press('Shift+t');
-  await expect.poll(rows).toEqual(['position.x', 'position.y', 'opacity']);
+  await expect.poll(rows).toEqual(['position', 'opacity']);
   await page.keyboard.press('Shift+t');
   // TT reveals mask opacity, restoring the pre-first-tap set for Shift combinations.
   await page.keyboard.press('s');

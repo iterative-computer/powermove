@@ -39,8 +39,9 @@ test('group Properties transform the rendered members and animate with one Undo'
   await page.evaluate(()=>(window as any).PM.setTime(2));
   await set('Position X','480');
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return PM.firstSel().p['position.x'].kf.map((k:any)=>[k.t,k.v]);})).toEqual([[0,400],[2,480]]);
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
   await page.keyboard.press('p');
-  await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline.rows.some((row:any)=>row.kind==='prop'&&row.L.id===PM.firstSel().id&&row.key==='position.x');});
+  await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline.rows.some((row:any)=>row.kind==='prop'&&row.L.id===PM.firstSel().id&&row.key==='position');});
   await page.screenshot({path:'/tmp/powermove-group-transforms-review.png'});
   const strip=await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect();return {x:r.left+timeline.gut+timeline.pps*.5,y:r.top+timeline.ruler+timeline.row/2,dx:timeline.pps*.5};});
   await page.mouse.move(strip.x,strip.y);await page.mouse.down();await page.mouse.move(strip.x+strip.dx,strip.y,{steps:8});await page.mouse.up();

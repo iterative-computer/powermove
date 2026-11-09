@@ -42,8 +42,11 @@ export async function importModelIntoScene(api:PowermoveAPI,supplied?:unknown,_l
       const added=api.scene3d.edit({operation:'add_object',object},{origin:'command'});if(!added.ok)throw new Error(added.message);
       const id=(added.data.result as any)?.id;
       for(const args of [{operation:'drop_to_floor',target:id},{operation:'auto_studio'}]){const r=api.scene3d.edit(args as any,{origin:'command'});if(!r.ok)throw new Error(r.message);}
+      // The studio creates/selects lights too. Select the model while the
+      // import transaction is open so it cannot add a separate Undo step.
+      if(id)api.selection.select([id]);
       const result=api.edit.commit(label);if(!result.ok)throw new Error(result.message);
-      if(id)api.selection.select([id]);api.transport.invalidate();
+      api.transport.invalidate();
       return {...result,data:{...result.data,result:(added.data as any)?.result}};
     }catch(error){api.edit.cancel();throw error;}
   }catch(error){const message=error instanceof Error?error.message:String(error);api.ui.toast(message,{error:true});return {ok:false,message};}

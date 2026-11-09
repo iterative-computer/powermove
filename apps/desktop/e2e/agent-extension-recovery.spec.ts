@@ -16,7 +16,7 @@ test('agent extension changes are isolated, recorded, and recoverable through th
   const extensionId = 'e2e-isolated-extension';
   const session = await launchApp({
     env: {
-      CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex.sh'),
+      CODEX_BINARY: path.join(repoRoot, 'e2e/fixtures/fake-project-codex.mjs'),
       FAKE_CODEX_EXTENSION_ID: extensionId,
       FAKE_CODEX_RESULT: JSON.stringify({
         summary: 'Created an isolated extension.',

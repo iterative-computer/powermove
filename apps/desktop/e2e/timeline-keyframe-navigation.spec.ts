@@ -9,6 +9,7 @@ test('timeline shortcuts navigate real keyframes with a compact transport', asyn
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Keyframe navigation', dur: 8 }));
     const L = PM.mkLayer('solid', { name: 'Animated', dur: 6 });
+    L.separateDimensions = true;
     L.from = 1;
     PM.proj.layers.push(L);
     PM.setKey(L, 'position.y', 2, 100);
@@ -63,6 +64,7 @@ test('clicking away clears row selection and deleting final keys preserves value
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Keyframe deselection', dur: 8 }));
     const L = PM.mkLayer('solid', { name: 'Animated', dur: 8 });
+    L.separateDimensions = true;
     PM.proj.layers.push(L);
     PM.setKey(L, 'position.y', 1, 100);
     PM.setKey(L, 'position.y', 3, 300);

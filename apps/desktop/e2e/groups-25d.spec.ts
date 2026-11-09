@@ -11,7 +11,7 @@ test('3D groups transform flat children together, including nested groups, with 
   PM.Edit.apply({type:'group_layers',targets:[a.id,b.id],name:'Cards'});const inner=PM.firstSel();
   PM.Edit.apply({type:'group_layers',targets:[inner.id],name:'3D rig'});PM.invalidate();
  });
- // 4f5cf623d moved 3D to the timeline's cube switch.
+ // The group cube switch explicitly enables 3D on its descendants too.
  const cube=await page.evaluate(()=>{const PM=(window as any).PM,T=PM.Kernel.services.get('timeline'),r=T.cv.getBoundingClientRect(),i=T.rows.findIndex((row:any)=>row.kind==='layer'&&row.L.id===PM.firstSel().id);return{x:r.left+T.gut-137,y:r.top+T.ruler+i*T.row-T.scrollY+T.row/2};});
  await page.mouse.click(cube.x,cube.y);
  await expect.poll(()=>page.evaluate(()=>!!(window as any).PM.firstSel().threeD)).toBe(true);
@@ -26,7 +26,7 @@ test('3D groups transform flat children together, including nested groups, with 
   const undo=PM.hist.undo(),undone=pixels(0);PM.hist.redo();PM.selectLayers(g.id);PM.invalidate();
   return {edit,changed:JSON.stringify(before)!==JSON.stringify(after),animated:JSON.stringify(after)!==JSON.stringify(later),undo,restored:JSON.stringify(before)===JSON.stringify(undone),switches:children.map((l:any)=>!!l.threeD),picked,box:box.corners.every((p:any)=>Number.isFinite(p.x)&&Number.isFinite(p.y)),errors:[...PM.GL.errors.entries()]};
  });
- expect(result.edit.ok).toBe(true);expect(result.changed).toBe(true);expect(result.animated).toBe(true);expect(result.undo).toBe(true);expect(result.restored).toBe(true);expect(result.switches).toEqual([false,false]);expect(result.picked).toBe(true);expect(result.box).toBe(true);expect(result.errors).toEqual([]);
+ expect(result.edit.ok).toBe(true);expect(result.changed).toBe(true);expect(result.animated).toBe(true);expect(result.undo).toBe(true);expect(result.restored).toBe(true);expect(result.switches).toEqual([true,true]);expect(result.picked).toBe(true);expect(result.box).toBe(true);expect(result.errors).toEqual([]);
  const drag=await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),p=viewer.layerWorldPivot(PM.firstSel(),0),r=viewer.inner.getBoundingClientRect();return {x:r.left+p.x*viewer.shown,y:r.top+p.y*viewer.shown};});
  await page.mouse.move(drag.x,drag.y);await page.mouse.down();await page.mouse.move(drag.x+40,drag.y-20,{steps:8});await page.mouse.up();
  const moved=await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),p=viewer.layerWorldPivot(PM.firstSel(),0),r=viewer.inner.getBoundingClientRect();return {type:PM.firstSel().type,x:r.left+p.x*viewer.shown,y:r.top+p.y*viewer.shown};});
