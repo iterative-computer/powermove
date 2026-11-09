@@ -2587,7 +2587,12 @@ fn export_defaults_rows_write_the_project_and_open_the_export_sheet() {
             );
         }
     }
+    // main's normalizeExportDefaults fallbacks, exactly.
     assert_eq!(row(&publication, "project.format")["value"], "mp4");
+    assert_eq!(row(&publication, "project.range")["value"], "work");
+    assert_eq!(row(&publication, "project.motion-blur")["value"], true);
+    assert_eq!(row(&publication, "project.audio")["value"], true);
+    assert_eq!(row(&publication, "project.resolution")["value"], 1.0);
     // An MP4 has no alpha: the row stays, dimmed.
     assert_eq!(row(&publication, "project.alpha")["disabled"], true);
     for (id, value) in [
@@ -2642,4 +2647,31 @@ fn export_defaults_rows_write_the_project_and_open_the_export_sheet() {
         .unwrap()
         .unwrap();
     assert_eq!(stored(&kernel), None, "one undo restores the project");
+}
+
+#[test]
+fn export_defaults_normalize_exactly_as_main() {
+    use crate::settings::normalize_export_defaults as n;
+    let d = n(&json!(null), 25.);
+    assert_eq!(
+        d,
+        json!({"format":"mp4","scale":1.0,"fps":25.0,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false})
+    );
+    // Number() coercion and clamps, kept v1 formats, booleans only as booleans.
+    let d = n(
+        &json!({"format":"web","scale":"40","fps":"300","range":"all","quality":"max","mblur":"no","audio":false,"alpha":1}),
+        30.,
+    );
+    assert_eq!(d["format"], "web");
+    assert_eq!(d["scale"], 16.0);
+    assert_eq!(d["fps"], 240.0);
+    assert_eq!(d["range"], "all");
+    assert_eq!(d["mblur"], true);
+    assert_eq!(d["audio"], false);
+    assert_eq!(d["alpha"], false);
+    assert_eq!(
+        n(&json!({"scale":-1,"fps":0}), f64::NAN),
+        n(&json!({}), 30.)
+    );
+    assert_eq!(n(&json!({"scale":0.001}), 30.)["scale"], 0.01);
 }

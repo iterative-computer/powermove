@@ -897,20 +897,38 @@ impl Backend {
                 "preset",
                 "presetName"
             ]))?;
-            let mut saved = self.kernel.state().settings.get("exportOpts").map(wire);
-            // A project's own export defaults (Settings ▸ Project) open the sheet,
-            // as in v1; other options keep the last export's.
-            if root.get("exportDefaults").is_some() {
-                let defaults = self.export_defaults(root, fps);
-                let mut options = saved.clone().filter(|v| crate::delivery::options(v).is_ok()).unwrap_or_else(|| json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
-                for key in [
-                    "format", "scale", "fps", "range", "quality", "mblur", "audio", "alpha",
-                ] {
-                    options[key] = defaults[key].clone();
-                }
-                saved = Some(options);
+            // As main's exporter: the project's export defaults open the sheet
+            // (every project has them, normalized); the sheet's other fields keep
+            // the last export's.
+            let base = self
+                .kernel
+                .state()
+                .settings
+                .get("exportOpts")
+                .map(wire)
+                .filter(|v| crate::delivery::options(v).is_ok())
+                .unwrap_or_else(|| json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+            let defaults = self.export_defaults(root, fps);
+            let mut options = base.clone();
+            for key in [
+                "format", "scale", "fps", "range", "quality", "mblur", "audio", "alpha",
+            ] {
+                options[key] = defaults[key].clone();
             }
-            let options=saved.filter(|v|crate::delivery::options(v).is_ok()).unwrap_or_else(||json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+            // main's planner exports the whole composition when "work" has no
+            // work area to use; say so in the sheet.
+            let work = comp
+                .get("work")
+                .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+            if options["range"] == "work" && work.is_none() {
+                options["range"] = json!("all");
+            }
+            // A format this app can't export (v1 `rec`, `web`) keeps the last one.
+            if crate::delivery::options(&options).is_err() {
+                options["format"] = base["format"].clone();
+            }
+            let saved = Some(options);
+            let options=saved.filter(|v|crate::delivery::options(v).is_ok()).unwrap_or_else(||json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
             self.native.export = json!({"version":1,"sequence":1,"project":null,"options":options,"bindings":fields,"presets":[],"capabilities":{},"run":{"phase":"idle"}});
         }
         let options: pm_promedia::export_panel::Options =

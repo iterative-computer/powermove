@@ -72,31 +72,59 @@ const EXPORT_FORMATS: [(&str, &str); 6] = [
     ("still", "Still Frame (PNG)"),
     ("json", "Project File (.pmv)"),
 ];
-/// Every field present and valid; anything else falls back (v1 `normalizeExportDefaults`).
-pub(crate) fn normalize_export_defaults(stored: &Value, fps: f64) -> Value {
-    let pick = |key: &str, allowed: &[Value], fallback: Value| {
-        Some(stored[key].clone())
-            .filter(|v| allowed.contains(v))
-            .unwrap_or(fallback)
+/// JavaScript `Number(value)` for a JSON value.
+fn js_number(value: &Value) -> f64 {
+    match value {
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::Bool(b) => f64::from(u8::from(*b)),
+        Value::Null => 0.,
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                0.
+            } else {
+                text.parse().unwrap_or(f64::NAN)
+            }
+        }
+        _ => f64::NAN,
+    }
+}
+/// main's `normalizeExportDefaults(raw, fallbackFps)`, field for field.
+pub(crate) fn normalize_export_defaults(stored: &Value, fallback_fps: f64) -> Value {
+    let pick = |key: &str, allowed: &[&str], fallback: &str| {
+        let value = stored[key].as_str().filter(|v| allowed.contains(v));
+        json!(value.unwrap_or(fallback))
     };
     let flag = |key: &str, fallback: bool| stored[key].as_bool().unwrap_or(fallback);
-    let formats: Vec<Value> = EXPORT_FORMATS.iter().map(|(v, _)| json!(v)).collect();
-    let in_range = |key: &str, lo: f64, hi: f64| {
-        stored[key]
-            .as_f64()
-            .filter(|f| f.is_finite() && (lo..=hi).contains(f))
+    let base_fps = if fallback_fps.is_finite() && fallback_fps > 0. {
+        fallback_fps.min(240.)
+    } else {
+        30.
     };
+    let fps = js_number(&stored["fps"]);
+    let scale = js_number(&stored["scale"]);
+    let number = |n: f64| serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number);
     json!({
-        "format": pick("format", &formats, json!("mp4")),
-        "scale": in_range("scale", 0.01, 16.).map_or(json!(1), |_| stored["scale"].clone()),
-        "fps": in_range("fps", 1., 240.).map_or(json!(fps), |_| stored["fps"].clone()),
-        "range": pick("range", &[json!("work"), json!("all")], json!("all")),
-        "quality": pick("quality", &[json!("draft"), json!("high"), json!("max")], json!("high")),
-        "mblur": flag("mblur", false),
+        "format": pick("format", &V1_FORMATS, "mp4"),
+        "scale": number(if !scale.is_finite() || scale <= 0. { 1. } else { scale.clamp(0.01, 16.) }),
+        "fps": number(if fps.is_finite() && fps > 0. { fps.min(240.) } else { base_fps }),
+        "range": pick("range", &["work", "all"], "work"),
+        "quality": pick("quality", &["draft", "high", "max"], "high"),
+        "mblur": flag("mblur", true),
         "audio": flag("audio", true),
         "alpha": flag("alpha", false),
     })
 }
+/// A usable work area (`[start, end]`, end after start), as main's planner asks.
+pub(crate) fn work_span(work: &Value) -> Option<(f64, f64)> {
+    let (a, b) = (work.get(0)?.as_f64()?, work.get(1)?.as_f64()?);
+    (b > a).then_some((a, b))
+}
+/// main's `EXPORT_FORMAT_OPTIONS` values: a stored format is kept even where
+/// this app has no encoder for it.
+const V1_FORMATS: [&str; 8] = [
+    "prores", "mp4", "webm", "rec", "png", "still", "web", "json",
+];
 /// v1 `EXPORT_FRAME_RATES`.
 const EXPORT_FRAME_RATES: [f64; 8] = [
     24000. / 1001.,
@@ -354,13 +382,13 @@ impl Backend {
         rows.extend(media);
         Ok(rows)
     }
-    /// The project's export defaults: the stored object, else the last export's
-    /// options, each field checked (v1 `normalizeExportDefaults`).
+    /// The project's export defaults (main's `readExportDefaults`).
     pub(crate) fn export_defaults(&self, root: &pm_model::Node, fps: f64) -> Value {
+        // As main: the project's own, normalized (a project without any reads
+        // the defaults); the last export's options never stand in.
         let stored = root
             .get("exportDefaults")
             .map(|n| wire(&n.to_value()))
-            .or_else(|| self.kernel.state().settings.get("exportOpts").map(wire))
             .unwrap_or(Value::Null);
         normalize_export_defaults(&stored, fps)
     }
@@ -405,7 +433,21 @@ impl Backend {
             .map(|(id, field, label, detail)| {
                 let key = format!("project.{id}");
                 let (control, options) = match *field {
-                    "format" => ("choice", json!(EXPORT_FORMATS.iter().map(|(v, l)| json!({"v":v,"label":l})).collect::<Vec<_>>())),
+                    "format" => {
+                        let mut options: Vec<Value> = EXPORT_FORMATS
+                            .iter()
+                            .map(|(v, l)| json!({"v":v,"label":l}))
+                            .collect();
+                        // A v1 format this app can't export still shows as stored.
+                        if !EXPORT_FORMATS.iter().any(|(v, _)| *v == format) {
+                            let label = match format {
+                                "rec" => "WebM · Realtime Capture",
+                                _ => "Web Animation · Code + Assets (.zip)",
+                            };
+                            options.push(json!({"v":format,"label":label}));
+                        }
+                        ("choice", json!(options))
+                    }
                     "scale" => ("choice", json!([{"v":0.5,"label":"Half"},{"v":1,"label":"Full"},{"v":2,"label":"2×"}])),
                     "fps" => ("choice", json!(rates.iter().map(|r| json!({"v":r,"label":rate_label(*r)})).collect::<Vec<_>>())),
                     "range" => ("choice", json!([{"v":"work","label":"Work Area"},{"v":"all","label":"Full Composition"}])),

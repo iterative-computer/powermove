@@ -1345,6 +1345,16 @@ impl Frame {
     /// One accessible element per painted clip, in paint order: its name and
     /// times, whether it is selected, and its visible body within the tracks.
     pub fn clip_nodes(&self) -> Vec<ClipNode> {
+        // One pass indexes each clip's name and selection ring.
+        let mut names = HashMap::new();
+        let mut rings = std::collections::HashSet::new();
+        for o in &self.ops {
+            if let Some(id) = o.id.strip_prefix("clip-content:") {
+                names.insert(id, o.text.as_deref().unwrap_or_default());
+            } else if let Some(id) = o.id.strip_prefix("clip-ring:") {
+                rings.insert(id);
+            }
+        }
         self.ops
             .iter()
             .filter_map(|o| {
@@ -1359,20 +1369,12 @@ impl Frame {
                 if bounds.width <= 0. || bounds.height <= 0. {
                     return None;
                 }
-                let content = format!("clip-content:{id}");
-                let name = self
-                    .ops
-                    .iter()
-                    .find(|c| c.id == content)
-                    .and_then(|c| c.text.clone())
-                    .unwrap_or_default();
-                let ring = format!("clip-ring:{id}");
                 Some(ClipNode {
                     id: id.to_owned(),
-                    name,
+                    name: names.get(id).copied().unwrap_or_default().to_owned(),
                     from: o.detail["from"].as_f64().unwrap_or(0.),
                     duration: o.detail["duration"].as_f64().unwrap_or(0.),
-                    selected: self.ops.iter().any(|r| r.id == ring),
+                    selected: rings.contains(id),
                     bounds,
                 })
             })

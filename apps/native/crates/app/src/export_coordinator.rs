@@ -40,22 +40,29 @@ pub fn tasks() -> Arc<Mutex<BackgroundTasks>> {
     static TASKS: std::sync::OnceLock<Arc<Mutex<BackgroundTasks>>> = std::sync::OnceLock::new();
     TASKS.get_or_init(Arc::default).clone()
 }
-/// Cancel flags of running agent exports, by task, for the Cancel button.
-fn agent_cancels() -> &'static Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>> {
-    static CANCELS: std::sync::OnceLock<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
+/// How to stop a running export: an agent's flag, or a window's job.
+enum Canceller {
+    Flag(Arc<AtomicBool>),
+    Run(std::sync::Weak<Run>),
+}
+/// Every running export's canceller, by task: Cancel reaches exactly that export,
+/// whichever window started it or shows the list.
+fn cancellers() -> &'static Mutex<std::collections::HashMap<u64, Canceller>> {
+    static CANCELS: std::sync::OnceLock<Mutex<std::collections::HashMap<u64, Canceller>>> =
         std::sync::OnceLock::new();
     CANCELS.get_or_init(Default::default)
 }
-/// Background Tasks ▸ Cancel on an agent's export. False if it isn't one.
-pub fn cancel_agent_export(id: pm_promedia::tasks::TaskId) -> bool {
-    agent_cancels()
-        .lock()
-        .unwrap()
-        .get(&id.0)
-        .is_some_and(|flag| {
-            flag.store(true, Ordering::Release);
-            true
-        })
+/// Background Tasks ▸ Cancel. False if no running export has that task.
+pub fn cancel_export(id: pm_promedia::tasks::TaskId) -> bool {
+    match cancellers().lock().unwrap().get(&id.0) {
+        Some(Canceller::Flag(flag)) => flag.store(true, Ordering::Release),
+        Some(Canceller::Run(run)) => match run.upgrade() {
+            Some(run) => run.cancel.store(true, Ordering::Release),
+            None => return false,
+        },
+        None => return false,
+    }
+    true
 }
 /// An agent's export as a Background Task: listed beside the person's, with its
 /// progress, and cancellable there.
@@ -86,7 +93,10 @@ impl AgentExport {
             .filter(|t| t.id == id)
             .ok_or("Export task did not start")?;
         let cancel = Arc::new(AtomicBool::new(false));
-        agent_cancels().lock().unwrap().insert(id.0, cancel.clone());
+        cancellers()
+            .lock()
+            .unwrap()
+            .insert(id.0, Canceller::Flag(cancel.clone()));
         Ok(Self { ticket, cancel })
     }
     pub fn progress(&self, frames: u64, total: u64) {
@@ -100,7 +110,7 @@ impl AgentExport {
     }
     /// Settles the row: completed, failed with its reason, or cancelled.
     pub fn finish(self, result: Result<(), String>) {
-        agent_cancels().lock().unwrap().remove(&self.ticket.id.0);
+        cancellers().lock().unwrap().remove(&self.ticket.id.0);
         let tasks = tasks();
         let mut tasks = tasks.lock().unwrap();
         if self.cancel.load(Ordering::Acquire) {
@@ -317,6 +327,10 @@ async fn execute(
                 Err(error) => Err(error),
                 Ok(started) => {
                     ticket = Some(started);
+                    cancellers()
+                        .lock()
+                        .unwrap()
+                        .insert(started.id.0, Canceller::Run(Arc::downgrade(&job)));
                     execute_inner(
                         &frozen,
                         &job,
@@ -347,6 +361,7 @@ async fn execute(
         }
     }
     if let Some(ticket) = ticket {
+        cancellers().lock().unwrap().remove(&ticket.id.0);
         let settled = {
             let mut tasks = tasks.lock().unwrap();
             if result.as_ref().is_err_and(|e| e == "cancelled") {
@@ -519,14 +534,37 @@ mod agent_tests {
         export.progress(30, 120);
         assert_eq!(row("agent-test-cancel").completed, 30);
         // Background Tasks ▸ Cancel reaches the agent's job, not the person's.
-        assert!(cancel_agent_export(listed.id));
+        assert!(cancel_export(listed.id));
         assert!(export.cancelled());
         export.finish(Err("cancelled".into()));
         assert_eq!(row("agent-test-cancel").state, TaskState::Cancelled);
+        assert!(!cancel_export(listed.id), "a settled export has no cancel");
+    }
+    /// Two windows' exports run at once: Cancel on one row stops that export only.
+    #[test]
+    fn cancel_reaches_exactly_the_export_on_its_row() {
+        let run = || {
+            Arc::new(Run {
+                handle: Mutex::new(None),
+                cancel: AtomicBool::new(false),
+            })
+        };
+        let (first, second) = (run(), run());
+        for (id, job) in [(9_001, &first), (9_002, &second)] {
+            cancellers()
+                .lock()
+                .unwrap()
+                .insert(id, Canceller::Run(Arc::downgrade(job)));
+        }
+        assert!(cancel_export(pm_promedia::tasks::TaskId(9_002)));
+        assert!(second.cancel.load(Ordering::Acquire));
+        assert!(!first.cancel.load(Ordering::Acquire));
+        drop(second);
         assert!(
-            !cancel_agent_export(listed.id),
-            "a settled export has no cancel"
+            !cancel_export(pm_promedia::tasks::TaskId(9_002)),
+            "a finished job"
         );
+        cancellers().lock().unwrap().retain(|id, _| *id < 9_000);
     }
     #[test]
     fn an_agent_export_settles_as_done_or_failed() {
