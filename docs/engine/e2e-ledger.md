@@ -597,7 +597,7 @@ and GPU of consecutive frames do not overlap yet. Electron was not measured.
 
 | Project | Before | After |
 |---|---|---|
-| 867 layers, 24 fps | 680 content frames skipped in one pass: 23 s and 4 s freezes waiting on raster override answers, then the realm's 8 s "not responding" prompt | 1,779 of 1,779 shown, 11 skipped; cost p50 15, p95 65 ms (9 to 22 s: CPU 17 to 42 ms, GPU wait about 22 ms) |
+| 867 layers, 24 fps | 680 content frames skipped in one pass: 23 s and 4 s freezes waiting on raster override answers, then the realm's 8 s "not responding" prompt | override playback left to the compat lane (this lane's change was withdrawn); with it: 1,779 of 1,779 shown, 11 skipped; cost p50 15, p95 65 ms (9 to 22 s: CPU 17 to 42 ms, GPU wait about 22 ms) |
 | 24 fps, 4K video | 39 skipped in the first 3.2 s (refusals backed off to 1 s) | 21 skipped, all in one 0.9 s hold at 3.07 s where an extension override fails (frames fail, as on main); cost p50 9.3, p95 17 ms |
 
 Section 5 (0 dropped, p95 at most 8.3 ms) is **not met**. Remaining: a
@@ -605,8 +605,9 @@ first-use composite pipeline compile (70 ms) in the first play, keyframed
 shape paths and per-frame texture creation on the CPU, GPU queueing.
 
 **Render cache.** View › Render Selection of a 4.1 s layer in the heaviest
-stretch rendered 99 frames in about 70 s in the background; played back from
-disk they cost p50 12.3, p95 13.3 ms against 50 to 75 ms rendered.
+stretch rendered 99 frames in under 10 s in an `--engine-job` child; played
+back through the read-ahead thread they cost p50 2.8, p95 3.3 ms against 50 to
+75 ms rendered.
 
 **Not run here:** AUDIO-2 and the `drag_500` / `blend_stack_cold` heap
 attribution need a quiet Mac; they stand as in the entries above.
