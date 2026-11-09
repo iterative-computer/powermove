@@ -1,3 +1,4 @@
+import {stableMaterialGroupBounds} from '../core/material-group-bounds';
 import { BLEND_NAMES } from '../../../../shared/blend';
 import { rasterImageFill } from './drawing';
 import { isExtrudedLayer, isShared3DPlane } from '../../core/scene3d/extrusion-data';
@@ -639,7 +640,7 @@ function uploadEffectCoordinates(g: any, W: number, H: number,
 /** Map composition pixels back to the layer's uncropped, normalized bounds.
  * Effects still sample the full-frame buffer; only their gradient geometry
  * follows the layer, including parent transforms and perspective. */
-function inputGroupBounds(group: any, time: number) {
+function inputGroupBounds(group: any, time: number, includeInactive=false) {
   const world = PM.worldMatrix(group, time), det = world[0]*world[3]-world[1]*world[2];
   if (Math.abs(det) < 1e-10) return null;
   const inverse = [world[3]/det,-world[1]/det,-world[2]/det,world[0]/det,
@@ -649,7 +650,7 @@ function inputGroupBounds(group: any, time: number) {
   for (const child of project.layers) {
     if (['group','audio','null','adjustment'].includes(child.type)
       || !(PM.groupAncestors?.(child,project.layers)||[]).some((g:any)=>g.id===group.id)
-      || !inputLayerActive(child,time,project,{inputVisibilityRoot:group.id})) continue;
+      || !includeInactive && !inputLayerActive(child,time,project,{inputVisibilityRoot:group.id})) continue;
     const bounds=GL.bounds(child,time); if(!bounds)continue;
     const local=PM.mul(inverse,PM.worldMatrix(child,time));
     for(const x of [bounds.x0,bounds.x1]) for(const y of [bounds.y0,bounds.y1]) {
@@ -660,7 +661,7 @@ function inputGroupBounds(group: any, time: number) {
   return Number.isFinite(x0) ? {x0,y0,x1,y1,w:x1-x0,h:y1-y0} : null;
 }
 GL.materialSourceBounds = (layer:any,time:number) => layer.type==='group'
-  ? inputGroupBounds(layer,time) || {x0:0,y0:0,x1:1,y1:1,w:1,h:1} : GL.bounds(layer,time);
+  ? stableMaterialGroupBounds(PM,layer,at=>inputGroupBounds(layer,at,true)) : GL.bounds(layer,time);
 function sourceWorld(layer:any,time:number):[number,number,number,number,number,number] {
   const world=PM.worldMatrix(layer,time),raster=activeSourceRaster();
   return raster?.groupInverse?PM.mul(raster.groupInverse,world):world;
@@ -2772,11 +2773,12 @@ GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,
     if(!p)throw new Error(GL.compileError('capture-material') || 'Could not compile material capture');
     const g=use(p);bindTex(0,frame.tex);setI(p,'u_tex',0);
     g.u('u_m',fullQuad(width,height));g.u('u_res',width,height);g.u('u_uv',0,0,1,1);
-    GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);GL.stats.passes++;
+    GL.gl.disable(GL.gl.BLEND);draw();GL.stats.passes++;
     const result=new Uint8Array(width*height*4);
     GL.gl.readPixels(0,0,width,height,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,result);
     return result;
   }finally{
+    GL.gl.enable(GL.gl.BLEND);
     if(converted)free(converted);if(frame)free(frame);pmScopePop();videoPath=previousPath;useVideoPreviews=previousPreviews;materialCapture=previousCapture;
     if(previousCapture && capture.loading)previousCapture.loading=true;
     PM.beginEval(outerTime);bind(target);

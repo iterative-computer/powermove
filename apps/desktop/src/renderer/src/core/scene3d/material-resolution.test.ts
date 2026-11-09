@@ -5,11 +5,11 @@ import {materialCompositionSample,compositionTextureFrame,clearCompositionTextur
 import {SceneRuntime} from './runtime';
 import {parseScene} from './schema';
 
-it('retains native image/comp dimensions and increases density to match the screen, bounded only by the device',()=>{
+it('retains native image/comp dimensions and increases density to match the screen, bounded by the capture budget and device',()=>{
   expect(materialTextureSize(4096,2048)).toEqual({width:4096,height:2048});
   expect(materialTextureSize(200,100,{width:2048,height:1024})).toEqual({width:2048,height:1024});
   expect(materialTextureSize(4096,2048,{width:100,height:100})).toEqual({width:4096,height:2048});
-  expect(materialTextureSize(16000,8000,undefined,8192)).toEqual({width:8192,height:4096});
+  expect(materialTextureSize(16000,8000,undefined,8192)).toEqual({width:4096,height:2048});
   expect(materialTextureSize(200,100,{width:16384,height:16384},4096)).toEqual({width:4096,height:2048});
 });
 
@@ -18,7 +18,7 @@ it('preserves an image layer bitmap even when its layout dimensions are smaller'
   const receiver={id:'receiver'},PM:any={proj:{id:'root',compId:'comp',w:1920,h:1080,fps:30,layers:[source,receiver],comps:{}},
     assets:{get:()=>({kind:'image',el:{width:4096,height:2048}})},GL:{bounds:()=>({w:320,h:160}),maxTextureSize:8192}};
   expect(materialCompositionSample(PM,receiver,{layerId:'image'},0)).toMatchObject({width:4096,height:2048});
-  expect(materialCompositionSample(PM,receiver,{layerId:'image'},0,{width:8192,height:4096})).toMatchObject({width:8192,height:4096});
+  expect(materialCompositionSample(PM,receiver,{layerId:'image'},0,{width:4096,height:2048})).toMatchObject({width:4096,height:2048});
 });
 
 function screen() {
@@ -54,9 +54,12 @@ it('upgrades the shared material before rendering and retains its density across
   const asset={object3d:mesh},sync=(time=0)=>runtime.sync(raw,()=>asset,p=>p.v,time,true,undefined,capture);
   const rendered=()=> (runtime.objects.get('screen') as THREE.Mesh).material as THREE.MeshBasicMaterial;
   sync();const small=rendered().map!,dispose=vi.spyOn(small,'dispose');
+  // Imported materials may share their color texture with data slots.
+  (rendered() as any).normalMap=small;(rendered() as any).roughnessMap=small;
   runtime.prepareMaterialTextures(2048,2048,camera,4096);
   expect(rendered().map!.image.width).toBe(2048);expect(dispose).toHaveBeenCalledOnce();
   expect(rendered().map!.generateMipmaps).toBe(true);expect(rendered().map!.anisotropy).toBe(16);
+  expect((rendered() as any).normalMap).toBe(rendered().map);expect((rendered() as any).roughnessMap).toBe(rendered().map);
   const high=rendered().map;
   runtime.prepareMaterialTextures(1900,1900,camera,4096);expect(rendered().map).toBe(high);expect(capture).toHaveBeenCalledTimes(2);
   camera.zoom=2;camera.updateProjectionMatrix();runtime.prepareMaterialTextures(2048,2048,camera,4096);
@@ -87,3 +90,5 @@ it('shares a sharper cached frame with material slots requesting fewer texels',(
   expect(compositionTextureFrame(PM,receiver,map,2)).toBe(high);expect(capture).toHaveBeenCalledOnce();
   clearCompositionTextures(PM);
 });
+
+it('caps extreme demands while preserving aspect',()=>{expect(materialTextureSize(200,100,{width:1e12,height:1e12},16384)).toEqual({width:4096,height:2048});});

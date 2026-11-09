@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import {makePM} from '../../legacy/__tests__/make-pm';
 import {editScene} from './operations';
 import {LAYER3D_DEFINITIONS,compositionScene,layer3DProperties} from './layers';
-import {listEligibleMaterialLayers,materialLayerLinks,validateCompositionMaps} from './material-maps';
+import {materialLayerStatus,listEligibleMaterialLayers,materialLayerLinks,validateCompositionMaps} from './material-maps';
 import {compositionTextureFrame,materialCompositionSample} from './composition-textures';
 import {readMaterialProperties,setAmbientResponse} from './material-properties';
 import {parseScene,sceneProperties} from './schema';
@@ -217,3 +217,5 @@ it('prepares visible videos inside hidden group sources with their composition c
   expect(materialClips).toHaveLength(1);expect(materialClips[0]).toMatchObject({id:'material-layer:artwork/movie',time:1,at:1});
   nested.on=false;PM.touch();expect(videoClipsAt(PM,1).filter(c=>c.id.startsWith('material-layer:'))).toHaveLength(0);
 });
+
+it('rejects groups with nested 3D sources',()=>{const {PM,add}=editor();const group=add('g','group'),nested=add('nested','group');nested.group=group.id;const camera=add('camera','extension');camera.group=nested.id;camera.d.data={camera:{}};expect(materialLayerStatus(PM.proj,'model','g')).toBe('ineligible');});

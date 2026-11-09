@@ -573,3 +573,14 @@ describe('linear compositing traversal', () => {
     expect(reads).toBeLessThanOrEqual(layers.length * 2);
   });
 });
+
+it('restores blending and capture scope when material drawing throws',()=>{
+  const {PM,gl}=preparedVideoRegistry();
+  const frame={fb:{},tex:{},w:2,h:2,colorDepth:8,busy:true};
+  PM.GL.renderProject=vi.fn(()=>frame);
+  PM.GL.progs.set('capture-material',{pr:{},a:0,u:new Map()});
+  gl.drawArrays.mockImplementation(()=>{throw new Error('Material draw failed');});
+  expect(()=>PM.GL.renderMaterialComposition(PM.proj,0,2,2,1)).toThrow('Material draw failed');
+  expect(gl.enable).toHaveBeenLastCalledWith(gl.BLEND);
+  expect(PM.scope.pop).toHaveBeenCalledOnce();expect(frame.busy).toBe(false);
+});
