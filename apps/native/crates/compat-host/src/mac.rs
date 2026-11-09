@@ -16,7 +16,6 @@ use std::{
     collections::BTreeMap,
     io::Read,
     rc::Rc,
-    time::{Duration, Instant},
 };
 
 type Task = Retained<ProtocolObject<dyn WKURLSchemeTask>>;
@@ -50,21 +49,14 @@ impl StoreDataStores {
         }
     }
 }
-struct Recovery {
-    old_pid: i32,
-    started: Instant,
-    termination: bool,
-}
 struct Shared {
     trust: Trust,
     handler: Rc<dyn SyncHandler>,
-    methods: BTreeMap<String, String>,
     channel: RefCell<Channel>,
     panels: RefCell<Panels>,
     pending: RefCell<Option<(Task, u64)>>,
     ready: Cell<bool>,
-    recovery: RefCell<Option<Recovery>>,
-    popouts: RefCell<Vec<(Retained<NSWindow>, Retained<WKWebView>)>>,
+    sheets: RefCell<Vec<(Retained<NSWindow>, Retained<WKWebView>)>>,
     geometry_dirty: Cell<bool>,
     closed: Cell<bool>,
     canvases: RefCell<crate::canvas::CanvasResources>,
@@ -139,11 +131,6 @@ impl Shared {
         if !self.panels.borrow().items.contains_key(&id) {
             return Err(Error::UnknownPanel);
         }
-        let context = RequestContext {
-            trust: self.trust.clone(),
-            generation,
-            panel: id,
-        };
         let payload = m["payload"].clone();
         match kind {
             "canvas_applied" => {
@@ -160,47 +147,8 @@ impl Shared {
                 if payload["kind"] == "event" && self.panels.borrow().items[&id].slot.is_none() {
                     return Err(Error::Forbidden);
                 }
-                self.handler.remote_dom(&context, payload)?;
+                self.handler.remote_dom(payload)?;
                 Ok(Value::Null)
-            }
-            "overlays" => {
-                let rects = serde_json::from_value(payload).map_err(|_| Error::InvalidGeometry)?;
-                let old = self.panels.borrow().items[&id].overlays.clone();
-                self.panels.borrow_mut().overlays(id, rects)?;
-                if old != self.panels.borrow().items[&id].overlays {
-                    self.geometry_dirty.set(true);
-                    self.handler.event(HostEvent::CompositionChanged)
-                }
-                Ok(Value::Null)
-            }
-            "dom" | "key" => {
-                if self.panels.borrow().items[&id].slot.is_none() {
-                    return Err(Error::Forbidden);
-                }
-                self.handler.event(if kind == "dom" {
-                    HostEvent::Dom { context, payload }
-                } else {
-                    HostEvent::Key { context, payload }
-                });
-                Ok(Value::Null)
-            }
-            "call" => {
-                let method = m["method"].as_str().ok_or(Error::InvalidRequest)?;
-                if self.trust.is_store() {
-                    let permission = self.methods.get(method).ok_or(Error::Forbidden)?;
-                    if !self.trust.permits(permission) {
-                        return Err(Error::Forbidden);
-                    }
-                }
-                let answer = self.handler.call(&context, method, payload)?;
-                if serde_json::to_vec(&answer)
-                    .map_err(|_| Error::InvalidRequest)?
-                    .len()
-                    > MAX_MESSAGE_BYTES
-                {
-                    return Err(Error::Backpressure);
-                }
-                Ok(answer)
             }
             _ => Err(Error::InvalidRequest),
         }
@@ -219,7 +167,7 @@ define_class!(
         #[unsafe(method(modalAction:))]
         fn modal_action(&self, sender: &NSButton) {
             let Some(window) = sender.window() else { return };
-            let children = self.ivars().popouts.borrow();
+            let children = self.ivars().sheets.borrow();
             let Some((_, web)) = children.iter().find(|(w, _)| std::ptr::eq(&**w, &*window)) else { return };
             let tag = sender.tag();
             let script = if tag >= 0 {
@@ -274,27 +222,27 @@ define_class!(
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         unsafe fn policy(&self,web:&WKWebView,action:&WKNavigationAction,done:&DynBlock<dyn Fn(WKNavigationActionPolicy)>){
             let url=unsafe{action.request()}.URL().and_then(|u|u.absoluteString()).map(|s|s.to_string()).unwrap_or_default();
-            let child=self.ivars().popouts.borrow().iter().any(|(_,v)|std::ptr::eq(&**v,web));
+            let child=self.ivars().sheets.borrow().iter().any(|(_,v)|std::ptr::eq(&**v,web));
             // Only host-created about:blank loads; every external/file/data URL,
-            // frame navigation and download is denied. Popouts are trusted only.
+            // frame navigation and download is denied. Sheets are trusted only.
             // A ui.modal sheet's child loads about:blank with its frame in the fragment.
             let allow=(url=="about:blank" || (child && url.starts_with("about:blank#pm-modal="))) && (!self.ivars().ready.get() || child || (!self.ivars().trust.is_store() && unsafe{action.targetFrame()}.is_none()));
             done.call((if allow{WKNavigationActionPolicy::Allow}else{WKNavigationActionPolicy::Cancel},));
         }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         unsafe fn terminated(&self,_web:&WKWebView){
-            if let Some(r)=self.ivars().recovery.borrow_mut().as_mut(){r.termination=true;}
             self.ivars().handler.event(HostEvent::ProcessTerminated);
         }
     }
     unsafe impl WKUIDelegate for Bridge {
         #[unsafe(method_id(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:))]
-        unsafe fn popout(&self,web:&WKWebView,cfg:&WKWebViewConfiguration,action:&WKNavigationAction,_features:&WKWindowFeatures)->Option<Retained<WKWebView>>{
-            self.make_popout(web,cfg,action)
+        unsafe fn open_sheet(&self,web:&WKWebView,cfg:&WKWebViewConfiguration,action:&WKNavigationAction,_features:&WKWindowFeatures)->Option<Retained<WKWebView>>{
+            let url=unsafe{action.request()}.URL().and_then(|u|u.absoluteString()).map(|s|s.to_string()).unwrap_or_default();
+            url.strip_prefix("about:blank#pm-modal=").and_then(|frame|self.make_modal(web,cfg,frame))
         }
         #[unsafe(method(webViewDidClose:))]
         unsafe fn child_closed(&self,web:&WKWebView){
-            let mut children=self.ivars().popouts.borrow_mut();
+            let mut children=self.ivars().sheets.borrow_mut();
             if let Some(i)=children.iter().position(|(_,v)|std::ptr::eq(&**v,web)) {let (w,v)=children.remove(i);unsafe{v.setUIDelegate(None);v.setNavigationDelegate(None)};if let Some(p)=w.sheetParent(){p.endSheet(&w)}
                 if let Some(p)=w.parentWindow(){p.removeChildWindow(&w)}w.close();}
         }
@@ -311,73 +259,6 @@ define_class!(
     }
 );
 impl Bridge {
-    fn make_popout(
-        &self,
-        web: &WKWebView,
-        cfg: &WKWebViewConfiguration,
-        action: &WKNavigationAction,
-    ) -> Option<Retained<WKWebView>> {
-        let s = self.ivars();
-        if s.trust.is_store() || s.popouts.borrow().len() >= 8 {
-            return None;
-        }
-        let url = unsafe { action.request() }
-            .URL()?
-            .absoluteString()?
-            .to_string();
-        if let Some(frame) = url.strip_prefix("about:blank#pm-modal=") {
-            return self.make_modal(web, cfg, frame);
-        }
-        if url != "about:blank" {
-            return None;
-        }
-        let r = NSRect::new(NSPoint::new(140., 140.), NSSize::new(440., 260.));
-        let child = unsafe {
-            WKWebView::initWithFrame_configuration(
-                WKWebView::alloc(self.mtm()),
-                NSRect::new(NSPoint::ZERO, r.size),
-                cfg,
-            )
-        };
-        unsafe {
-            child.setUIDelegate(Some(ProtocolObject::from_ref(self)));
-            child.setNavigationDelegate(Some(ProtocolObject::from_ref(self)));
-        }
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(self.mtm()),
-                r,
-                NSWindowStyleMask::Titled
-                    | NSWindowStyleMask::Closable
-                    | NSWindowStyleMask::Resizable,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        unsafe { window.setReleasedWhenClosed(false) };
-        // Belongs to its app (P-CHILD): normal level, hidden while inactive.
-        window.setHidesOnDeactivate(true);
-        window.setTitle(&NSString::from_str("Powermove · Compat popout"));
-        window.setContentView(Some(&child));
-        if let Some(parent) = web.window() {
-            unsafe {
-                parent.addChildWindow_ordered(&window, NSWindowOrderingMode::Above);
-            }
-        }
-        // An extension can open one while another app is in front: it comes
-        // forward only while Powermove is active, else it waits behind.
-        if NSApplication::sharedApplication(self.mtm()).isActive() {
-            window.makeKeyAndOrderFront(None);
-        } else {
-            window.orderBack(None);
-        }
-        s.popouts.borrow_mut().push((window, child.clone()));
-        s.handler.event(HostEvent::PopoutOpened);
-        Some(child)
-    }
-}
-
-impl Bridge {
     /// ui.modal: a sheet on the extension's window. Its title and buttons are
     /// native; its body is the child web view the page moves the modal's DOM
     /// into. Buttons right-aligned, the primary one last and on Return.
@@ -388,7 +269,7 @@ impl Bridge {
         frame: &str,
     ) -> Option<Retained<WKWebView>> {
         let s = self.ivars();
-        if s.trust.is_store() || s.popouts.borrow().len() >= 8 {
+        if s.trust.is_store() || s.sheets.borrow().len() >= 8 {
             return None;
         }
         let parent = web.window();
@@ -489,13 +370,12 @@ impl Bridge {
             content.addSubview(&button);
             right -= 12.;
         }
-        s.popouts.borrow_mut().push((window.clone(), child.clone()));
+        s.sheets.borrow_mut().push((window.clone(), child.clone()));
         // A page with no window (headless tests) keeps the sheet unshown; its
         // body and actions still work.
         if let Some(parent) = parent {
             parent.beginSheet_completionHandler(&window, None);
         }
-        s.handler.event(HostEvent::PopoutOpened);
         Some(child)
     }
 }
@@ -598,7 +478,6 @@ pub struct MacDomHost {
     slot: Retained<SlotView>,
     activity: Option<Activity>,
     job_count: u32,
-    dedicated_document: bool,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -631,18 +510,14 @@ impl MacDomHost {
             extension: session.data_store.extension.as_str().into(),
             permissions,
         };
-        let applier = format!("{page_bundle}\n{REMOTE_DOM_SHELL}");
-        let mut host = Self::new_configured(
+        Self::new_configured(
             mtm,
             trust,
             handler,
             stores,
-            BTreeMap::new(),
-            &applier,
+            page_bundle,
             Some(&session.data_store),
-        )?;
-        host.dedicated_document = true;
-        Ok(host)
+        )
     }
     /// A dedicated WebKit document using the production protocol applier bundle.
     /// `page_bundle` is host-built code exposing PMRemoteDOM.PageApplier.
@@ -653,42 +528,14 @@ impl MacDomHost {
         stores: &mut StoreDataStores,
         page_bundle: &str,
     ) -> Result<Self> {
-        let applier = format!("{page_bundle}\n{REMOTE_DOM_SHELL}");
-        let mut host =
-            Self::new_with_applier(mtm, trust, handler, stores, BTreeMap::new(), &applier)?;
-        host.dedicated_document = true;
-        Ok(host)
-    }
-    /// `methods` maps Store method names to manifest permission names. Unknown
-    /// Store methods are denied; the kernel must independently recheck admission.
-    pub fn new(
-        mtm: MainThreadMarker,
-        trust: Trust,
-        handler: Rc<dyn SyncHandler>,
-        stores: &mut StoreDataStores,
-        methods: BTreeMap<String, String>,
-    ) -> Result<Self> {
-        Self::new_with_applier(mtm, trust, handler, stores, methods, PAGE_APPLIER)
-    }
-    /// A trusted, bundled renderer adapter can replace the fixture applier. It
-    /// must implement the envelope/event contract, never execute extension code.
-    pub fn new_with_applier(
-        mtm: MainThreadMarker,
-        trust: Trust,
-        handler: Rc<dyn SyncHandler>,
-        stores: &mut StoreDataStores,
-        methods: BTreeMap<String, String>,
-        applier: &str,
-    ) -> Result<Self> {
-        Self::new_configured(mtm, trust, handler, stores, methods, applier, None)
+        Self::new_configured(mtm, trust, handler, stores, page_bundle, None)
     }
     fn new_configured(
         mtm: MainThreadMarker,
         trust: Trust,
         handler: Rc<dyn SyncHandler>,
         stores: &mut StoreDataStores,
-        methods: BTreeMap<String, String>,
-        applier: &str,
+        page_bundle: &str,
         identity: Option<&pm_store_host::identity::DataStoreIdentity>,
     ) -> Result<Self> {
         if objc2_core_graphics::CGSessionCopyCurrentDictionary().is_none() {
@@ -698,13 +545,11 @@ impl MacDomHost {
         let shared = Rc::new(Shared {
             trust: trust.clone(),
             handler,
-            methods,
             channel: RefCell::new(Channel::new(token, 1)),
             panels: RefCell::new(Panels::default()),
             pending: RefCell::new(None),
             ready: Cell::new(false),
-            recovery: RefCell::new(None),
-            popouts: RefCell::new(vec![]),
+            sheets: RefCell::new(vec![]),
             geometry_dirty: Cell::new(true),
             closed: Cell::new(false),
             canvases: RefCell::new(crate::canvas::CanvasResources::default()),
@@ -740,13 +585,12 @@ impl MacDomHost {
         slot.setAccessibilityLabel(Some(&NSString::from_str("Compatibility panels")));
         let host = Self {
             shared,
-            applier: applier.to_owned(),
+            applier: format!("{page_bundle}\n{REMOTE_DOM_SHELL}"),
             bridge,
             web,
             slot,
             activity: None,
             job_count: 0,
-            dedicated_document: false,
         };
         host.load();
         Ok(host)
@@ -754,7 +598,7 @@ impl MacDomHost {
     fn load(&self) {
         let c = self.shared.channel.borrow();
         let nonce = random_token().expect("OS entropy");
-        let html = transport::page_with_applier(
+        let html = transport::page(
             &c.base(),
             &nonce,
             c.generation,
@@ -769,10 +613,10 @@ impl MacDomHost {
     pub fn web_view(&self) -> &WKWebView {
         &self.web
     }
-    /// The page's open child web views (popouts and ui.modal sheet bodies).
+    /// The bodies of the page's open ui.modal sheets.
     pub fn child_web_views(&self) -> Vec<Retained<WKWebView>> {
         self.shared
-            .popouts
+            .sheets
             .borrow()
             .iter()
             .map(|(_, web)| web.clone())
@@ -789,7 +633,7 @@ impl MacDomHost {
         if generation != self.generation() {
             return Err(Error::StaleGeneration);
         }
-        if !self.dedicated_document || !self.shared.ready.get() {
+        if !self.shared.ready.get() {
             return Err(Error::Backpressure);
         }
         if selector.len() > 4096 {
@@ -836,7 +680,7 @@ impl MacDomHost {
         if generation != self.generation() {
             return Err(Error::StaleGeneration);
         }
-        if !self.dedicated_document || !self.shared.ready.get() {
+        if !self.shared.ready.get() {
             return Err(Error::Backpressure);
         }
         let (sender, ticket) = crate::capture::ticket();
@@ -897,7 +741,7 @@ impl MacDomHost {
     /// after decoding and replacing its bitmap. No V8 call occurs here.
     pub fn present_canvas(&mut self, panel: PanelId, frame: &CanvasFrame) -> Result<()> {
         self.check(frame.generation, panel)?;
-        if !self.dedicated_document || !self.shared.ready.get() {
+        if !self.shared.ready.get() {
             return Err(Error::Backpressure);
         }
         let resource = self.shared.canvases.borrow_mut().insert(frame)?;
@@ -913,10 +757,6 @@ impl MacDomHost {
     /// interleaved with GPUI root anchors. Preserve the real remote WebKit tree.
     pub fn accessibility_view(&self) -> Retained<NSView> {
         Retained::into_super(self.slot.clone())
-    }
-    #[cfg(feature = "gpui")]
-    pub fn accessibility_item(&self) -> gpui_macos::composition::AccessibilityItem {
-        gpui_macos::composition::AccessibilityItem::Native(self.accessibility_view())
     }
     /// Install below GPUI's drawing view. Do not call from the present callback.
     pub fn install_below(&self, container: &NSView, gpui: &NSView) {
@@ -939,8 +779,8 @@ impl MacDomHost {
         Ok(())
     }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
-    /// No JS call or wait occurs here. Returns the committed page geometry.
-    pub fn present(&mut self, viewport: Rect) -> Result<CompositionSnapshot> {
+    /// No JS call or wait occurs here.
+    pub fn present(&mut self, viewport: Rect) -> Result<()> {
         if !viewport.valid() || viewport.x != 0. || viewport.y != 0. {
             return Err(Error::InvalidGeometry);
         }
@@ -953,37 +793,12 @@ impl MacDomHost {
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
         ));
-        let snapshot = self.composition();
-        self.slot.clip(snapshot.visible_union.clone());
+        self.slot.clip(self.shared.panels.borrow().visible());
         self.shared.geometry_dirty.set(false);
-        Ok(snapshot)
+        Ok(())
     }
     pub fn composition_dirty(&self) -> bool {
         self.shared.geometry_dirty.get()
-    }
-    /// Shell key monitors/menu interceptors must yield whenever this is true.
-    /// Forward HostEvent::Key into shell resolution with compat=false; never replay
-    /// that event into WebKit a second time. WebKit owns IME and text defaults.
-    pub fn owns_first_responder(&self) -> bool {
-        let children = self.shared.popouts.borrow();
-        for web in std::iter::once(&*self.web).chain(children.iter().map(|(_, v)| &**v)) {
-            let Some(window) = web.window() else { continue };
-            if !window.isKeyWindow() {
-                continue;
-            }
-            let mut responder = window.firstResponder();
-            for _ in 0..64 {
-                let Some(current) = responder else { break };
-                if std::ptr::eq(
-                    &*current as *const NSResponder,
-                    web as *const WKWebView as *const NSResponder,
-                ) {
-                    return true;
-                }
-                responder = unsafe { current.nextResponder() };
-            }
-        }
-        false
     }
 
     /// Job-scoped, nestable activity. Park only when the editor window is closed
@@ -1087,101 +902,8 @@ impl MacDomHost {
             a.window.close();
         }
     }
-    /// Call only after trusted Stop approval (Store watchdog may call directly).
-    /// Restart is observed by tick(); selector presence alone is never success.
-    pub fn stop_and_recover(&mut self) -> Result<Generation> {
-        if self.shared.recovery.borrow().is_some() {
-            return Err(Error::Forbidden);
-        }
-        if NSProcessInfo::processInfo()
-            .operatingSystemVersion()
-            .majorVersion
-            < 14
-            || !self
-                .web
-                .respondsToSelector(sel!(_killWebContentProcessAndResetState))
-            || !self.web.respondsToSelector(sel!(_webProcessIdentifier))
-        {
-            return Err(Error::Unsupported("compat_hang_stop_unavailable"));
-        }
-        let pid = self.content_pid();
-        if pid <= 0 {
-            return Err(Error::Unsupported("compat_content_pid_unavailable"));
-        }
-        let token = random_token()?;
-        self.shared.handler.prepare_reset(self.generation())?;
-        self.close_popouts();
-        self.shared.pending.borrow_mut().take();
-        self.shared.ready.set(false);
-        let generation = self.generation() + 1;
-        *self.shared.channel.borrow_mut() = Channel::new(token, generation);
-        *self.shared.canvases.borrow_mut() = crate::canvas::CanvasResources::default();
-        for p in self.shared.panels.borrow_mut().items.values_mut() {
-            p.overlays.clear()
-        }
-        self.shared.geometry_dirty.set(true);
-        *self.shared.recovery.borrow_mut() = Some(Recovery {
-            old_pid: pid,
-            started: Instant::now(),
-            termination: false,
-        });
-        unsafe {
-            let _: () = msg_send![&*self.web, _killWebContentProcessAndResetState];
-        }
-        self.load();
-        Ok(generation)
-    }
-    pub fn content_pid(&self) -> i32 {
-        if self.web.respondsToSelector(sel!(_webProcessIdentifier)) {
-            unsafe { msg_send![&*self.web, _webProcessIdentifier] }
-        } else {
-            0
-        }
-    }
-    /// Call from the shell's event loop (outside GPUI's draw lock). No page eval.
-    pub fn tick(&mut self) {
-        let mut recovery = self.shared.recovery.borrow_mut();
-        if let Some(r) = recovery.as_ref() {
-            let pid = self.content_pid();
-            if self.shared.ready.get() && pid > 0 && pid != r.old_pid && process_gone(r.old_pid) {
-                let old_pid = r.old_pid;
-                recovery.take();
-                drop(recovery);
-                self.shared.handler.event(HostEvent::Recovered {
-                    generation: self.generation(),
-                    old_pid,
-                    new_pid: pid,
-                });
-            } else if r.started.elapsed() > Duration::from_secs(20) {
-                recovery.take();
-                drop(recovery);
-                self.shared
-                    .handler
-                    .event(HostEvent::Failure("compat_recovery_timeout"));
-            }
-        }
-        // User-closed child windows are removed without retaining hidden pages.
-        // A ui.modal sheet has no close box: it goes when its page closes it.
-        self.shared.popouts.borrow_mut().retain(|(w, v)| {
-            if w.isVisible() || !w.styleMask().contains(NSWindowStyleMask::Closable) {
-                true
-            } else {
-                unsafe {
-                    v.setNavigationDelegate(None);
-                    v.setUIDelegate(None)
-                };
-                if let Some(p) = w.parentWindow() {
-                    p.removeChildWindow(w)
-                }
-                false
-            }
-        });
-    }
-    pub fn popout_count(&self) -> usize {
-        self.shared.popouts.borrow().len()
-    }
-    fn close_popouts(&self) {
-        for (w, v) in self.shared.popouts.borrow_mut().drain(..) {
+    fn close_sheets(&self) {
+        for (w, v) in self.shared.sheets.borrow_mut().drain(..) {
             unsafe {
                 v.setNavigationDelegate(None);
                 v.setUIDelegate(None)
@@ -1208,10 +930,7 @@ impl DomPanelHost for MacDomHost {
         self.shared.channel.borrow().generation
     }
     fn create(&mut self, panel: PanelSpec) -> Result<()> {
-        if self.dedicated_document && !self.shared.panels.borrow().items.is_empty() {
-            return Err(Error::DuplicatePanel);
-        }
-        if self.shared.panels.borrow().items.contains_key(&panel.id) {
+        if !self.shared.panels.borrow().items.is_empty() {
             return Err(Error::DuplicatePanel);
         }
         if self.shared.ready.get() {
@@ -1235,7 +954,6 @@ impl DomPanelHost for MacDomHost {
         let mut panels = self.shared.panels.borrow_mut();
         let p = panels.get(id)?;
         p.slot = Some(slot);
-        p.overlays.clear();
         self.shared.geometry_dirty.set(true);
         Ok(())
     }
@@ -1248,7 +966,6 @@ impl DomPanelHost for MacDomHost {
         let mut panels = self.shared.panels.borrow_mut();
         let p = panels.get(id)?;
         p.slot = None;
-        p.overlays.clear();
         self.shared.geometry_dirty.set(true);
         Ok(())
     }
@@ -1269,19 +986,6 @@ impl DomPanelHost for MacDomHost {
         self.shared
             .send(json!({"kind":"batch","panel":id,"batch":batch}))
     }
-    fn send_event(&mut self, g: Generation, id: PanelId, event: Value) -> Result<()> {
-        if self.dedicated_document {
-            return Err(Error::Unsupported(
-                "remote DOM input must enter through the page or owner queue",
-            ));
-        }
-        self.check(g, id)?;
-        if !self.shared.ready.get() {
-            return Err(Error::Backpressure);
-        }
-        self.shared
-            .send(json!({"kind":"event","panel":id,"event":event}))
-    }
     fn focus(&mut self, id: PanelId, node: Option<u64>) -> Result<()> {
         self.check(self.generation(), id)?;
         if !self.shared.ready.get() {
@@ -1296,16 +1000,13 @@ impl DomPanelHost for MacDomHost {
         self.shared
             .send(json!({"kind":"focus","panel":id,"node":node}))
     }
-    fn composition(&self) -> CompositionSnapshot {
-        self.shared.panels.borrow().snapshot()
-    }
 }
 impl Drop for MacDomHost {
     fn drop(&mut self) {
         self.shared.closed.set(true);
         self.job_count = self.job_count.min(1);
         self.end_background_job();
-        self.close_popouts();
+        self.close_sheets();
         self.shared.pending.borrow_mut().take();
         unsafe { self.web.stopLoading() };
         unsafe {
@@ -1318,7 +1019,7 @@ impl Drop for MacDomHost {
 }
 /// Closing a key child window makes its parent key synchronously, and the
 /// shell then renders inside that AppKit callback. A host method (called with
-/// the shell's borrow of the host held, e.g. `stop_and_recover`) must not
+/// the shell's borrow of the host held, such as `Drop`) must not
 /// re-enter the shell that way, so the close runs on the next run-loop turn in
 /// any common mode. The pending perform request retains the window.
 fn close_later(window: &NSWindow) {
@@ -1339,31 +1040,22 @@ fn random_token() -> Result<String> {
         .map_err(|_| Error::Unsupported("compat_entropy_unavailable"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
-fn process_gone(pid: i32) -> bool {
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-        fn __error() -> *mut i32;
-    }
-    pid > 0 && unsafe { kill(pid, 0) == -1 && *__error() == 3 }
-}
 
 #[cfg(test)]
 mod admission_tests {
     use super::*;
     #[derive(Default)]
     struct Handler {
-        calls: Cell<u32>,
+        feedback: Cell<u32>,
         events: Cell<u32>,
     }
     impl SyncHandler for Handler {
-        fn call(&self, c: &RequestContext, _: &str, args: Value) -> Result<Value> {
-            assert_eq!(c.panel, 1);
-            assert_eq!(c.generation, 3);
-            self.calls.set(self.calls.get() + 1);
-            Ok(args)
-        }
         fn event(&self, _: HostEvent) {
             self.events.set(self.events.get() + 1)
+        }
+        fn remote_dom(&self, _: Value) -> Result<()> {
+            self.feedback.set(self.feedback.get() + 1);
+            Ok(())
         }
     }
     fn shared(trust: Trust) -> (Shared, Rc<Handler>) {
@@ -1376,85 +1068,55 @@ mod admission_tests {
             })
             .unwrap();
         panels.get(1).unwrap().slot = Some(PanelSlot {
-            id: 1,
             bounds: Rect::new(0., 0., 10., 10.),
             clip: Rect::new(0., 0., 10., 10.),
-            reading_order: 0,
         });
         (
             Shared {
                 trust,
                 handler: handler.clone(),
-                methods: BTreeMap::from([
-                    ("read".into(), "project:read".into()),
-                    ("write".into(), "project:write".into()),
-                ]),
                 channel: RefCell::new(Channel::new("synthetic-capability".into(), 3)),
                 canvases: RefCell::new(crate::canvas::CanvasResources::default()),
                 fonts: RefCell::default(),
                 panels: RefCell::new(panels),
                 pending: RefCell::new(None),
                 ready: Cell::new(true),
-                recovery: RefCell::new(None),
-                popouts: RefCell::new(vec![]),
+                sheets: RefCell::new(vec![]),
                 geometry_dirty: Cell::new(false),
                 closed: Cell::new(false),
             },
             handler,
         )
     }
-    #[test]
-    fn store_admits_only_mapped_and_granted_methods() {
-        let (s, h) = shared(Trust::Store {
-            extension: "fixture".into(),
-            permissions: ["project:read".into()].into(),
-        });
-        assert_eq!(
-            s.handle(r#"{"generation":3,"panel":1,"kind":"call","method":"read","payload":7}"#),
-            Ok(json!(7))
-        );
-        for method in ["write", "unknown"] {
-            assert_eq!(
-                s.handle(
-                    &json!({"generation":3,"panel":1,"kind":"call","method":method}).to_string()
-                ),
-                Err(Error::Forbidden)
-            );
-        }
-        assert_eq!(h.calls.get(), 1);
-    }
+    const INPUT: &str =
+        r#"{"generation":3,"panel":1,"kind":"remote_dom","payload":{"kind":"event"}}"#;
     #[test]
     fn stale_and_unknown_panel_requests_do_not_reach_handler() {
         let (s, h) = shared(Trust::Trusted);
         assert_eq!(
-            s.handle(r#"{"generation":2,"panel":1,"kind":"call","method":"read"}"#),
+            s.handle(&INPUT.replace(r#""generation":3"#, r#""generation":2"#)),
             Err(Error::StaleGeneration)
         );
         assert_eq!(
-            s.handle(r#"{"generation":3,"panel":2,"kind":"call","method":"read"}"#),
+            s.handle(&INPUT.replace(r#""panel":1"#, r#""panel":2"#)),
             Err(Error::UnknownPanel)
         );
-        assert_eq!(h.calls.get(), 0);
+        assert_eq!(h.feedback.get(), 0);
     }
     #[test]
     fn detached_panels_cannot_forward_input() {
         let (s, h) = shared(Trust::Trusted);
+        assert_eq!(s.handle(INPUT), Ok(Value::Null));
         s.panels.borrow_mut().get(1).unwrap().slot = None;
-        assert_eq!(
-            s.handle(r#"{"generation":3,"panel":1,"kind":"key","payload":{}}"#),
-            Err(Error::Forbidden)
-        );
-        assert_eq!(h.events.get(), 0);
+        assert_eq!(s.handle(INPUT), Err(Error::Forbidden));
+        assert_eq!(h.feedback.get(), 1);
     }
     #[test]
     fn stopped_hosts_reject_requests() {
         let (s, h) = shared(Trust::Trusted);
         s.closed.set(true);
-        assert_eq!(
-            s.handle(r#"{"generation":3,"panel":1,"kind":"call","method":"read"}"#),
-            Err(Error::StaleGeneration)
-        );
-        assert_eq!(h.calls.get(), 0);
+        assert_eq!(s.handle(INPUT), Err(Error::StaleGeneration));
+        assert_eq!(h.feedback.get(), 0);
     }
     #[test]
     fn store_bootstrap_rejects_nonopaque_origin() {

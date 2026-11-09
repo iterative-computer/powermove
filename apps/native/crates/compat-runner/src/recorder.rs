@@ -1,8 +1,7 @@
 use base64::Engine;
 use pm_recorder::{
     Affine, Canvas, Cap, Direction, FillRule, Gradient, GradientKind, ImageData, Join, Paint,
-    Pattern, Point, Rect, Repetition, Source, TextAlign, TextBaseline, TextLayout, TextProvider,
-    Vec2,
+    Pattern, Point, Rect, Repetition, Source, TextAlign, TextBaseline, TextProvider, Vec2,
 };
 use pm_runtime_v8::*;
 use serde_json::{Value, json};
@@ -46,28 +45,34 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn activating(&self, _id: Option<&str>) {}
     /// A task has run past the watchdog's limit; the user decides (D11).
     fn unresponsive(&self, _execution: u64) {}
-    /// A synchronous layout read: the page's `layout` answer to measure
-    /// `request` (already sent with the realm's last batch), or `None` when
-    /// the page doesn't answer in time. Blocks the realm's worker only.
-    fn measure_sync(&self, _request: u64) -> Option<Value> {
-        None
+    /// A synchronous layout read of measure `request` (already sent with the
+    /// realm's last batch). Blocks the realm's worker only.
+    fn measure_sync(&self, _request: u64) -> SyncLayout {
+        SyncLayout::NoPage
+    }
+}
+/// How a synchronous layout read ended.
+pub enum SyncLayout {
+    /// The page's `layout` answer.
+    Answer(Value),
+    /// No page reads this realm's batches, so none will answer.
+    NoPage,
+    /// A page reads them but did not answer in time.
+    TimedOut,
+}
+impl SyncLayout {
+    fn into_json(self) -> Value {
+        match self {
+            Self::Answer(layout) => layout,
+            Self::NoPage => json!({"unavailable": "no-page"}),
+            Self::TimedOut => json!({"unavailable": "timeout"}),
+        }
     }
 }
 pub struct NoEvents;
 impl RealmEvents for NoEvents {}
 /// Canvas text shapes against the app's font service.
 pub type CanvasText = Box<dyn TextProvider + Send>;
-struct Text<'a>(&'a mut dyn TextProvider);
-impl TextProvider for Text<'_> {
-    fn layout(
-        &mut self,
-        font: &pm_recorder::Font,
-        text: &[u16],
-        direction: Direction,
-    ) -> std::result::Result<TextLayout, pm_recorder::Error> {
-        self.0.layout(font, text, direction)
-    }
-}
 pub struct NativeHost {
     state: Mutex<State>,
     kernel: Mutex<crate::adapter::KernelAdapter>,
@@ -1305,7 +1310,7 @@ impl NativeHost {
                     .as_mut()
                     .ok_or_else(|| Error::Host("canvas text backend not attached".into()))?;
                 let metrics = canvas
-                    .measure_text(&text, &mut Text(&mut **provider))
+                    .measure_text(&text, &mut **provider)
                     .map_err(host_error)?;
                 json!({"width":metrics.width,"actualBoundingBoxLeft":metrics.actual_bounding_box_left,
                     "actualBoundingBoxRight":metrics.actual_bounding_box_right,
@@ -1328,9 +1333,9 @@ impl NativeHost {
                     .as_mut()
                     .ok_or_else(|| Error::Host("canvas text backend not attached".into()))?;
                 if name == "fillText" {
-                    canvas.fill_text(&text, x, y, width, &mut Text(&mut **provider))
+                    canvas.fill_text(&text, x, y, width, &mut **provider)
                 } else {
-                    canvas.stroke_text(&text, x, y, width, &mut Text(&mut **provider))
+                    canvas.stroke_text(&text, x, y, width, &mut **provider)
                 }
                 .map_err(host_error)?;
                 Value::Null
@@ -1556,7 +1561,7 @@ impl EngineProxy for NativeHost {
             let request = input["request"]
                 .as_u64()
                 .ok_or(Error::Invalid("measure request"))?;
-            return Ok(self.events.measure_sync(request).unwrap_or(Value::Null));
+            return Ok(self.events.measure_sync(request).into_json());
         }
         if operation == "dom.batch" {
             let mut state = self.state.lock().unwrap();

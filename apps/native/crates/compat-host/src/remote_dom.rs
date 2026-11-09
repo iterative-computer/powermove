@@ -171,28 +171,6 @@ mod tests {
     }
 
     #[test]
-    fn unattached_feedback_mailbox_refuses_instead_of_dropping() {
-        struct Unattached;
-        impl crate::SyncHandler for Unattached {
-            fn call(&self, _: &crate::RequestContext, _: &str, _: Value) -> Result<Value> {
-                Err(Error::Forbidden)
-            }
-            fn event(&self, _: crate::HostEvent) {}
-        }
-        let context = crate::RequestContext {
-            trust: crate::Trust::Trusted,
-            generation: 1,
-            panel: 1,
-        };
-        assert_eq!(
-            crate::SyncHandler::remote_dom(&Unattached, &context, json!({})),
-            Err(Error::Unsupported(
-                "remote DOM feedback queue is not attached"
-            ))
-        );
-    }
-
-    #[test]
     fn native_panel_ids_must_survive_javascript_transport_exactly() {
         let session = Session {
             panel: "synthetic".into(),

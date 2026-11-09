@@ -1,9 +1,7 @@
-#![allow(dead_code)]
-use pm_recorder_raster::{Rasterizer, recorder::*};
+use super::fonts;
+use pm_recorder::*;
 use std::f64::consts::{PI, TAU};
 use std::sync::Arc;
-#[path = "fonts.rs"]
-mod fonts;
 pub const MODES: [&str; 26] = [
     "source-over",
     "source-in",
@@ -31,21 +29,6 @@ pub const MODES: [&str; 26] = [
     "saturation",
     "color",
     "luminosity",
-];
-pub const NAMES: [&str; 13] = [
-    "rects",
-    "curves",
-    "arcs",
-    "roundrect",
-    "strokes",
-    "clip-transform",
-    "linear",
-    "radial",
-    "conic",
-    "patterns",
-    "images",
-    "composites",
-    "text",
 ];
 pub fn record(name: &str) -> Canvas {
     let (w, h) = match name {
@@ -328,64 +311,7 @@ fn source() -> Source {
     }
 }
 pub fn render(name: &str) -> ImageData {
-    if name == "shadow-composites" {
-        use kurbo::Shape;
-        use pm_recorder_raster::{AlphaMask, Clip, Shadow};
-        let mut c = Canvas::new(7, 26, 3).unwrap();
-        c.set_fill_color("rgba(60,120,180,0.6)").unwrap();
-        c.fill_rect(0., 0., 26., 2.).unwrap();
-        let mut r = Rasterizer::new(7, 26, 3).unwrap();
-        r.replay(r.key(), c.commands()).unwrap();
-        for (x, mode) in MODES.into_iter().enumerate() {
-            let mask = AlphaMask::new(1, 2, [x as i32, 1], vec![0.4; 2]).unwrap();
-            let clip = Clip {
-                path: Rect::new(x as f64, 0., x as f64 + 1., 3.).to_path(1e-4),
-                rule: FillRule::NonZero,
-            };
-            r.draw_shadow(
-                r.key(),
-                &mask,
-                Shadow {
-                    color: Color {
-                        r: 200. / 255.,
-                        g: 80. / 255.,
-                        b: 40. / 255.,
-                        a: 1.,
-                    },
-                    offset: [0., 0.],
-                    blur: 0.,
-                },
-                mode,
-                &[clip],
-            )
-            .unwrap();
-        }
-        return r.image_data().unwrap();
-    }
-    if name == "analytic-shadow" {
-        use pm_recorder_raster::{AlphaMask, Shadow};
-        let mut r = Rasterizer::new(7, 16, 16).unwrap();
-        let mask = AlphaMask::new(2, 2, [3, 3], vec![1.; 4]).unwrap();
-        r.draw_shadow(
-            r.key(),
-            &mask,
-            Shadow {
-                color: Color {
-                    a: 0.5,
-                    ..Color::BLACK
-                },
-                offset: [2.5, 1.25],
-                blur: 2.,
-            },
-            "source-over",
-            &[],
-        )
-        .unwrap();
-        return r.image_data().unwrap();
-    }
-    let c = record(name);
+    let mut c = record(name);
     let (w, h) = c.size();
-    let mut r = Rasterizer::new(7, w, h).unwrap();
-    r.replay(r.key(), c.commands()).unwrap();
-    r.image_data().unwrap()
+    c.get_image_data(0, 0, w as i32, h as i32).unwrap()
 }

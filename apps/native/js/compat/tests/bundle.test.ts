@@ -1,23 +1,6 @@
 import { expect, test } from "bun:test";
 import { CompatRealm } from "../src";
 import { FakeHost } from "./fake-host";
-import vm from "node:vm";
-test("shipped IIFE publishes the documented PowermoveCompat global in bare V8", async () => {
-  const build = await Bun.build({
-    entrypoints: [new URL("../src/browser.ts", import.meta.url).pathname],
-    target: "browser",
-    format: "iife",
-  });
-  expect(build.success).toBe(true);
-  const context = vm.createContext({});
-  vm.runInContext(await build.outputs[0].text(), context);
-  expect(vm.runInContext("typeof PowermoveCompat.CompatRealm", context)).toBe(
-    "function",
-  );
-  expect(
-    vm.runInContext("typeof process + ':' + typeof document", context),
-  ).toBe("undefined:undefined");
-});
 test("browser bundle executes with only ECMAScript globals and explicit host functions", async () => {
   const build = await Bun.build({
     entrypoints: [new URL("../src/index.ts", import.meta.url).pathname],

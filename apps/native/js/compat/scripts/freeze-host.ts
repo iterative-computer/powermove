@@ -76,7 +76,7 @@ export async function frozen(name: string): Promise<string> {
       .map((node) => "export " + node.getText(tree))
       .join("\n");
     input =
-      `import { CHANNELS_3D, local3D, parent3D, world3D, is3DLayer, perspectiveAmount, planeMatrix, projectPoint, inversePlane, planeContains } from "../legacy/core/space-3d";
+      `import { CHANNELS_3D, local3D, parent3D, world3D, is3DLayer, perspectiveAmount, planeMatrix, projectPoint, inversePlane, planeContains } from "../reference/legacy/core/space-3d";
 import { ASSET_DRAG_MIME, FX_DRAG_MIME, writeAssetDrag, hasAssetDrag, hasFileDrag, hasMediaDrag, readAssetDrag, hasFxDrag, readFxDrag, applyFxDrop } from "./drop";
 import { findPanel, hasPanel, removePanel, insertPanel, hidePanel, restorePanel } from "./layout-model";
 const EMPTY_AFFINE=[1,0,0,1,0,0], EMPTY_MAT3=[1,0,0,0,1,0,0,0,1], EMPTY_MAT4=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];\n` +
@@ -90,7 +90,10 @@ const EMPTY_AFFINE=[1,0,0,1,0,0], EMPTY_MAT3=[1,0,0,0,1,0,0,0,1], EMPTY_MAT4=[1,
     code = code
       .replace("'../../shared/sandbox-rpc'", "'./sandbox-rpc'")
       .replace("'../src/legacy/core/easing'", "'./ease-runtime'")
-      .replace("'../src/legacy/core/space-3d'", "'../legacy/core/space-3d'");
+      .replace(
+        "'../src/legacy/core/space-3d'",
+        "'../reference/legacy/core/space-3d'",
+      );
   if (name === "registries")
     code = code
       .replace("from './keychord'", "from '../../keychord'")

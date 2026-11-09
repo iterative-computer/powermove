@@ -3,6 +3,7 @@
  * contributor and a recorded reason; it never stops the others. Module graphs
  * come from the native compiler and link with real ES semantics.
  */
+import { linkRequest } from "./module-graph";
 import type { CompatRealm } from "./realm";
 import type { Data } from "./types";
 
@@ -10,11 +11,6 @@ const DEFAULT_TIMEOUT = 10_000;
 const DEFAULT_WINDOW = 10_000;
 const DEFAULT_LIMIT = 2;
 const ERROR_CHARS = 4_000;
-const RESERVED = new Set(
-  "await break case catch class const continue debugger default delete do else enum export extends false finally for function if implements import in instanceof interface let new null package private protected public return static super switch this throw true try typeof var void while with yield".split(
-    " ",
-  ),
-);
 const BLOCKED = new Set([
   "build-error",
   "manifest-error",
@@ -158,52 +154,18 @@ export function createLoader(options: LoaderOptions) {
   const generations = new Map<string, number>();
   let queue: Promise<unknown> = Promise.resolve();
   let booting: Promise<void> | null = null;
-  const runtimeSource = (specifier: string): string => {
-    if (specifier === "svelte/internal/disclose-version") return "export {}";
-    const table = realm.globals.__powermove_runtime;
-    if (!(specifier in table))
-      throw new Error(`Unsupported runtime import: ${specifier}`);
-    const keys = Object.keys(table[specifier]);
-    const name = /^[A-Za-z_$][\w$]*$/;
-    return [
-      `const m = globalThis.__powermove_runtime[${JSON.stringify(specifier)}];`,
-      "export default m;",
-      ...keys
-        .filter((k) => k !== "default" && name.test(k) && !RESERVED.has(k))
-        .map((k) => `export const ${k} = m.${k};`),
-      ...keys
-        .filter((k) => RESERVED.has(k) && k !== "default")
-        .map(
-          (k, i) =>
-            `const __reserved_${i} = m.${k}; export { __reserved_${i} as ${k} };`,
-        ),
-    ].join("\n");
-  };
   /** A new generation is a new module instance, like the reference's cache bust. */
   async function importGraph(record: Data): Promise<Data> {
     const graph = record.graph;
     if (!graph) throw new Error("no bundle to load");
     const generation = (generations.get(record.id) ?? 0) + 1;
     generations.set(record.id, generation);
-    const base = `pmext://${record.id}/${generation}/`;
-    const url = (id: string) =>
-      id.startsWith("runtime:") ? `pmruntime://${id.slice(8)}` : base + id;
-    const sources: Data = {},
-      edges: Data = {};
-    for (const [id, source] of Object.entries(graph.sources))
-      sources[url(id)] = source;
-    for (const [id, table] of Object.entries(graph.edges as Data)) {
-      edges[url(id)] = {};
-      for (const [specifier, target] of Object.entries(table as Data)) {
-        edges[url(id)][specifier] = url(target as string);
-        if ((target as string).startsWith("runtime:"))
-          sources[url(target as string)] ??= runtimeSource(
-            (target as string).slice(8),
-          );
-      }
-    }
     const [done, namespace] = link(
-      JSON.stringify({ sources, edges, entry: url("powermove:bundle") }),
+      linkRequest(
+        graph,
+        `pmext://${record.id}/${generation}/`,
+        realm.globals.__powermove_runtime,
+      ),
     );
     await done;
     return namespace;

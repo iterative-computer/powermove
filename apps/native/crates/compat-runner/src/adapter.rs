@@ -685,7 +685,11 @@ impl KernelAdapter {
                 let write = self.direct_write(args, &p)?;
                 let written = self.execute(txid, write)?;
                 if written.get("error").is_some() {
-                    let _ = self.step(HistoryCall::Rollback.into());
+                    // A rollback that fails leaves the entry open: report that.
+                    let rolled = self.step(HistoryCall::Rollback.into())?;
+                    if rolled.get("error").is_some() {
+                        return Ok(rolled);
+                    }
                     let message = written["error"]["message"].clone();
                     return Ok(
                         json!({"value":{"ok":false,"message":message},"publication":self.publication()?}),

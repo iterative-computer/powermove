@@ -1,7 +1,7 @@
 # Store view host (package 10)
 
 `apps/native/crates/store-host` is `pm-store-host`. It implements the policy,
-archive admission, install publication, permissions, channel admission and view
+archive admission, install publication, permissions and view
 recovery that can run without WebKit. It has no Node, Chromium, V8, UI, kernel or
 engine dependency. **This is not a macOS WebKit adapter, Store distribution
 service, sandboxed helper launcher, or proof of v1–3 corpus compatibility.**
@@ -18,7 +18,7 @@ remote-DOM applier executes in WebKit; extension scripts never enter the page.
 `ViewPlatform::enqueue` is the nonblocking boundary for a main-thread WebKit
 adapter. Worker-side archive/file/kernel methods must never run on main. They
 must be wrapped in the kernel actor's tickets/commands, not a UI blocking wait.
-No live JS objects or callbacks cross this crate's JSON channel.
+No live JS objects or callbacks cross this crate's boundary.
 
 `ExtensionId` validates the shipped registry grammar, `[a-z0-9][a-z0-9-]{1,63}`,
 including on deserialization. `DataStoreIdentity` hashes a domain and
@@ -333,27 +333,7 @@ modal dialogs must be denied by the platform delegate as well. The adapter must
 check opaque `location.origin` before declaring Ready; a message's origin field
 is never transport authentication. CSP is not a replacement for native guards.
 
-## Message schema and recovery
-
-`Envelope` carries protocol version 1, extension/view/generation, per-source
-sequence, from/to and tagged `Message`. Host-bound endpoints authenticate the
-source and capability before `Channel::admit`; never trust the JSON sender.
-Allowed routes: view → realm Ready/Input/PaintAck/Failure; realm → view
-DomBatch/Snapshot; realm → kernel ServiceCall; kernel → realm
-ServiceReply/KernelEvent. A view cannot directly issue kernel operations.
-DOM payload semantics belong to the full remote-DOM bridge, not a fixture
-allowlist. Node/callback identity stays in V8; native pixels cross as IDs.
-
-Admission rejects stale identities/generations, unknown schema/version,
-sequence gaps and invalid routes. Limits default to 1 MiB/message,
-256 queued messages and 8 MiB total. Backpressure consumes neither sequence nor
-older work. Consumers complete the front entry only after acceptance. Duplicate
-receipts distinguish queued from completed requests; payload changes under the
-same sequence fail with Conflict. Pending payloads plus the last completed
-fingerprint per endpoint bound replay memory. Older completed retries return
-Stale and must query kernel transaction receipts; they never redispatch an
-edit. Service request IDs must also map to kernel realm/generation/txids for
-lost-ack replay across connections. The transport owns response replay.
+## View recovery
 
 `View` uses a host monotonic clock and explicit states. Start → Ready requests a
 fresh authoritative DOM snapshot. Crash/hang/ready timeout → **Seal** kernel

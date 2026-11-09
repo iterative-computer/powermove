@@ -124,15 +124,8 @@ fn config() -> (Config, Arc<Kernel>, Arc<Host>) {
         host,
     )
 }
-fn wait<T>(t: Ticket<T>) -> Result<T> {
-    let end = Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Some(v) = t.try_take() {
-            return v;
-        }
-        assert!(Instant::now() < end, "ticket timeout");
-        thread::sleep(Duration::from_millis(2));
-    }
+fn wait<T>(mut t: Ticket<T>) -> Result<T> {
+    wait_until(&mut t, Instant::now() + Duration::from_secs(20)).expect("ticket timeout")
 }
 fn until(mut f: impl FnMut() -> bool) {
     let end = Instant::now() + Duration::from_secs(10);

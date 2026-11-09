@@ -37,7 +37,8 @@ fn compile<'s>(s: &mut v8::PinScope<'s, '_>, url: &str) -> Option<v8::Local<'s, 
     if let Some(module) = existing {
         return Some(v8::Local::new(s, module));
     }
-    let code = s.get_slot::<Registry>()?.sources.get(url)?.clone();
+    // The compiled module is what stays; its text is not needed again.
+    let code = s.get_slot_mut::<Registry>()?.sources.remove(url)?;
     let origin = origin(s, url)?;
     let text = v8::String::new(s, &code)?;
     let mut source = v8::script_compiler::Source::new(text, Some(&origin));

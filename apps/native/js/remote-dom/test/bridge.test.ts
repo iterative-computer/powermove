@@ -201,7 +201,7 @@ describe('remote DOM mirror and real-document applier', () => {
     const page = new JSDOM('<!doctype html><html><head></head><body></body></html>');
     const replies: PageMessage[] = [];
     let asked = 0,
-      answer = true;
+      answer: boolean | null = true;
     const shim: RemoteDOM = new RemoteDOM({
       session: { panel: 'fixture', generation: 1 },
       // The host hands batches to the page and routes its answer back.
@@ -212,7 +212,7 @@ describe('remote DOM mirror and real-document applier', () => {
       measureSync(request) {
         asked++;
         const reply = replies.find((m) => m.kind === 'layout' && m.request === request);
-        return answer ? (reply ?? null) : null;
+        return (answer && reply) || { unavailable: answer === null ? 'no-page' : 'timeout' };
       }
     });
     const applier = new PageApplier({
@@ -245,14 +245,29 @@ describe('remote DOM mirror and real-document applier', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(resized).toBe(1);
-    // A page that doesn't answer leaves the cached layout, and reads stop
-    // waiting for a moment.
-    answer = false;
+    // Without a page every read asks (the host answers at once) and keeps
+    // the cached layout.
+    answer = null;
     caret.textContent = 'xy';
     expect(caret.getBoundingClientRect().left).toBe(44);
     caret.textContent = 'xyz';
     expect(caret.getBoundingClientRect().left).toBe(44);
-    expect(asked).toBe(3);
+    expect(asked).toBe(4);
+    // A page too slow to answer gets no more synchronous reads until its next
+    // layout answer arrives.
+    answer = false;
+    caret.textContent = 'xyzw';
+    expect(caret.getBoundingClientRect().left).toBe(44);
+    caret.textContent = 'xyzwv';
+    expect(caret.getBoundingClientRect().left).toBe(44);
+    expect(asked).toBe(5);
+    shim.flush();
+    left = 50;
+    shim.receive(replies.filter((m) => m.kind === 'layout').pop()!);
+    answer = true;
+    caret.textContent = 'u';
+    expect(caret.getBoundingClientRect().left).toBe(50);
+    expect(asked).toBe(6);
     shim.dispose();
     applier.dispose();
     page.window.close();

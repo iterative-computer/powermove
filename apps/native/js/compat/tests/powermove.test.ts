@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { CompatRealm, powermove } from "../src";
-import { readFontAxes } from "../src/frozen/typography/font-catalog";
+import { readFontAxes } from "../src/frozen/reference/typography/font-catalog";
 import { FakeHost } from "./fake-host";
 test("vector factories, evaluation and content helpers retain property references", () => {
   const host = new FakeHost(),

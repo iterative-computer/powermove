@@ -4,7 +4,7 @@ import { describe, expect, it } from "bun:test";
 import {
   compileExpression,
   type ExpressionContext,
-} from "../../src/frozen/legacy/core/expression";
+} from "../../src/frozen/reference/legacy/core/expression";
 
 const context = (
   overrides: Partial<ExpressionContext> = {},

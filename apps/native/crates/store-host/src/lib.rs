@@ -2,7 +2,6 @@
 //! Platform adapters enqueue commands; none of these I/O methods belong on main.
 pub mod adapter;
 pub mod artifact;
-pub mod channel;
 pub mod identity;
 pub mod install;
 pub mod permission;

@@ -63,10 +63,8 @@ impl Rect {
 /// must be flattened by the compositor or rejected, never silently approximated.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PanelSlot {
-    pub id: u64,
     pub bounds: Rect,
     pub clip: Rect,
-    pub reading_order: u32,
 }
 impl PanelSlot {
     pub fn visible(&self) -> Rect {
@@ -77,22 +75,6 @@ impl PanelSlot {
 pub struct PanelSpec {
     pub id: PanelId,
     pub label: String,
-}
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CompositionSnapshot {
-    pub panels: Vec<(PanelId, PanelSlot)>,
-    /// Window-space rectangles, clipped to the viewport. The shell subtracts
-    /// its interactive AND visually occluding regions before opening hit holes.
-    pub overlay_holes: Vec<Rect>,
-    pub visible_union: Vec<Rect>,
-}
-impl CompositionSnapshot {
-    pub fn page_at(&self, x: f64, y: f64) -> bool {
-        self.visible_union.iter().any(|r| r.contains(x, y))
-    }
-    pub fn accepts_gpui(&self, x: f64, y: f64, occluding: &[Rect]) -> bool {
-        occluding.iter().any(|r| r.contains(x, y)) || !self.page_at(x, y)
-    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Trust {
@@ -113,30 +95,13 @@ impl Trust {
         matches!(self, Self::Store { .. })
     }
 }
-#[derive(Clone, Debug)]
-pub struct RequestContext {
-    pub trust: Trust,
-    pub generation: Generation,
-    pub panel: PanelId,
-}
-/// Must return a bounded cached/native answer or enqueue work. Never wait for
-/// V8, an actor response, a GPU completion, or page JS on AppKit's main thread.
-/// Store admission is repeated here, under the extension's identity, by kernel.
+/// Page messages arrive on AppKit's main thread. Never wait for V8, an actor
+/// response, a GPU completion, or page JS here.
 pub trait SyncHandler {
-    fn call(&self, context: &RequestContext, method: &str, args: Value) -> Result<Value>;
     fn event(&self, event: HostEvent);
     /// Only enqueue to a bounded routing-owner mailbox. Never enter V8 or wait
     /// on that owner here. Refusal must be explicit; no dropped acknowledgements.
-    fn remote_dom(&self, _context: &RequestContext, _payload: Value) -> Result<()> {
-        Err(Error::Unsupported(
-            "remote DOM feedback queue is not attached",
-        ))
-    }
-    /// Called BEFORE reset. Seal acknowledged gestures and revoke the old bridge
-    /// generation. Returning Err aborts Stop without touching the page.
-    fn prepare_reset(&self, _generation: Generation) -> Result<()> {
-        Ok(())
-    }
+    fn remote_dom(&self, payload: Value) -> Result<()>;
 }
 /// A face the page lays text out with: the engine's own face for what the
 /// project's text asks for, under the family name the page's CSS uses.
@@ -159,22 +124,7 @@ pub enum HostEvent {
     Ready {
         generation: Generation,
     },
-    Dom {
-        context: RequestContext,
-        payload: Value,
-    },
-    Key {
-        context: RequestContext,
-        payload: Value,
-    },
-    CompositionChanged,
-    PopoutOpened,
     ProcessTerminated,
-    Recovered {
-        generation: Generation,
-        old_pid: i32,
-        new_pid: i32,
-    },
     Failure(&'static str),
     /// The page settled these faces (`PageFace::key`), loaded or failed, after
     /// `MacDomHost::add_fonts`.
@@ -190,9 +140,7 @@ pub trait DomPanelHost {
     fn detach(&mut self, panel: PanelId) -> Result<()>;
     fn destroy(&mut self, panel: PanelId) -> Result<()>;
     fn apply(&mut self, generation: Generation, panel: PanelId, batch: Value) -> Result<()>;
-    fn send_event(&mut self, generation: Generation, panel: PanelId, event: Value) -> Result<()>;
     fn focus(&mut self, panel: PanelId, node: Option<u64>) -> Result<()>;
-    fn composition(&self) -> CompositionSnapshot;
 }
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug)]
@@ -200,7 +148,6 @@ pub(crate) struct Panel {
     #[cfg(target_os = "macos")]
     pub spec: PanelSpec,
     pub slot: Option<PanelSlot>,
-    pub overlays: Vec<Rect>,
 }
 #[cfg(any(target_os = "macos", test))]
 #[derive(Default)]
@@ -223,7 +170,6 @@ impl Panels {
                 #[cfg(target_os = "macos")]
                 spec,
                 slot: None,
-                overlays: vec![],
             },
         );
         Ok(())
@@ -231,64 +177,36 @@ impl Panels {
     pub fn get(&mut self, id: PanelId) -> Result<&mut Panel> {
         self.items.get_mut(&id).ok_or(Error::UnknownPanel)
     }
-    pub fn snapshot(&self) -> CompositionSnapshot {
-        let mut panels: Vec<_> = self
-            .items
-            .iter()
-            .filter_map(|(id, p)| p.slot.clone().map(|s| (*id, s)))
-            .collect();
-        panels.sort_by_key(|(id, s)| (s.reading_order, *id));
-        let overlay_holes: Vec<_> = panels
-            .iter()
-            .flat_map(|(id, _)| self.items[id].overlays.iter())
-            .map(|r| r.intersection(self.viewport))
-            .filter(|r| r.w > 0. && r.h > 0.)
-            .collect();
-        let mut visible_union: Vec<_> = match &self.regions {
-            None => panels
-                .iter()
-                .map(|(_, s)| s.visible().intersection(self.viewport))
+    /// Window-space rectangles the page shows through, clipped to the viewport.
+    pub fn visible(&self) -> Vec<Rect> {
+        match &self.regions {
+            None => self
+                .items
+                .values()
+                .filter_map(|p| p.slot.as_ref())
+                .map(|s| s.visible().intersection(self.viewport))
                 .collect(),
             Some(regions) => regions
                 .iter()
                 .map(|r| r.intersection(self.viewport))
                 .filter(|r| r.w > 0. && r.h > 0.)
                 .collect(),
-        };
-        visible_union.extend(overlay_holes.iter().copied());
-        CompositionSnapshot {
-            panels,
-            overlay_holes,
-            visible_union,
         }
-    }
-    pub fn overlays(&mut self, id: PanelId, rects: Vec<Rect>) -> Result<()> {
-        if rects.len() > 128 || rects.iter().any(|r| !r.valid()) {
-            return Err(Error::InvalidGeometry);
-        }
-        let p = self.get(id)?;
-        if p.slot.is_none() {
-            return Err(Error::Forbidden);
-        }
-        p.overlays = rects;
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn panel(p: &mut Panels, id: u64, order: u32) {
+    fn panel(p: &mut Panels, id: u64) {
         p.create(PanelSpec {
             id,
             label: "Fixture".into(),
         })
         .unwrap();
         p.get(id).unwrap().slot = Some(PanelSlot {
-            id,
             bounds: Rect::new(10., 20., 100., 100.),
             clip: Rect::new(10., 20., 60., 100.),
-            reading_order: order,
         });
     }
     #[test]
@@ -297,13 +215,13 @@ mod tests {
             viewport: Rect::new(0., 0., 400., 400.),
             ..Panels::default()
         };
-        panel(&mut p, 1, 0);
+        panel(&mut p, 1);
         p.regions = Some(vec![
             Rect::new(0., 0., 50., 50.),
             Rect::new(300., 300., 200., 200.),
         ]);
         assert_eq!(
-            p.snapshot().visible_union,
+            p.visible(),
             vec![
                 Rect::new(0., 0., 50., 50.),
                 Rect::new(300., 300., 100., 100.)
@@ -311,12 +229,15 @@ mod tests {
         );
         // Every panel closed: the whole-window slot must not unmask the window.
         p.regions = Some(vec![]);
-        assert!(p.snapshot().visible_union.is_empty());
+        assert!(p.visible().is_empty());
     }
     #[test]
     fn logical_lifecycle_and_duplicates() {
-        let mut p = Panels::default();
-        panel(&mut p, 1, 0);
+        let mut p = Panels {
+            viewport: Rect::new(0., 0., 400., 300.),
+            ..Panels::default()
+        };
+        panel(&mut p, 1);
         assert_eq!(
             p.create(PanelSpec {
                 id: 1,
@@ -325,64 +246,9 @@ mod tests {
             Err(Error::DuplicatePanel)
         );
         assert_eq!(p.get(2).unwrap_err(), Error::UnknownPanel);
-        assert!(p.snapshot().panels.len() == 1);
+        assert_eq!(p.visible(), [Rect::new(10., 20., 60., 100.)]);
         p.get(1).unwrap().slot = None;
-        assert!(p.snapshot().visible_union.is_empty());
-    }
-    #[test]
-    fn overlay_and_clip_geometry_matches_hit_regions() {
-        let mut p = Panels {
-            viewport: Rect::new(0., 0., 400., 300.),
-            ..Default::default()
-        };
-        panel(&mut p, 1, 0);
-        p.overlays(1, vec![Rect::new(60., 110., 100., 40.)])
-            .unwrap();
-        let s = p.snapshot();
-        assert!(s.page_at(20., 30.));
-        assert!(!s.page_at(80., 30.));
-        assert!(s.page_at(100., 125.));
-        assert!(s.accepts_gpui(100., 125., &[Rect::new(90., 120., 20., 20.)]));
-        assert!(!s.accepts_gpui(100., 125., &[]));
-    }
-    #[test]
-    fn overlay_reports_are_bounded_and_finite() {
-        let mut p = Panels::default();
-        panel(&mut p, 1, 0);
-        assert_eq!(
-            p.overlays(1, vec![Rect::new(f64::NAN, 0., 1., 1.)]),
-            Err(Error::InvalidGeometry)
-        );
-        assert_eq!(
-            p.overlays(1, vec![Rect::default(); 129]),
-            Err(Error::InvalidGeometry)
-        );
-        p.get(1).unwrap().slot = None;
-        assert_eq!(p.overlays(1, vec![]), Err(Error::Forbidden));
-    }
-    #[test]
-    fn reading_order_is_independent_of_panel_id() {
-        let mut p = Panels::default();
-        panel(&mut p, 1, 9);
-        panel(&mut p, 2, 1);
-        assert_eq!(
-            p.snapshot()
-                .panels
-                .iter()
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>(),
-            [2, 1]
-        );
-    }
-    #[test]
-    fn holes_are_clamped_to_viewport() {
-        let mut p = Panels {
-            viewport: Rect::new(0., 0., 100., 100.),
-            ..Default::default()
-        };
-        panel(&mut p, 1, 0);
-        p.overlays(1, vec![Rect::new(90., 90., 50., 50.)]).unwrap();
-        assert_eq!(p.snapshot().overlay_holes, [Rect::new(90., 90., 10., 10.)]);
+        assert!(p.visible().is_empty());
     }
     #[test]
     fn store_permission_default_is_deny() {
@@ -392,94 +258,5 @@ mod tests {
         };
         assert!(t.permits("project:read"));
         assert!(!t.permits("project:write"));
-    }
-}
-
-/// Product watchdog policy consumes JS execution time, excluding time waiting
-/// on a native call. The V8/bridge owner supplies that accounting; wall time is
-/// not a substitute. Trusted Stop is always a shell decision.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WatchdogAction {
-    None,
-    Notice,
-    PromptStopWait,
-    StopStore,
-}
-#[derive(Default)]
-pub struct Watchdog {
-    notice: bool,
-    prompt: bool,
-    last_elapsed: std::time::Duration,
-    next_prompt: std::time::Duration,
-}
-impl Watchdog {
-    pub fn observe(&mut self, js_elapsed: std::time::Duration, trust: &Trust) -> WatchdogAction {
-        self.last_elapsed = js_elapsed;
-        if js_elapsed >= self.next_prompt.max(std::time::Duration::from_secs(8)) && !self.prompt {
-            self.prompt = true;
-            self.notice = true;
-            return if trust.is_store() {
-                WatchdogAction::StopStore
-            } else {
-                WatchdogAction::PromptStopWait
-            };
-        }
-        if js_elapsed >= std::time::Duration::from_secs(2) && !self.notice {
-            self.notice = true;
-            return WatchdogAction::Notice;
-        }
-        WatchdogAction::None
-    }
-    pub fn wait(&mut self) {
-        self.prompt = false;
-        self.next_prompt = self
-            .last_elapsed
-            .saturating_add(std::time::Duration::from_secs(8));
-    }
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-#[cfg(test)]
-mod watchdog_tests {
-    use super::*;
-    #[test]
-    fn trusted_hang_prompts_and_store_stops() {
-        use std::time::Duration;
-        let mut w = Watchdog::default();
-        assert_eq!(
-            w.observe(Duration::from_secs(1), &Trust::Trusted),
-            WatchdogAction::None
-        );
-        assert_eq!(
-            w.observe(Duration::from_secs(2), &Trust::Trusted),
-            WatchdogAction::Notice
-        );
-        assert_eq!(
-            w.observe(Duration::from_secs(3), &Trust::Trusted),
-            WatchdogAction::None
-        );
-        assert_eq!(
-            w.observe(Duration::from_secs(8), &Trust::Trusted),
-            WatchdogAction::PromptStopWait
-        );
-        w.wait();
-        assert_eq!(
-            w.observe(Duration::from_secs(9), &Trust::Trusted),
-            WatchdogAction::None
-        );
-        assert_eq!(
-            w.observe(Duration::from_secs(16), &Trust::Trusted),
-            WatchdogAction::PromptStopWait
-        );
-        w.reset();
-        let store = Trust::Store {
-            extension: "fixture".into(),
-            permissions: Default::default(),
-        };
-        assert_eq!(
-            w.observe(Duration::from_secs(8), &store),
-            WatchdogAction::StopStore
-        );
     }
 }

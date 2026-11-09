@@ -2,14 +2,13 @@
 //! transformed on its own; V8 then links the graph with real ES module semantics,
 //! so nothing here reimplements scope hoisting. Source text never executes here.
 use crate::manifest;
-use pm_runtime_v8::{SvelteCompiler, SvelteUnit, module_imports, strip_typescript};
+use pm_runtime_v8::{SvelteCompiler, SvelteUnit, module_imports, strip_typescript, wait_until};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -35,13 +34,16 @@ const SUFFIXES: [&str; 7] = [
 /// Bump with any change to module transforms; compiled graphs are cached by it.
 const COMPILER: &str = "native-1";
 
+/// The modules the realm bundles provide, one per line (`build-app.ts`).
+const RUNTIME_MODULES: &str = include_str!(concat!(env!("OUT_DIR"), "/runtime-modules.txt"));
+
 fn runtime_import(specifier: &str, surface: bool) -> bool {
     if surface {
         return specifier == "preact"
             || specifier.starts_with("preact/")
             || specifier.starts_with("powermove/");
     }
-    specifier == "powermove" || specifier == "svelte" || specifier.starts_with("svelte/")
+    RUNTIME_MODULES.lines().any(|module| module == specifier)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,16 +156,9 @@ impl Sources<'_> {
             .svelte
             .compile(source, &filename, unit)
             .map_err(|e| e.to_string())?;
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if let Some(result) = ticket.try_take() {
-                return result.map(|o| o.javascript).map_err(|e| e.to_string());
-            }
-            if Instant::now() > deadline {
-                return Err("Svelte compiler timed out".into());
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        let result = wait_until(&mut ticket, Instant::now() + Duration::from_secs(60))
+            .ok_or("Svelte compiler timed out")?;
+        result.map(|o| o.javascript).map_err(|e| e.to_string())
     }
     fn transform(&self, source: &str, file: &Path) -> Result<String, String> {
         let name = file.to_string_lossy();
@@ -281,10 +276,14 @@ pub fn fingerprint(root: &Path) -> Result<Vec<(PathBuf, u64, std::time::SystemTi
         })
         .collect()
 }
-fn digest_tree(root: &Path) -> Result<String, String> {
+/// Identity of everything a compile reads: the tree, the transforms and the
+/// API surface it targets.
+fn digest_tree(root: &Path, surface: bool) -> Result<String, String> {
     let mut hash = Sha256::new();
     hash.update(COMPILER);
     hash.update(pm_runtime_v8::SVELTE_VERSION);
+    hash.update(RUNTIME_MODULES);
+    hash.update([u8::from(surface)]);
     for file in tree(root)? {
         let name = file.strip_prefix(root).unwrap_or(&file).to_string_lossy();
         hash.update((name.len() as u64).to_be_bytes());
@@ -312,18 +311,20 @@ pub fn compile(
     if !manifest::safe_entry(entry) {
         return Err("Entry must be a relative .ts, .js, or .mjs source path".into());
     }
-    let hash = digest_tree(&root)?;
+    let surface = api_version >= 4;
+    let hash = digest_tree(&root, surface)?;
     let cached = cache.map(|c| c.join(format!("{}-{entry}.json", &hash[..32]).replace('/', "_")));
     if let Some(graph) = cached
         .as_ref()
         .and_then(|p| fs::read(p).ok())
         .and_then(|b| serde_json::from_slice(&b).ok())
         .and_then(|v| ModuleGraph::from_json(&v))
+        .filter(|graph| graph.hash == hash)
     {
         return Ok(graph);
     }
     let mut sources = Sources {
-        surface: api_version >= 4,
+        surface,
         root: root.clone(),
         svelte,
         seen: BTreeMap::new(),
@@ -335,7 +336,7 @@ pub fn compile(
         },
     };
     let entry_path = json!(format!("./{entry}"));
-    let bundle = if api_version >= 4 {
+    let bundle = if surface {
         format!("export * from {entry_path};")
     } else {
         format!(

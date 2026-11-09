@@ -601,7 +601,7 @@ impl Canvas {
     pub fn measure_text(
         &self,
         text: &[u16],
-        provider: &mut impl TextProvider,
+        provider: &mut (impl TextProvider + ?Sized),
     ) -> Result<TextMetrics> {
         Ok(provider
             .layout(&self.state.font, text, self.state.direction)?
@@ -617,7 +617,7 @@ impl Canvas {
         x: f64,
         y: f64,
         max_width: Option<f64>,
-        provider: &mut impl TextProvider,
+        provider: &mut (impl TextProvider + ?Sized),
     ) -> Result<()> {
         self.draw_text(text, Point::new(x, y), max_width, provider, false)
     }
@@ -627,7 +627,7 @@ impl Canvas {
         x: f64,
         y: f64,
         max_width: Option<f64>,
-        provider: &mut impl TextProvider,
+        provider: &mut (impl TextProvider + ?Sized),
     ) -> Result<()> {
         self.draw_text(text, Point::new(x, y), max_width, provider, true)
     }
@@ -636,7 +636,7 @@ impl Canvas {
         text: &[u16],
         origin: Point,
         max_width: Option<f64>,
-        provider: &mut impl TextProvider,
+        provider: &mut (impl TextProvider + ?Sized),
         stroke: bool,
     ) -> Result<()> {
         if !origin.is_finite() || max_width.is_some_and(|w| !w.is_finite() || w <= 0.) {

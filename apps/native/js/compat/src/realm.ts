@@ -1,4 +1,4 @@
-import * as powermove from "./frozen/kernel/editor-helpers";
+import * as powermove from "./frozen/reference/kernel/editor-helpers";
 import { installIcons } from "./frozen/host/icons";
 import { HostChannel, HostError } from "./channel";
 import {

@@ -13,7 +13,7 @@
 //! with its export (finished, failed or cancelled) or its window.
 use super::{Measures, PAGE_QUEUE, PAGE_SESSION, PANEL};
 use super::{Shared, TrySink};
-use crate::recorder::{CanvasText, NativeHost, RealmEvents};
+use crate::recorder::{CanvasText, NativeHost, RealmEvents, SyncLayout};
 use crate::{RasterAnswer, RasterHooks};
 use pm_compat_host::{AdmittedDomBatch, RemoteDomPanel};
 use pm_kernel::{KernelHandle, Published};
@@ -179,25 +179,30 @@ impl RealmEvents for Arc<Events> {
     fn unresponsive(&self, execution: u64) {
         let _ = self.inbox.send(RunInput::Unresponsive(execution));
     }
-    fn measure_sync(&self, request: u64) -> Option<Value> {
+    fn measure_sync(&self, request: u64) -> SyncLayout {
         let rx = match self.measuring.lock().unwrap().wait(request) {
-            Ok(answer) => return Some(answer),
+            Ok(answer) => return SyncLayout::Answer(answer),
             Err(rx) => rx,
         };
         self.dom_ready();
         // Without a page (it never started reading) nothing waits.
-        let wait =
-            if self.page_missed.load(Ordering::Acquire) && !self.reading.load(Ordering::Acquire) {
-                Duration::ZERO
-            } else {
-                READ_WAIT
-            };
-        let answer = rx.recv_timeout(wait).ok();
+        let reading = self.reading.load(Ordering::Acquire);
+        let wait = if self.page_missed.load(Ordering::Acquire) && !reading {
+            Duration::ZERO
+        } else {
+            READ_WAIT
+        };
+        let answer = rx.recv_timeout(wait);
         self.measuring.lock().unwrap().waiting = None;
-        if answer.is_none() {
+        let Ok(answer) = answer else {
             self.layout_failed.store(true, Ordering::Release);
-        }
-        answer
+            return if reading {
+                SyncLayout::TimedOut
+            } else {
+                SyncLayout::NoPage
+            };
+        };
+        SyncLayout::Answer(answer)
     }
 }
 

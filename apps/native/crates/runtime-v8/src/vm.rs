@@ -151,15 +151,19 @@ impl Blocked {
 }
 /// The extension a stack capture found running one execution.
 #[derive(Clone, Default)]
-pub(crate) struct Culprit(Arc<Mutex<Option<Found>>>);
+pub(crate) struct Culprit(Arc<(Mutex<Option<Found>>, std::sync::Condvar)>);
 /// One execution and the extension found running it.
 type Found = (u64, Option<String>);
 impl Culprit {
     pub(crate) fn get(&self, execution: u64) -> Option<String> {
-        match &*self.0.lock().unwrap() {
+        match &*self.0.0.lock().unwrap() {
             Some((id, owner)) if *id == execution => owner.clone(),
             _ => None,
         }
+    }
+    fn found(&self, execution: u64, owner: Option<String>) {
+        *self.0.0.lock().unwrap() = Some((execution, owner));
+        self.0.1.notify_all();
     }
 }
 /// The realm's context, for code that runs inside it from an interrupt.
@@ -182,19 +186,12 @@ pub(crate) fn capture_culprit(handle: &v8::IsolateHandle, slot: &Culprit, execut
         drop(unsafe { Box::from_raw(capture) });
         return;
     }
-    let deadline = Instant::now() + Duration::from_millis(250);
-    while Instant::now() < deadline {
-        if slot
-            .0
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|(id, _)| *id == execution)
-        {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    let (found, captured) = &*slot.0;
+    let _ = captured
+        .wait_timeout_while(found.lock().unwrap(), Duration::from_millis(250), |found| {
+            found.as_ref().is_none_or(|(id, _)| *id != execution)
+        })
+        .unwrap();
 }
 unsafe extern "C" fn capture_stack(mut raw: v8::UnsafeRawIsolatePtr, data: *mut c_void) {
     // SAFETY: `data` is the box `capture_culprit` leaked for exactly this callback.
@@ -202,7 +199,7 @@ unsafe extern "C" fn capture_stack(mut raw: v8::UnsafeRawIsolatePtr, data: *mut 
     // V8 invokes this with the isolate entered, on its currently locked owner.
     let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw) };
     let Some(MainContext(context)) = isolate.get_slot::<MainContext>().cloned() else {
-        *capture.slot.0.lock().unwrap() = Some((capture.execution, None));
+        capture.slot.found(capture.execution, None);
         return;
     };
     v8::scope!(let hs, isolate);
@@ -221,7 +218,7 @@ unsafe extern "C" fn capture_stack(mut raw: v8::UnsafeRawIsolatePtr, data: *mut 
             }
         }
     }
-    *capture.slot.0.lock().unwrap() = Some((capture.execution, owner));
+    capture.slot.found(capture.execution, owner);
 }
 /// `pmext://<id>/<generation>/<file>`: the extension a module belongs to.
 pub(crate) fn extension_of_module(url: &str) -> Option<&str> {

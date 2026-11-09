@@ -1,10 +1,12 @@
-/** Verbatim copy of the current reference's pure runtime closure. Run with Bun. */
+/** Verbatim copy of the current reference's pure runtime closure: the legacy
+ * runtime, the controls and the public `powermove` module. Run with Bun. */
 import { dirname, join, normalize, relative } from "node:path";
 const root = join(import.meta.dir, "../../../../..");
 const reference = "c7f46a05641b23944d3692c9d80f9677c7e1ef1d";
 const base = "apps/desktop/src/renderer/src/";
 const target = join(import.meta.dir, "../src/frozen/reference");
 const entries = [
+  "kernel/editor-helpers.ts",
   "legacy/core/anim.ts",
   "legacy/core/easing.ts",
   "legacy/core/selection.ts",

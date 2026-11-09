@@ -659,6 +659,7 @@ checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
 dependencies = [
  "fontconfig-parser",
  "log",
+ "memmap2",
  "slotmap",
  "tinyvec",
 ]
@@ -1511,6 +1512,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-image-io"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32b0446e98cf4a784cc7a0177715ff317eeaa8463841c616cfc78aa4f953c4ea"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2090,7 +2103,7 @@ dependencies = [
  "pm-compat-runner",
  "pm-mcp",
  "pm-promedia",
- "pm-recorder-raster",
+ "pm-recorder",
  "pm-remote-dom",
  "pm-runtime-v8",
  "pm-services",
@@ -2143,7 +2156,11 @@ dependencies = [
  "block2",
  "ed25519-dalek",
  "objc2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-text",
  "objc2-foundation",
+ "objc2-image-io",
  "pm-compat-host",
  "pm-kernel",
  "pm-mcp",
@@ -2153,6 +2170,7 @@ dependencies = [
  "pm-runtime-v8",
  "pm-store-host",
  "png",
+ "resvg",
  "serde_json",
  "sha2",
  "url",
@@ -2314,15 +2332,6 @@ dependencies = [
  "pm-vector",
  "read-fonts 0.45.1",
  "unicode-bidi",
-]
-
-[[package]]
-name = "pm-recorder-raster"
-version = "0.1.0"
-dependencies = [
- "kurbo",
- "libm",
- "pm-recorder",
 ]
 
 [[package]]

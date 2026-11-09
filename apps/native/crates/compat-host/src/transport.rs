@@ -55,10 +55,7 @@ impl Channel {
         }
         let route = parts.next().ok_or(Error::InvalidRequest)?.to_owned();
         if parts.next().is_some()
-            || !matches!(
-                route.as_str(),
-                "call" | "events" | "page" | "canvas" | "font"
-            )
+            || !matches!(route.as_str(), "call" | "events" | "canvas" | "font")
         {
             return Err(Error::InvalidRequest);
         }
@@ -138,12 +135,8 @@ pub(crate) fn csp(nonce: &str, trust: &Trust) -> String {
         "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline' data: blob:{remote}; img-src data: blob:{remote}; font-src pmcompat: data: blob:{remote}; connect-src pmcompat: data: blob:; media-src data: blob:{remote}; object-src 'none'; worker-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
     )
 }
-#[cfg(test)]
-pub(crate) fn page(base: &str, nonce: &str, generation: Generation) -> String {
-    page_with_applier(base, nonce, generation, PAGE_APPLIER, &Trust::Trusted)
-}
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn page_with_applier(
+pub(crate) fn page(
     base: &str,
     nonce: &str,
     generation: Generation,
@@ -152,7 +145,7 @@ pub(crate) fn page_with_applier(
 ) -> String {
     let cfg = json!({"base":base,"generation":generation});
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style>html,body{{margin:0;background:transparent;font:14px -apple-system;color:CanvasText}}[data-pm-panel]{{position:fixed;overflow:visible}}[data-pm-panel][hidden]{{display:none}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta name=\"color-scheme\" content=\"dark light\"><style>html,body{{margin:0;background:transparent;font:14px -apple-system;color:CanvasText}}html:not([data-pm-modal-doc]) [data-pm-modal]{{display:none}}[data-pm-modal-doc] body{{background:transparent;padding:0 20px}}</style><script nonce=\"{}\">const PM_HOST_CONFIG={};{}</script>",
         csp(nonce, trust),
         nonce,
         cfg,
@@ -230,18 +223,6 @@ mod tests {
         assert!(c.poll(0).unwrap().is_none());
     }
     #[test]
-    fn custom_adapter_replaces_fixture_code() {
-        let html = page_with_applier(
-            "pmcompat://host/fixture/",
-            "fixture",
-            1,
-            "window.customAdapter=true;",
-            &Trust::Trusted,
-        );
-        assert!(html.contains("window.customAdapter=true;"));
-        assert!(!html.contains("Minimal adapter fixture"));
-    }
-    #[test]
     fn manifest_network_permission_changes_asset_csp_only() {
         let denied = Trust::Store {
             extension: "fixture".into(),
@@ -274,11 +255,19 @@ mod tests {
         assert!(!format!("{:?}", channel()).contains("test-capability"));
     }
     #[test]
-    fn bootstrap_has_no_eval_or_network_origin() {
-        let h = page("pmcompat://host/test/", "test-nonce", 1);
-        assert!(h.contains("script-src 'nonce-test-nonce'"));
-        assert!(h.contains("connect-src pmcompat:"));
-        assert!(!PAGE_APPLIER.contains("evaluateJavaScript"));
-        assert!(!PAGE_APPLIER.contains("eval("));
+    fn only_the_nonced_bundle_runs_and_it_connects_only_to_its_channel() {
+        let h = page(
+            "pmcompat://host/test/",
+            "test-nonce",
+            1,
+            "window.bundle=true;",
+            &Trust::Trusted,
+        );
+        let policy = csp("test-nonce", &Trust::Trusted);
+        assert!(h.contains(&policy));
+        assert!(policy.contains("script-src 'nonce-test-nonce';"));
+        assert!(!policy.contains("unsafe-eval"));
+        assert!(policy.contains("connect-src pmcompat: data: blob:;"));
+        assert!(h.contains("<script nonce=\"test-nonce\">const PM_HOST_CONFIG={\"base\":\"pmcompat://host/test/\",\"generation\":1};window.bundle=true;</script>"));
     }
 }

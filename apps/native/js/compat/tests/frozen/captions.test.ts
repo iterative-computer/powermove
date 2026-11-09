@@ -19,7 +19,7 @@ import {
   trimCue,
   updateCues,
   type CaptionCue,
-} from "../../src/legacy/captions-model";
+} from "../../src/frozen/reference/captions/model";
 
 const ids = () => {
   let n = 0;

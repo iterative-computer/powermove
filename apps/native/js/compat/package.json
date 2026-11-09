@@ -6,11 +6,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./testing": "./tests/fake-host.ts",
-    "./powermove": "./src/frozen/kernel/editor-helpers.ts"
+    "./powermove": "./src/frozen/reference/kernel/editor-helpers.ts"
   },
   "scripts": {
     "test": "bun test tests",
-    "build": "bun build src/browser.ts --target=browser --format=iife --outfile=dist/compat-realm.js",
+    "build": "bun scripts/build-app.ts dist",
     "typecheck": "tsc --noEmit",
     "replay": "bun scripts/replay.ts",
     "corpus": "bun scripts/corpus.ts",

@@ -5,7 +5,7 @@ import { describe, expect, it } from "bun:test";
 import {
   temporalEvaluate,
   temporalKeys,
-} from "../../src/frozen/legacy/core/temporal-bridge";
+} from "../../src/frozen/reference/legacy/core/temporal-bridge";
 
 describe("prepared temporal evaluation", () => {
   it("keeps legacy accessors when a track grows and rebinds them when keys move to another track", () => {

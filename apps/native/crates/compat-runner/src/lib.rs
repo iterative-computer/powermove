@@ -119,18 +119,12 @@ pub(crate) fn pool(scope: &str, host: Arc<NativeHost>) -> Result<RuntimePool> {
     )
 }
 pub(crate) fn settled(realm: &Realm, source: &str, seconds: u64) -> Result<Evaluation> {
-    let ticket = realm.eval(source)?;
+    let mut ticket = realm.eval(source)?;
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result;
-        }
-        if Instant::now() > deadline {
-            realm.stop(ticket.execution);
-            return Err(Error::Host("compat runner execution timeout".into()));
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until(&mut ticket, deadline).unwrap_or_else(|| {
+        realm.stop(ticket.execution);
+        Err(Error::Host("compat runner execution timeout".into()))
+    })
 }
 pub(crate) fn boot_realm(realm: &Realm, host: &NativeHost, prelude: &str) -> Result<()> {
     if !prelude.is_empty() {
@@ -1015,14 +1009,14 @@ mod tests {
                 }
                 Err("Capture cancelled".into())
             })));
-        let ticket = runner.realm.eval("PM.renderFrameTo(0,2,2)").unwrap();
+        let mut ticket = runner.realm.eval("PM.renderFrameTo(0,2,2)").unwrap();
         thread::sleep(Duration::from_millis(50));
         runner.realm.stop(ticket.execution);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while ticket.try_take().is_none() {
-            assert!(Instant::now() < deadline, "the capture outlived Stop");
-            thread::sleep(Duration::from_millis(5));
-        }
+        assert!(
+            pm_runtime_v8::wait_until(&mut ticket, deadline).is_some(),
+            "the capture outlived Stop"
+        );
     }
     #[test]
     fn extension_bytes_are_staged_as_files_and_held_files_read_lazily() {

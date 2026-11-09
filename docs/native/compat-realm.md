@@ -1,8 +1,9 @@
 # v1–3 compatibility realm bundle
 
 P2 package 9 lives in `apps/native/js/compat` as `@powermove/compat-realm`.
-The production entry is `src/index.ts`; `bun run build` produces the
-`PowermoveCompat` IIFE in ignored `dist/compat-realm.js`. It has no runtime
+The production entry is `src/index.ts`; `bun run build` writes the bundles the
+app embeds (`compat.js`, `store.js`, `page.js` and the runtime module list) to
+ignored `dist/`, as compat-runner's build script does. They have no runtime
 package dependencies, Node/Bun imports, Chromium, or required DOM global.
 Bun, TypeScript, Happy DOM, jsdom, Prettier and the Svelte compiler are development/test tools only. The shared Svelte runtime is injected by the embedder.
 
@@ -18,19 +19,22 @@ Reference: tag `v1.2.0`, commit
 | Source at the tag                                                       | Package implementation                                                                                                          |
 | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `renderer/src/kernel/services.ts`                                       | `src/services.ts`: unchanged stack/identity/disposal behavior; local type imports                                               |
-| `renderer/src/kernel/editor-helpers.ts` and its 15-module export graph  | `src/frozen`: complete frozen `powermove` runtime exports, with shared caption modules re-exported                              |
 | `renderer/src/kernel/registry.ts`                                       | `src/registry.ts`: contribution stacks, batches and ownership                                                                   |
 | `renderer/src/kernel/keychord.ts`                                       | `src/keychord.ts`: chord helpers; DOM helpers are not required at module load                                                   |
 | `renderer/src/controls/gesture.ts`                                      | `src/gesture.ts`: exact command/set/local dispatcher; local types                                                               |
 | `renderer/src/legacy/core/model.ts`                                     | `src/legacy/model.ts`: factories, defaults, clone and serialization; excludes model/index/group/composition install and HMR     |
 | `renderer/src/core/color-depth.ts`, `core/export-defaults.ts`           | Pure helpers under `src/legacy`                                                                                                 |
-| `renderer/src/captions/model.ts`, `core/types/captions.ts`              | Pure caption helpers under `src/legacy`                                                                                         |
 | `renderer/src/kernel/registries.ts`                                     | `src/keymap.ts`: DOM-free adaptation of binding sorting and synchronous bubble resolution                                       |
 | `kernel/install.ts`, `legacy/core/history.ts`, `legacy/core/editing.ts` | `src/realm.ts`: new kernel-channel facade preserving documented admission/return forms; history/document authority stays native |
 
 Paths in the table are beneath `apps/desktop/src` at the frozen tag.
-The complete frozen `powermove` helper export graph is also extracted under
-`src/frozen`; it is available through the package `./powermove` subpath and
+
+`bun run freeze-reference` copies, verbatim, the relative-import closure of the
+public `powermove` module (`kernel/editor-helpers.ts`), the legacy runtime and
+the shared controls from commit `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`
+into `src/frozen/reference`. That module's code is identical at the v1.2.0 tag;
+one copy serves extensions, the legacy runtime, the controls and the Store
+facades. It is available through the package `./powermove` subpath and
 `__powermove_runtime.powermove`. The embedding compiler/runtime supplies its shared
 Svelte modules through `runtimeModules`. DOM helper bodies use only bridge globals
 when called; they do not require a document at bundle load.
