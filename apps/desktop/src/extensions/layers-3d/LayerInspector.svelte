@@ -5,7 +5,8 @@
   import MaterialsSection from './MaterialsSection.svelte';
   import PartsSection from './PartsSection.svelte';
   import WorldSection from './WorldSection.svelte';
-  import { FOG_FIELDS, TERRAIN_FIELDS, REGION_FIELDS, SCATTER_FIELDS, MATERIAL_OPTION_FIELDS, IRIS_FIELDS, SKY_PRESET_VALUES, environmentKind, worldLayer, addWorld, scatterSources, environmentSourceChoices, pickEnvironmentImage, sourceKey, sourceFromKey } from './environment-ui';
+  import MaterialOptionsRows from './MaterialOptionsRows.svelte';
+  import { FOG_FIELDS, TERRAIN_FIELDS, REGION_FIELDS, SCATTER_FIELDS, IRIS_FIELDS, SKY_PRESET_VALUES, environmentKind, worldLayer, addWorld, scatterSources, environmentSourceChoices, pickEnvironmentImage, sourceKey, sourceFromKey } from './environment-ui';
   import { MATERIAL_FIELDS, LIGHT_TYPES, lightFields, cameraFields, ENVIRONMENT_FIELDS } from './scene-model';
   import type { SceneUiState } from './scene-state.svelte';
   let { api,ui,layerId }:{api:PowermoveAPI;ui:SceneUiState;layerId:string}=$props();
@@ -28,8 +29,7 @@
     if(next==='pick'){const id=await pickEnvironmentImage(api);if(id)edit('update_terrain',{heightSource:id},'Terrain height image');return;}
     edit('update_terrain',{heightSource:sourceFromKey(String(next))},'Terrain height');
   }
-  function setOption(key:string,v:unknown,label:string){const result=api.scene3d.edit({operation:'set_material_options',target:layerId,patch:{[key]:v}},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});api.transport.invalidate();}
-  const optionValue=(key:string)=>object?.materialOptions?undefined:key==='castsShadows'?(object?.castShadow?'on':'off'):key==='acceptsShadows'?object?.receiveShadow!==false:true;
+  const optionValue=(key:string):unknown=>key==='castsShadows'?(object?.castShadow?'on':'off'):key==='acceptsShadows'?object?.receiveShadow!==false:true;
   /* Cameras made before iris existed have no iris channels: the first edit
      installs all four (set_camera fills defaults), then sets the value. */
   const IRIS_DEFAULTS:Record<string,number>={irisShape:0,irisRotation:0,irisRoundness:0,irisAspect:1};
@@ -89,12 +89,7 @@
       <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${swatches[finish.id]?'transparent':finish.p.color};${swatches[finish.id]?`background-image:url(${swatches[finish.id]});background-size:cover`:""}`} onclick={()=>studioEdit({operation:"apply_material",preset:finish.id},finish.label)}></button>{/each}</div>
       {#each baseFields as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}
-    <Section {api} title="Material Options" />
-    {#each MATERIAL_OPTION_FIELDS as field (field.key)}
-      {#if object.materialOptions}<SceneField {api} {ui} {layer} {field} path={`materialOptions.${field.key}`} channel={object.materialOptions.p[field.key]} />
-      {:else if field.kind==='select'}<Row {api} label={field.label}><SelectField {api} get={()=>optionValue(field.key)} options={(field.options ?? []).map(o=>({v:String(o.v),label:o.label}))} edit={{mode:'set',label:field.label,set:(v:unknown)=>setOption(field.key,v,field.label)}} label={field.label} /></Row>
-      {:else}<Row {api} label={field.label}><ToggleField {api} get={()=>optionValue(field.key)} edit={{mode:'set',label:field.label,set:(v:unknown)=>setOption(field.key,!!v,field.label)}} label={field.label} /></Row>{/if}
-    {/each}
+    <MaterialOptionsRows {api} {ui} {layer} options={object.materialOptions} fallback={optionValue} />
     <PartsSection {api} {ui} {layer} />
     <MaterialsSection {api} {ui} {layer} />
   {:else if light}

@@ -203,3 +203,21 @@ test('A group of models has Exploded view and Turntable in its panel', async ({ 
   await expect.poll(() => page.evaluate(() => (window as any).PM.L('top').p['position.y'].kf.length)).toBe(2);
   await shot(page, '15-group-exploded-view');
 });
+
+test('3D artwork layers have After Effects Material Options', async ({ session }) => {
+  test.setTimeout(90_000);
+  await session.openEditor();
+  const page = session.page;
+  await page.evaluate(() => {
+    const PM = (window as any).PM; PM.pause();
+    PM.Kernel.api('artwork-options-e2e').scene3d.edit({ operation: 'add_camera' });
+    PM.Edit.apply({ type: 'add_layer', id: 'card', layerType: 'solid', name: 'Card', threeD: true, content: { w: 400, h: 300, color: '#E5484D' } });
+    PM.L('card').threeD = true; PM.touch?.();
+    PM.selectLayers(['card']);
+  });
+  await pick(page, 'Casts Shadows', 'Only');
+  await expect.poll(() => page.evaluate(() => (window as any).PM.L('card').d.materialOptions?.p.castsShadows.v)).toBe('only');
+  await expect(page.locator('[data-scene-channel="materialOptions.acceptsLights"]')).toBeAttached();
+  await page.locator('[data-scene-channel="materialOptions.castsShadows"]').scrollIntoViewIfNeeded();
+  await shot(page, '16-artwork-material-options');
+});

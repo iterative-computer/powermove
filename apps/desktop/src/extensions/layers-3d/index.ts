@@ -5,6 +5,7 @@ import { STUDIO_CUBE } from './studio-cube';
 import LayerInspector from './LayerInspector.svelte';
 import ExtrusionInspector from './ExtrusionInspector.svelte';
 import GroupTools from './GroupTools.svelte';
+import ArtworkMaterialOptions from './ArtworkMaterialOptions.svelte';
 import {isExtrudable,isExtruded,installSurfaceProperty,surfaceAt} from './extrusion';
 import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems,is3DLayer,addMenuItems} from './scene-actions';
 import {PRIMITIVES,LIGHT_TYPES} from './scene-model';
@@ -68,6 +69,11 @@ export default function activate(api:PowermoveAPI):void {
   for(const c of commands)api.commands.register({...c,category:'Layer'});
   api.inspector.registerSection({id:'3d-model',title:'3D',after:'content',when:({layerIds})=>layerIds.length===1&&is3DLayer(api.model.layer(layerIds[0]!)),
     build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(LayerInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
+  // After Effects' Material Options for any 3D artwork layer (models have them in the 3D section,
+  // extruded text and shapes under Geometry Options beside Front/Bevel/Side/Back).
+  const artwork3D=(layer:any)=>!!layer?.threeD&&!is3DLayer(layer)&&!isExtruded(layer)&&['solid','image','video','text','shape','precomp'].includes(layer.type);
+  api.inspector.registerSection({id:'3d-material-options',title:'Material Options',after:'transform',when:({layerIds})=>layerIds.length===1&&artwork3D(api.model.layer(layerIds[0]!)),
+    build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(ArtworkMaterialOptions,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
   // Turntable and exploded view for a group of models.
   api.inspector.registerSection({id:'3d-group',title:'3D Group',after:'content',when:({layerIds})=>layerIds.length===1&&api.scene3d.isGroup(layerIds[0]!),
     build(target,{layerIds}){const component=mount(GroupTools,{target,props:{api,layerId:layerIds[0]!}});return()=>{void unmount(component);};}});
