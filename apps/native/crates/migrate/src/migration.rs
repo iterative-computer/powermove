@@ -117,6 +117,10 @@ pub enum Status {
     Unclassified,
     NewlyMissing,
     RegeneratePoster,
+    /// Its original is in a folder the person didn't give access to (denied,
+    /// skipped or unanswered) and nothing captured stands in. Offline, never
+    /// blocking; it keeps its source for a relink or a later grant.
+    NotReached,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -562,31 +566,34 @@ pub fn migrate_many_with_disk(
                         | crate::library_media::SourceStatus::Verified
                 )
         });
-        let status = if unavailable_disk && stored.is_none() && !reference.poster {
-            Status::NewlyMissing
-        } else if reference.poster {
-            if stored.is_some() {
+        let status =
+            if reference.unreached && !reference.poster && original.is_none() && stored.is_none() {
+                Status::NotReached
+            } else if unavailable_disk && stored.is_none() && !reference.poster {
+                Status::NewlyMissing
+            } else if reference.poster {
+                if stored.is_some() {
+                    Status::VerifiedOriginal
+                } else {
+                    Status::RegeneratePoster
+                }
+            } else if original.is_some() {
                 Status::VerifiedOriginal
-            } else {
-                Status::RegeneratePoster
-            }
-        } else if original.is_some() {
-            Status::VerifiedOriginal
-        } else if stored.is_some() && reference.is_proxy() {
-            Status::ProxyOnly
-        } else if stored.is_some() {
-            // A sampled mismatch can mean a transformed TIFF/HEIC/animation.
-            // Preserve it and warn; never call those bytes a verified original.
-            if reference.fingerprint.is_some() {
+            } else if stored.is_some() && reference.is_proxy() {
                 Status::ProxyOnly
+            } else if stored.is_some() {
+                // A sampled mismatch can mean a transformed TIFF/HEIC/animation.
+                // Preserve it and warn; never call those bytes a verified original.
+                if reference.fingerprint.is_some() {
+                    Status::ProxyOnly
+                } else {
+                    Status::Unclassified
+                }
+            } else if reference.before == Availability::Offline {
+                Status::AlreadyOffline
             } else {
-                Status::Unclassified
-            }
-        } else if reference.before == Availability::Offline {
-            Status::AlreadyOffline
-        } else {
-            Status::NewlyMissing
-        };
+                Status::NewlyMissing
+            };
         // Availability can improve. Losing an available original (even when a
         // proxy remains), or losing an available proxy, blocks that owner.
         let lost = match reference.before {

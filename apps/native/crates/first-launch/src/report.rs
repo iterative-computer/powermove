@@ -92,9 +92,7 @@ pub fn load(native: &Path) -> Result<Report> {
                 let status = serde_json::from_value::<Status>(entry["status"].clone());
                 let kind = match status {
                     Ok(Status::ProxyOnly) => ReportKind::Proxies,
-                    Ok(Status::AlreadyOffline) if entry["reference"]["unreached"] == true => {
-                        ReportKind::NotReached
-                    }
+                    Ok(Status::NotReached) => ReportKind::NotReached,
                     _ => continue,
                 };
                 let key = entry["reference"]["key"].as_str().unwrap_or("Media");

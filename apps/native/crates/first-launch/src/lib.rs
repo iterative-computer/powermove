@@ -201,6 +201,10 @@ pub struct State {
     /// The person's answer about originals in folders macOS guards.
     #[serde(default)]
     pub folder_access: Option<source_access::Choice>,
+    /// What became of each folder macOS guards, by its resolved path: a later
+    /// run opens only granted ones and never asks in the background.
+    #[serde(default)]
+    pub folder_outcomes: std::collections::BTreeMap<PathBuf, source_access::Outcome>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -429,18 +433,24 @@ fn run_inner(
             source_stamp: None,
             latest_pass: None,
             folder_access: None,
+            folder_outcomes: Default::default(),
         };
         publish(&native, &state)?;
         state
     };
-    if let Some(choice) = folder_choice
-        && state.folder_access != Some(choice)
-    {
+    // The person's answer covers the folders the explanation named (`Pending`),
+    // never folders found later.
+    if let Some(choice) = folder_choice {
         state.folder_access = Some(choice);
+        source_access::answer(
+            &mut state.folder_outcomes,
+            choice == source_access::Choice::Allow,
+        );
         publish(&native, &state)?;
     }
     // Only a host that installed a policy guards folders; without one, opens are direct.
-    source_access::choose(state.folder_access.unwrap_or(source_access::Choice::Ask));
+    source_access::choose(source_access::Choice::Ask);
+    source_access::remember(&state.folder_outcomes);
     ensure!(
         state.version == 1 && state.bundle_id == BETA_BUNDLE_ID && state.source == source,
         "profile migration identity mismatch"
@@ -484,6 +494,8 @@ fn run_inner(
                 total,
             })
         })?;
+        state.folder_outcomes.extend(source_access::outcomes());
+        publish(&native, &state)?;
         // Nothing in a guarded folder was opened. Explain before macOS asks.
         let folders = source_access::asked();
         if !folders.is_empty() {
@@ -522,6 +534,8 @@ fn run_inner(
     source_access::begin_bytes(0);
     hook(Event::Started(Step::Media))?;
     let pass = media(&native, &root, &batches, &closure, &mut hook)?;
+    state.folder_outcomes.extend(source_access::outcomes());
+    publish(&native, &state)?;
     if !state.completed.contains(&Step::Media) {
         state.latest_pass = Some(pass.snapshot.clone());
         finish(&native, &mut state, Step::Media, &mut hook)?;
@@ -728,13 +742,13 @@ fn summary(state: &State, pass: &Pass) -> Outcome {
         already_offline: pass
             .closure
             .iter()
-            .filter(|e| e.status == migration::Status::AlreadyOffline && !e.reference.unreached)
+            .filter(|e| e.status == migration::Status::AlreadyOffline)
             .count(),
         // Files, not references: undo history repeats the same original.
         not_reached: pass
             .closure
             .iter()
-            .filter(|e| e.status == migration::Status::AlreadyOffline && e.reference.unreached)
+            .filter(|e| e.status == migration::Status::NotReached)
             .filter_map(|e| e.reference.source_path.as_ref())
             .collect::<BTreeSet<_>>()
             .len(),

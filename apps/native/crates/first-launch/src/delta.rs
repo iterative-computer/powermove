@@ -262,13 +262,11 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
     let (source, native) = validate(config)?;
     let mut state = load_state(&native, &source)?;
     let _lock = lease(&native)?;
-    // Behind the open library nobody sees an explanation, so a folder macOS
-    // protects is opened only if the person allowed it at first launch.
-    let _folders = crate::source_access::ensure(
-        state
-            .folder_access
-            .unwrap_or(crate::source_access::Choice::Skip),
-    );
+    // Behind the open library nobody sees an explanation: only folders macOS
+    // granted open; a new one waits for the person (`Pending`), and nothing
+    // refused or unanswered is retried.
+    let _folders = crate::source_access::ensure(crate::source_access::Choice::Defer);
+    crate::source_access::remember(&state.folder_outcomes);
     let deltas = native.join("first-launch-deltas");
     let pending = deltas.join("pending");
     let next = Checkpoint::load(&pending)?;
@@ -279,6 +277,10 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
     } else {
         let c = closure::inventory(&next, &pending, &batches, &mut |_, _| Ok(()))?;
         disk::atomic(&availability, &c)?;
+        state
+            .folder_outcomes
+            .extend(crate::source_access::outcomes());
+        publish(&native, &state)?;
         c
     };
     hook(Event::Started(Step::Media))?;

@@ -4,6 +4,12 @@
 //! (`Choice::Allow`), never waits on an unanswered prompt, and reports what it
 //! couldn't reach. Metadata (`lstat`) is not guarded; only opening is.
 //!
+//! Each guarded folder's answer is an [`Outcome`] the caller persists, so a later
+//! run never asks again in the background: only granted folders open then, and
+//! a folder seen for the first time waits (`Pending`) for the person. Folders
+//! are matched after resolving symlinked ancestors, so an alias into Downloads
+//! is Downloads.
+//!
 //! The policy is per thread: the migration worker installs it, and code on that
 //! thread opens sources through [`open`]. Without a policy every open is direct.
 use serde::{Deserialize, Serialize};
@@ -24,10 +30,34 @@ use std::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Choice {
-    /// Not told yet: guarded sources are counted, never opened.
+    /// Someone can be told: a folder without an answer is counted and left
+    /// `Pending` for the explanation, never opened.
     Ask,
+    /// The person's last answer at first launch (kept for older states; each
+    /// folder's own [`Outcome`] is what counts).
     Allow,
     Skip,
+    /// Nobody is there to ask (a later launch, behind the open library): only
+    /// granted folders open; a new one is recorded `Pending`, never prompted.
+    Defer,
+}
+/// What became of a guarded folder. Persisted by the caller across runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Outcome {
+    /// macOS allowed it: later runs open it directly.
+    Granted,
+    /// The person read the explanation and chose Continue: the next foreground
+    /// open asks macOS (never in the background).
+    Allowed,
+    /// macOS refused it.
+    Denied,
+    /// The person chose Skip These Files.
+    Skipped,
+    /// The prompt went unanswered past the timeout. Never retried silently.
+    Unanswered,
+    /// Seen while nobody could be asked; waits for the person's answer.
+    Pending,
 }
 
 /// Shared with the window, which polls it: bytes for the running step, and the
@@ -68,9 +98,9 @@ const PROMPT_SHOWN: Duration = Duration::from_millis(400);
 
 struct Policy {
     choice: Choice,
+    /// Resolved through symlinks, as paths are before matching.
     roots: Vec<(PathBuf, String)>,
-    granted: BTreeSet<PathBuf>,
-    skipped: BTreeSet<PathBuf>,
+    outcomes: BTreeMap<PathBuf, Outcome>,
     asked: BTreeMap<String, BTreeSet<PathBuf>>,
     activity: Arc<Activity>,
     timeout: Duration,
@@ -133,9 +163,11 @@ pub fn install_with(
     POLICY.with(|p| {
         *p.borrow_mut() = Some(Policy {
             choice,
-            roots,
-            granted: BTreeSet::new(),
-            skipped: BTreeSet::new(),
+            roots: roots
+                .into_iter()
+                .map(|(root, name)| (resolve_dir(&root, &mut 0), name))
+                .collect(),
+            outcomes: BTreeMap::new(),
             asked: BTreeMap::new(),
             activity,
             timeout,
@@ -163,6 +195,24 @@ pub fn choose(choice: Choice) {
     });
 }
 
+/// Seeds the policy with folder outcomes a previous run persisted.
+pub fn remember(outcomes: &BTreeMap<PathBuf, Outcome>) {
+    POLICY.with(|p| {
+        if let Some(policy) = p.borrow_mut().as_mut() {
+            for (root, outcome) in outcomes {
+                policy.outcomes.insert(resolve_dir(root, &mut 0), *outcome);
+            }
+        }
+    });
+}
+/// Every folder outcome known now, for the caller to persist.
+pub fn outcomes() -> BTreeMap<PathBuf, Outcome> {
+    POLICY.with(|p| {
+        p.borrow()
+            .as_ref()
+            .map_or(BTreeMap::new(), |policy| policy.outcomes.clone())
+    })
+}
 /// Guarded folders seen while asking, with how many files each holds.
 pub fn asked() -> Vec<(String, usize)> {
     POLICY.with(|p| {
@@ -185,11 +235,56 @@ pub fn folder_of(path: &Path) -> Option<String> {
     })
 }
 fn root_of(policy: &Policy, path: &Path) -> Option<(PathBuf, String)> {
+    let resolved = resolve(path);
     policy
         .roots
         .iter()
-        .find(|(root, _)| path.starts_with(root))
+        .find(|(root, _)| resolved.starts_with(root))
         .cloned()
+}
+/// `path` with every symlinked ancestor resolved, using `lstat`/`readlink` only:
+/// metadata, which macOS doesn't guard (reading a guarded folder would prompt).
+/// The last component stays as named; opens refuse a symlink there.
+pub fn resolve(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => resolve_dir(parent, &mut 0).join(name),
+        _ => path.to_owned(),
+    }
+}
+fn resolve_dir(path: &Path, hops: &mut u32) -> PathBuf {
+    use std::path::Component;
+    let parts: Vec<Component> = path.components().collect();
+    let mut out = PathBuf::new();
+    for (i, part) in parts.iter().enumerate() {
+        match part {
+            Component::Prefix(_) | Component::RootDir => out.push(part.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => {
+                let next = out.join(name);
+                let link =
+                    std::fs::symlink_metadata(&next).is_ok_and(|m| m.file_type().is_symlink());
+                match std::fs::read_link(&next) {
+                    Ok(target) if link && *hops < 40 => {
+                        *hops += 1;
+                        let mut rest = if target.is_absolute() {
+                            target
+                        } else {
+                            out.join(target)
+                        };
+                        for later in &parts[i + 1..] {
+                            rest.push(later.as_os_str());
+                        }
+                        return resolve_dir(&rest, hops);
+                    }
+                    _ => out = next,
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Counts bytes the running step has read once (never its verification passes).
@@ -242,19 +337,23 @@ pub fn open(path: &Path, options: &OpenOptions) -> io::Result<File> {
         let Some((root, name)) = root_of(policy, path) else {
             return Plan::Direct;
         };
-        if policy.skipped.contains(&root) {
-            return Plan::Refuse;
-        }
-        if policy.granted.contains(&root) {
-            return Plan::Direct;
-        }
-        match policy.choice {
-            Choice::Ask => {
-                policy.asked.entry(name).or_default().insert(path.into());
+        let background = policy.choice == Choice::Defer;
+        match policy.outcomes.get(&root) {
+            Some(Outcome::Granted) => Plan::Direct,
+            Some(Outcome::Denied | Outcome::Skipped | Outcome::Unanswered) => Plan::Refuse,
+            Some(Outcome::Allowed) if !background => {
+                Plan::Guarded(root, name, policy.activity.clone(), policy.timeout)
+            }
+            Some(Outcome::Allowed) => Plan::Refuse,
+            // No answer for this folder yet: in the foreground it joins the
+            // explanation; in the background it waits.
+            Some(Outcome::Pending) | None => {
+                if !background {
+                    policy.asked.entry(name).or_default().insert(path.into());
+                }
+                policy.outcomes.insert(root, Outcome::Pending);
                 Plan::Refuse
             }
-            Choice::Skip => Plan::Refuse,
-            Choice::Allow => Plan::Guarded(root, name, policy.activity.clone(), policy.timeout),
         }
     });
     let (root, name, activity, timeout) = match plan {
@@ -270,46 +369,61 @@ pub fn open(path: &Path, options: &OpenOptions) -> io::Result<File> {
     });
     activity.skip.store(false, Ordering::Release);
     let started = Instant::now();
-    let result = loop {
+    let (result, outcome) = loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(result) => break Some(result),
+            Ok(Ok(file)) => break (Ok(file), Some(Outcome::Granted)),
+            Ok(Err(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
+                break (Err(e), Some(Outcome::Denied));
+            }
+            Ok(Err(e)) => break (Err(e), None),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break Some(Err(io::Error::other("folder access check stopped")));
+                break (Err(io::Error::other("folder access check stopped")), None);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if started.elapsed() >= PROMPT_SHOWN && activity.waiting().is_none() {
                     activity.set_waiting(Some(name.clone()));
                 }
-                if activity.skip.swap(false, Ordering::AcqRel) || started.elapsed() >= timeout {
-                    break None;
+                if activity.skip.swap(false, Ordering::AcqRel) {
+                    break (Err(not_reached()), Some(Outcome::Skipped));
+                }
+                if started.elapsed() >= timeout {
+                    break (Err(not_reached()), Some(Outcome::Unanswered));
                 }
             }
         }
     };
     activity.set_waiting(None);
-    POLICY.with(|p| {
-        if let Some(policy) = p.borrow_mut().as_mut() {
-            match &result {
-                Some(Ok(_)) => {
-                    policy.granted.insert(root);
-                }
-                Some(Err(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
-                    policy.skipped.insert(root);
-                }
-                None => {
-                    policy.skipped.insert(root);
-                }
-                Some(Err(_)) => {}
+    if let Some(outcome) = outcome {
+        POLICY.with(|p| {
+            if let Some(policy) = p.borrow_mut().as_mut() {
+                policy.outcomes.insert(root, outcome);
             }
+        });
+    }
+    result
+}
+
+/// The person's answer to the explanation: every folder waiting on it
+/// (`Pending`) becomes `Allowed` or `Skipped`. Folders seen later wait again.
+pub fn answer(outcomes: &mut BTreeMap<PathBuf, Outcome>, allow: bool) {
+    for outcome in outcomes.values_mut() {
+        if *outcome == Outcome::Pending {
+            *outcome = if allow {
+                Outcome::Allowed
+            } else {
+                Outcome::Skipped
+            };
         }
-    });
-    result.unwrap_or_else(|| Err(not_reached()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn downloads(dir: &Path) -> PathBuf {
+        resolve_dir(&dir.join("Downloads"), &mut 0)
+    }
     fn roots(dir: &Path) -> Vec<(PathBuf, String)> {
         vec![(dir.join("Downloads"), "Downloads".into())]
     }
@@ -318,29 +432,81 @@ mod tests {
         o.read(true);
         o
     }
+    fn guarded(choice: Choice, dir: &Path, timeout: Duration, activity: Arc<Activity>) -> Scope {
+        std::fs::create_dir_all(dir.join("Downloads")).unwrap();
+        install_with(choice, activity, roots(dir), timeout)
+    }
+    fn allowed(dir: &Path) {
+        remember(&BTreeMap::from([(dir.join("Downloads"), Outcome::Allowed)]));
+    }
 
     #[test]
-    fn asking_counts_guarded_files_without_opening_them() {
+    fn asking_counts_guarded_files_and_only_the_answer_opens_them() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("Downloads")).unwrap();
+        let _scope = guarded(Choice::Ask, dir.path(), PROMPT_TIMEOUT, Arc::default());
         let guarded = dir.path().join("Downloads/a.mov");
         let plain = dir.path().join("b.mov");
         std::fs::write(&guarded, b"a").unwrap();
         std::fs::write(&plain, b"b").unwrap();
-        let _scope = install_with(
-            Choice::Ask,
-            Arc::default(),
-            roots(dir.path()),
-            PROMPT_TIMEOUT,
-        );
         assert!(open(&plain, &read()).is_ok());
         let error = open(&guarded, &read()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(open(&guarded, &read()).is_err());
         assert_eq!(asked(), vec![("Downloads".into(), 1)]);
-        choose(Choice::Allow);
+        let mut persisted = outcomes();
+        assert_eq!(persisted[&downloads(dir.path())], Outcome::Pending);
+        answer(&mut persisted, true);
+        remember(&persisted);
         assert!(open(&guarded, &read()).is_ok());
-        assert!(asked().is_empty());
+        assert_eq!(outcomes()[&downloads(dir.path())], Outcome::Granted);
+    }
+
+    /// An alias whose ancestor links into Downloads is Downloads.
+    #[test]
+    fn a_symlinked_ancestor_into_a_guarded_folder_is_that_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let _scope = guarded(Choice::Ask, dir.path(), PROMPT_TIMEOUT, Arc::default());
+        std::fs::create_dir(dir.path().join("Downloads/inner")).unwrap();
+        std::fs::write(dir.path().join("Downloads/inner/a.mov"), b"a").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("Downloads"), dir.path().join("alias")).unwrap();
+        std::fs::create_dir(dir.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink("../alias/inner", dir.path().join("elsewhere/link")).unwrap();
+        for path in [
+            "alias/inner/a.mov",
+            "elsewhere/link/a.mov",
+            "elsewhere/../alias/inner/a.mov",
+        ] {
+            let error = open(&dir.path().join(path), &read()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{path}");
+        }
+        assert_eq!(asked(), vec![("Downloads".into(), 3)]);
+    }
+
+    /// Behind the open library nobody can be asked: only granted folders open;
+    /// a new folder waits, and an unanswered one is never retried.
+    #[test]
+    fn the_background_never_prompts_and_never_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let _scope = guarded(Choice::Defer, dir.path(), PROMPT_TIMEOUT, Arc::default());
+        let file = dir.path().join("Downloads/a.mov");
+        std::fs::write(&file, b"a").unwrap();
+        assert!(open(&file, &read()).is_err());
+        assert_eq!(outcomes()[&downloads(dir.path())], Outcome::Pending);
+        assert!(asked().is_empty(), "nobody to explain it to");
+        for refused in [
+            Outcome::Allowed,
+            Outcome::Unanswered,
+            Outcome::Skipped,
+            Outcome::Denied,
+        ] {
+            remember(&BTreeMap::from([(dir.path().join("Downloads"), refused)]));
+            assert!(open(&file, &read()).is_err(), "{refused:?}");
+        }
+        remember(&BTreeMap::from([(
+            dir.path().join("Downloads"),
+            Outcome::Granted,
+        )]));
+        assert!(open(&file, &read()).is_ok());
     }
 
     /// A FIFO's open blocks until a writer comes, as an unanswered prompt does.
@@ -352,16 +518,11 @@ mod tests {
     #[test]
     fn an_unanswered_prompt_is_skipped_by_the_person_and_never_waited_on_again() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("Downloads")).unwrap();
+        let activity = Arc::new(Activity::default());
+        let _scope = guarded(Choice::Ask, dir.path(), PROMPT_TIMEOUT, activity.clone());
+        allowed(dir.path());
         let blocked = dir.path().join("Downloads/a.mov");
         fifo(&blocked);
-        let activity = Arc::new(Activity::default());
-        let _scope = install_with(
-            Choice::Allow,
-            activity.clone(),
-            roots(dir.path()),
-            PROMPT_TIMEOUT,
-        );
         let watcher = {
             let activity = activity.clone();
             std::thread::spawn(move || {
@@ -378,25 +539,26 @@ mod tests {
         watcher.join().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(activity.waiting(), None);
-        // The folder is skipped for the rest of the run: no second wait.
+        assert_eq!(outcomes()[&downloads(dir.path())], Outcome::Skipped);
         let started = Instant::now();
         assert!(open(&blocked, &read()).is_err());
         assert!(started.elapsed() < PROMPT_SHOWN);
     }
 
     #[test]
-    fn an_unanswered_prompt_times_out() {
+    fn an_unanswered_prompt_times_out_and_is_recorded() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("Downloads")).unwrap();
+        let _scope = guarded(
+            Choice::Ask,
+            dir.path(),
+            Duration::from_millis(600),
+            Arc::default(),
+        );
+        allowed(dir.path());
         let blocked = dir.path().join("Downloads/a.mov");
         fifo(&blocked);
-        let _scope = install_with(
-            Choice::Allow,
-            Arc::default(),
-            roots(dir.path()),
-            Duration::from_millis(600),
-        );
         let error = open(&blocked, &read()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(outcomes()[&downloads(dir.path())], Outcome::Unanswered);
     }
 }

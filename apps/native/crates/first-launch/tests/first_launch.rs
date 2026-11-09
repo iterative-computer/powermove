@@ -1335,6 +1335,12 @@ fn allowed_protected_originals_are_copied() {
         Outcome::NeedsFolderAccess { .. }
     ));
     let result = run_with_folder_access(&config, Choice::Allow, |_| Ok(())).unwrap();
+    // macOS's answer is kept for that folder; later runs open it directly.
+    let state: State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(
+        state.folder_outcomes.values().collect::<Vec<_>>(),
+        [&pm_first_launch::source_access::Outcome::Granted]
+    );
     assert!(
         matches!(
             result,
