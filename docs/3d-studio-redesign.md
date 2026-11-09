@@ -1,6 +1,11 @@
 # 3D, redesigned: Powermove Studio
 
-Status: proposal, 2026-10-29. Nothing here is built yet.
+Status: original proposal, 2026-10-29. The Studio renderer and tools are now
+integrated with main's layer model on `studio-3d`. See
+[the parity checklist](studio/parity.md) and [backend contract](studio/backend.md)
+for current behavior, checks and remaining targets. The historical proposal
+below describes the original design and intermediate implementation stages;
+its references to a classic renderer fallback no longer apply to the page.
 
 This proposal starts from the 3D work on `feature/blender-motion-design`
 (`0b2bd8d22`, "Unify 2D and 3D into one simple 3D view") and the native

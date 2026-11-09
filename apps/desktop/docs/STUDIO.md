@@ -17,13 +17,12 @@ The viewer's toolbar, for a composition with 3D layers, left to right:
   handles line up with the scene or with the object, however it is turned.
 - **Frame:** fit the selection, or everything when nothing is selected
   (F, Home).
-- **Fast / Quality:** how the viewer draws 3D. Fast uses the real-time
-  renderer, with the studio set's backdrop, reflections and a soft contact
-  shadow under the models, so it keeps up at any size. Quality is Studio, as
-  below. Exports and agent frames always render at Studio's Final quality.
-  The choice is remembered.
+- **Fast / Quality:** both use Studio. Fast keeps the low-resolution Live
+  preview; Quality refines the image when you pause. Exports and agent
+  frames use Final quality. The choice is remembered. These controls are
+  in the viewer footer; navigation tools remain in the header.
 
-In Quality:
+Studio has three rendering tiers:
 
 - **Live** while you drag, scrub or play: half resolution, one sample per
   pixel, denoised. Depth of field is off while things move.
@@ -42,8 +41,11 @@ In Quality:
   measured noise, which smooths light, screens, shallow-focus blur and the
   floor's shadows while edges, paint and the backdrop stay exact.
 
-Machines without WebGPU, and orthographic cameras, use the real-time
-renderer (as Fast does).
+Perspective and orthographic cameras both use Studio, including camera zoom
+and near/far clipping. A native renderer can attach through
+[`StudioBackend`](../../../docs/studio/backend.md); otherwise the app uses
+WebGPU. Native initialization or rendering failures fall back to WebGPU.
+There is no three.js picture-rendering mode.
 
 ## Building a product shot
 
@@ -58,9 +60,11 @@ renderer (as Fast does).
   polished steel, gold, clear and frosted glass, gloss lacquer, soft-touch
   plastic, glazed ceramic, matte rubber and a display under glass. Each is a
   starting point; the material fields refine it.
-- **Screen** (model inspector): choose a composition to play on the surface
-  as a live screen, like a device's display. Its UVs span the composition;
-  the emission strength sets its brightness.
+- **Materials** (model inspector): select the whole model or a named source
+  material, then choose an image, composition or same-composition layer as
+  its Color or Emission source. Sources update at the frame's time. Emission
+  intensity controls screen brightness. Existing Studio screen links still
+  render, and the `screen` field remains available to agents.
 - **Drop to floor** (model inspector) rests a model on the floor.
 
 ## Large models and CAD
@@ -71,14 +75,12 @@ assembly's parts, names and colors, so each part can take its own finish.
 A typical 18-part assembly takes under half a second.
 
 CAD assemblies import as GLB (up to 512 MB, 10 million triangles in up to
-65,536 parts) or OBJ (up to 10 million triangles). Studio prepares each
-large part in the background: the viewer keeps drawing with the classic
-renderer and the corner pill reads "Preparing 1.0M triangles" until Studio
-takes over. On an M5, a 1-million-triangle, 20-part assembly is ready about
-1.1 s after it appears, and the editor never stalls more than about 150 ms.
-Exports and agent frames wait for the model instead (about 1.8 s the first
-time for that assembly). A model too large for one GPU buffer (96 bytes a
-triangle) stays on the classic renderer.
+65,536 parts) or OBJ (up to 10 million triangles). Studio prepares large
+geometry in a worker; the corner pill reports preparation while controls stay
+responsive. Exports and agent frames wait for preparation before reading back
+pixels. Repeated geometry shares its BVH, including imported glTF instances;
+transform changes rebuild the small instance hierarchy rather than geometry.
+The maximum usable scene also depends on the GPU's buffer and memory limits.
 
 ## Gaussian splats
 
@@ -115,8 +117,8 @@ Put light where you point (after Light Wrangler for Blender). Choose
 
 ## Shots
 
-The camera inspector's Shot buttons write ordinary keyframes you can edit in
-the timeline:
+Shot buttons write ordinary keyframes you can edit in the timeline.
+Turntable is in the model inspector; camera moves are in the camera inspector:
 
 | Shot | Moves |
 |---|---|
@@ -177,8 +179,13 @@ shells. Verify with `render_frames`: agent frames always use the Final tier.
 - Each mesh keeps a BVH in its own space; a small top-level BVH over the
   models' world bounds is rebuilt when anything moves, so animating a large
   model costs almost nothing.
-- One trace per depth set serves every 3D layer: each layer receives only its
-  own pixels, so masks, effects and opacity stay per layer.
+- Opaque depth sets share one trace. Layers with opacity, masks or effects
+  receive separate primary-camera views so the compositor can reveal layers
+  behind them. All geometry remains available to reflections and shadows.
+- Backend frames can arrive asynchronously. Final capture waits for scene
+  preparation and transport readiness; closing a project releases sessions
+  and late frames. See [`docs/studio/backend.md`](../../../docs/studio/backend.md)
+  for the shared Rust/TypeScript scene and binary layout.
 - Live screens render their composition at each frame's time and update
   only their texture.
 - CAD import uses [occt-import-js](https://github.com/kovacsv/occt-import-js)
@@ -190,3 +197,18 @@ shells. Verify with `render_frames`: agent frames always use the Final tier.
   floor or a matte surface) come from photons traced from the lights before
   each batch of samples. Refine and Final only, and only in scenes with glass
   or polished metal.
+
+## Compatibility and remaining targets
+
+Main's layer document, timeline, material sources, parts, Front/Bevel/Side/Back
+surfaces, native controls and agent operation shapes remain the editing API.
+The checklist and verified limitations are in
+[`docs/studio/parity.md`](../../../docs/studio/parity.md). HDRI lighting,
+Substance SBSAR, FBX animation, camera iris controls, simultaneous views and
+user-exportable render passes still require implementation. Studio does not
+claim Blender Cycles parity.
+
+Imported glTF models using additional physical-material texture maps, texture
+transforms or secondary UV sets still have an appearance-parity gap. The six
+standard image slots exposed in Powermove's Materials UI are supported; the
+extended import cases are listed separately in the checklist.
