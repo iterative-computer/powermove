@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex, Once, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 
@@ -97,6 +97,119 @@ pub(crate) struct NativeState {
     engine: Option<Arc<dyn EngineProxy>>,
     cancellation: Cancellation,
     sync_calls: usize,
+    blocked: Arc<Blocked>,
+}
+/// Time the running task spent blocked in synchronous engine calls (the
+/// kernel channel, the engine, a base raster): the watchdog counts JS time
+/// only (plan 3.5.2, D11).
+#[derive(Default)]
+pub(crate) struct Blocked(Mutex<(Duration, Option<Instant>, usize)>);
+impl Blocked {
+    fn enter(&self) {
+        let mut b = self.0.lock().unwrap();
+        if b.2 == 0 {
+            b.1 = Some(Instant::now());
+        }
+        b.2 += 1;
+    }
+    fn exit(&self) {
+        let mut b = self.0.lock().unwrap();
+        b.2 = b.2.saturating_sub(1);
+        if b.2 == 0
+            && let Some(at) = b.1.take()
+        {
+            b.0 += at.elapsed();
+        }
+    }
+    fn reset(&self) {
+        *self.0.lock().unwrap() = Default::default();
+    }
+    /// Blocked so far in this task, including a call still waiting.
+    pub(crate) fn total(&self) -> Duration {
+        let b = self.0.lock().unwrap();
+        b.0 + b.1.map_or(Duration::ZERO, |at| at.elapsed())
+    }
+}
+/// The extension a stack capture found running one execution.
+#[derive(Clone, Default)]
+pub(crate) struct Culprit(Arc<Mutex<Option<Found>>>);
+/// One execution and the extension found running it.
+type Found = (u64, Option<String>);
+impl Culprit {
+    pub(crate) fn get(&self, execution: u64) -> Option<String> {
+        match &*self.0.lock().unwrap() {
+            Some((id, owner)) if *id == execution => owner.clone(),
+            _ => None,
+        }
+    }
+}
+/// The realm's context, for code that runs inside it from an interrupt.
+#[derive(Clone)]
+struct MainContext(v8::Global<v8::Context>);
+struct Capture {
+    slot: Culprit,
+    execution: u64,
+}
+/// Reads the running task's stack from inside it (an interrupt runs on the
+/// isolate's thread at its next stack check, also in a tight loop) and waits
+/// briefly for the answer.
+pub(crate) fn capture_culprit(handle: &v8::IsolateHandle, slot: &Culprit, execution: u64) {
+    let capture = Box::into_raw(Box::new(Capture {
+        slot: slot.clone(),
+        execution,
+    }));
+    if !handle.request_interrupt(capture_stack, capture as *mut c_void) {
+        // SAFETY: V8 refused the request, so the callback never takes it.
+        drop(unsafe { Box::from_raw(capture) });
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < deadline {
+        if slot
+            .0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(id, _)| *id == execution)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+unsafe extern "C" fn capture_stack(mut raw: v8::UnsafeRawIsolatePtr, data: *mut c_void) {
+    // SAFETY: `data` is the box `capture_culprit` leaked for exactly this callback.
+    let capture = unsafe { Box::from_raw(data as *mut Capture) };
+    // V8 invokes this with the isolate entered, on its currently locked owner.
+    let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw) };
+    let Some(MainContext(context)) = isolate.get_slot::<MainContext>().cloned() else {
+        *capture.slot.0.lock().unwrap() = Some((capture.execution, None));
+        return;
+    };
+    v8::scope!(let hs, isolate);
+    let context = v8::Local::new(hs, &context);
+    let s = &mut v8::ContextScope::new(hs, context);
+    let mut owner = None;
+    if let Some(trace) = v8::StackTrace::current_stack_trace(s, 64) {
+        for index in 0..trace.get_frame_count() {
+            let name = trace
+                .get_frame(s, index)
+                .and_then(|frame| frame.get_script_name(s))
+                .map(|name| name.to_rust_string_lossy(s));
+            if let Some(id) = name.as_deref().and_then(extension_of_module) {
+                owner = Some(id.to_owned());
+                break;
+            }
+        }
+    }
+    *capture.slot.0.lock().unwrap() = Some((capture.execution, owner));
+}
+/// `pmext://<id>/<generation>/<file>`: the extension a module belongs to.
+pub(crate) fn extension_of_module(url: &str) -> Option<&str> {
+    url.strip_prefix("pmext://")?
+        .split('/')
+        .next()
+        .filter(|id| !id.is_empty())
 }
 impl NativeState {
     /// Room a fetch leaves for a synchronous engine reply.
@@ -376,7 +489,11 @@ fn engine_call(
         )
     };
     budget.check().map_err(|e| e.to_string())?;
-    let text = call(&*engine, &generation, budget.clone()).map_err(|e| e.to_string())?;
+    let blocked = state.lock().unwrap().blocked.clone();
+    blocked.enter();
+    let text = call(&*engine, &generation, budget.clone());
+    blocked.exit();
+    let text = text.map_err(|e| e.to_string())?;
     budget.check().map_err(|e| e.to_string())?;
     if text.len() > budget.max_response_bytes {
         return Err("Engine response quota".into());
@@ -629,6 +746,7 @@ pub(crate) struct Vm {
     blob: Arc<Vec<u8>>,
     cache: CodeCache,
     pub cache_hits: usize,
+    cache_prefix: Option<crate::cache::CachePrefix>,
     owner: std::thread::ThreadId,
 }
 impl Vm {
@@ -669,6 +787,7 @@ impl Vm {
             engine,
             cancellation: Cancellation::default(),
             sync_calls: 0,
+            blocked: Arc::default(),
         }));
         isolate.set_slot(Native(native_state.clone()));
         crate::modules::install(&mut isolate);
@@ -706,6 +825,7 @@ impl Vm {
                 v8::Local::<v8::Function>::try_from(object.get(cs, key.into()).unwrap()).unwrap();
             (v8::Global::new(cs, context), v8::Global::new(cs, function))
         };
+        isolate.set_slot(MainContext(context.clone()));
         // SAFETY: only Send-owned native state, strong Globals, default allocator;
         // no Weak/finalizer/cppgc callbacks. V8 is accessed solely under Locker.
         let isolate = unsafe { isolate.try_into_shared() }
@@ -719,6 +839,7 @@ impl Vm {
             blob,
             cache,
             cache_hits: 0,
+            cache_prefix: None,
             owner: std::thread::current().id(),
         };
         let origin = std::time::SystemTime::now()
@@ -750,6 +871,11 @@ impl Vm {
         let mut n = self.native.lock().unwrap();
         n.cancellation = cancellation;
         n.sync_calls = 0;
+        n.blocked.reset();
+    }
+    /// The running task's time blocked in synchronous engine calls.
+    pub(crate) fn blocked(&self) -> Arc<Blocked> {
+        self.native.lock().unwrap().blocked.clone()
     }
     pub fn handle(&self) -> v8::IsolateHandle {
         self.quota.handle.clone()
@@ -765,15 +891,18 @@ impl Vm {
             return Err(Error::Quota("source bytes"));
         }
         let key = cached.then(|| {
-            CacheKey::new(
-                v8::V8::get_version(),
-                &self.blob,
-                code.as_bytes(),
-                &format!(
-                    "{FLAGS};tag={}",
-                    v8::script_compiler::cached_data_version_tag()
-                ),
-            )
+            self.cache_prefix
+                .get_or_insert_with(|| {
+                    CacheKey::prefix(
+                        v8::V8::get_version(),
+                        &self.blob,
+                        &format!(
+                            "{FLAGS};tag={}",
+                            v8::script_compiler::cached_data_version_tag()
+                        ),
+                    )
+                })
+                .key(code.as_bytes())
         });
         let cache = key.and_then(|key| self.cache.get(key));
         let mut isolate = self.isolate.as_ref().unwrap().lock();

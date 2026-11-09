@@ -31,7 +31,7 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// Every host gets its own kernel writer; one window's retirement is its own.
@@ -48,6 +48,8 @@ const MAX_RESTARTS: usize = 2;
 const PAGE_QUEUE: usize = 256;
 /// How often an idle owner looks for extensions changed on disk.
 const DISK_POLL: Duration = Duration::from_secs(3);
+/// Realm sources the owner holds while the realm's queue is full.
+const MAX_DEFERRED: usize = 4096;
 const TIME_MOVED: u8 = 1;
 const PLAY_MOVED: u8 = 2;
 
@@ -400,12 +402,14 @@ impl ExtensionHost {
             moved: moved.clone(),
             restarts: 0,
             asking: None,
+            asking_culprit: None,
             running: None,
             realm: None,
             router: None,
             records: vec![],
             canvases: BTreeMap::new(),
             dom_waiting: VecDeque::new(),
+            deferred: VecDeque::new(),
             disk: 0,
             store_revision: None,
             config,
@@ -681,7 +685,9 @@ struct Owner {
     moved: Arc<AtomicU8>,
     restarts: usize,
     /// The task the user is being asked about, so one hang asks once at a time.
+    /// The task the D11 sheet asks about, and the extension running it.
     asking: Option<u64>,
+    asking_culprit: Option<String>,
     /// The last command's task and the extension that registered it.
     running: Option<(u64, String)>,
     realm: Option<Live>,
@@ -690,6 +696,8 @@ struct Owner {
     canvases: BTreeMap<(u64, String), u64>,
     /// Batches taken from the realm that the page queue has no room for yet.
     dom_waiting: VecDeque<Value>,
+    /// Realm sources waiting for room in its queue (`eval`).
+    deferred: VecDeque<String>,
     disk: u64,
     store_revision: Option<u64>,
 }
@@ -698,8 +706,15 @@ impl Owner {
         self.disk = self.stamp();
         self.boot();
         loop {
-            let message = match input.recv_timeout(DISK_POLL) {
+            self.retry_deferred();
+            let wait = if self.deferred.is_empty() {
+                DISK_POLL
+            } else {
+                Duration::from_millis(2)
+            };
+            let message = match input.recv_timeout(wait) {
                 Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) if !self.deferred.is_empty() => continue,
                 Err(RecvTimeoutError::Timeout) => {
                     // Extensions change on disk: an agent's edit, a manual copy.
                     let stamp = self.stamp();
@@ -749,7 +764,9 @@ impl Owner {
         *self.transport.lock().unwrap() = None;
         self.router = None;
         self.asking = None;
+        self.asking_culprit = None;
         self.dom_waiting.clear();
+        self.deferred.clear();
         self.canvases.clear();
         self.shared.reader.store(0, Ordering::Release);
         self.shared.update(|p| {
@@ -764,27 +781,52 @@ impl Owner {
         self.config.kernel.retire_realm(self.writer);
         self.retired = true;
     }
-    /// The task's execution id, when it was queued.
+    /// The task's execution id, when it was queued. When the realm's queue
+    /// is full (a long or hung task) the source waits here, in order, and the
+    /// owner keeps handling input (Stop, Quit) instead of waiting for room.
     fn eval(&mut self, source: &str) -> Option<u64> {
         let live = self.realm.as_ref()?;
+        if !self.deferred.is_empty() {
+            self.defer(source.to_owned());
+            return None;
+        }
         match live.realm.eval(source) {
             Ok(ticket) => Some(ticket.execution),
             Err(Error::Busy) => {
-                // The owner's queue is full: wait for room rather than drop state.
-                let realm = live.realm.clone();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(1));
-                    match realm.eval(source) {
-                        Err(Error::Busy) => continue,
-                        result => return result.ok().map(|t| t.execution),
-                    }
-                }
+                self.defer(source.to_owned());
                 None
             }
             Err(_) => {
                 let _ = self.inbox.send(Input::Failed(self.writer.generation));
                 None
+            }
+        }
+    }
+    fn defer(&mut self, source: String) {
+        // A realm this far behind is hung; the watchdog asks about it, and a
+        // stopped realm restarts from the kernel's state, not from this queue.
+        if self.deferred.len() >= MAX_DEFERRED {
+            self.deferred.pop_front();
+        }
+        self.deferred.push_back(source);
+    }
+    /// Queues what waited for room, while the realm takes it.
+    fn retry_deferred(&mut self) {
+        while let Some(source) = self.deferred.front() {
+            let Some(live) = self.realm.as_ref() else {
+                self.deferred.clear();
+                return;
+            };
+            match live.realm.eval(source.as_str()) {
+                Err(Error::Busy) => return,
+                Ok(_) => {
+                    self.deferred.pop_front();
+                }
+                Err(_) => {
+                    self.deferred.clear();
+                    let _ = self.inbox.send(Input::Failed(self.writer.generation));
+                    return;
+                }
             }
         }
     }
@@ -876,19 +918,25 @@ impl Owner {
                 self.reopen_panels(None);
             }
             Input::Rescan => self.rescan(),
-            Input::Failed(generation) if generation == self.writer.generation => self.restart(),
+            Input::Failed(generation) if generation == self.writer.generation => {
+                let culprit = self.activating_now();
+                self.restart(culprit)
+            }
             Input::Unresponsive(generation, execution)
                 if generation == self.writer.generation && self.asking != Some(execution) =>
             {
                 self.ask_unresponsive(execution)
             }
             Input::StopTask(execution, stop) => {
-                if self.asking == Some(execution) {
+                let culprit = if self.asking == Some(execution) {
                     self.asking = None;
-                }
+                    self.asking_culprit.take()
+                } else {
+                    None
+                };
                 let stopped = stop && self.realm.as_ref().is_some_and(|l| l.realm.stop(execution));
                 if stopped {
-                    self.restart();
+                    self.restart(culprit);
                 }
             }
             Input::Realm(..)
@@ -1585,6 +1633,10 @@ impl Owner {
     }
     /// D11: "not responding — Wait / Stop", named for the extension that was
     /// activating when there is one. The task keeps running while the user decides.
+    /// The extension is the one whose code the watchdog found on the stack
+    /// (any task: a raster override, an event, a timer, a command), else the
+    /// one activating or whose command runs. Stop turns it off, so the
+    /// rebuilt realm doesn't run into the same hang again.
     fn ask_unresponsive(&mut self, execution: u64) {
         let Some(live) = &self.realm else { return };
         let activating = live.events.activating.lock().unwrap().clone();
@@ -1593,17 +1645,30 @@ impl Owner {
             .as_ref()
             .filter(|(task, _)| *task == execution)
             .map(|(_, owner)| owner.clone());
-        let disables = activating.is_some();
-        let name = activating.or(command).and_then(|id| {
+        let culprit = live
+            .realm
+            .culprit(execution)
+            .or(activating)
+            .or(command)
+            .filter(|id| self.records.iter().any(|r| r["id"] == id.as_str()));
+        let name = culprit.as_ref().map(|id| {
             self.records
                 .iter()
                 .find(|r| r["id"] == id.as_str())
-                .map(|r| r["manifest"]["name"].as_str().unwrap_or(&id).to_owned())
+                .and_then(|r| r["manifest"]["name"].as_str())
+                .unwrap_or(id)
+                .to_owned()
         });
+        let disables = culprit.is_some();
         self.asking = Some(execution);
+        self.asking_culprit = culprit;
         let request =
             json!({"kind":"unresponsive","execution":execution,"name":name,"disables":disables});
         self.shared.update(|p| p.requests.push(request));
+    }
+    fn activating_now(&self) -> Option<String> {
+        let live = self.realm.as_ref()?;
+        live.events.activating.lock().unwrap().clone()
     }
     fn command_owner(&self, id: &str) -> Option<String> {
         let contributions = self
@@ -1623,9 +1688,9 @@ impl Owner {
     /// A hung or failed realm is rebuilt without the extension that broke it. That
     /// extension stays off until someone turns it back on, here and in every other
     /// window, and the next launch does not run into it again.
-    fn restart(&mut self) {
+    fn restart(&mut self, culprit: Option<String>) {
         let Some(live) = &self.realm else { return };
-        let culprit = live.events.activating.lock().unwrap().take();
+        live.events.activating.lock().unwrap().take();
         let transport = live.host.transport();
         let clock = (transport.time(), transport.playing());
         self.retire_realm();
@@ -1678,7 +1743,7 @@ impl Owner {
 mod tests {
     use super::*;
     use pm_kernel::{HistoryCall, KernelActor, KernelConfig, OpenSource, Reply, Request};
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, time::Instant};
     fn extension(root: &Path, id: &str, files: &[(&str, &str)]) {
         let directory = root.join(id);
         fs::create_dir_all(&directory).unwrap();
@@ -2350,6 +2415,45 @@ mod tests {
         fixture.until("second rebuild", |host| host.view() == 3 && host.is_ready());
         let published = fixture.kernel.published("window").unwrap();
         assert!(published.entry.is_none(), "the open entry was sealed");
+    }
+    /// D11 outside activation and commands: the sheet names the extension whose
+    /// code is running (read from the stack), and Stop turns that one off so
+    /// the rebuilt realm doesn't run into the same hang again.
+    #[test]
+    fn a_hang_in_a_service_another_extension_calls_names_the_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-provider",
+            &[(
+                "index.ts",
+                "export default function(api){api.services.register('synthetic.slow',()=>{for(;;);})}",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-caller",
+            &[(
+                "index.ts",
+                "export default function(api){setTimeout(()=>api.services.get('synthetic.slow')?.(),300)}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let asked = fixture.answer_unresponsive(Some("synthetic-provider"));
+        fixture.host.answer_unresponsive(asked, true);
+        fixture.until("rebuilt", |host| host.view() == 2 && host.is_ready());
+        assert_eq!(fixture.health("synthetic-provider"), "runtime-error");
+        assert_eq!(fixture.health("synthetic-caller"), "ok");
+        thread::sleep(Duration::from_millis(1500));
+        assert_eq!(fixture.host.view(), 2, "no second hang");
+        assert!(
+            !fixture
+                .host
+                .take_requests()
+                .iter()
+                .any(|r| r["kind"] == "unresponsive")
+        );
     }
     fn command_of(host: &ExtensionHost, id: &str) -> bool {
         host.contributions().is_some_and(|c| {
