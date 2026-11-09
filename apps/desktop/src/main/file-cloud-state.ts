@@ -2,7 +2,11 @@ import type { CloudFileState } from '../shared/ipc';
 
 async function nativeState(file: string): Promise<CloudFileState> {
   if (process.platform !== 'darwin') return 'unknown';
-  try { return await (await import('@powermove/macos-haptics')).cloudFileState(file); }
+  try {
+    const module = await import('@powermove/macos-haptics');
+    const native = (module as typeof module & { default?: typeof module }).default ?? module;
+    return await native.cloudFileState(file);
+  }
   catch (error: any) {
     // Standalone Node hosts may not ship the desktop addon.
     if (error.code === 'MODULE_NOT_FOUND' || error.code === 'ERR_MODULE_NOT_FOUND') return 'unknown';

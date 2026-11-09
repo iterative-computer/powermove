@@ -1,6 +1,14 @@
 import { afterEach, expect, it, vi } from 'vitest';
+const native = vi.hoisted(() => ({ cloudFileState: vi.fn().mockResolvedValue('local') }));
+// Node's dynamic import exposes this CommonJS addon through default.
+vi.mock('@powermove/macos-haptics', () => ({ default: native }));
 import { inspectFileCloudState, requireLocalMedia } from './file-cloud-state';
 afterEach(() => vi.useRealTimers());
+
+it.runIf(process.platform === 'darwin')('opens local files with the native CommonJS addon', async () => {
+  await expect(inspectFileCloudState('/synthetic.pmv')).resolves.toBe('local');
+  expect(native.cloudFileState).toHaveBeenCalledWith('/synthetic.pmv');
+});
 
 it.each(['icloud', 'cloud'] as const)('explains that %s media needs a download before conversion', async state => {
   const inspect = vi.fn().mockResolvedValue(state);
