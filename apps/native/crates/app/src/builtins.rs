@@ -1497,6 +1497,8 @@ impl Render for SurfaceWindow {
     }
 }
 
+/// v1's timeline `gutterWidth` default (`api-helpers.ts`).
+const V1_DEFAULT_GUTTER: f64 = 224.;
 /// A painter's answer: JSON text (the realm returns `JSON.stringify(…)`),
 /// refused past 4 MiB before parsing.
 fn painter_answer(text: &str) -> Option<Value> {
@@ -1554,7 +1556,12 @@ pub fn timeline_chrome(
     let m = &mut t.metrics;
     for (target, value) in [
         (&mut m.track_row, field("rowHeight", 22., 48., true)),
-        (&mut m.layer_column, field("gutterWidth", 160., 640., true)),
+        // v1 wrote its default (224) into every workspace; only another value
+        // is a person's choice. The default takes the native, wider column.
+        (
+            &mut m.layer_column,
+            field("gutterWidth", 160., 640., true).filter(|w| *w != V1_DEFAULT_GUTTER),
+        ),
         (&mut m.ruler, field("rulerHeight", 20., 42., true)),
         (&mut m.keyframe, field("keyframeSize", 4., 12., false)),
         // Main draws clip bars with at most a 5-point corner.

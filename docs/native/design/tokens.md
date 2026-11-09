@@ -151,7 +151,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.keyboard_step` | Splitter arrow-key step | 10 | 10 | 10 | 10 |
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
 | `metrics.kind_badge` | Layer-kind badge square in the timeline and Project list | 18 | 18 | 18 | 18 |
-| `metrics.layer_column` | Timeline layer list column width | 360 | 360 | 360 | 360 |
+| `metrics.layer_column` | Timeline layer list column width | 320 | 320 | 320 | 320 |
 | `metrics.mark_bracket` | Width of In and Out brackets on rulers and scrubbers | 6 | 6 | 6 | 6 |
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |

@@ -177,6 +177,18 @@ fn timeline_chrome_follows_the_workspace_and_the_theme_surface() {
         t.metrics.clip_radius, 5.,
         "main's clip bars cap the corner at 5"
     );
+    // v1's written default gives way to the native column; another width is kept.
+    let gutter = |w: f64| {
+        let ws = pm_model::json::parse(&format!(
+            r#"{{"chrome":{{"timeline":{{"gutterWidth":{w}}}}}}}"#
+        ))
+        .unwrap();
+        crate::builtins::timeline_chrome(base.clone(), &ws, &serde_json::Value::Null)
+            .metrics
+            .layer_column
+    };
+    assert_eq!(gutter(224.), base.metrics.layer_column);
+    assert_eq!(gutter(300.), 300.);
     let clips = pm_model::json::parse(r#"{"chrome":{"timeline":{"clipRadius":2.5}}}"#).unwrap();
     let t2 = crate::builtins::timeline_chrome(base.clone(), &clips, &serde_json::Value::Null);
     assert_eq!(t2.metrics.clip_radius, 2.5);
