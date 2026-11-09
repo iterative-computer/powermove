@@ -26,18 +26,6 @@ fn push_rgba8(out: &mut Vec<u8>, [r, g, b, a]: [f32; 4], pixels: SnapshotPixels)
     ));
 }
 
-fn push_rgba8_unorm(out: &mut Vec<u8>, [r, g, b, a]: [u8; 4], pixels: SnapshotPixels) {
-    match pixels {
-        SnapshotPixels::Opaque => out.extend_from_slice(&[r, g, b, 255]),
-        SnapshotPixels::Premultiplied => out.extend_from_slice(&[r, g, b, a]),
-        SnapshotPixels::Straight if a == 0 => out.extend_from_slice(&[0, 0, 0, 0]),
-        SnapshotPixels::Straight => {
-            let un =
-                |v: u8| ((u32::from(v) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
-            out.extend_from_slice(&[un(r), un(g), un(b), a]);
-        }
-    }
-}
 
 /// Premultiplied float RGBA to RGBA8, with the request's alpha treatment.
 pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
@@ -48,17 +36,6 @@ pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
     out
 }
 
-/// Unorm RGBA8 to RGBA8, with the request's alpha treatment.
-pub fn encode_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
-    if pixels == SnapshotPixels::Premultiplied {
-        return rgba.to_vec();
-    }
-    let mut out = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
-        push_rgba8_unorm(&mut out, [px[0], px[1], px[2], px[3]], pixels);
-    }
-    out
-}
 
 /// Places a painted `crop` (`[x, y, w, h]` in canvas pixels) into the canvas
 /// `window` (or the whole canvas), returning the window's RGBA8 and its size.
