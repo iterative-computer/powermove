@@ -39,6 +39,11 @@ describe('Studio Rust scene contract',()=>{
   const graph=new THREE.Scene();graph.add(mesh);const prepared=extractScene(graph,()=>true,env);
   expect(prepared.tris[0]).toBeCloseTo(1);expect(prepared.tris[2]).toBeCloseTo(0);expect(prepared.bounds.max.x-prepared.bounds.min.x).toBeLessThan(1e-6);
  });
+ it('keeps standard imported anisotropy and dispersion alongside Studio presets',()=>{
+  const graph=new THREE.Scene(),material=new THREE.MeshPhysicalMaterial({anisotropy:.7,dispersion:.4});
+  const mesh=new THREE.Mesh(new THREE.BoxGeometry(),material);mesh.userData.sceneId='imported';graph.add(mesh);
+  const prepared=extractScene(graph,()=>true,env);expect(prepared.materials[15]).toBeCloseTo(.7);expect(prepared.materials[22]).toBeCloseTo(.4);
+ });
 
 });
 
