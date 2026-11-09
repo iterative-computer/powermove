@@ -540,6 +540,8 @@ pub struct ObjectIdentity {
     pub receive_shadow: bool,
     #[serde(default)]
     pub vertex_colors: Option<Vec<[f32; 4]>>,
+    #[serde(default)]
+    pub primary_visible: Option<bool>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Texture {

@@ -20,7 +20,7 @@ fn aovs(@builtin(global_invocation_id) gid: vec3u) {
   var dist = 0.0;
   for (var k = 0; k < 16; k++) {
     let ray = camera_ray(vec2f(f32(gid.x), f32(gid.y)) + rnd2());
-    let hit = intersect(ray[0], ray[1], camera_limit(ray[0],ray[1]), false);
+    let hit = primary_intersect(ray[0], ray[1], camera_limit(ray[0],ray[1]));
     let tf = floor_t(ray[0], ray[1]);
     if (tf < hit.t) {
       normal += vec3f(0.0, 1.0, 0.0);

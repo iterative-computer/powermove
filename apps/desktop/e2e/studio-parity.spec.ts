@@ -21,12 +21,12 @@ test('main scene features survive the Studio renderer upgrade', async ({ session
   });
   const capture = async (name: string, time = 0) => {
     const result = await page.evaluate(async (time: number) => {
-      const PM = (window as any).PM; await PM.prepareFrame(time, { mblur: false });
+      const PM = (window as any).PM; PM.agentFrameCapture=true;await PM.prepareFrame(time, { mblur: false,width:960,height:540 });
       const canvas = PM.renderFrameTo(time, 960, 540, { mblur: false });
       const pixels = canvas.getContext('2d').getImageData(0, 0, 960, 540).data;
       let lit = 0;
       for (let i = 0; i < pixels.length; i += 4) if (Math.max(pixels[i], pixels[i + 1], pixels[i + 2]) > 35) lit++;
-      return { png: canvas.toDataURL('image/png'), lit, studio: PM.Studio?.status() };
+      const result={ png: canvas.toDataURL('image/png'), lit, studio: PM.Studio?.status() };PM.agentFrameCapture=false;return result;
     }, time);
     await writeFile(`${folder}/${phase}-${name}.png`, Buffer.from(result.png.split(',')[1], 'base64'));
     expect(result.lit).toBeGreaterThan(500);

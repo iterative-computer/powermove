@@ -35,7 +35,7 @@ export type StudioScene = {
   /** Scene object id (layer id) of each object index the tracer reports. */
   objects: string[];
   triangles: number;
-  instancePolicies?: { part: string | null; castShadow: boolean; receiveShadow: boolean }[];
+  instancePolicies?: { part: string | null; castShadow: boolean; receiveShadow: boolean; primaryVisible?:boolean }[];
   materialPolicies?: { ambientResponse: number; doubleSided: boolean; alphaTest: number }[];
   lightPolicies?: { castShadow: boolean; distance: number; decay: number }[];
   /** World-space bounds, for the shadow catcher and epsilon scale. */
@@ -70,6 +70,8 @@ function meshesOf(scene: THREE.Scene, include: (id: string) => boolean): { mesh:
   return out;
 }
 
+export type ExtractOptions={onReady:()=>void;hiddenPrimary?:Set<string>};
+
 /**
  * The scene's buffers. With `background`, meshes of WORKER_TRIANGLES or more
  * that have no BVH yet start building in workers and the result is
@@ -77,14 +79,15 @@ function meshesOf(scene: THREE.Scene, include: (id: string) => boolean): { mesh:
  * without it every BVH builds at once (exports, swatches).
  */
 export function extractScene(scene: THREE.Scene, include: (id: string) => boolean, environment: EnvironmentInput): StudioScene;
-export function extractScene(scene: THREE.Scene, include: (id: string) => boolean, environment: EnvironmentInput, background: { onReady: () => void }): StudioScene | StudioPending;
-export function extractScene(scene: THREE.Scene, include: (id: string) => boolean, environment: EnvironmentInput, background?: { onReady: () => void }): StudioScene | StudioPending {
+export function extractScene(scene: THREE.Scene, include: (id: string) => boolean, environment: EnvironmentInput, background: ExtractOptions): StudioScene | StudioPending;
+export function extractScene(scene: THREE.Scene, include: (id: string) => boolean, environment: EnvironmentInput, background?: ExtractOptions): StudioScene | StudioPending {
   scene.updateMatrixWorld(true);
   const meshes = meshesOf(scene, include);
   const objects: string[] = [];
   const objectIndex = new Map<string, number>();
   const materials: number[] = [];
   const materialIndex = new Map<string, number>();
+  const materialValues = new Map<string,number>();
   const maps: StudioMap[] = [];
   const mapIndex = new Map<any, number>();
   const bounds = new THREE.Box3();
@@ -105,8 +108,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     const key = materialKey(m,mesh);
     let i = materialIndex.get(key);
     if (i !== undefined) return i;
-    i = materialIndex.size;
-    materialIndex.set(key, i);
+
     const color = m.color || new THREE.Color(1, 1, 1);
     const screen: string | null = m.userData?.screen ?? null;
     // A screen glows with its composition: white emission scaled by the strength.
@@ -122,7 +124,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     const roughness = basic ? 1 : m.roughness ?? 1;
     const transmission = m.transmission ?? 0;
     const opacity = m.transparent || m.opacity < 1 ? m.opacity ?? 1 : 1;
-    materials.push(
+    const values=[
       color.r, color.g, color.b, metallic,
       roughness, m.clearcoat ?? 0, m.clearcoatRoughness ?? 0.03, transmission,
       // A basic (unlit) material glows its own color.
@@ -135,14 +137,16 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       m.userData?.materialAmbientUniform?.value ?? 1,
       (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0), m.alphaTest ?? 0, 0,
       layer(m.roughnessMap), layer(m.metalnessMap), layer(m.aoMap), m.normalScale?.x ?? 1,
-    );
-    return i;
+    ];
+    const fingerprint=values.join(',');i=materialValues.get(fingerprint);
+    if(i===undefined){i=materials.length/STUDIO_MATERIAL_FLOATS;materials.push(...values);materialValues.set(fingerprint,i);}
+    materialIndex.set(key,i);return i;
   };
 
   // One BVH per mesh, in its own space, reused until its geometry or material
   // assignment changes; only the top level is rebuilt when things move.
   const blases: Blas[] = [];
-  const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean }[] = [];
+  const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean; color?:[number,number,number]; primaryVisible:boolean }[] = [];
   let pending = 0, total = 0;
   for (const { mesh, id } of meshes) {
     const g = mesh.geometry as THREE.BufferGeometry;
@@ -157,7 +161,8 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     const deformation=skinned.isSkinnedMesh?Array.from(skinned.skeleton.boneMatrices).join(','):'';
     const morph=mesh.morphTargetInfluences?.join(',') ?? '';
     const key = `${blasKey(g, mi, oi)}:${deformation}:${morph}:${mats.map((m:any)=>!!m?.vertexColors).join(',')}`;
-    let blas = blasCache.get(mesh);
+    const previous=blasCache.get(mesh);
+    let blas = previous?.key===key?previous:sharedBlases.get(key);
     if (!blas || blas.key !== key) {
       const building = buildingFor.get(mesh);
       if (background && building?.key === key) { pending += building.triangles; total += building.triangles; continue; }
@@ -168,7 +173,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
         void finishGeometryInWorker(geometryPayload(g,mi,oi)).then(data=>{
           if(buildingFor.get(mesh)?.key!==key)return;buildingFor.delete(mesh);
           const bounds=new THREE.Box3(new THREE.Vector3(...data.bounds.slice(0,3) as [number,number,number]),new THREE.Vector3(...data.bounds.slice(3) as [number,number,number]));
-          blasCache.set(mesh,{...data,key,bounds});background.onReady();
+          const blas={...data,key,bounds};blasCache.set(mesh,blas);rememberBlas(blas);background.onReady();
         },()=>{buildingFor.delete(mesh);failedFor.set(mesh,key);background.onReady();});
         continue;
       }
@@ -182,7 +187,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
         void finishBlasInWorker(corners, shading).then(data => {
           if (buildingFor.get(mesh)?.key !== key) return;
           buildingFor.delete(mesh);
-          blasCache.set(mesh, { key, bounds: box, ...data });
+          const blas={key,bounds:box,...data};blasCache.set(mesh,blas);rememberBlas(blas);
           onReady();
         }, () => {
           // A failed worker: build this mesh in place next time.
@@ -193,14 +198,20 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
         continue;
       }
       blas = { key, bounds: box, ...finishBlas(corners, shading) };
-      blasCache.set(mesh, blas);
+      blasCache.set(mesh, blas);rememberBlas(blas);
     }
     total += blas.triangles;
     if (!blas.triangles) continue;
     blases.push(blas);
     let root:THREE.Object3D=mesh;while(root.parent && root.parent!==scene && root.parent.userData.sceneId===id)root=root.parent;
-    instances.push({ blas, world: mesh.matrixWorld.clone(), part:mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh), castShadow:mesh.castShadow, receiveShadow:mesh.receiveShadow });
-    bounds.union(blas.bounds.clone().applyMatrix4(mesh.matrixWorld));
+    const part=mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh);
+    const instanced=mesh as THREE.InstancedMesh,count=instanced.isInstancedMesh?instanced.count:1;
+    for(let instance=0;instance<count;instance++){
+      const world=mesh.matrixWorld.clone();if(instanced.isInstancedMesh){const local=new THREE.Matrix4();instanced.getMatrixAt(instance,local);world.multiply(local);}
+      const color=instanced.isInstancedMesh && instanced.instanceColor?new THREE.Color().fromBufferAttribute(instanced.instanceColor,instance):null;
+      instances.push({blas,world,part,primaryVisible:!background?.hiddenPrimary?.has(id) && mesh.userData.studioPrimaryVisible!==false,castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,...(color?{color:color.toArray() as [number,number,number]}:{})});
+      bounds.union(blas.bounds.clone().applyMatrix4(world));
+    }
   }
   if (pending) return { pending, total };
   // Geometry in layout order (stable across frames while meshes do not change).
@@ -293,14 +304,14 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   sdata.set(lights, 0);
   const nm = new THREE.Matrix3(), inv = new THREE.Matrix4();
   for (let k = 0; k < instances.length; k++) {
-    const { blas, world } = instances[top.order[k]!]!;
+    const { blas, world, color, primaryVisible } = instances[top.order[k]!]!;
     const o = lights.length + k * 36, w = world.elements, iv = inv.copy(world).invert().elements, n = nm.getNormalMatrix(world).elements;
     for (let r = 0; r < 3; r++) {
       sdata.set([iv[r]!, iv[4 + r]!, iv[8 + r]!, iv[12 + r]!], o + r * 4);
       sdata.set([n[r]!, n[3 + r]!, n[6 + r]!, 0], o + 12 + r * 4);
-      sdata.set([w[r]!, w[4 + r]!, w[8 + r]!, 0], o + 24 + r * 4);
+      sdata.set([w[r]!, w[4 + r]!, w[8 + r]!, color?.[r] ?? 0], o + 24 + r * 4);
     }
-    sdata[o + 15] = geometry.roots.get(blas)!;
+    sdata[o + 15] = geometry.roots.get(blas)!;sdata[o + 19]=color?1:0;sdata[o+23]=primaryVisible?0:1;
   }
 
   void environment;
@@ -308,7 +319,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     positions: geometry.positions, tris: geometry.tris, blasNodes: geometry.blasNodes, tlasNodes, geometryKey,
     sdata, instanceCount: instances.length,
     materials: new Float32Array(materials.length ? materials : [0,0,0,0,1,0,.03,0,0,0,0,0,1.5,1,1,0,-1,-1,-1,-1,0,0,0,0,1,7,0,0,-1,-1,-1,1]),
-    instancePolicies: Array.from(top.order,k=>{const m=instances[k]!;return {part:m.part,castShadow:m.castShadow,receiveShadow:m.receiveShadow};}),
+    instancePolicies: Array.from(top.order,k=>{const m=instances[k]!;return {part:m.part,castShadow:m.castShadow,receiveShadow:m.receiveShadow,primaryVisible:m.primaryVisible};}),
     materialPolicies: Array.from({length:materials.length/32},(_,i)=>({ambientResponse:materials[i*32+24]!,doubleSided:(materials[i*32+25]!&4)!==0,alphaTest:materials[i*32+26]!})),
     lightPolicies,
     lightCount: lights.length / 16,
@@ -319,6 +330,14 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
 type Blas = BlasData & { key: string; bounds: THREE.Box3 };
 
 const blasCache = new WeakMap<THREE.Object3D, Blas>();
+const sharedBlases=new Map<string,Blas>();let sharedBlasBytes=0;
+function rememberBlas(blas:Blas):void{
+ if(sharedBlases.has(blas.key))return;
+ const bytes=blas.positions.byteLength+blas.tris.byteLength+blas.nodes.byteLength;
+ if(bytes>256*1024*1024)return;
+ while(sharedBlasBytes+bytes>256*1024*1024 && sharedBlases.size){const [key,old]=sharedBlases.entries().next().value!;sharedBlases.delete(key);sharedBlasBytes-=old.positions.byteLength+old.tris.byteLength+old.nodes.byteLength;}
+ sharedBlases.set(blas.key,blas);sharedBlasBytes+=bytes;
+}
 const buildingFor = new WeakMap<THREE.Object3D, { key: string; triangles: number }>();
 const failedFor = new WeakMap<THREE.Object3D, string>();
 const geometryCache = new Map<string, { positions: Float32Array; tris: Float32Array; blasNodes: ArrayBuffer; roots: Map<Blas, number>; triangles: number; tlasCapacity: number }>();
@@ -332,6 +351,7 @@ function idOf(o: any): string {
   return `${v}.${o.version ?? 0}`;
 }
 function blasKey(g: THREE.BufferGeometry, materials: number[], object: number): string {
-  return [g.uuid, idOf(g.getAttribute('position')), idOf(g.getAttribute('normal')), idOf(g.getAttribute('uv')), idOf(g.getAttribute('color')), idOf(g.getIndex()), materials.join(','), object, g.groups.map(x => `${x.start}:${x.count}:${x.materialIndex}`).join(';')].join('/');
+  const version=(name:string)=>{const a=g.getAttribute(name) as THREE.BufferAttribute;return a?`${a.count}:${a.itemSize}:${a.version ?? (a as any).data?.version ?? 0}`:'-';};
+  const identity=g.userData.studioGeometryKey?[g.userData.studioGeometryKey,...['position','normal','uv','color'].map(version),g.getIndex()?.version ?? 0]:[g.uuid,idOf(g.getAttribute('position')),idOf(g.getAttribute('normal')),idOf(g.getAttribute('uv')),idOf(g.getAttribute('color')),idOf(g.getIndex())];
+  return [...identity, materials.join(','), object, g.groups.map(x => `${x.start}:${x.count}:${x.materialIndex}`).join(';')].join('/');
 }
-

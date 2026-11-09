@@ -140,7 +140,7 @@ export class SceneRuntime {
         const object = cloneSkinned(asset.object3d);
         // Clones own geometry/material lifetime, never the asset store's resources.
         // Splat clones already share their data and own their sort order.
-        object.traverse((c:any)=> { if (c.userData.splat) return; if (c.geometry) c.geometry=c.geometry.clone();
+        object.traverse((c:any)=> { if (c.userData.splat) return; if (c.geometry) {const original=c.geometry;c.geometry=original.clone();c.geometry.userData.studioGeometryKey=original.uuid;}
           if (c.material) c.material=Array.isArray(c.material) ? c.material.map((m:any)=>m.clone()) : c.material.clone(); });
         captureRestPose(object);
         if (asset.animations?.length) {

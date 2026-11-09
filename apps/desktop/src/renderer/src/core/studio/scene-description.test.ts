@@ -41,3 +41,21 @@ describe('Studio Rust scene contract',()=>{
  });
 
 });
+
+it('keeps one mesh BVH for a whole imported instance set',()=>{
+ const graph=new THREE.Scene(),mesh=new THREE.InstancedMesh(new THREE.BoxGeometry(),new THREE.MeshStandardMaterial(),100);
+ mesh.userData.sceneId='forest';for(let i=0;i<100;i++)mesh.setMatrixAt(i,new THREE.Matrix4().makeTranslation(i*2,0,0));graph.add(mesh);
+ const prepared=extractScene(graph,()=>true,env);expect(prepared.triangles).toBe(12);expect(prepared.instanceCount).toBe(100);expect(prepared.bounds.max.x).toBeCloseTo(198.5);
+ const description=describePreparedScene(prepared,view,[]);expect(description.scene.objects).toHaveLength(100);expect(description.layer_ids).toEqual(['forest']);
+});
+it('shares cloned file geometry and identical materials within one model layer',()=>{
+ const graph=new THREE.Scene(),g=new THREE.BoxGeometry();
+ for(let i=0;i<2;i++){const clone=g.clone();clone.userData.studioGeometryKey=g.uuid;const mesh=new THREE.Mesh(clone,new THREE.MeshStandardMaterial());mesh.userData.sceneId='assembly';mesh.position.x=i*2;graph.add(mesh);}
+ const prepared=extractScene(graph,()=>true,env);expect(prepared.instanceCount).toBe(2);expect(prepared.triangles).toBe(12);expect(prepared.materials.length).toBe(32);
+});
+it('retains imported instance colors without copying mesh triangles',()=>{
+ const mesh=new THREE.InstancedMesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial({color:'#ffffff'}),2);mesh.userData.sceneId='colored-instances';mesh.setColorAt(0,new THREE.Color(1,0,0));mesh.setColorAt(1,new THREE.Color(0,0,1));mesh.setMatrixAt(1,new THREE.Matrix4().makeTranslation(2,0,0));
+ const graph=new THREE.Scene();graph.add(mesh);const prepared=extractScene(graph,()=>true,env),doc=describePreparedScene(prepared,view,[]);
+ expect(prepared.triangles).toBe(12);expect(prepared.instanceCount).toBe(2);
+ const bases=doc.scene.objects.map(o=>doc.scene.materials[o.material]!.base);expect(bases).toContainEqual({x:1,y:0,z:0});expect(bases).toContainEqual({x:0,y:0,z:1});
+});

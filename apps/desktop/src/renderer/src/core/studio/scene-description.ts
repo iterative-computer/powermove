@@ -24,6 +24,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
     materials.push({ base: vec(m, o), metallic: m[o + 3]!, roughness: m[o + 4]!, coat: m[o + 5]!, coat_roughness: m[o + 6]!, transmission: m[o + 7]!, emission: vec(m, o + 8), screen: false, subsurface: m[o + 11]!, ior: m[o + 12]!, specular: m[o + 13]!, anisotropy: m[o + 15]!, sheen: m[o + 20]!, film_nm: m[o + 21]!, dispersion: m[o + 22]!, droplets: m[o + 23]! });
     materialOptions.push({ opacity: m[o + 14]!, ambient_response: input.materialPolicies?.[o / 32]?.ambientResponse ?? 1, double_sided: input.materialPolicies?.[o / 32]?.doubleSided ?? true, unlit:(m[o+25]! & 8)!==0, alpha_test: input.materialPolicies?.[o / 32]?.alphaTest ?? 0, maps: [m[o + 16]!, m[o + 17]!, m[o + 28]!, m[o + 29]!, m[o + 19]!, m[o + 30]!] });
   }
+  const coloredMaterials=new Map<string,number>();
   const nodes = new Uint32Array(input.blasNodes), baseNode = input.tlasNodes.byteLength / 64;
   for (let instance = 0; instance < input.instanceCount; instance++) {
     const at = input.lightCount * 16 + instance * 36, d = input.sdata;
@@ -38,11 +39,18 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
         if (count === 0xffffffff) continue;
         if (count === 0) { stack.push(start - baseNode); continue; }
         for (let t = start; t < start + count; t++) {
-          const material = input.tris[t * 24 + 18]!, layer = input.tris[t * 24 + 19]!;
+          const originalMaterial = input.tris[t * 24 + 18]!, layer = input.tris[t * 24 + 19]!;
+          let material=originalMaterial;
+          if(d[at+19]!>0.5){
+            const color=[d[at+27]!,d[at+31]!,d[at+35]!],key=`${originalMaterial}:${color.join(',')}`;
+            const previous=coloredMaterials.get(key);
+            if(previous!==undefined)material=previous;
+            else{const m=materials[originalMaterial]!,scale=(v:StudioVec3)=>({x:v.x*color[0]!,y:v.y*color[1]!,z:v.z*color[2]!});material=materials.length;materials.push({...m,base:scale(m.base),emission:materialOptions[originalMaterial]?.unlit?scale(m.emission):m.emission});materialOptions.push({...materialOptions[originalMaterial]!});coloredMaterials.set(key,material);}
+          }
           let mesh = groups.get(material);
           if (!mesh) { mesh = { positions: [], normals: [], uvs: [], indices: [] }; groups.set(material, mesh); }
           const index = mesh.positions.length;
-          const vertexColors=(input.materials[material*32+25]! & 16)!==0;
+          const vertexColors=(input.materials[originalMaterial*32+25]! & 16)!==0;
           let identity=identities[objects.findIndex(o=>o.mesh===mesh)];
           for (let j = 0; j < 3; j++) {
             const p = new THREE.Vector3().fromArray(input.positions, t * 12 + j * 4).applyMatrix4(world);
@@ -59,7 +67,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
           if (mesh.indices.length === 1) {
             objects.push({ mesh, material }); layers.push(layer);
             const meta = input.instancePolicies?.[instance];
-            identities.push(identity ?? { layer: input.objects[layer]!, part: meta?.part ?? null, cast_shadow: meta?.castShadow ?? true, receive_shadow: meta?.receiveShadow ?? true });
+            identities.push({...identity ?? { layer: input.objects[layer]!, part: meta?.part ?? null, cast_shadow: meta?.castShadow ?? true, receive_shadow: meta?.receiveShadow ?? true },primary_visible:d[at+23]!<.5});
           }
         }
       }
@@ -118,7 +126,7 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
     if(colors)g.setAttribute('color',new THREE.Float32BufferAttribute(colors.flat(),4));
     const material=materials[o.material]!.clone();material.vertexColors=!!colors;
     const mesh = new THREE.Mesh(g, material); mesh.userData.sceneId = document.object_ids[i]?.layer ?? document.layer_ids[document.scene.layers[i]!] ?? `object-${i}`;
-    mesh.userData.studioPart = document.object_ids[i]?.part ?? null;
+    mesh.userData.studioPart = document.object_ids[i]?.part ?? null;mesh.userData.studioPrimaryVisible=document.object_ids[i]?.primary_visible!==false;
     mesh.castShadow = document.object_ids[i]?.cast_shadow ?? true; mesh.receiveShadow = document.object_ids[i]?.receive_shadow ?? true; graph.add(mesh);
   });
   // Lights are already in the shared GPU layout; replace the extracted light segment below.

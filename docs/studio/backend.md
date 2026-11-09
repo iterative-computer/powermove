@@ -77,3 +77,18 @@ the original parameter meaning and output. The page's `StudioView.camera`
 contains ordinary `near` and `far` numbers; backend implementations need no
 bit packing outside their GPU upload. Primary and guide rays use clip planes;
 reflections still see the complete scene.
+
+Instance metadata also uses existing, previously unused `sdata` lanes; the
+stride stays 36 floats. Within each instance, offset 19 is a color-present flag,
+with linear RGB in offsets 27/31/35. Offset 23 hides that instance from primary
+camera and guide rays only. Zero in those flags keeps the original behavior.
+Shadow/reflection rays still see hidden-primary instances. This lets the host
+apply per-layer opacity, masks and effects over the layers behind them without
+losing their reflections or shadows. JSON carries the equivalent optional
+`object_ids[].primary_visible` field. Ordinary opaque depth sets still share one
+renderer job; layers requiring separate compositing use per-layer primary views.
+
+Imported `EXT_mesh_gpu_instancing` becomes one mesh BVH with multiple transform
+instances. Cloned geometry within a layer can also share its BVH when original
+geometry, material assignment and pose match. The shared CPU cache is capped at
+256 MiB. Scene data and the material table retain stable binary strides.

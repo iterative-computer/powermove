@@ -292,6 +292,7 @@ export async function loadSplats(blob: Blob, name: string): Promise<{ object3d: 
   const center = new THREE.Vector3((x[0] + x[1]) / 2, (y[0] + y[1]) / 2, (z[0] + z[1]) / 2);
   const radius = Math.max(1e-6, Math.hypot(x[1] - x[0], y[1] - y[0], z[1] - z[0]) / 2);
   const mesh = new SplatMesh(data);
+  mesh.geometry.boundingBox=new THREE.Box3(new THREE.Vector3(x[0],y[0],z[0]),new THREE.Vector3(x[1],y[1],z[1]));
   mesh.name = name;
   // 3DGS captures (COLMAP) are y-down; Powermove is y-up.
   const normalization = new THREE.Group();

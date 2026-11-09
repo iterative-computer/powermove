@@ -26,7 +26,7 @@ describe('Studio backend lifecycle',()=>{
  it('recovers a native initialization failure with in-page WebGPU',async()=>{
   const dispose=vi.fn();registerStudioBackend(()=>({id:'broken-native',initialize:async()=>{throw new Error('host unavailable');},dispose} as unknown as StudioBackend));
   const {PM,draw}=fixture();draw();await studioIdle(PM);draw();await studioIdle(PM);const frame=draw();
-  expect(frame?.version).toBe('fallback');expect(dispose).toHaveBeenCalledOnce();expect(PM.Studio.status().backend).toBe('webgpu');
+  expect(frame?.version).toContain('fallback');expect(dispose).toHaveBeenCalledOnce();expect(PM.Studio.status().backend).toBe('webgpu');
  });
  it('sends canonical Rust scenes to a backend without the optional binary fast path',async()=>{
   let description:any;registerStudioBackend(()=>({id:'json-test',initialize:async()=>{},setScene:(d:any)=>{description=d;},setCamera:()=>{},setTime:()=>{},render:(r:any)=>({source:document.createElement('canvas'),width:64,height:64,samples:r.samples,version:'json'}),dispose:()=>{}} as unknown as StudioBackend));
