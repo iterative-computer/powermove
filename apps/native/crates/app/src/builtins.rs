@@ -362,7 +362,7 @@ impl Controller {
         })
         .detach();
     }
-    fn facts(&self) -> Value {
+    fn facts(&self, cx: &App) -> Value {
         let status = self.viewer.as_ref().map(|v| v.status());
         let playing = status.as_ref().is_some_and(|s| {
             s.clock
@@ -374,7 +374,7 @@ impl Controller {
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact()})
+            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx)})
     }
     /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
     /// the playhead and timecode are CALayers fed from the display link.
@@ -413,7 +413,7 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
-        let facts = self.facts();
+        let facts = self.facts(cx);
         let originals = self.media.originals.clone();
         let observed = self.rendition_runtime();
         let show_missing = std::mem::take(&mut self.builtins.show_missing);

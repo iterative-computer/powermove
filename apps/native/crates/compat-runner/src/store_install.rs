@@ -21,6 +21,10 @@ const PINNED_KEYS: &[(&str, &str, [u8; 32])] = &[];
 pub fn origin() -> &'static str {
     dev().map_or(ORIGIN, |dev| dev.origin)
 }
+/// Whether this development build reads a fixture Store (`--dev-store-origin`).
+pub fn is_dev() -> bool {
+    dev().is_some()
+}
 /// A development build's fixture Store: its loopback origin and the one test
 /// key (`--dev-store-key publisher:key-id:<64 hex>`) its releases are signed
 /// with. Release builds compile this away; no catalog or extension input can

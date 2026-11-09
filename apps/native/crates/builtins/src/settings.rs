@@ -92,7 +92,18 @@ pub const RESOLUTIONS: [(&str, u32, u32); 6] = [
 
 impl Backend {
     /// Live subscription rows. These replace the catalogue's disabled ones by id.
-    pub(crate) fn account_rows(&self) -> Vec<Value> {
+    pub(crate) fn account_rows(&mut self) -> Vec<Value> {
+        let mut rows = cloud_rows(&self.native.facts["cloud"]);
+        // A switch acts through its native binding lease.
+        if let Some(remember) = rows.iter_mut().find(|r| r["id"] == "account.remember")
+            && let Ok(fields) = self.fields(&json!(["account.remember"]))
+        {
+            remember["binding"] = fields["account.remember"].clone();
+        }
+        rows.extend(self.subscription_rows());
+        rows
+    }
+    fn subscription_rows(&self) -> Vec<Value> {
         let Some(accounts) = self.native.agent_link.accounts() else {
             return vec![notification_row()];
         };
@@ -451,6 +462,20 @@ impl Backend {
                     .push(("media.settings".into(), json!({"action":action["action"]})));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            Some("write") if action["id"] == "account.remember" => {
+                let on = action["value"]
+                    .as_bool()
+                    .ok_or("Remember Installs must be on or off")?;
+                let name = if on {
+                    "cloudRememberOn"
+                } else {
+                    "cloudRememberOff"
+                };
+                self.native
+                    .platform
+                    .push(("command".into(), json!({ "name": name })));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             Some("write") => {
                 let value = &action["value"];
                 if action["id"] == "memory.enabled" {
@@ -572,6 +597,23 @@ impl Backend {
                 ));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            // The Powermove account's sheets, Keychain and registry calls are the app's.
+            Some("row")
+                if matches!(
+                    action["action"].as_str(),
+                    Some("account.sign-in" | "account.sign-out" | "account.delete")
+                ) =>
+            {
+                let name = match action["action"].as_str() {
+                    Some("account.sign-in") => "cloudSignIn",
+                    Some("account.sign-out") => "cloudSignOut",
+                    _ => "cloudDeleteAccount",
+                };
+                self.native
+                    .platform
+                    .push(("command".into(), json!({ "name": name })));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // Keychain consent belongs to the app: it asks before anything is read.
             Some("row") if action["action"] == "account.bring-sign-ins" => {
                 self.native
@@ -628,6 +670,47 @@ impl Backend {
             _ => Err("Settings service is unavailable for this action".into()),
         }
     }
+}
+/// Settings › Accounts › Powermove Account, from the app's `cloud` fact
+/// (v1.2.0 SettingsScreen): Sign In… while signed out; the identity with Sign
+/// Out, Remember Installs and Delete Account… while signed in.
+pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
+    if !cloud.is_object() {
+        return Vec::new();
+    }
+    let busy = cloud["busy"] == true;
+    let row = |id: &str, label: &str, control: &str| {
+        json!({"id":format!("account.{id}"),"section":"accounts","group":"Powermove Account",
+            "label":label,"control":control,"disabled":busy})
+    };
+    if cloud["signedIn"] != true {
+        let mut sign_in = row("sign-in", "Powermove Account", "action");
+        sign_in["action"] = json!("account.sign-in");
+        sign_in["actionLabel"] = json!("Sign In…");
+        sign_in["detail"] = json!("Publish and manage your extensions on the Store.");
+        let mut remember = row("remember", "Remember Installs on This Account", "switch");
+        remember["value"] = json!(false);
+        remember["disabled"] = json!(true);
+        return vec![sign_in, remember];
+    }
+    let identity = cloud["identity"].as_str().unwrap_or_default();
+    let email = cloud["email"].as_str().unwrap_or_default();
+    let mut account = row("sign-in", identity, "action");
+    account["action"] = json!("account.sign-out");
+    account["actionLabel"] = json!("Sign Out");
+    if identity != email {
+        account["detail"] = json!(email);
+    }
+    let mut remember = row("remember", "Remember Installs on This Account", "switch");
+    remember["value"] = json!(cloud["rememberInstalls"] == true);
+    remember["detail"] = json!(
+        "Keep a list of the extensions you install from the Store. Turning this off deletes the list."
+    );
+    let mut delete = row("delete", "Delete Account", "action");
+    delete["action"] = json!("account.delete");
+    delete["actionLabel"] = json!("Delete Account…");
+    delete["detail"] = json!("Your published extensions stay on the Store under your handle.");
+    vec![account, remember, delete]
 }
 fn number(value: &Value, min: f64, max: f64) -> Result<f64, String> {
     value
@@ -766,5 +849,27 @@ mod protected_folders_tests {
             protected_folders_row(&json!([{"name":"Desktop","files":1,"refused":true}])).unwrap();
         assert_eq!(row["disabled"], false);
         assert_eq!(row["actionLabel"], "Check Again…");
+    }
+}
+#[cfg(test)]
+mod cloud_tests {
+    use super::cloud_rows;
+    use serde_json::json;
+    #[test]
+    fn powermove_account_rows_follow_the_session() {
+        assert!(cloud_rows(&serde_json::Value::Null).is_empty());
+        let out = cloud_rows(&json!({"revision":2,"signedIn":false}));
+        assert_eq!(out[0]["action"], "account.sign-in");
+        assert_eq!(out[0]["actionLabel"], "Sign In…");
+        assert_eq!(out[1]["disabled"], true);
+        let signed = json!({"revision":3,"signedIn":true,"identity":"@maker",
+            "email":"person@example.com","rememberInstalls":true});
+        let out = cloud_rows(&signed);
+        assert_eq!(out[0]["label"], "@maker");
+        assert_eq!(out[0]["detail"], "person@example.com");
+        assert_eq!(out[0]["action"], "account.sign-out");
+        assert_eq!(out[1]["value"], true);
+        assert_eq!(out[1]["disabled"], false);
+        assert_eq!(out[2]["action"], "account.delete");
     }
 }

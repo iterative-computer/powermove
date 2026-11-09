@@ -2,6 +2,9 @@ mod alert;
 mod builtins;
 #[cfg(test)]
 mod builtins_tests;
+mod cloud;
+#[cfg(test)]
+mod cloud_tests;
 mod colour;
 mod colour_panel;
 mod diag;
@@ -314,6 +317,7 @@ fn main() -> Result<()> {
                     .or_else(|| launch.take().map(entry::Pending::File));
                 entity.update(cx, |v, cx| v.initialize(opening, cx));
                 entry::register(&entity, window.window_handle(), cx);
+                cloud::init(profile.clone(), cx);
                 if let Some(ns) = platform::ns_window(window) {
                     updates::after_launch(profile.clone(), ns, cx);
                 }

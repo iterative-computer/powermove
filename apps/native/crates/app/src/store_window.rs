@@ -413,6 +413,7 @@ impl StoreWindow {
             ) {
                 Ok(_) => {
                     pm_compat_runner::host::rescan_all();
+                    crate::cloud::remember_install(&profile, &repo, Some(&release));
                     Reply::Done(if updating {
                         format!("{name} is updated.")
                     } else {
@@ -429,6 +430,7 @@ impl StoreWindow {
         &mut self,
         id: String,
         name: String,
+        repo: Option<String>,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
@@ -447,12 +449,18 @@ impl StoreWindow {
         .sheet(&ns_window);
         cx.spawn(async move |this, cx| {
             if rx.recv().await == Ok(Some(true)) {
-                let _ = this.update(cx, |v, cx| v.uninstall(id, name, cx));
+                let _ = this.update(cx, |v, cx| v.uninstall(id, name, repo, cx));
             }
         })
         .detach();
     }
-    pub fn uninstall(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+    pub fn uninstall(
+        &mut self,
+        id: String,
+        name: String,
+        repo: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.busy.is_some() {
             return;
         }
@@ -462,6 +470,9 @@ impl StoreWindow {
             move |_| match store_install::uninstall(kernel.as_ref(), &profile, &id) {
                 Ok(()) => {
                     pm_compat_runner::host::rescan_all();
+                    if let Some(repo) = &repo {
+                        crate::cloud::remember_install(&profile, repo, None);
+                    }
                     Reply::Done(format!("{name} is uninstalled."))
                 }
                 Err(error) => Reply::Done(error.to_string()),
@@ -984,11 +995,11 @@ impl StoreWindow {
         }
         actions = actions.child(button);
         if let Some(item) = installed {
-            let (id, name) = (item.id.clone(), item.name.clone());
+            let (id, name, repo) = (item.id.clone(), item.name.clone(), item.repo.clone());
             actions = actions.child(
                 self.button("store-uninstall", "Uninstall…", self.busy.is_none(), false)
                     .on_click(cx.listener(move |v, _, window, cx| {
-                        v.confirm_uninstall(id.clone(), name.clone(), window, cx)
+                        v.confirm_uninstall(id.clone(), name.clone(), repo.clone(), window, cx)
                     })),
             );
         }

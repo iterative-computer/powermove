@@ -168,6 +168,156 @@ fn detail(repo: &str) -> Value {
         .collect();
     value
 }
+/// The account side of the fixture: one person, sessions by bearer token.
+#[derive(Default)]
+pub struct Account {
+    challenges: std::collections::BTreeMap<String, String>,
+    sessions: std::collections::BTreeSet<String>,
+    email: String,
+    handle: Option<String>,
+    remember: bool,
+    pub installs: Vec<(String, String)>,
+    pub deleted: bool,
+}
+impl Account {
+    pub fn sessions_clear(&mut self) {
+        self.sessions.clear();
+    }
+}
+/// The emailed code the fixture accepts.
+pub const CODE: &str = "424242";
+fn cloud(
+    method: &str,
+    path: &str,
+    head: &str,
+    body: &[u8],
+    account: &Mutex<Account>,
+) -> Option<(u16, Vec<u8>)> {
+    use base64::Engine;
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    let request: Value = serde_json::from_slice(body).unwrap_or_default();
+    let mut a = account.lock().unwrap();
+    let bearer = head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case("authorization")
+            .then(|| v.trim().strip_prefix("Bearer ").map(str::to_owned))?
+    });
+    let authed = bearer.as_ref().is_some_and(|t| a.sessions.contains(t));
+    let json = |v: Value| Some((200, v.to_string().into_bytes()));
+    let fail =
+        |status: u16, code: &str| Some((status, json!({ "error": code }).to_string().into_bytes()));
+    let session = |a: &mut Account| {
+        let token = format!("fixture-session-{}", a.sessions.len() + 1);
+        a.sessions.insert(token.clone());
+        json!({"token":token,"expiresAt":"2099-01-01T00:00:00.000Z"})
+    };
+    let me = |a: &Account| {
+        json!({"user":{"id":"fixture-user","name":null,"email":a.email,"image":null},
+        "publisher":a.handle.as_ref().map(|h| json!({"id":"5a1c0000-0000-4000-8000-0000000000ee","handle":h,"tombstoned":false,"verified":false})),
+        "settings":{"rememberInstalls":a.remember}})
+    };
+    match (method, path) {
+        // The registry's Google page, played by the review: it answers with
+        // the return link a browser would follow.
+        ("GET", "/v1/auth/desktop") => {
+            let pairs: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect();
+            let get = |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| key == k)
+                    .map(|(_, v)| v.clone())
+            };
+            let (state, challenge) = (get("state")?, get("challenge")?);
+            a.challenges.insert(state.clone(), challenge);
+            Some((
+                302,
+                format!("powermove://auth?state={state}&token=browser-{state}").into_bytes(),
+            ))
+        }
+        ("POST", "/v1/auth/desktop/exchange") => {
+            let state = request["state"].as_str()?.to_owned();
+            let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(request["verifier"].as_str()?)
+                .ok()?;
+            let challenge =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(&verifier));
+            if a.challenges.remove(&state) != Some(challenge)
+                || request["token"].as_str() != Some(&format!("browser-{state}"))
+            {
+                return fail(401, "unauthorized");
+            }
+            a.email = "fixture@example.com".into();
+            a.deleted = false;
+            json(session(&mut a))
+        }
+        ("POST", "/v1/auth/email/send") => {
+            a.email = request["email"].as_str()?.to_owned();
+            json(json!({"ok":true}))
+        }
+        ("POST", "/v1/auth/email/verify") => {
+            if request["otp"].as_str() != Some(CODE) || request["email"] != a.email.as_str() {
+                return fail(401, "unauthorized");
+            }
+            a.deleted = false;
+            json(session(&mut a))
+        }
+        (_, p)
+            if p.starts_with("/v1/me")
+                || p.starts_with("/v1/installs")
+                || p == "/v1/auth/sign-out" =>
+        {
+            if !authed {
+                return fail(401, "unauthorized");
+            }
+            match (method, p) {
+                ("GET", "/v1/me") => json(me(&a)),
+                ("DELETE", "/v1/me") => {
+                    a.sessions.clear();
+                    a.deleted = true;
+                    a.handle = None;
+                    Some((204, vec![]))
+                }
+                ("POST", "/v1/me/handle") => match request["handle"].as_str()? {
+                    "taken" => fail(409, "handle_taken"),
+                    "powermove" => fail(400, "handle_reserved"),
+                    handle => {
+                        a.handle = Some(handle.to_owned());
+                        json(json!({"publisher":me(&a)["publisher"]}))
+                    }
+                },
+                ("PATCH", "/v1/me/settings") => {
+                    a.remember = request["rememberInstalls"].as_bool()?;
+                    if !a.remember {
+                        a.installs.clear();
+                    }
+                    json(json!({"settings":{"rememberInstalls":a.remember}}))
+                }
+                ("POST", "/v1/auth/sign-out") => {
+                    if let Some(token) = &bearer {
+                        a.sessions.remove(token);
+                    }
+                    json(json!({"ok":true}))
+                }
+                ("POST", "/v1/installs") => {
+                    a.installs.push((
+                        request["repoId"].as_str()?.to_owned(),
+                        request["releaseId"].as_str()?.to_owned(),
+                    ));
+                    Some((204, vec![]))
+                }
+                ("DELETE", p) => {
+                    let repo = p.strip_prefix("/v1/installs/")?;
+                    a.installs.retain(|(r, _)| r != repo);
+                    Some((204, vec![]))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 fn route(method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
     let json = |v: Value| (200, v.to_string().into_bytes());
@@ -244,6 +394,10 @@ fn route(method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
 }
 /// Serves the fixture Store on 127.0.0.1; returns its origin.
 pub fn serve(port: u16) -> String {
+    serve_with(port, Arc::default())
+}
+/// As [`serve`], with the account the test reads back.
+pub fn serve_with(port: u16, account: Arc<Mutex<Account>>) -> String {
     let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
     let origin = format!(
         "http://127.0.0.1:{}/",
@@ -251,6 +405,7 @@ pub fn serve(port: u16) -> String {
     );
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            let account = account.clone();
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let mut data = Vec::new();
@@ -283,7 +438,12 @@ pub fn serve(port: u16) -> String {
                 };
                 let mut line = head.lines().next().unwrap_or_default().split(' ');
                 let (method, path) = (line.next().unwrap_or(""), line.next().unwrap_or(""));
-                let (status, reply) = route(method, path, &body);
+                let (status, reply) = cloud(method, path, &head, &body, &account)
+                    .unwrap_or_else(|| route(method, path, &body));
+                // A redirect's body is where it goes.
+                let location = (status == 302)
+                    .then(|| format!("Location: {}\r\n", String::from_utf8_lossy(&reply)))
+                    .unwrap_or_default();
                 let kind = if path.ends_with("/tar") {
                     "application/gzip"
                 } else {
@@ -291,7 +451,7 @@ pub fn serve(port: u16) -> String {
                 };
                 let _ = stream.write_all(
                     format!(
-                        "HTTP/1.1 {status} OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status} OK\r\n{location}Content-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         reply.len()
                     )
                     .as_bytes(),
@@ -320,6 +480,7 @@ fn serve_fixture_store() {
         .unwrap_or(4170);
     let origin = serve(port);
     println!("--dev-store-origin {origin} --dev-store-key {}", key_spec());
+    println!("emailed sign-in code: {CODE}");
     loop {
         std::thread::sleep(Duration::from_secs(3600));
     }
@@ -543,7 +704,12 @@ fn library_shows_an_update_notice_and_updates_then_uninstall_archives() {
     );
     // Uninstall (what the confirmation's Uninstall runs) archives it too.
     view.update(cx, |v, cx| {
-        v.uninstall("soft-glow".into(), "Soft Glow".into(), cx)
+        v.uninstall(
+            "soft-glow".into(),
+            "Soft Glow".into(),
+            Some(GLOW_REPO.into()),
+            cx,
+        )
     });
     settle(&view, cx, "uninstall", |v| {
         v.busy.is_none()
