@@ -47,17 +47,18 @@ test('saved project files restore imported video without the original session me
     const layer = PM.proj.layers.find((item: any) => item.name === 'h264-aac.mp4');
     PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { from: 0 } });
     PM.setTime(1.5, { raw: true, force: true });
-    const live = PM.assets.get(layer.d.asset);
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Restored video did not seek')), 8000);
-      const poll = () => {
-        if (Math.abs(live.el.currentTime - 1.5) < .05 && live.el.readyState >= 2) { clearTimeout(timeout); resolve(); }
-        else setTimeout(poll, 50);
-      }; poll();
-    });
-    const frame = PM.renderFrameTo(1.5, PM.proj.w, PM.proj.h);
-    return { bytes: blob?.size, pixel: [...frame.getContext('2d').getImageData(frame.width / 2, frame.height / 2, 1, 1).data] };
+    // This verifies persisted source pixels. Await the real capture decoder;
+    // a background preview may use another element or supersede its own seek.
+    const capturing = PM.agentFrameCapture;
+    PM.agentFrameCapture = true;
+    try {
+      await PM.prepareFrame(1.5, { mblur: false });
+      const prepared = PM.preparedVideoFrames?.size === 1;
+      const frame = PM.renderFrameTo(1.5, PM.proj.w, PM.proj.h);
+      return { prepared, bytes: blob?.size, pixel: [...frame.getContext('2d').getImageData(frame.width / 2, frame.height / 2, 1, 1).data] };
+    } finally { PM.agentFrameCapture = capturing; PM.preparedVideoFrames = null; }
   });
+  expect(restored.prepared).toBe(true);
   expect(restored.bytes).toBeGreaterThan(0);
   expect(restored.pixel[1]).toBeGreaterThan(225);
   expect(restored.pixel[0]).toBeLessThan(30);
