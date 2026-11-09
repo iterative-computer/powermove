@@ -29,7 +29,7 @@ import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
-import { studioLayer, studioPreviewKey, studioUnsettled, studioReady, studioIdle, studioPending } from '../../core/studio';
+import { beginStudioCapture, studioLayer, studioPreviewKey, studioUnsettled, studioReady, studioIdle, studioPending } from '../../core/studio';
 import { MAP_SIZE as STUDIO_MAP_SIZE } from '../../core/studio/extract';
 
 /* Live screens being rendered right now (a screen showing its own 3D layer would never end). */
@@ -1424,7 +1424,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     pmScopePush(sub);
     try {
       const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH,
-        inputFrameOptions ? { transparent: true, ...inputFrameOptions } : isolatedCaptureNoMotionBlur ? { transparent: true, mblur: false } : { transparent: true });
+        { ...(inputFrameOptions ? { transparent: true, ...inputFrameOptions } : isolatedCaptureNoMotionBlur ? { transparent: true, mblur: false } : { transparent: true }),studioShutterSamples:PM._studioShutterSamples });
       /* blit the nested result into our FBO so ownership stays with this level */
       bind(f);
       const p = program('copyA', PM.FRAG_DRAW);
@@ -2165,10 +2165,11 @@ GL.prepareStudioFrame = async (project:any,time:number,options:any={}) => {
   const has3D=(comp:any):boolean=>(comp.layers || []).some((l:any)=>layer3DRole(l) || isExtrudedLayer(l) || isShared3DPlane(comp,l) || PM.layerDefinition?.(l.d?.definition)?.renderer?.kind==='mesh');
   if(![project,...Object.values<any>(PM.proj?.comps || {})].some(has3D))return;
   await studioReady(PM);
+  beginStudioCapture(PM);
   const width=options.width || project.w,height=options.height || project.h;
   for(let attempt=0;attempt<8;attempt++){
     if(options.signal?.aborted)throw new Error('Studio frame cancelled');
-    const f=GL.renderProject(project,time,width,height,{...options,mblur:false,exporting:!!PM.Export?.busy || !!PM.agentFrameCapture,transparent:true});
+    const f=GL.renderProject(project,time,width,height,{...options,exporting:!!options.exporting || !!PM.Export?.busy || !!PM.agentFrameCapture,transparent:true});
     free(f);await studioIdle(PM);
     if(!studioPending(PM))return;
   }
@@ -2216,7 +2217,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   // An explicit fresh frame (previewReuse: false) is a still too, even through the editor's camera.
   PM._studioStill=!PM._studioFinal&&(!opt.editorViewport||opt.previewReuse===false);
   // Motion blur renders each frame at several shutter times; Studio splits its samples across them.
-  PM._studioShutterSamples=opt.mblur!==false&&opt.mbSamples>1?opt.mbSamples:1;
+  PM._studioShutterSamples=opt.studioShutterSamples || 1;
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
   const gl = GL.gl;
   const orderedLayers = proj.layers;
@@ -2323,6 +2324,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       let blend = opt.inputLayer ? 0 : (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
       if(blend===5&&L.blendVersion===2)blend=18;
       const mb = (isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur) && opt.mblur !== false;
+      PM._studioShutterSamples=opt.studioShutterSamples || (mb?motionBlurTimes(T,proj.fps,opt).length:1);
       const transition = opt.inputLayer ? null : activeTransition(L, T);
 
       /* Adjustment layers are full-frame processors over the already-rendered
@@ -2357,7 +2359,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
         lf=grab(W,H);bind(lf);clear();
         const times=mb?motionBlurTimes(T,proj.fps,opt):[T];
         for(const at of times){
-          const frame=GL.renderProject(proj,at,W,H,{...opt,inputLayer:undefined,inputStage:undefined,rawOwner:L.id,ownerGrow:true,mblur:false,inputContext:layerInputs?.time===at?layerInputs:undefined});
+          const frame=GL.renderProject(proj,at,W,H,{...opt,inputLayer:undefined,inputStage:undefined,rawOwner:L.id,ownerGrow:true,mblur:false,studioShutterSamples:PM._studioShutterSamples,inputContext:layerInputs?.time===at?layerInputs:undefined});
           const e=frame.sourceExtent??{x0:0,y0:0,w:frame.inputResolution[0],h:frame.inputResolution[1]};
           bind(lf);drawContent(L,at,W,H,PM.clamp(PM.ev(L,'opacity',at)/100,0,1)/times.length,undefined,mb,{tex:frame.tex,w:e.w,h:e.h,ax:-e.x0,ay:-e.y0,uv:[0,0,1,1],fromFbo:true,tmp:frame});
         }
@@ -2369,7 +2371,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
           const times = motionBlurTimes(T, proj.fps, opt), n = times.length;
           for (const at of times) {
             const sample = GL.renderProject(proj, at, W, H, {
-              ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj && layerInputs?.time === at ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id, groupBackdrop:lower.frame, mblur: false,
+              ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj && layerInputs?.time === at ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id, groupBackdrop:lower.frame, mblur: false,studioShutterSamples:PM._studioShutterSamples,
             });
             bind(lf); drawFbo(sample, W, H, 1 / n, true); free(sample);
           }

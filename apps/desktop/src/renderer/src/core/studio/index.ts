@@ -18,12 +18,13 @@ type Job = {
   changedAt: number; usedAt: number; refining: boolean; samples: number; refineGoal:number; generation: number;
   factoryRevision: number; completedGeneration: number; failure: string | null;
 };
-type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; preview: StudioPreview; previewListeners: Set<(q: StudioPreview) => void>; frames: number; declined: string; revision: number; preparing: Map<string, StudioPending> };
+type Capture = { frames:Map<string,StudioFrame> };
+type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; preview: StudioPreview; previewListeners: Set<(q: StudioPreview) => void>; frames: number; declined: string; revision: number; preparing: Map<string, StudioPending>; capture:Capture|null };
 const states = new WeakMap<object, State>();
 const state = (PM: any): State => {
   let s = states.get(PM);
   if (!s) {
-    s = { jobs: new Map(), tick: null, enabled: true, preview: PM.store?.get?.('studioPreview', 'quality') === 'fast' ? 'fast' : 'quality', previewListeners: new Set(), frames: 0, declined: '', revision: 0, preparing: new Map() };
+    s = { jobs: new Map(), tick: null, enabled: true, preview: PM.store?.get?.('studioPreview', 'quality') === 'fast' ? 'fast' : 'quality', previewListeners: new Set(), frames: 0, declined: '', revision: 0, preparing: new Map(),capture:null };
     states.set(PM, s); const st = s;
     PM.Studio ??= {
       setEnabled: (on: boolean) => setStudioEnabled(PM, on),
@@ -172,12 +173,23 @@ function schedule(PM: any): void {
     if (more) { PM.invalidate?.('render'); schedule(PM); }
   }) as unknown as number;
 }
-function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: string): StudioFrame | null {
-  const cached = job.frames.get(key); if (cached) {job.completedGeneration=job.generation;return cached;}
+function retainCapture(capture:Capture,key:string,frame:StudioFrame):void {
+  const canvas=new OffscreenCanvas(frame.width,frame.height);
+  canvas.getContext('2d')!.drawImage(frame.source,0,0);
+  capture.frames.set(key,{...frame,source:canvas,version:`capture:${nextCaptureFrame++}`,release:()=>{canvas.width=canvas.height=0;}});
+}
+function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: string, capture:Capture|null=null,captureKey=''): StudioFrame | null {
+  const cached = job.frames.get(key); if (cached) {job.completedGeneration=job.generation;if(capture)retainCapture(capture,captureKey,cached);return cached;}
   if (job.pending.has(key) || !job.ready) return null;
   const generation = job.generation;
+  let asynchronous=false;
   const accept = (frame: StudioFrame) => {
-    if (job.generation !== generation) { frame.release?.(); return; }
+    if (job.disposed || job.generation !== generation && (!capture || state(PM).capture!==capture)) { frame.release?.(); return; }
+    if(asynchronous && capture && state(PM).capture===capture){
+      // Transport canvases may be reused for the next shutter sample. Snapshot
+      // on the GPU before another scene/time patch can change their pixels.
+      retainCapture(capture,captureKey,frame);
+    }
     // One current frame for each layer/tier; release superseded transport buffers.
     const prefix = `${request.layer}:${request.tier}:`;
     for (const [oldKey, old] of job.frames) if (oldKey.startsWith(prefix) && oldKey !== key) { old.release?.(); job.frames.delete(oldKey); }
@@ -186,8 +198,9 @@ function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: stri
   try {
     const result = job.chain ? job.chain.then(() => job.backend.render(request)) : job.backend.render(request);
     if (result && typeof (result as Promise<StudioFrame>).then === 'function') {
+      asynchronous=true;
       const pending = Promise.resolve(result).then(accept).catch(error => backendFailure(job,PM,error)).finally(() => { job.pending.delete(key); PM.invalidate?.('render'); });
-      job.pending.set(key, pending); return null;
+      job.pending.set(key, pending);chain(job,pending);return null;
     }
     accept(result as StudioFrame); return result as StudioFrame;
   } catch (error) { backendFailure(job,PM,error); return null; }
@@ -216,6 +229,10 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const splat=studioSplatLayer(runtime,camera,objectId,depthIds,width,height,bottom);
   if(splat){s.frames++;return {canvas:splat,version:`splat:${runtime.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}`};}
   const cam = cameraOf(camera, width, height); if (!cam) throw new Error('Unsupported Studio camera');
+  const capture=final?s.capture:null;
+  const captureKey=capture?`${PM.animVersion?.() ?? ''}:${runtime.studioId ?? (runtime.studioId=nextRuntime++)}:${[...depthIds].sort()}:${objectId}:${time}:${width}:${height}:${bottom}:${JSON.stringify(cam)}:${PM._studioShutterSamples || 1}`:'';
+  const prepared=capture?.frames.get(captureKey);
+  if(prepared)return {canvas:prepared.source,version:prepared.version};
   const separate=separateCompositing(PM,runtime,time),hiddenPrimary=new Set([...separate].filter(id=>id!==objectId && depthIds.has(id)));
   const fork=[...depthIds].some(id=>separate.has(id));
   const setKey = `${runtime.studioId ?? (runtime.studioId = nextRuntime++)}:${[...depthIds].sort().join(',')}${fork?`:layer:${objectId}`:''}`;
@@ -259,18 +276,23 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const rw = tier === 'live' ? Math.max(2, width >> 1) : width, rh = tier === 'live' ? Math.max(2, height >> 1) : height;
   const request: StudioRenderRequest = { tier, size: { width: rw, height: rh }, samples, layer: objectId || undefined, background: bottom, accumulate: tier === 'refine', denoise: studioOptions.denoise };
   const key = `${objectId}:${tier}:${bottom}:${job.sceneKey}:${viewKey}:${samples}`;
-  const frame = requestFrame(PM, job, request, key);
+  const frame = requestFrame(PM, job, request, key,capture,captureKey);
   if (!final && !still) schedule(PM);
   if (frame) return { canvas: frame.source, version: `${job.uid}:${job.generation}:${frame.version}` };
   // Async renderers keep the last completed frame while a newer one is in flight.
   const previous = [...job.frames.entries()].reverse().find(([k]) => k.startsWith(`${objectId}:`))?.[1];
   return previous ? { canvas: previous.source, version: `${job.uid}:${job.generation}:${previous.version}` } : null;
 }
-let nextRuntime = 1,nextJob=1;
+let nextRuntime = 1,nextJob=1,nextCaptureFrame=1;
+/** A capture owns async shutter images until the next frame's preparation. */
+export function beginStudioCapture(PM:any):void {
+  const s=state(PM);for(const frame of s.capture?.frames.values() || [])frame.release?.();s.capture={frames:new Map()};
+}
 export function pruneStudio(PM: any, keep: (setKey: string) => boolean): void {
   const s = states.get(PM); if (!s) return;
   for (const k of s.preparing.keys()) if (!keep(k)) s.preparing.delete(k);
   for (const [k, j] of s.jobs) if (!keep(k)) { disposeJob(j); s.jobs.delete(k); }
+  if(!s.jobs.size){for(const frame of s.capture?.frames.values() || [])frame.release?.();s.capture=null;}
 }
 /** Wait for queued scene patches and frame transports, used before final readback. */
 export async function studioIdle(PM?: any): Promise<void> {

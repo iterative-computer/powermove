@@ -37,6 +37,15 @@ must not mutate a returned frame before the next request for that layer; call
 `release` when a transported frame is no longer needed. `pick` and `bounds` are
 optional because the host retains the main scene graph for gizmos and picking.
 
+Final preparation traverses the actual shutter samples. Async render requests
+are serialized with scene/time patches, and completed images are copied into
+GPU-backed capture canvases before a transport canvas can be reused. Those
+images serve the synchronous compositor's readback, then are released on the
+next frame's preparation or project close. Shutter samples share a backend
+session; they do not create a native host session for each sample. Static
+layers receive the full Final sample budget; blurred layers divide it across
+their shutter samples, including descendants of a blurred group.
+
 The three tiers use the same geometry/material/light model. Fast preview uses
 Studio Live with fewer pixels/samples; Quality refines while idle. In-page
 WebGPU remains the fallback for the native backend. Neither backend uses

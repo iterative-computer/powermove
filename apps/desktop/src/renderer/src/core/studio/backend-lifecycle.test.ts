@@ -12,9 +12,9 @@ import { registerStudioBackend, type StudioBackend } from '../scene3d/studio-bac
 import { SceneRuntime } from '../scene3d/runtime';
 import { disposeSceneRuntimes } from '../scene3d/service';
 import { createScene, createObject } from '../scene3d/schema';
-import { studioIdle, studioLayer, studioPending } from './index';
+import { beginStudioCapture,studioIdle, studioLayer, studioPending } from './index';
 function fixture(){const PM:any={time:0,_studioFinal:true,invalidate:vi.fn(),store:{get:()=> 'quality'}};const runtime=new SceneRuntime();const scene=createScene();scene.objects=[createObject('model')];runtime.sync(scene);return {PM,runtime,draw:(time=0)=>studioLayer(PM,runtime,64,64,'model',new Set(['model']),true,runtime.camera,undefined,time)};}
-afterEach(()=>registerStudioBackend(null));
+afterEach(()=>{registerStudioBackend(null);vi.unstubAllGlobals();});
 describe('Studio backend lifecycle',()=>{
  it('waits for native initialization and async per-layer frames, then reuses the completed frame',async()=>{
   const requests:any[]=[],dispose=vi.fn(),source=document.createElement('canvas');
@@ -41,5 +41,14 @@ describe('Studio backend lifecycle',()=>{
   disposeSceneRuntimes(PM);expect(dispose).toHaveBeenCalledOnce();
   complete({source:document.createElement('canvas'),width:64,height:64,samples:64,version:'late',release});
   await Promise.resolve();await Promise.resolve();expect(release).toHaveBeenCalledOnce();expect(studioPending(PM)).toBe(false);
+ });
+ it('keeps every async shutter sample ready for the final synchronous compositor',async()=>{
+  vi.stubGlobal('OffscreenCanvas',class{width:number;height:number;constructor(w:number,h:number){this.width=w;this.height=h;}getContext(){return {drawImage:vi.fn()};}});
+  const rendered:number[]=[];let time=0;registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:(t:number)=>{time=t;},render:async()=>{rendered.push(time);return {source:document.createElement('canvas'),width:64,height:64,samples:16,version:`time:${time}`};},dispose:()=>{}} as unknown as StudioBackend));
+  const {PM,draw}=fixture();PM._studioShutterSamples=4;beginStudioCapture(PM);draw();await studioIdle(PM);
+  draw(0);draw(.1);await studioIdle(PM);const a=draw(0),b=draw(.1);
+  expect(rendered).toEqual([0,.1]);expect(a?.canvas).not.toBe(b?.canvas);
+  expect(draw(0)?.canvas).toBe(a?.canvas);
+  beginStudioCapture(PM);expect((a?.canvas as any).width).toBe(0);
  });
 });
