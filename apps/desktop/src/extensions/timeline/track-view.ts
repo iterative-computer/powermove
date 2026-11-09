@@ -1059,7 +1059,7 @@ export function createTrackView(host: TrackViewHost) {
       host.invalidate('timeline');
       return true;
     }
-    if (layer.type === 'precomp' && layer.d?.comp) { api.commands.run('openComposition', layer.d.comp); return true; }
+    if (layer.type === 'precomp' && layer.d?.comp) { api.commands.run('openComposition', layer.d.comp, layer.id); return true; }
     if (layer.type === 'captions' && hit) return host.captions.doubleClick(layer, x, laneY(hit.item.area, hit.item.lane), rowH());
     // Double-clicking an animated clip unfolds or folds its keyframes.
     if (openable(layer)) { toggleOpen([layer]); return true; }

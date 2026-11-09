@@ -26,12 +26,81 @@ describe('compositions', () => {
     expect(PM.proj.comps[mainId]).toMatchObject({ id: mainId, name: 'Main', w: 1920 });
     expect(PM.proj.comps[mainId].layers.map((layer: any) => layer.name)).toEqual(['Back']);
     expect(PM.proj.comps[id]).toBeUndefined();
-    expect(PM.time).toBe(0);
+    expect(PM.time).toBe(2);
 
     PM.Comps.open(mainId);
     expect(names(PM)).toEqual(['Back']);
-    expect(PM.time).toBe(2); // each composition keeps its own current time
+    expect(PM.time).toBe(2);
     expect(PM.Comps.openTabs()).toEqual([mainId, id]);
+  });
+
+  it('carries the current time between unrelated tabs instead of restoring an old playhead', () => {
+    const PM=composer(),main=PM.proj.compId;
+    const other=PM.Comps.create({name:'Other',dur:4},{open:false});
+    PM.time=3;PM.Comps.open(other);expect(PM.time).toBe(3);
+    PM.time=1.5;PM.Comps.open(main);expect(PM.time).toBe(1.5);
+    PM.time=8;PM.Comps.open(other);expect(PM.time).toBe(4);
+    PM.Comps.create({name:'New'});expect(PM.time).toBe(0);
+  });
+
+  it('maps precomp offsets and trim in both directions, including reopening an existing tab', () => {
+    const PM=composer(),main=PM.proj.compId;
+    const child=PM.Comps.create({name:'Child',dur:6},{open:false});
+    const instance=PM.Comps.addToTimeline(child,{from:3});instance.d.trim=1;
+    PM.time=5;PM.Comps.open(child);expect(PM.time).toBe(3);
+    PM.time=4;PM.Comps.open(main);expect(PM.time).toBe(6);
+    PM.time=7;PM.Comps.open(child);expect(PM.time).toBe(5);
+    PM.time=1;PM.Comps.open(main);expect(PM.time).toBe(3);
+    PM.time=0;PM.Comps.open(child);expect(PM.time).toBe(0);
+  });
+
+  it('uses the opened instance when the same composition appears more than once', () => {
+    const PM=composer(),main=PM.proj.compId;
+    const child=PM.Comps.create({name:'Reused',dur:6},{open:false});
+    const a=PM.Comps.addToTimeline(child,{from:0}),b=PM.Comps.addToTimeline(child,{from:4});
+    PM.selectLayers(a.id);PM.time=5;
+    PM.Comps.open(child,{layerId:b.id});expect(PM.time).toBe(1);
+    PM.time=2;PM.Comps.open(main);expect(PM.time).toBe(6);
+    PM.selectLayers(a.id);PM.Comps.open(child);expect(PM.time).toBe(6);
+  });
+
+  it('maps nested and sibling compositions through their common parent', () => {
+    const PM=composer(),main=PM.proj.compId;
+    const a=PM.Comps.create({name:'A',dur:8},{open:false});PM.Comps.addToTimeline(a,{from:1});
+    const b=PM.Comps.create({name:'B',dur:7},{open:false});PM.Comps.addToTimeline(b,{from:3});
+    PM.time=6;PM.Comps.open(a);expect(PM.time).toBe(5);
+    const deep=PM.Comps.create({name:'Deep',dur:6},{open:false});PM.Comps.addToTimeline(deep,{from:2});
+    PM.Comps.open(deep);expect(PM.time).toBe(3);
+    PM.time=2;PM.Comps.open(main);expect(PM.time).toBe(5);
+    PM.Comps.open(a);PM.time=3;PM.Comps.open(b);expect(PM.time).toBe(1);
+  });
+
+  it.each([2,-1])('uses the renderer clock for a precomp speed of %s',speed=>{
+    const PM=composer(),main=PM.proj.compId;
+    const child=PM.Comps.create({name:'Retimed',dur:8},{open:false});
+    const instance=PM.Comps.addToTimeline(child,{from:2});instance.d.speed=speed;instance.d.trim=speed<0?6:1;
+    PM.time=4;PM.Comps.open(child);expect(PM.time).toBe(speed<0?4:5);
+    PM.time=speed<0?3:7;PM.Comps.open(main);expect(PM.time).toBe(5);
+  });
+
+  it('inverts a remapped source clock and keeps the entry frame for freezes',()=>{
+    const PM=composer(),main=PM.proj.compId;
+    const child=PM.Comps.create({name:'Remapped',dur:8},{open:false});
+    const instance=PM.Comps.addToTimeline(child,{from:2});
+    instance.d.timeRemap=PM.P(true);instance.d.sourceTime=PM.P(0);
+    instance.d.sourceTime.kf=[PM.KF(0,6),PM.KF(6,0)];
+    PM.time=4;PM.Comps.open(child);expect(PM.time).toBeCloseTo(4);
+    PM.time=3;PM.Comps.open(main);expect(PM.time).toBeCloseTo(5);
+    const live=PM.L(instance.id);live.d.sourceTime=PM.P(3);PM.touch();
+    PM.time=6;PM.Comps.open(child);expect(PM.time).toBe(3);
+    PM.Comps.open(main);expect(PM.time).toBe(6);
+  });
+
+  it('opens a duration-fitted precomp at the matching source frame',()=>{
+    const PM=composer();
+    const shape=PM.mkLayer('shape',{from:2,dur:5});PM.proj.layers.push(shape);PM.time=4.5;
+    PM.Comps.precompose([shape.id],{adjustDuration:true,open:true});
+    expect(PM.time).toBe(2.5);
   });
 
   it('keeps undo attached to the composition an edit was made in', () => {

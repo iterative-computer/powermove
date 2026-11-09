@@ -2,6 +2,7 @@ import { compositionDependencies } from '../../core/scene3d/material-maps';
 import { remapLayerInputs } from '../../core/effect-inputs';
 import { evaluatedValue, isProperty } from './content-properties';
 import { sourceTime } from './retiming';
+import { compositionNavigationTime } from './composition-time';
 import { selectionBounds } from './selection-bounds';
 /* After Effects compositions.
  *
@@ -159,9 +160,10 @@ export function normalizeCompositions(project: any, uid: (prefix: string) => str
 }
 
 export function install(PM: PMRegistry): void {
-  /* Per-composition view state (AE keeps each comp's current time and layer
-     selection). Session-only, keyed by project id + comp id. */
+  /* Per-composition selection/scroll state. Entry times also disambiguate
+     repeated or frozen source frames. Session-only, keyed by project + comp. */
   const views = new Map<string, { time: number; layers: string[]; scrollT?: number; scrollY?: number; pps?: number }>();
+  const timeContexts = new Map<string, Map<string,string>>();
   /* Timeline tabs, per project. */
   const tabs = new Map<string, string[]>();
   const viewKey = (id: string) => `${PM.proj?.id}:${id}`;
@@ -256,12 +258,17 @@ export function install(PM: PMRegistry): void {
   };
 
   /** Make `id` the open composition (the Timeline/viewer tab). */
-  const open = (id: string, options: { tab?: boolean } = {}) => {
+  const open = (id: string, options: { tab?: boolean; layerId?: string; time?: number } = {}) => {
     if (!PM.proj || !exists(id)) return false;
     if (options.tab !== false && !openTabs().includes(id)) tabs.set(PM.proj.id, [...openTabs(), id]);
     if (isRoot(id)) { PM.bus.emit('comps'); return true; }
     if (PM.hist?.busy?.()) return false;
     PM.pause?.();
+    let contexts=timeContexts.get(PM.proj.id);
+    if(!contexts){contexts=new Map();timeContexts.set(PM.proj.id,contexts);}
+    const navigation=compositionNavigationTime(PM,id,options,
+      compId=>compId===PM.proj.compId?PM.time:views.get(viewKey(compId))?.time ?? PM.time,contexts);
+    for(const link of navigation.links)contexts.set(link.child,`${link.parent}:${link.layer.id}`);
     const timeline = PM.Kernel?.services?.get?.('timeline');
     views.set(viewKey(PM.proj.compId), {
       time: PM.time, layers: [...PM.sel.layers],
@@ -272,7 +279,7 @@ export function install(PM: PMRegistry): void {
     const view = views.get(viewKey(id));
     PM.replaceProject(next, { selection: { layers: view?.layers || [], keys: [], chan: null } });
     publishRotation(before, next);
-    PM.time = PM.clamp(view?.time ?? 0, 0, next.dur);
+    PM.time = PM.clamp(options.time ?? navigation.time, 0, next.dur);
     if (timeline) {
       if (Number.isFinite(view?.scrollT)) timeline.scrollT = view!.scrollT;
       if (Number.isFinite(view?.scrollY)) timeline.scrollY = view!.scrollY;
@@ -319,7 +326,7 @@ export function install(PM: PMRegistry): void {
       PM.ProjectIndex?.invalidate();
     });
     PM.bus.emit('comps'); PM.bus.emit('project');
-    if (options.open !== false) open(comp.id);
+    if (options.open !== false) open(comp.id, { time: 0 });
     return comp.id;
   };
 

@@ -1896,7 +1896,7 @@ function bindStage(stage: any, inner: any): () => void {
     if (hit?.type === 'precomp' && hit.d?.comp) {
       e.preventDefault();
       e.stopPropagation();
-      api.commands.run('openComposition', hit.d.comp);
+      api.commands.run('openComposition', hit.d.comp, hit.id);
       return;
     }
     /* Double-clicking an imported model picks the part under the pointer
