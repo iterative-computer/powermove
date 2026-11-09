@@ -93,6 +93,7 @@ struct Host {
     cancels: Arc<AtomicUsize>,
     logs: Mutex<Vec<String>>,
     mode: AtomicUsize,
+    bodies: Mutex<Vec<Vec<u8>>>,
 }
 struct Request {
     deadline: Instant,
@@ -134,6 +135,7 @@ impl HostProxy for Host {
     ) -> Result<Box<dyn HostRequest>> {
         assert!(request.deadline > Instant::now());
         self.starts.fetch_add(1, Ordering::Relaxed);
+        self.bodies.lock().unwrap().push(request.body);
         Ok(Box::new(Request {
             deadline: Instant::now() + Duration::from_millis(10),
             mode: self.mode.load(Ordering::Relaxed),
@@ -510,6 +512,34 @@ fn fetch_proxy_response_and_body_consumption() {
         "true"
     );
     assert_eq!(f.host.starts.load(Ordering::Relaxed), 1);
+    close(&r);
+}
+/// Request bodies reach the host as bytes: a body three times the JSON op
+/// limit arrives exactly, as do strings and blobs.
+#[test]
+fn fetch_request_bodies_cross_as_bytes() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(async()=>{const b=new Uint8Array(3*1024*1024);for(let i=0;i<b.length;i++)b[i]=i%251;await fetch('https://example.test/up',{method:'POST',body:b.subarray(1)});await fetch('https://example.test/up',{method:'POST',body:new Blob(['ab'])});await fetch('https://example.test/up',{method:'POST',body:'é'});await fetch('https://example.test/up');return true})()"
+        ),
+        "true"
+    );
+    let bodies = f.host.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 4);
+    assert_eq!(bodies[0].len(), 3 * 1024 * 1024 - 1);
+    assert!(
+        bodies[0]
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b as usize == (i + 1) % 251)
+    );
+    assert_eq!(bodies[1], b"ab");
+    assert_eq!(bodies[2], "é".as_bytes());
+    assert!(bodies[3].is_empty());
+    drop(bodies);
     close(&r);
 }
 #[test]

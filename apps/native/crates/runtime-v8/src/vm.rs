@@ -489,25 +489,56 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
 }
 /// `__bytes(operation, view, input)`: an engine call carrying one byte payload
 /// (an encoded image, a file), copied out of V8 once instead of as JSON.
-fn bytes_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
-    let op = a.get(0).to_rust_string_lossy(s);
-    let bytes = if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(a.get(1)) {
+/// The bytes of an ArrayBuffer or view, copied out once.
+fn view_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
         let mut out = vec![0; view.byte_length()];
         view.copy_contents(&mut out);
-        out
-    } else if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(a.get(1)) {
+        Some(out)
+    } else if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
         let store = buffer.get_backing_store();
-        store
-            .data()
-            .map(|data| {
-                // SAFETY: the backing store is alive for this call and `byte_length` long.
-                unsafe {
-                    std::slice::from_raw_parts(data.as_ptr() as *const u8, store.byte_length())
-                }
-                .to_vec()
-            })
-            .unwrap_or_default()
+        Some(
+            store
+                .data()
+                .map(|data| {
+                    // SAFETY: the backing store is alive for this call and `byte_length` long.
+                    unsafe {
+                        std::slice::from_raw_parts(data.as_ptr() as *const u8, store.byte_length())
+                    }
+                    .to_vec()
+                })
+                .unwrap_or_default(),
+        )
     } else {
+        None
+    }
+}
+/// `__fetch(body, request)`: start a fetch whose body goes over as bytes,
+/// never as a JSON number array. Returns the request id.
+fn fetch_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(body) = view_bytes(a.get(0)) else {
+        throw(s, "Fetch body must be bytes");
+        return;
+    };
+    let request = a.get(1).to_rust_string_lossy(s);
+    let state = s.get_slot::<Native>().unwrap().0.clone();
+    state.lock().unwrap().sampled_external = s.get_heap_statistics().external_memory();
+    let limits = state.lock().unwrap().limits.clone();
+    if body.len() > limits.max_response_bytes || request.len() > limits.max_op_bytes {
+        throw(s, "Host argument quota");
+        return;
+    }
+    let result = serde_json::from_str::<Value>(&request)
+        .map_err(|e| e.to_string())
+        .and_then(|request| fetch(&mut state.lock().unwrap(), &request, body));
+    match result {
+        Ok(id) => rv.set(v8::Number::new(s, id as f64).into()),
+        Err(error) => throw(s, &error),
+    }
+}
+fn bytes_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let op = a.get(0).to_rust_string_lossy(s);
+    let Some(bytes) = view_bytes(a.get(1)) else {
         throw(s, "Host byte payload must be an ArrayBuffer or view");
         return;
     };
@@ -656,6 +687,60 @@ fn engine_call(
     }
     Ok(text)
 }
+/// Admit one fetch (`__fetch`): its reservation, URL, headers and body.
+fn fetch(n: &mut NativeState, v: &Value, body: Vec<u8>) -> std::result::Result<u64, String> {
+    if n.in_flight >= n.limits.max_host_ops {
+        return Err("Host operation quota".into());
+    }
+    let reserve = n.limits.max_response_bytes;
+    let headroom = n.engine_headroom();
+    let start = n.admits_response(reserve + headroom);
+    // Waiting helps only when other fetches hold the room it needs.
+    let fits_alone = n
+        .sampled_external
+        .checked_add(n.engine_reserved)
+        .and_then(|v| v.checked_add(reserve + headroom))
+        .is_some_and(|v| v <= n.limits.external_bytes);
+    if !start && (!n.limits.queue_fetches || !fits_alone) {
+        return Err("External memory reservation quota".into());
+    }
+    let url =
+        url::Url::parse(v["url"].as_str().ok_or("Missing URL")?).map_err(|e| e.to_string())?;
+    if !["http", "https"].contains(&url.scheme()) {
+        return Err("Unsupported fetch protocol".into());
+    }
+    let headers = v["headers"]
+        .as_array()
+        .ok_or("Invalid headers")?
+        .iter()
+        .map(|x| {
+            Ok((
+                x[0].as_str().ok_or("Invalid header")?.into(),
+                x[1].as_str().ok_or("Invalid header")?.into(),
+            ))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    n.next_id += 1;
+    n.in_flight += 1;
+    let request = (
+        n.next_id,
+        FetchRequest {
+            url: url.into(),
+            method: v["method"].as_str().unwrap_or("GET").into(),
+            headers,
+            body,
+            max_response_bytes: reserve,
+            deadline: Instant::now() + n.limits.host_timeout,
+        },
+    );
+    if start {
+        n.reserved += reserve;
+        n.queued.push(request);
+    } else {
+        n.deferred.push_back(request);
+    }
+    Ok(n.next_id)
+}
 fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value, String> {
     match op {
         "console" => {
@@ -667,70 +752,6 @@ fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value
                 v["message"].as_str().unwrap_or("").into(),
             ));
             Ok(Value::Null)
-        }
-        "fetch" => {
-            if n.in_flight >= n.limits.max_host_ops {
-                return Err("Host operation quota".into());
-            }
-            let reserve = n.limits.max_response_bytes;
-            let headroom = n.engine_headroom();
-            let start = n.admits_response(reserve + headroom);
-            // Waiting helps only when other fetches hold the room it needs.
-            let fits_alone = n
-                .sampled_external
-                .checked_add(n.engine_reserved)
-                .and_then(|v| v.checked_add(reserve + headroom))
-                .is_some_and(|v| v <= n.limits.external_bytes);
-            if !start && (!n.limits.queue_fetches || !fits_alone) {
-                return Err("External memory reservation quota".into());
-            }
-            let url = url::Url::parse(v["url"].as_str().ok_or("Missing URL")?)
-                .map_err(|e| e.to_string())?;
-            if !["http", "https"].contains(&url.scheme()) {
-                return Err("Unsupported fetch protocol".into());
-            }
-            let body = v["body"]
-                .as_array()
-                .ok_or("Invalid body")?
-                .iter()
-                .map(|x| {
-                    x.as_u64()
-                        .filter(|x| *x < 256)
-                        .map(|x| x as u8)
-                        .ok_or("Invalid byte")
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let headers = v["headers"]
-                .as_array()
-                .ok_or("Invalid headers")?
-                .iter()
-                .map(|x| {
-                    Ok((
-                        x[0].as_str().ok_or("Invalid header")?.into(),
-                        x[1].as_str().ok_or("Invalid header")?.into(),
-                    ))
-                })
-                .collect::<std::result::Result<Vec<_>, String>>()?;
-            n.next_id += 1;
-            n.in_flight += 1;
-            let request = (
-                n.next_id,
-                FetchRequest {
-                    url: url.into(),
-                    method: v["method"].as_str().unwrap_or("GET").into(),
-                    headers,
-                    body,
-                    max_response_bytes: reserve,
-                    deadline: Instant::now() + n.limits.host_timeout,
-                },
-            );
-            if start {
-                n.reserved += reserve;
-                n.queued.push(request);
-            } else {
-                n.deferred.push_back(request);
-            }
-            Ok(json!(n.next_id))
         }
         "abort" => {
             if n.aborted.len() < n.limits.max_host_ops {
@@ -972,6 +993,7 @@ impl Vm {
                 ("__now", v8::Function::new(cs, now).unwrap()),
                 ("__clone", v8::Function::new(cs, clone_value).unwrap()),
                 ("__bytes", v8::Function::new(cs, bytes_op).unwrap()),
+                ("__fetch", v8::Function::new(cs, fetch_op).unwrap()),
                 ("__read", v8::Function::new(cs, read_op).unwrap()),
                 ("__body", v8::Function::new(cs, body_op).unwrap()),
                 (

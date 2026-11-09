@@ -313,10 +313,10 @@
     if(local===undefined) return Promise.reject(new TypeError('Failed to fetch'));
     const url=new URL(String(input));
     if(!['http:','https:'].includes(url.protocol)) return Promise.reject(new TypeError('Unsupported fetch protocol'));
-    let body=init.body ?? [];
-    body=typeof body==='string'?new TextEncoder().encode(body):body instanceof Blob?blobBytes.get(body):viewBytes(body)??body;
+    let body=init.body ?? new Uint8Array(0);
+    body=typeof body==='string'?new TextEncoder().encode(body):body instanceof Blob?blobBytes.get(body):viewBytes(body)??new TextEncoder().encode(String(body));
     return new Promise((resolve,reject) => {
-      const id=native('fetch',{url:url.href,method:String(init.method??'GET').toUpperCase(),headers:[...new Headers(init.headers)],body:Array.from(body)});
+      const id=__fetch(body,JSON.stringify({url:url.href,method:String(init.method??'GET').toUpperCase(),headers:[...new Headers(init.headers)]}));
       const abort=()=>{ native('abort',id); requests.delete(id); reject(signal.reason); };
       requests.set(id,{resolve,reject,signal,abort}); signal?.addEventListener('abort',abort,{once:true});
     });
