@@ -983,7 +983,7 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
   if (e && e.bytes > maxSourceBytes) return null;
   if (!e) {
-    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:advanced?{...record.values,...d.strokeStyle,strokeWidth:Math.max(record.values.strokeWidth,(d.stroke??0))}:record.values,matrix:record.matrix})))
+    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:advanced?{...record.values,...d.strokeStyle,strokeWidth:Math.max(record.values.strokeWidth,(d.stroke??0)*(d.strokeStyle?.align==='outside'?2:1))}:record.values,matrix:record.matrix})))
       : L.type === 'text' ? textRasterGeometry(d,scale) : shapeRasterGeometry(d,scale);
     if ((crop?.width ?? geometry.width) * (crop?.height ?? geometry.height) * 4 > maxSourceBytes) return null;
     // Animated text can paint beyond the ordinary text geometry; leave that

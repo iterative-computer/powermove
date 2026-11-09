@@ -1,4 +1,5 @@
 type Bounds={x0:number;y0:number;x1:number;y1:number;w:number;h:number};
+const MAX_SAMPLES=240;
 const cache=new WeakMap<object,{stamp:unknown[];groups:Map<string,Bounds>}>();
 /** Union all frame samples once per edit, including children outside their in/out points. */
 export function stableMaterialGroupBounds(PM:any,group:any,sample:(time:number)=>Bounds|null):Bounds {
@@ -8,7 +9,9 @@ export function stableMaterialGroupBounds(PM:any,group:any,sample:(time:number)=
   const cached=entry.groups.get(group.id);if(cached)return cached;
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
   const fps=Math.max(1,Number(comp.fps)||30),from=Math.max(0,group.from || 0),end=Math.min(comp.dur,from+(group.dur ?? comp.dur));
-  for(let frame=Math.floor(from*fps);frame<=Math.ceil(end*fps);frame++){
+  // Long groups are sampled at most MAX_SAMPLES times so an edit stays cheap.
+  const first=Math.floor(from*fps),last=Math.ceil(end*fps),step=Math.max(1,Math.ceil((last-first)/MAX_SAMPLES));
+  for(let frame=first;frame<=last;frame=frame<last&&frame+step>last?last:frame+step){
     const b=sample(frame/fps);if(!b)continue;
     x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);
   }
