@@ -6,9 +6,8 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# Pure Rust, no GPUI. Grown from pm-mac-core (the document authority), which
-# is now a thin re-export of this crate (docs/native/kernel.md). Engine crates
-# are linked by path (docs/gpui/engine-boundary.md, section 2).
+# Pure Rust, no GPUI. Engine crates are linked by path
+# (docs/gpui/engine-boundary.md, section 2).
 
 [dependencies]
 pm-captions = { path = "../../../../engine/crates/pm-captions" }

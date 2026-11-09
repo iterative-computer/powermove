@@ -5035,13 +5035,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-mac-core"
-version = "0.1.0"
-dependencies = [
- "pm-kernel",
-]
-
-[[package]]
 name = "pm-mcp"
 version = "0.1.0"
 dependencies = [

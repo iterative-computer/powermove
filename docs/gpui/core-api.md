@@ -1,7 +1,7 @@
 # The document layer of `pm-kernel`: the API panels code against
 
 Crate: `apps/native/crates/kernel` (package `pm-kernel`, grown from
-`pm-mac-core`, which remains a one-line re-export at `apps/native/crates/core`).
+`pm-mac-core`).
 Pure Rust, no GPUI. This page covers the **document layer** (`DocumentStore`,
 commands, files). In the app, the store lives inside the kernel actor and is
 reached through `KernelHandle` calls, `Published` snapshots and the
