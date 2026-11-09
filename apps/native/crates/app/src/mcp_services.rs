@@ -69,7 +69,46 @@ pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()>
         eprintln!("Extension change recovery failed: {error}");
     }
     automation.extensions = Some(Arc::new(extensions));
+    automation.store_reads = Some(Arc::new(StoreHttp));
     Ok(())
+}
+/// The Store's public read routes over the system HTTP stack, for
+/// `store_search`, `store_extension` and `store_source` (runs on MCP workers).
+struct StoreHttp;
+impl pm_mcp::store::StoreRead for StoreHttp {
+    fn get(&self, request: pm_mcp::store::Request) -> Result<pm_mcp::store::Response> {
+        let failed = |message: &str| Error {
+            code: "store_error".into(),
+            message: message.into(),
+            backing: Some("native Store transport".into()),
+        };
+        let origin = url::Url::parse(pm_compat_runner::store_install::ORIGIN)
+            .map_err(|_| Error::invalid("Invalid Store origin"))?;
+        let mut url = origin
+            .join(&request.path)
+            .map_err(|_| Error::invalid("Invalid Store route"))?;
+        if !request.path.starts_with("/v1/store/")
+            || request.path.contains(['?', '#'])
+            || url.origin() != origin.origin()
+            || request.max_bytes > pm_mcp::store::JSON_LIMIT
+        {
+            return Err(Error::invalid("Invalid native Store read request"));
+        }
+        if !request.query.is_empty() {
+            url.query_pairs_mut().extend_pairs(request.query);
+        }
+        // Transport errors can carry hosts and system detail: none crosses MCP.
+        let response = pm_compat_runner::net::get(url.as_str(), request.max_bytes, 30)
+            .map_err(|_| failed("The Store didn't answer. Check the connection and try again."))?;
+        // A redirect may not take a Store read to another origin.
+        if url::Url::parse(&response.url).ok().map(|u| u.origin()) != Some(origin.origin()) {
+            return Err(failed("The Store answered from another origin"));
+        }
+        Ok(pm_mcp::store::Response {
+            status: response.status,
+            body: response.body,
+        })
+    }
 }
 pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
     std::thread::spawn(move || -> anyhow::Result<()> {
