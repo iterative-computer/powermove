@@ -33,6 +33,7 @@ mod panel_bridge;
 mod panel_capture_tests;
 mod panels;
 mod perf_gate;
+mod perf_panel;
 mod platform;
 mod playback;
 mod pro_media;
