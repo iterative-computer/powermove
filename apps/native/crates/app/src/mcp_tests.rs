@@ -494,8 +494,7 @@ fn queued_app_mcp_call_cannot_edit_a_reopened_document_with_the_same_project_id(
     assert!(f.host.kernel.close("test").wait().unwrap());
     f.host.kernel.open("test",OpenSource::Untitled(model(&json!({"id":"test","name":"Replacement","compId":"c","w":320,"h":180,"fps":30,"dur":2,"layers":[],"assets":{},"comps":{}})))).wait().unwrap().unwrap();
     let before = f.host.kernel.published("test").unwrap();
-    let mut automation = f.tools.automation.lock().unwrap();
-    automation.document_fence = Some(retired);
+    let mut automation = pm_mcp::Automation::fenced(&f.tools.automation, Some(retired)).unwrap();
     let retired_request = automation.apply_commands(
         "test",
         vec![],

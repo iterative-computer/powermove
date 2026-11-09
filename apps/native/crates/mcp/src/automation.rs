@@ -114,13 +114,44 @@ impl std::ops::Deref for StateRead<'_> {
         }
     }
 }
+/// The host bound to one caller's attached document until dropped, so a
+/// queued request cannot land in a replacement document that reuses the
+/// project id. Without a fence, requests go to the project's current document.
+pub struct Fenced<'a>(std::sync::MutexGuard<'a, Automation>);
+impl Automation {
+    pub fn fenced(
+        host: &std::sync::Mutex<Automation>,
+        document: Option<u64>,
+    ) -> Result<Fenced<'_>> {
+        let mut guard = host
+            .lock()
+            .map_err(|_| Error::unavailable("headless host stopped"))?;
+        guard.document_fence = document;
+        Ok(Fenced(guard))
+    }
+}
+impl std::ops::Deref for Fenced<'_> {
+    type Target = Automation;
+    fn deref(&self) -> &Automation {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Fenced<'_> {
+    fn deref_mut(&mut self) -> &mut Automation {
+        &mut self.0
+    }
+}
+impl Drop for Fenced<'_> {
+    fn drop(&mut self) {
+        self.0.document_fence = None;
+    }
+}
 /// Single owner host. Call on a dedicated worker; do not put this behind a mutex
 /// that a UI thread waits for. It never discovers a profile.
 pub struct Automation {
     backend: Backend,
-    /// Document bound to the caller's session, so a queued request cannot land
-    /// in a replacement document that reuses the project id.
-    pub document_fence: Option<u64>,
+    /// See [`Fenced`].
+    document_fence: Option<u64>,
     pub profile: PathBuf,
     pub exports: PathBuf,
     pub active: Option<String>,

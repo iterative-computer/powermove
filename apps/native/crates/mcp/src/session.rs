@@ -164,12 +164,8 @@ impl McpSession {
             .project
             .as_deref()
             .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
-        let mut host = self
-            .host
-            .lock()
-            .map_err(|_| Error::unavailable("headless host stopped"))?;
+        let mut host = Automation::fenced(&self.host, session.document)?;
         assert_project(session, &host, id)?;
-        host.document_fence = session.document;
         host.project_memory(id, args, self.writer)
     }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
@@ -193,10 +189,10 @@ impl McpSession {
             return self.finish(args["commit"] == true);
         }
         let shared = self.host.clone();
-        let mut host = shared
-            .lock()
-            .map_err(|_| Error::unavailable("headless host stopped"))?;
-        host.document_fence = self.active.as_ref().and_then(|session| session.document);
+        let mut host = Automation::fenced(
+            &shared,
+            self.active.as_ref().and_then(|session| session.document),
+        )?;
         if ["list_projects", "create_project", "open_project"].contains(&name) {
             if name != "list_projects" && self.active.is_some() {
                 return Err(Error::invalid(
@@ -1018,11 +1014,7 @@ impl McpSession {
             return Ok(json!({"changed":false}));
         };
         let result = (|| {
-            let mut host = self
-                .host
-                .lock()
-                .map_err(|_| Error::unavailable("headless host stopped"))?;
-            host.document_fence = session.document;
+            let mut host = Automation::fenced(&self.host, session.document)?;
             let Some(id) = session.project.clone() else {
                 return Ok(json!({"changed":session.committed}));
             };
