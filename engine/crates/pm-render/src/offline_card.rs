@@ -127,28 +127,88 @@ pub fn svg(file: &str, w: f64, h: f64, tier: Tier) -> String {
     )
 }
 
-/// The card written once to the engine's card cache (content-addressed), so
-/// the SVG image path can draw and cache it like any SVG file.
+/// Cards kept on disk and in memory by this process. A card for the same
+/// file, box and tier is reused without building or hashing its SVG again;
+/// the least recently used one beyond this is deleted.
+const MAX_CARDS: usize = 32;
+/// Files left by earlier runs are removed once they are this old.
+const STALE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+type Key = (String, u64, u64, Tier);
+struct Cards {
+    dir: PathBuf,
+    next: u64,
+    /// Most recently used last.
+    kept: Vec<(Key, PathBuf)>,
+}
+static CARDS: std::sync::Mutex<Option<Cards>> = std::sync::Mutex::new(None);
+
+/// This process's card directory (other processes, such as an export job,
+/// keep their own); stale directories of earlier runs are pruned once.
+fn open_cards() -> Result<Cards, String> {
+    let root = std::env::temp_dir().join("powermove-offline-cards");
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > STALE);
+            if old {
+                let _ = std::fs::remove_dir_all(entry.path());
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let dir = root.join(std::process::id().to_string());
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(Cards {
+        dir,
+        next: 0,
+        kept: Vec::new(),
+    })
+}
+
+/// The card's file, written once per file name, box and tier, so the SVG
+/// image path can draw and cache it like any SVG file.
 pub fn path(file: &str, w: f64, h: f64, tier: Tier) -> Result<PathBuf, String> {
-    use std::hash::{Hash, Hasher};
+    let key: Key = (file.to_owned(), w.to_bits(), h.to_bits(), tier);
+    let mut guard = CARDS.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(open_cards()?);
+    }
+    let cards = guard.as_mut().expect("opened above");
+    if let Some(i) = cards.kept.iter().position(|(k, p)| *k == key && p.exists()) {
+        let kept = cards.kept.remove(i);
+        let path = kept.1.clone();
+        cards.kept.push(kept);
+        return Ok(path);
+    }
     let svg = svg(file, w, h, tier);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    svg.hash(&mut hasher);
-    let dir = std::env::temp_dir().join("powermove-offline-cards");
-    let path = dir.join(format!("{:016x}.svg", hasher.finish()));
-    if !path.exists() {
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        // Write then rename: a reader never sees a partial card.
-        let partial = dir.join(format!(
-            "{:016x}.{}.partial",
-            hasher.finish(),
-            std::process::id()
-        ));
-        std::fs::write(&partial, svg.as_bytes())
-            .map_err(|e| format!("{}: {e}", partial.display()))?;
-        std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let path = cards.dir.join(format!("{}.svg", cards.next));
+    let partial = cards.dir.join(format!("{}.partial", cards.next));
+    cards.next += 1;
+    // Write then rename: a reader never sees a partial card.
+    std::fs::write(&partial, svg.as_bytes()).map_err(|e| format!("{}: {e}", partial.display()))?;
+    std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    cards.kept.retain(|(k, _)| *k != key);
+    cards.kept.push((key, path.clone()));
+    while cards.kept.len() > MAX_CARDS {
+        let (_, old) = cards.kept.remove(0);
+        let _ = std::fs::remove_file(old);
     }
     Ok(path)
+}
+
+/// Cards this process keeps (for tests).
+#[cfg(test)]
+fn kept() -> usize {
+    CARDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map_or(0, |c| c.kept.len())
 }
 
 #[cfg(test)]
@@ -185,11 +245,28 @@ mod tests {
     }
 
     #[test]
-    fn the_same_card_is_one_file() {
+    fn cards_are_reused_and_bounded() {
         let a = path("a.mp4", 640.0, 360.0, Tier::Named).unwrap();
+        let stamp = std::fs::metadata(&a).unwrap().modified().unwrap();
         let b = path("a.mp4", 640.0, 360.0, Tier::Named).unwrap();
-        assert_eq!(a, b);
-        assert!(a.exists());
+        assert_eq!(a, b, "the same card is the same file");
+        assert_eq!(
+            std::fs::metadata(&b).unwrap().modified().unwrap(),
+            stamp,
+            "not rewritten"
+        );
+        // A scrub through many sizes keeps at most MAX_CARDS files.
+        let mut paths = vec![];
+        for i in 0..(MAX_CARDS + 8) {
+            paths.push(path("b.mp4", 100.0 + i as f64, 60.0, Tier::Compact).unwrap());
+        }
+        assert!(kept() <= MAX_CARDS);
+        assert!(!paths[0].exists(), "the oldest card is deleted");
+        assert!(paths.last().unwrap().exists());
+        let on_disk = std::fs::read_dir(paths.last().unwrap().parent().unwrap())
+            .unwrap()
+            .count();
+        assert!(on_disk <= MAX_CARDS, "{on_disk} files");
     }
 
     /// Pictures of the card at thumbnail, small-viewer and full-screen sizes:
