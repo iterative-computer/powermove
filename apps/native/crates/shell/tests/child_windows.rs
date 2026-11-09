@@ -5,7 +5,7 @@
 //! with activation prohibited and never orders a window on screen.
 #[cfg(target_os = "macos")]
 fn main() {
-    use gpui_macos::child_window::{apply, follows_policy};
+    use gpui_macos::child_window::{apply, follows_policy, forget, is_pending, show, show_pending};
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorPanel, NSPanel,
@@ -73,6 +73,29 @@ fn main() {
     colours.setFloatingPanel(false);
     check("colour panel", &colours);
 
+    // Shown while the app is inactive (this process can't be active): the
+    // window waits off screen; a hide forgets it; activation shows it.
+    assert!(!app.isActive());
+    let waiting = panel(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    apply(&waiting);
+    show(&waiting, false);
+    assert!(
+        !waiting.isVisible(),
+        "an inactive app shows no child window"
+    );
+    assert!(is_pending(&waiting));
+    forget(&waiting);
+    assert!(
+        !is_pending(&waiting),
+        "a hidden or closed window never comes back"
+    );
+    show(&waiting, false);
+    show_pending();
+    assert!(!is_pending(&waiting));
+    assert!(waiting.isVisible(), "it shows once the app is active");
+    waiting.orderOut(None);
+    assert!(!waiting.isVisible());
+
     // The creation sites use the policy and nothing sets a global level.
     let sources = [
         (
@@ -99,9 +122,13 @@ fn main() {
             source.contains("child_window::apply"),
             "{name} applies the policy"
         );
+        assert!(
+            source.contains("child_window::show("),
+            "{name} shows only while the app is active"
+        );
     }
     println!(
-        "child_windows: {checked} window kinds and {} creation sites keep the policy",
+        "child_windows: {checked} window kinds, the inactive-app queue and {} creation sites keep the policy",
         sources.len()
     );
 }

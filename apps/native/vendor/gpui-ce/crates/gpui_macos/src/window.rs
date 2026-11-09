@@ -1554,7 +1554,18 @@ impl MacWindow {
                 }
             }
 
-            if focus && show {
+            if show
+                && matches!(
+                    kind,
+                    WindowKind::Floating | WindowKind::PopUp | WindowKind::AnchoredPopup(_)
+                )
+            {
+                // Powermove P-CHILD: only while the app is active.
+                crate::child_window::show(
+                    &*(native_window as *const objc2_app_kit::NSWindow),
+                    focus,
+                );
+            } else if focus && show {
                 native_window.makeKeyAndOrderFront_(NIL);
             } else if show {
                 native_window.orderFront_(NIL);
@@ -1645,6 +1656,8 @@ impl Drop for MacWindow {
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
+        // A child window queued to show on activation never shows once closed.
+        unsafe { crate::child_window::forget(&*(window as *const objc2_app_kit::NSWindow)) };
         this.frame_source.take();
         if let Some(link) = this.ca_display_link.take() {
             unsafe {
@@ -1943,7 +1956,13 @@ impl PlatformWindow for MacWindow {
             .spawn(async move {
                 if !closed.load(Ordering::Acquire) {
                     unsafe {
-                        let _: () = msg_send![window, makeKeyAndOrderFront: NIL];
+                        let ns = &*(window as *const objc2_app_kit::NSWindow);
+                        if ns.hidesOnDeactivate() {
+                            // A child window (P-CHILD): only while the app is active.
+                            crate::child_window::show(ns, true);
+                        } else {
+                            let _: () = msg_send![window, makeKeyAndOrderFront: NIL];
+                        }
                     }
                 }
             })

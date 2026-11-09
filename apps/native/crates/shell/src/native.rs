@@ -2729,12 +2729,14 @@ impl Popup {
             let _: () = msg_send![NSObject::class(),cancelPreviousPerformRequestsWithTarget:&*self.window,selector:sel!(orderOut:),object:std::ptr::null::<AnyObject>()];
         }
         gpui_macos::child_window::attach(&self.window, &self.parent);
-        self.window.makeKeyAndOrderFront(None);
+        // Only while the app is active, never over other apps (P-CHILD).
+        gpui_macos::child_window::show(&self.window, true);
         self.window.makeFirstResponder(Some(&self.search));
         animate(&self.window, true, &self.tokens, &mut self.spring);
     }
     fn hide(&mut self) {
         self.model.open = false;
+        gpui_macos::child_window::forget(&self.window);
         let duration = animate(&self.window, false, &self.tokens, &mut self.spring);
         unsafe {
             let _: () = msg_send![&*self.window,performSelector:sel!(orderOut:),withObject:std::ptr::null::<AnyObject>(),afterDelay:duration];

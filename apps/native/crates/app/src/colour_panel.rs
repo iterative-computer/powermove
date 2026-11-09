@@ -77,7 +77,7 @@ pub fn choose(initial: Option<u32>) -> async_channel::Receiver<Option<String>> {
     // The system panel floats over every app by default (P-CHILD).
     panel.setFloatingPanel(false);
     gpui_macos::child_window::apply(&panel);
-    panel.makeKeyAndOrderFront(None);
+    gpui_macos::child_window::show(&panel, true);
     rx
 }
 /// The system loupe. `None` when the person cancels with Escape.
