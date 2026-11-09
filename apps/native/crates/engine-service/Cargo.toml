@@ -22,6 +22,7 @@ pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-audio = { path = "../../../../engine/crates/pm-audio" }
 pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
 pm-render = { path = "../../../../engine/crates/pm-render" }
+pm-text = { path = "../../../../engine/crates/pm-text", default-features = false, features = ["system"] }
 pm-media = { path = "../../../../engine/crates/pm-media" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-export = { path = "../../../../engine/crates/pm-export" }

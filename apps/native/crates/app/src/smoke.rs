@@ -1,10 +1,8 @@
 use anyhow::{Context, Result, ensure};
 use pm_engine_service::{Headless, Scene};
 use pm_kernel::{persistence::DiskFormat, session::*, *};
-use pm_node::fonts::{
-    FontService,
-    render::{FontBroker, RenderFonts},
-};
+use pm_render::text::host::RenderFonts;
+use pm_text::host::{FontBroker, FontService};
 use pm_protocol::common::{Size, TICKS_PER_SECOND, Ticks};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 
@@ -20,7 +18,7 @@ pub fn run(manifest: PathBuf) -> Result<()> {
     });
     let mut source = FontService::new().map_err(anyhow::Error::msg)?;
     let result = loop {
-        pm_node::fonts::render::serve(&mut source, broker.take_asks());
+        pm_text::host::serve(&mut source, broker.take_asks());
         match rx.try_recv() {
             Ok(result) => break result,
             Err(mpsc::TryRecvError::Disconnected) => anyhow::bail!("Smoke worker stopped"),

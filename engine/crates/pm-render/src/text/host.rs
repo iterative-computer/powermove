@@ -95,6 +95,17 @@ impl RenderFonts {
         }
     }
 
+    /// The same fonts for a renderer on another thread: the same broker,
+    /// with its own health, so a failure one thread met is reported by that
+    /// thread's render only.
+    pub fn sibling(&self) -> Self {
+        Self {
+            broker: self.broker.clone(),
+            health: FontHealth::default(),
+            reinstall: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// The registry generation (includes project font changes).
     pub fn generation(&self) -> u64 {
         self.broker.generation()

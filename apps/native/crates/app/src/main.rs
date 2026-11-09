@@ -61,10 +61,8 @@ mod viewer2;
 mod viewer_overlays;
 use anyhow::{Context, Result};
 use gpui::AppContext;
-use pm_node::fonts::{
-    FontService,
-    render::{FontBroker, RenderFonts},
-};
+use pm_render::text::host::RenderFonts;
+use pm_text::host::{FontBroker, FontService};
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
@@ -256,7 +254,7 @@ fn main() -> Result<()> {
                     let service = service.clone();
                     cx.spawn(async move |_| {
                         while rx.recv().await.is_ok() {
-                            pm_node::fonts::render::serve(
+                            pm_text::host::serve(
                                 &mut *service.borrow_mut(),
                                 broker.take_asks(),
                             );

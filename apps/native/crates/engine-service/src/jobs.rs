@@ -612,13 +612,13 @@ pub fn run_child() -> Result<()> {
     emit(status(&request.job, JobState::Running, 0., None, None))?;
     // CoreText registry stays on main; rendering waits only on this serviced
     // broker, never on GPUI or a Node event loop.
-    let mut font_service = pm_node::fonts::FontService::new().map_err(anyhow::Error::msg)?;
-    let broker = pm_node::fonts::render::FontBroker::new();
+    let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
+    let broker = pm_text::host::FontBroker::new();
     // This windowless host pumps the broker below. A registered wake admits
     // requests; without it layout fails immediately and can lose text glyphs.
     broker.set_wake(Arc::new(|| {}));
     broker.set_generation(font_service.generation());
-    let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
+    let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();
     // Low disk: refuse to start, then watch the volume while frames land.
     let reserve = request.disk_reserve;
@@ -811,7 +811,7 @@ pub fn run_child() -> Result<()> {
         Ok(delivered.path)
     });
     while !worker.is_finished() {
-        pm_node::fonts::render::serve(&mut font_service, broker.take_asks());
+        pm_text::host::serve(&mut font_service, broker.take_asks());
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     let result = worker

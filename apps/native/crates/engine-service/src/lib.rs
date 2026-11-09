@@ -725,7 +725,7 @@ impl EngineService {
     /// `shader_cache` is a folder kept across launches for translated shaders.
     pub fn start_with_fonts(
         gpu: pm_gpu::Gpu,
-        fonts: pm_node::fonts::render::RenderFonts,
+        fonts: pm_render::text::host::RenderFonts,
         shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
@@ -1928,7 +1928,7 @@ impl Headless {
             engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
         })
     }
-    pub fn with_fonts(fonts: pm_node::fonts::render::RenderFonts) -> Result<Self> {
+    pub fn with_fonts(fonts: pm_render::text::host::RenderFonts) -> Result<Self> {
         let mut h = Self::new()?;
         h.engine.set_fonts(fonts);
         Ok(h)

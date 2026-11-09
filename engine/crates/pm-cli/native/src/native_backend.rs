@@ -17,10 +17,10 @@ use pm_protocol::{
 pub struct Native {
     headless: Option<Headless>,
     media: Option<MediaCatalog>,
-    fonts: Option<pm_node::fonts::render::RenderFonts>,
+    fonts: Option<pm_render::text::host::RenderFonts>,
 }
 impl Native {
-    pub fn with_fonts(fonts: pm_node::fonts::render::RenderFonts) -> Self {
+    pub fn with_fonts(fonts: pm_render::text::host::RenderFonts) -> Self {
         Self {
             fonts: Some(fonts),
             ..Self::default()

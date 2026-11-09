@@ -65,7 +65,7 @@ impl LayerRasters {
     pub fn start(
         device: wgpu::Device,
         queue: wgpu::Queue,
-        fonts: Option<pm_node::fonts::render::RenderFonts>,
+        fonts: Option<pm_render::text::host::RenderFonts>,
     ) -> anyhow::Result<Arc<Self>> {
         let (tx, rx) = channel::<Job>();
         std::thread::Builder::new()

@@ -4861,6 +4861,7 @@ dependencies = [
  "pm-render",
  "pm-scene3d",
  "pm-studio",
+ "pm-text",
  "pm-time",
  "serde",
  "serde_json",

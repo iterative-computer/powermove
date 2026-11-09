@@ -54,10 +54,8 @@ fn write_result(result: pm_native_cli::Result<(serde_json::Value, u8)>) -> std::
 
 #[cfg(target_os = "macos")]
 fn run_with_fonts() -> pm_native_cli::Result<(serde_json::Value, u8)> {
-    use pm_node::fonts::{
-        FontService,
-        render::{FontBroker, RenderFonts, serve},
-    };
+    use pm_render::text::host::RenderFonts;
+    use pm_text::host::{FontBroker, FontService, serve};
     let mut source = FontService::new().map_err(|e| pm_native_cli::error("font_error", e))?;
     let broker = FontBroker::new();
     broker.set_generation(source.generation());

@@ -8,10 +8,8 @@ use pm_kernel::commands::transform::{AlignMode, TransformCommand};
 use pm_kernel::{Call, Caller, Command, KernelActor, KernelConfig, OpenSource, Reply, Request};
 use pm_kernel::{SelectionCall, WriteBody};
 use pm_model::Value;
-use pm_node::fonts::{
-    FontService,
-    render::{FontBroker, RenderFonts, serve},
-};
+use pm_render::text::host::RenderFonts;
+use pm_text::host::{FontBroker, FontService, serve};
 use std::{sync::mpsc, time::Duration};
 
 fn project(text: &str) -> Value {
