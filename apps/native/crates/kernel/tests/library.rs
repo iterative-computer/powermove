@@ -264,61 +264,6 @@ fn legacy_journal_replays_id_keyed_operations_and_skips_mismatches() {
     );
 }
 
-/// Read-only smoke test against a copy of a real profile store. Ignored by
-/// default; reports counts only (never names, ids or content):
-/// `PM_KERNEL_STORE_COPY=/tmp/copy cargo test -p pm-kernel --test library -- --ignored --nocapture`
-#[test]
-#[ignore]
-fn smoke_real_store_copy_counts_only() {
-    let Ok(dir) = std::env::var("PM_KERNEL_STORE_COPY") else {
-        return;
-    };
-    let store = LibraryStore::open(std::path::Path::new(&dir));
-    let summary = store.summary().unwrap();
-    let mut loaded = 0;
-    let mut opened = 0;
-    let mut histories = 0;
-    let mut rejected = 0;
-    let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
-    let mut journal_entries = 0;
-    let mut failures = 0;
-    let mut k = Kernel::new(KernelConfig::default());
-    let keys = store.keys().unwrap();
-    for key in &keys {
-        let StoreKey::Dynamic { prefix, id } = key else {
-            continue;
-        };
-        if prefix != "project" {
-            continue;
-        }
-        match store.load(id) {
-            Ok(Some(p)) => {
-                loaded += 1;
-                journal_entries += p.journal_applied;
-                histories += usize::from(p.history.is_some());
-                match k.open(id, OpenSource::Library(p)) {
-                    Ok(info) => {
-                        opened += 1;
-                        rejected += usize::from(info.history_rejected);
-                        if let Some(reason) = info.history_error {
-                            *reasons.entry(reason).or_default() += 1;
-                        }
-                        k.close(id);
-                    }
-                    Err(_) => failures += 1,
-                }
-            }
-            _ => failures += 1,
-        }
-    }
-    eprintln!("store summary: {summary:?}");
-    eprintln!("history refusal reasons: {reasons:?}");
-    eprintln!(
-        "project slots loaded {loaded}, opened in kernel {opened}, with history {histories}, \
-         history rejected {rejected}, journal entries applied {journal_entries}, failures {failures}"
-    );
-}
-
 #[test]
 fn recovery_sequences_keep_rewound_edits_in_plain_and_stringified_slots() {
     for stringified in [false, true] {
