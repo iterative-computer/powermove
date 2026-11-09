@@ -136,19 +136,10 @@ impl ExtensionHost for AppExtensions {
 }
 
 fn settle(ticket: Ticket<Evaluation>) -> Result<(), String> {
-    let deadline = Instant::now() + ACTIVATION;
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result.map(drop).map_err(|e| e.to_string());
-        }
-        if Instant::now() > deadline {
-            return Err(format!(
-                "activation did not finish within {}s",
-                ACTIVATION.as_secs()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    crate::ticket::answer(ticket, Instant::now() + ACTIVATION)
+        .ok_or_else(|| format!("activation did not finish within {}s", ACTIVATION.as_secs()))?
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 /// The built-in a fork draws in place of, if any.
 pub fn replaced_panel(manifest: &Value) -> Option<&'static str> {

@@ -47,6 +47,7 @@ mod surface_routes;
 mod surfaces;
 mod tasks_window;
 mod text_host;
+mod ticket;
 mod timeline_surface;
 #[cfg(test)]
 mod timeline_tests;

@@ -1311,15 +1311,7 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                         let Ok(ticket) = ticket else { continue };
                         // A painter that threw has answered; one still running
                         // past the deadline makes this paint incomplete.
-                        let answer = loop {
-                            if let Some(result) = ticket.try_take() {
-                                break Some(result);
-                            }
-                            if std::time::Instant::now() > deadline {
-                                break None;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        };
+                        let answer = crate::ticket::answer(ticket, deadline);
                         let Some(Ok(evaluation)) = answer else {
                             complete &= answer.is_some();
                             continue;

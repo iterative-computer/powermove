@@ -807,15 +807,9 @@ impl Controller {
             let ticket = cx.background_executor().spawn(async move {
                 let hot = runtime.hot(&extension).ok().and_then(|ticket| {
                     let deadline = std::time::Instant::now() + HOT_HANDOFF;
-                    loop {
-                        if let Some(result) = ticket.try_take() {
-                            return result.ok().map(|e| e.value);
-                        }
-                        if std::time::Instant::now() > deadline {
-                            return None;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                    crate::ticket::answer(ticket, deadline)?
+                        .ok()
+                        .map(|e| e.value)
                 });
                 runtime.unmount_extension(&extension);
                 runtime.mount_extension(&extension, &graph, hot.as_deref())
@@ -1893,15 +1887,10 @@ fn wait_ticket(
     ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>,
     deadline: std::time::Instant,
 ) -> Result<String, String> {
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result.map(|e| e.value).map_err(|e| format!("{e:?}"));
-        }
-        if std::time::Instant::now() > deadline {
-            return Err("The extension didn't answer in time.".into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    crate::ticket::answer(ticket, deadline)
+        .ok_or_else(|| "The extension didn't answer in time.".to_owned())?
+        .map(|e| e.value)
+        .map_err(|e| format!("{e:?}"))
 }
 /// Every v4 extension's items for a menu, as native entries (off the main
 /// thread). Realms gather in parallel, each giving its contributions 100 ms;
