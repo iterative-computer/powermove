@@ -1004,10 +1004,11 @@ impl MacWindowState {
         // Core Animation follows the layer/view's display and refresh timing.
         // Metal updates also provide a drawable and a CPU submission deadline.
         unsafe {
-            if !self
-                .native_window
-                .occlusionState()
-                .contains(NSWindowOcclusionState::Visible)
+            if !draws_occluded()
+                && !self
+                    .native_window
+                    .occlusionState()
+                    .contains(NSWindowOcclusionState::Visible)
             {
                 self.stop_display_link();
                 return;
@@ -3261,10 +3262,18 @@ unsafe extern "C" fn window_did_change_occlusion_state(this: &Objc2Object, _: Se
         {
             lock.move_traffic_light();
             lock.start_display_link();
-        } else {
+        } else if !draws_occluded() {
             lock.stop_display_link();
         }
     }
+}
+
+/// Powermove: development builds may keep drawing covered windows
+/// (`PM_NATIVE_DRAW_OCCLUDED=1`, the app's `--draw-occluded`) so background
+/// review checks see live frames without raising anything. Release builds
+/// always pause an occluded window's display link.
+fn draws_occluded() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_DRAW_OCCLUDED").is_some()
 }
 
 unsafe extern "C" fn window_did_resize(this: &Objc2Object, _: Sel, _: ObjcId) {

@@ -358,6 +358,8 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
     match arg.to_str()? {
         "--appearance" => Some("PM_NATIVE_APPEARANCE"),
         "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
+        "--open" => Some("PM_NATIVE_REVIEW_OPEN"),
+        "--draw-occluded" => Some("PM_NATIVE_DRAW_OCCLUDED"),
         // A fixture Store on this Mac and its test signing key (store_install).
         "--dev-store-origin" => Some("PM_DEV_STORE_ORIGIN"),
         "--dev-store-key" => Some("PM_DEV_STORE_KEY"),
@@ -390,7 +392,14 @@ mod review_override_tests {
     #[test]
     fn release_builds_reject_the_review_overrides() {
         use std::ffi::OsStr;
-        for arg in ["--appearance", "--accessibility"] {
+        for arg in [
+            "--appearance",
+            "--accessibility",
+            "--open",
+            "--draw-occluded",
+            "--dev-store-origin",
+            "--dev-store-key",
+        ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
         }
