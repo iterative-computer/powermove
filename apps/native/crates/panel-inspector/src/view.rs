@@ -158,6 +158,10 @@ impl Inspector {
     pub fn revision(&self) -> u64 {
         self.published.revision()
     }
+    /// The publication the model projects.
+    pub fn published(&self) -> &Arc<Published> {
+        &self.published
+    }
     pub fn project_id(&self) -> &str {
         &self.published.project
     }

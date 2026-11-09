@@ -4689,6 +4689,7 @@ dependencies = [
  "pm-panel-agentpanel",
  "pm-panel-inspector",
  "pm-panel-media",
+ "pm-panel-studio3d",
  "pm-panel-timeline",
  "pm-panel-viewerchrome",
  "pm-promedia",

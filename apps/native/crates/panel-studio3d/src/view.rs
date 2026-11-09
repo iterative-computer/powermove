@@ -143,7 +143,7 @@ fn contains(
                 .any(|c| contains(c, target, comps, seen))
         })
 }
-fn screen_options(p: &Published, target: &str) -> Result<Vec<Value>> {
+pub(crate) fn screen_options(p: &Published, target: &str) -> Result<Vec<Value>> {
     let root = from_model(
         &p.snapshot
             .root()

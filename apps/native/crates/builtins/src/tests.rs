@@ -2783,3 +2783,207 @@ fn a_contributed_layer_types_parameters_are_properties_rows() {
     assert_eq!(size.value.as_f64(), Some(3.));
     panels.close();
 }
+
+/// 3d-studio.md §8 through the Properties presenter: each role's sections,
+/// a channel row writing like any property, and pop-ups and checkboxes
+/// going through the Studio's typed edits.
+#[test]
+fn properties_show_the_3d_section_for_models_lights_and_cameras() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let run = |args: Value| {
+        let call = pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![
+                pm_kernel::Scene3dCommand::Apply {
+                    comp: None,
+                    args: data::model(&args).unwrap(),
+                    selection: vec![],
+                    time: 0.,
+                    autokey: false,
+                }
+                .into(),
+            ]),
+        };
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{args}: {e}");
+        }
+    };
+    run(json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}));
+    run(json!({"operation":"add_light","id":"lamp","light":{"type":"area"}}));
+    run(json!({"operation":"add_camera","id":"cam"}));
+    let mut presenter = properties::Properties::default();
+    let publish = |presenter: &mut properties::Properties, id: &str| {
+        select_layer(&kernel, id);
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+        (model, publication)
+    };
+    let titles = |p: &Value| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["id"].as_str().unwrap().starts_with("3d."))
+            .map(|s| s["title"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let row = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+    };
+    let labels = |p: &Value, section: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["title"] == section)
+            .map(|s| {
+                s["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["label"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let write = |presenter: &properties::Properties,
+                 model: &mut pm_panel_inspector::Inspector,
+                 row: &Value,
+                 value: Value| {
+        let handle = row["control"]["binding"]["handle"]
+            .as_str()
+            .or(row["control"]["axes"][0]["binding"]["handle"].as_str())
+            .unwrap();
+        let request = presenter
+            .write(
+                model,
+                Caller::native(),
+                handle,
+                data::model(&value).unwrap(),
+                0.,
+            )
+            .unwrap();
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{value}: {e}");
+        }
+        model.sync(kernel.published("synthetic").unwrap());
+    };
+
+    let (mut model, p) = publish(&mut presenter, "model");
+    assert_eq!(
+        titles(&p),
+        ["Model", "Material", "Coat and Glass", "Surface", "Emission"]
+    );
+    assert_eq!(
+        labels(&p, "Model"),
+        ["Source", "Cast Shadows", "Receive Shadows"]
+    );
+    assert_eq!(
+        labels(&p, "Material"),
+        ["Screen", "Color", "Roughness", "Metalness", "Opacity"]
+    );
+    assert_eq!(row(&p, "3d.source").unwrap()["control"]["value"], "Cube");
+    let roughness = row(&p, "m.roughness").unwrap();
+    assert_eq!(roughness["control"]["axes"][0]["min"], 0.02);
+    assert_eq!(roughness["animation"], "static");
+    write(&presenter, &mut model, &roughness, json!(0.5));
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.castShadow").unwrap(),
+        json!(false),
+    );
+    let (_, p) = publish(&mut presenter, "model");
+    assert_eq!(
+        row(&p, "m.roughness").unwrap()["control"]["axes"][0]["value"],
+        0.5
+    );
+    assert_eq!(row(&p, "3d.castShadow").unwrap()["control"]["value"], false);
+
+    let (mut model, p) = publish(&mut presenter, "lamp");
+    assert_eq!(titles(&p), ["Light"]);
+    assert_eq!(
+        labels(&p, "Light"),
+        [
+            "Type",
+            "Color",
+            "Brightness",
+            "Width",
+            "Height",
+            "Cast Shadows"
+        ]
+    );
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.type").unwrap(),
+        json!("spot"),
+    );
+    let (_, p) = publish(&mut presenter, "lamp");
+    assert_eq!(
+        labels(&p, "Light"),
+        [
+            "Type",
+            "Color",
+            "Brightness",
+            "Range",
+            "Falloff",
+            "Spread",
+            "Softness",
+            "Cast Shadows"
+        ]
+    );
+
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert_eq!(titles(&p), ["Camera", "Environment", "Shot"]);
+    assert_eq!(
+        labels(&p, "Camera"),
+        [
+            "Projection",
+            "Field of View",
+            "Clip Start",
+            "Clip End",
+            "f-Stop",
+            "Focus"
+        ]
+    );
+    assert_eq!(
+        labels(&p, "Environment"),
+        [
+            "Ambient",
+            "Ambient Color",
+            "Exposure",
+            "Shadows",
+            "Background"
+        ]
+    );
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.projection").unwrap(),
+        json!("orthographic"),
+    );
+    let (_, p) = publish(&mut presenter, "cam");
+    assert_eq!(labels(&p, "Camera")[1], "Zoom");
+    assert_eq!(row(&p, "3d.samples").unwrap()["disabled"], true);
+    // A 2D layer has no 3D section.
+    let (_, p) = publish(&mut presenter, "a");
+    assert!(titles(&p).is_empty());
+}
