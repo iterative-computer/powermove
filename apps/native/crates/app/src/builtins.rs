@@ -41,7 +41,7 @@ pub struct Host {
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
     requests: VecDeque<PlatformRequest>,
-    windows: BTreeMap<String, AnyWindowHandle>,
+    pub windows: BTreeMap<String, AnyWindowHandle>,
     opening_windows: BTreeSet<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
@@ -165,6 +165,7 @@ impl Controller {
             ),
             Arc::new(pm_agents::account::open_in_browser),
         );
+        runtime.set_agent_notices(crate::notifications::sink(self.window_key));
         let mut tickets = vec![];
         for panel in BUILTIN_PANELS.iter() {
             if application && !panel.application {

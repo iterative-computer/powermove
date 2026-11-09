@@ -1005,3 +1005,22 @@ fn card_facts_omit_missing_values_and_zero_dimensions() {
     r.summary = None;
     assert_eq!(r.facts("Yesterday"), Some("Yesterday".into()));
 }
+#[test]
+fn open_in_new_window_asks_for_a_window_of_its_own() {
+    use pm_kernel::{locks::OpenDecision, session::ShellReply};
+    for (action, new_window) in [(MenuAction::Open, false), (MenuAction::OpenNewWindow, true)] {
+        let mut c = ready();
+        c.menu("b", action).unwrap();
+        let serial = c.port.sent.last().unwrap().serial;
+        c.take_effects();
+        let reply = ShellReply::Library(OpenDecision::Writable);
+        complete(&mut c, serial, Ok(Outcome::Opened(reply)));
+        let opened = c.take_effects().into_iter().find_map(|e| match e {
+            HostEffect::OpenEditor {
+                name, new_window, ..
+            } => Some((name, new_window)),
+            _ => None,
+        });
+        assert_eq!(opened, Some(("Trailer".into(), new_window)));
+    }
+}

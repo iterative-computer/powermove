@@ -7,6 +7,7 @@ mod colour_panel;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 mod dialogs;
+mod entry;
 mod error_log;
 mod export_coordinator;
 mod extension_authoring;
@@ -27,11 +28,13 @@ mod media;
 mod media_import;
 mod media_refresh;
 mod migration_report;
+mod notifications;
 mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]
 mod panel_capture_tests;
 mod panels;
 mod perf_gate;
+mod perf_panel;
 mod platform;
 mod playback;
 mod pro_media;
@@ -51,6 +54,7 @@ mod ticket;
 mod timeline_surface;
 #[cfg(test)]
 mod timeline_tests;
+mod updates;
 mod v4_compile;
 mod v4_control;
 mod v4_native;
@@ -242,6 +246,8 @@ fn main() -> Result<()> {
     let started = Rc::new(Cell::new(false));
     let electron = plan.electron();
     let gate = first_run::gate(plan, handle.clone(), tools, server.clone());
+    // The command-line project opens in the first window only.
+    let launch = Cell::new(launch);
     let result = pm_shell::run_gated(
         device,
         Rc::new({
@@ -250,6 +256,8 @@ fn main() -> Result<()> {
             move |host, window, cx| {
                 if !started.replace(true) {
                     diag::install_probe(cx);
+                    error_log::persist(&profile, cx);
+                    notifications::install(cx);
                     panel_bridge::serve(bridge_calls.clone(), bridge_windows.clone(), cx);
                     let rx = wake_rx.clone();
                     let broker = broker.clone();
@@ -299,12 +307,19 @@ fn main() -> Result<()> {
                 })
                 .detach();
                 playback::install(&entity, cx);
-                entity.update(cx, |v, cx| v.initialize(launch.clone(), cx));
+                let opening = entry::take_for_new_window(cx)
+                    .or_else(|| launch.take().map(entry::Pending::File));
+                entity.update(cx, |v, cx| v.initialize(opening, cx));
+                entry::register(&entity, window.window_handle(), cx);
+                if let Some(ns) = platform::ns_window(window) {
+                    updates::after_launch(profile.clone(), ns, cx);
+                }
                 perf_gate::install(&entity, cx);
                 Rc::new(session::Bridge(entity))
             }
         }),
         gate,
+        Rc::new(entry::receive),
     );
     broker.close();
     std::thread::spawn(move || {

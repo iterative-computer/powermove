@@ -11,7 +11,7 @@ pub fn run() -> anyhow::Result<()> {
 struct SharedMetalDevice(metal::Device);
 impl Global for SharedMetalDevice {}
 pub fn run_with_device(device: metal::Device) -> anyhow::Result<()> {
-    launch(device, false, None, None)
+    launch(device, false, None, None, None)
 }
 /// Initializes native chrome with activation prohibited and every window hidden.
 pub fn smoke() -> anyhow::Result<()> {
@@ -20,28 +20,34 @@ pub fn smoke() -> anyhow::Result<()> {
         true,
         None,
         None,
+        None,
     )
 }
 /// Launch using the engine device and app-owned panel/command implementation.
 pub fn run_integrated(device: metal::Device, factory: integration::Factory) -> anyhow::Result<()> {
-    launch(device, false, Some(factory), None)
+    launch(device, false, Some(factory), None, None)
 }
 /// Opens the editor windows. Whoever holds the gate calls it exactly once.
 pub type Finish = Rc<dyn Fn(&mut App)>;
 pub type Gate = Box<dyn FnOnce(Finish, &mut App)>;
+/// Files and `powermove://` links LaunchServices hands the app (Finder, the
+/// Dock icon, `open`), as absolute URL strings, in arrival order.
+pub type OpenUrls = Rc<dyn Fn(Vec<String>, &mut App)>;
 /// As `run_integrated`, with no editor window until `gate` calls its `Finish`.
 pub fn run_gated(
     device: metal::Device,
     factory: integration::Factory,
     gate: Gate,
+    open_urls: OpenUrls,
 ) -> anyhow::Result<()> {
-    launch(device, false, Some(factory), Some(gate))
+    launch(device, false, Some(factory), Some(gate), Some(open_urls))
 }
 fn launch(
     device: metal::Device,
     smoke: bool,
     factory: Option<integration::Factory>,
     gate: Option<Gate>,
+    open_urls: Option<OpenUrls>,
 ) -> anyhow::Result<()> {
     native::install_identity();
     let theme_error = theme::load_from_env();
@@ -58,8 +64,22 @@ fn launch(
     } else {
         app
     };
+    // A cold start delivers its documents before `run`'s callback: listen
+    // first, hand them over once the app exists.
+    let (urls_tx, urls_rx) = async_channel::unbounded::<Vec<String>>();
+    app.on_open_urls(move |urls| {
+        let _ = urls_tx.try_send(urls);
+    });
     app.with_accessibility_forced().run(move |cx| {
         cx.set_global(SharedMetalDevice(device));
+        if let Some(open_urls) = open_urls {
+            cx.spawn(async move |cx| {
+                while let Ok(urls) = urls_rx.recv().await {
+                    cx.update(|cx| open_urls(urls, cx));
+                }
+            })
+            .detach();
+        }
         if let Some(factory) = factory {
             cx.set_global(integration::AppIntegration(factory));
         }
@@ -139,7 +159,8 @@ fn keeps_windows() -> bool {
     NSUserDefaults::standardUserDefaults()
         .boolForKey(&NSString::from_str("NSQuitAlwaysKeepsWindows"))
 }
-pub(crate) fn open_editor(cx: &mut App) {
+/// A new editor window, cascaded from the key one (File ▸ New Window).
+pub fn open_editor(cx: &mut App) {
     open_editor_window(cx, true, None, None);
 }
 /// Opens a new editor window as a native tab of the window with session id `leader`.

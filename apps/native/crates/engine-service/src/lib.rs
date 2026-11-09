@@ -243,6 +243,8 @@ pub struct ViewerStatus {
     pub held_frames: u64,
     /// Paused pictures re-presented once because they never reached the glass.
     pub represented: u64,
+    /// Frames completed for display under this viewer (Performance panel).
+    pub presented: u64,
     /// Layers missing from the frame on screen, with why. The rest is drawn.
     pub layer_failures: Vec<pm_render::LayerFailure>,
     /// Effects the project uses whose provider isn't installed. Their
@@ -1311,6 +1313,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     v.status.represented += 1;
                 }
                 v.status.layer_failures = f.submission.failures.to_vec();
+                v.status.presented += 1;
                 // A captured frame's pixels stay with its stamp and time: a
                 // re-present of the same picture (no readback) keeps them.
                 let kept = v

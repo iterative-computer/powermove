@@ -27,6 +27,24 @@ struct Log {
     level: Level,
     code: String,
     text: String,
+    /// Unix milliseconds; 0 for records written before timestamps.
+    #[serde(default)]
+    at_ms: u64,
+}
+/// A persisted log row for the local Error Log window. Never exported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    pub level: Level,
+    pub code: String,
+    pub text: String,
+    pub at_ms: u64,
+}
+const CLEARED: &str = "services.log.cleared";
+const CRASHES: &str = "services.crash.index";
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashRecord {
@@ -77,13 +95,61 @@ impl Diagnostics {
             level,
             code: code.into(),
             text,
+            at_ms: now_ms(),
         };
         let dir = storage.directory("logs", "events")?;
         storage.publish(&dir, serde_json::to_vec(&log)?.as_slice())?;
         Ok(())
     }
+    /// The newest `limit` rows since the last Clear Log, oldest first.
+    pub fn recent(storage: &ServiceStorage, limit: usize) -> Result<Vec<LogEntry>> {
+        let cleared = storage
+            .setting(CLEARED)?
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let dir = storage.directory("logs", "events")?;
+        let mut out = Vec::new();
+        for (_, path) in crate::storage::generations(&dir)?.into_iter().rev() {
+            if out.len() >= limit {
+                break;
+            }
+            let log: Log =
+                serde_json::from_slice(&crate::storage::read_capped(&path, 128 * 1024)?)?;
+            if log.at_ms <= cleared {
+                break;
+            }
+            component(&log.code)?;
+            out.push(LogEntry {
+                level: log.level,
+                code: log.code,
+                text: log.text,
+                at_ms: log.at_ms,
+            });
+        }
+        out.reverse();
+        Ok(out)
+    }
+    /// Error Log ▸ Clear Log. Records stay on disk (immutable generations);
+    /// the window shows only what came after.
+    pub fn clear(storage: &mut ServiceStorage) -> Result<()> {
+        storage.set(CLEARED, serde_json::json!(now_ms()))?;
+        Ok(())
+    }
+    /// Every recorded crash id, oldest first.
+    pub fn crashes(storage: &ServiceStorage) -> Result<Vec<String>> {
+        Ok(storage
+            .setting(CRASHES)?
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default())
+    }
     pub fn crash(storage: &mut ServiceStorage, crash: CrashRecord) -> Result<()> {
         crash.validate()?;
+        let mut index = Self::crashes(storage)?;
+        if !index.contains(&crash.id) {
+            index.push(crash.id.clone());
+            ensure!(index.len() <= 4096, TooLarge; "too many crash records");
+            storage.set(CRASHES, serde_json::to_value(&index)?)?;
+        }
         storage.set(
             &format!("services.crash.{}", crash.id),
             serde_json::to_value(crash)?,

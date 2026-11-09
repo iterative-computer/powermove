@@ -118,6 +118,10 @@ fn next_quit(cx: &mut App) {
                 result = Some(Err(e));
             }
         }
+        if let Some(Ok(ShellReply::Compacted { .. })) = &result {
+            // The Error Log's store: this quit was not a crash.
+            crate::error_log::session_ended().await;
+        }
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
             // library next launch, so they never hold the quit.

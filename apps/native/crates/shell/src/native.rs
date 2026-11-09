@@ -118,6 +118,14 @@ fn active_send(command: Command) {
         });
     }
 }
+/// Sends `name` to the current editor exactly as its menu item would.
+pub fn send_menu_command(name: &str) {
+    active_send(Command {
+        name: name.into(),
+        args: vec![],
+        token: None,
+    });
+}
 /// Frame of the current editor window (key, else main), for cascading new windows.
 pub fn editor_frame() -> Option<[f64; 4]> {
     let mtm = MainThreadMarker::new().unwrap();
