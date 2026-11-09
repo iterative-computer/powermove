@@ -1311,3 +1311,102 @@ fn an_export_whose_frames_wait_flushes_the_encoder_and_verifies() {
 fn an_export_held_for_a_long_playback_never_drops_a_frame() {
     held_h264_export("held-long", std::time::Duration::from_secs(80));
 }
+
+/// Whole frames, overlapping or not; with `band_every`, every that-many-th
+/// admission is one band (a viewer that became busy mid-export).
+struct Overlap {
+    overlaps: bool,
+    band_every: u32,
+    admitted: AtomicU32,
+    open: AtomicU32,
+    most_open: AtomicU32,
+}
+
+impl Overlap {
+    fn new(overlaps: bool, band_every: u32) -> Self {
+        Self {
+            overlaps,
+            band_every,
+            admitted: AtomicU32::new(0),
+            open: AtomicU32::new(0),
+            most_open: AtomicU32::new(0),
+        }
+    }
+}
+
+impl GpuGate for Overlap {
+    fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let open = self.open.fetch_add(1, Ordering::Relaxed) + 1;
+        self.most_open.fetch_max(open, Ordering::Relaxed);
+        let i = self.admitted.fetch_add(1, Ordering::Relaxed) + 1;
+        Some(if self.band_every > 0 && i % self.band_every == 0 {
+            1
+        } else {
+            units
+        })
+    }
+    fn finished(&self, _: u64, _: u32, _: f64) {
+        self.open.fetch_sub(1, Ordering::Relaxed);
+    }
+    fn abandoned(&self, _: u64) {
+        panic!("a supported frame never abandons a submission");
+    }
+    fn measures(&self) -> bool {
+        false
+    }
+    fn overlaps(&self) -> bool {
+        self.overlaps
+    }
+}
+
+/// Overlapping frames (the next frame's CPU work during this one's GPU
+/// work) deliver exactly the frames, in order, that serial frames do, also
+/// when a banded frame interrupts the overlap; at most two frames are ever
+/// admitted at once.
+#[test]
+fn overlapped_frames_equal_serial_frames_bit_for_bit() {
+    let dur = 0.5;
+    let (doc, media) = generated(dur);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut encode = |gate: &dyn GpuGate| {
+        let mut s = settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::P4444Xq,
+            },
+            WireAlpha::Straight,
+            dur,
+        );
+        s.audio = false;
+        let job = job(&doc, media.clone(), s, PathBuf::from("/unused.mov"));
+        let plan = plan_export(&job).unwrap();
+        run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            gate,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap()
+    };
+    let serial = encode(&Overlap::new(false, 0));
+    let overlapped_gate = Overlap::new(true, 0);
+    let overlapped = encode(&overlapped_gate);
+    let mixed_gate = Overlap::new(true, 4);
+    let mixed = encode(&mixed_gate);
+    assert_eq!(serial.frames.len(), 15);
+    assert_eq!(overlapped_gate.most_open.load(Ordering::Relaxed), 2);
+    assert!(mixed_gate.most_open.load(Ordering::Relaxed) <= 2);
+    assert!(
+        serial.frames == overlapped.frames,
+        "overlapped frames differ"
+    );
+    assert!(
+        serial.frames == mixed.frames,
+        "frames around a banded one differ"
+    );
+}

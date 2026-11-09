@@ -55,6 +55,28 @@ fn half_table() -> &'static [f32; 1 << 16] {
 
 /// `data` is valid only while mapped. The caller owns the destination, so
 /// there is no raw-byte or decoded-frame allocation in this hot path.
+/// Mapped rows of a frame `format` texture into working floats; refuses a
+/// format exports never render.
+pub(crate) fn decode_rows(
+    format: wgpu::TextureFormat,
+    data: &[u8],
+    row: usize,
+    padded: usize,
+    height: usize,
+    destination: &mut [f32],
+) -> Result<(), ReadbackError> {
+    if !matches!(
+        format,
+        wgpu::TextureFormat::Rgba8Unorm
+            | wgpu::TextureFormat::Rgba16Float
+            | wgpu::TextureFormat::Rgba32Float
+    ) {
+        return Err(ReadbackError::Format(format));
+    }
+    decode_mapped_rows(format, data, row, padded, height, destination);
+    Ok(())
+}
+
 fn decode_mapped_rows(
     format: wgpu::TextureFormat,
     data: &[u8],
