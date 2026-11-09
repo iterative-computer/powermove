@@ -163,19 +163,12 @@ worker handle exposes run IDs, questions, sessions, progress, notifications and
 terminal results. Kernel/tool mutations must still go through the existing
 kernel actor and Rust MCP host; provider traffic grants no direct document lease.
 
-## Protocol generation and conformance evidence
+## Protocol conformance evidence
 
-`fixtures/protocol-ts` contains 32 dependent types produced by the pinned native
-Codex 0.159.1 executable with `codex app-server generate-ts`. The root set covers
-initialize, thread start/resume, turn start/steer/interrupt and user-input request/
-response. `protocol-source.json` hashes each source. `generate-protocol.cjs`
-translates those declarations, including literals/unions, into `generated.rs`.
-`Field<Option<T>>` preserves missing versus explicit null; flattened future fields
-survive round trips. These are the generated type closure used by this client,
-not a claim to implement every App Server method. The wire client retains JSON
-at its boundary for the shipped subset: for example, the tag omits text_elements
-on text inputs although generated UserInput declares it. That omission is replayed
-as shipped; no provider protocol is guessed from a newer SDK.
+The wire client builds JSON at its boundary for the shipped subset of the pinned
+Codex 0.159.1 App Server protocol: for example, the tag omits text_elements on
+text inputs. That omission is replayed as shipped; no provider protocol is
+guessed from a newer SDK.
 
 `capture-oracle.cjs` uses `git show v1.2.0` and TypeScript 5.9.3 to execute the
 unmodified TypeScript client/parser methods with injected fake processes. It uses
@@ -251,9 +244,8 @@ workspace owner adds the new package entry to the shared lock, ordinary locked
 commands need no switch. Python 3 is required only for fake-runtime pipe tests.
 TypeScript/npm are required only to regenerate reference evidence, not to build
 or run pm-agents. To regenerate, install TypeScript 5.9.3 and Codex 0.159.1 under
-`work/oracle`, capture the pinned CLI's generate-ts output under `work/`, then run
-`capture-oracle.cjs` and `generate-protocol.cjs`; all retained inputs are public
-synthetic fixtures and frozen type declarations.
+`work/oracle`, then run
+`capture-oracle.cjs`; all retained inputs are public synthetic fixtures.
 
 Verification on Linux: **87 Cargo tests pass** (11 transcript, 4 conversation, 10 persistence,
 32 protocol, 12 runtime, 6 process transport, and 12 workspace). Strict Clippy (`--all-targets --no-deps -D warnings`),
