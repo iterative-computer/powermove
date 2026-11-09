@@ -38,6 +38,14 @@ const cluster = {
   gap: token("metrics.gap"),
 } as const;
 const stack = { display: "flex", flexDirection: "column" } as const;
+/** Summary and actions under a hairline, like v1's sheet footer. */
+const footer = {
+  ...line,
+  borderTopWidth: token("metrics.border"),
+  borderColor: token("colors.hairline"),
+  paddingTop: token("metrics.inset"),
+  marginTop: token("metrics.gap"),
+} as const;
 const detail = {
   color: token("colors.muted"),
   fontSize: token("typography.minimum"),
@@ -192,6 +200,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         style={{
           color: token("colors.text"),
           fontSize: token("typography.heading"),
+          fontWeight: token("typography.semibold_weight"),
         }}
       >
         {progressSheet ? `Exporting “${p.name}”` : "Export"}
@@ -254,7 +263,11 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             role="group"
             label="Export"
             metadata={{ export: { recipe: "sheet-footer" } }}
-            style={{ ...cluster, justifyContent: "end" }}
+            style={{
+              ...footer,
+              justifyContent: "end",
+              gap: token("metrics.gap"),
+            }}
           >
             {s.run.phase === "failed" ? (
               <>
@@ -311,33 +324,36 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             {descriptions[model.kind]}
           </text>
           {model.kind === "project" ? (
-            <Group label="Keep Every Layer Editable">
-              <text
+            <UI.FormGroup label="Keep Every Layer Editable">
+              <div
+                role="group"
+                label="Keep Every Layer Editable"
                 style={{
-                  color: token("colors.secondary"),
-                  fontSize: token("typography.reading"),
+                  ...stack,
+                  gap: token("metrics.border"),
+                  padding: token("metrics.inset"),
                 }}
               >
-                Save a portable Powermove project with its media, effects,
-                keyframes and composition settings.
-              </text>
-              {["Editable layers", "Original media", "Animation & effects"].map(
-                (label) => (
-                  <text
-                    key={label}
-                    style={{
-                      ...detail,
-                      background: token("colors.panel_secondary"),
-                      borderRadius: token("metrics.capsule_radius"),
-                      paddingLeft: token("metrics.gap"),
-                      paddingRight: token("metrics.gap"),
-                    }}
-                  >
-                    {label}
-                  </text>
-                ),
-              )}
-            </Group>
+                <text style={{ ...text, fontSize: token("typography.title") }}>
+                  Keep every layer editable
+                </text>
+                <text
+                  style={{ ...detail, fontSize: token("typography.label") }}
+                >
+                  Save a portable Powermove project with its media, effects,
+                  keyframes and composition settings.
+                </text>
+                <text
+                  style={{
+                    color: token("colors.secondary"),
+                    fontSize: token("typography.label"),
+                    marginTop: token("metrics.gap"),
+                  }}
+                >
+                  Editable layers · Original media · Animation & effects
+                </text>
+              </div>
+            </UI.FormGroup>
           ) : (
             <>
               <Group label="Output">
@@ -496,7 +512,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 height: ["metrics.control", "metrics.inset", "metrics.inset"],
               },
             }}
-            style={line}
+            style={footer}
           >
             <div style={stack}>
               <text
