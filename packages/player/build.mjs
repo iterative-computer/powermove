@@ -1,43 +1,38 @@
-// Bundles the Powermove web player from the desktop app's sources.
-// The esbuild options here are the single source of truth: the desktop app's
-// `virtual:powermove-player` module (embedded into web exports) and this
-// package's dist/ output both go through bundlePlayerEntry.
+// Bundles the Powermove web player from the Electron app's player sources.
+// The Electron app ships from main; this branch no longer carries it, so the
+// sources come from the pinned commit below (read with `git archive`, which
+// needs the repository's history, not a shallow clone).
 import { build } from 'esbuild';
+import { execFileSync } from 'node:child_process';
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const SOURCE_COMMIT = '0c818d97c398a34a9e6e11bb1da71cf94b4ee0e2';
 const packageDir = path.dirname(fileURLToPath(import.meta.url));
-const playerSourceDir = path.resolve(packageDir, '../../apps/desktop/src/renderer/src/player');
+const sources = path.join(packageDir, '.v1-src', SOURCE_COMMIT);
 
-export const entries = {
-  player: path.join(playerSourceDir, 'player.ts'),
-  'svg-player': path.join(playerSourceDir, 'svg-player.ts'),
-};
-
-/**
- * Bundle one browser-only entry to ESM text.
- * @param {string} entryPath absolute path to the entry module
- * @returns {Promise<{ text: string; inputs: string[] }>} bundle text and the absolute paths of every input file
- */
-export async function bundlePlayerEntry(entryPath) {
-  const result = await build({
-    entryPoints: [entryPath],
-    bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
-    minify: true, legalComments: 'inline', define: { 'import.meta.hot': 'false' },
-    metafile: true,
-    // esbuild reports metafile inputs relative to its working directory; pin it so callers get stable paths.
-    absWorkingDir: packageDir,
-  });
-  const inputs = Object.keys(result.metafile.inputs).map(file => path.resolve(packageDir, file));
-  return { text: result.outputFiles[0].text, inputs };
+function extractSources() {
+  if (existsSync(path.join(sources, 'apps/desktop/src'))) return;
+  mkdirSync(sources, { recursive: true });
+  const archive = execFileSync('git', ['archive', SOURCE_COMMIT, 'apps/desktop/src'], { cwd: path.resolve(packageDir, '../..'), maxBuffer: 256 * 1024 * 1024 });
+  execFileSync('tar', ['-x', '-C', sources], { input: archive });
 }
 
 async function main() {
+  extractSources();
+  const playerSourceDir = path.join(sources, 'apps/desktop/src/renderer/src/player');
   const dist = path.join(packageDir, 'dist');
   await mkdir(dist, { recursive: true });
-  for (const [name, entry] of Object.entries(entries)) {
-    const { text } = await bundlePlayerEntry(entry);
+  for (const name of ['player', 'svg-player']) {
+    const result = await build({
+      entryPoints: [path.join(playerSourceDir, `${name}.ts`)],
+      bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
+      minify: true, legalComments: 'inline', define: { 'import.meta.hot': 'false' },
+      nodePaths: [path.join(packageDir, 'node_modules')],
+    });
+    const text = result.outputFiles[0].text;
     await writeFile(path.join(dist, `${name}.js`), text);
     // Declarations are hand-written (the sources are loosely typed `any` engines); ship them beside the bundles.
     await copyFile(path.join(packageDir, 'types', `${name}.d.ts`), path.join(dist, `${name}.d.ts`));
@@ -45,6 +40,4 @@ async function main() {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(error => { console.error(error); process.exit(1); });
-}
+main().catch(error => { console.error(error); process.exit(1); });

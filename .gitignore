@@ -19,6 +19,7 @@ packages/macos-haptics/build/
 
 # generated packages
 packages/player/dist/
+packages/player/.v1-src/
 
 # local environment
 .env
