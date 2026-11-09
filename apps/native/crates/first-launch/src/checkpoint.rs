@@ -53,17 +53,24 @@ impl Checkpoint {
     pub fn load(root: &Path) -> Result<Self> {
         let cp: Self = disk::json(&root.join("checkpoint.json"))?;
         ensure!(cp.version == 1, "unsupported checkpoint");
+        pm_native_migrate::source_access::begin_bytes(
+            cp.files
+                .values()
+                .chain(cp.chromium_payloads.values())
+                .map(|e| e.bytes)
+                .sum(),
+        );
         for (p, e) in &cp.files {
             relative(p)?;
             ensure!(
-                disk::hash(&root.join("profile").join(p))? == (e.hash.clone(), e.bytes),
+                disk::hash_counted(&root.join("profile").join(p))? == (e.hash.clone(), e.bytes),
                 "checkpoint content changed"
             );
         }
         for (p, e) in &cp.chromium_payloads {
             relative(p)?;
             ensure!(
-                disk::hash(&root.join(p))? == (e.hash.clone(), e.bytes),
+                disk::hash_counted(&root.join(p))? == (e.hash.clone(), e.bytes),
                 "checkpoint media content changed"
             );
         }
@@ -134,7 +141,7 @@ impl Checkpoint {
                         )?;
                         for payload in disk::walk(&stage.join(&out).join("blobs"))?.keys() {
                             let relative = out.join("blobs").join(payload);
-                            let (hash, bytes) = disk::hash(&stage.join(&relative))?;
+                            let (hash, bytes) = disk::hash_counted(&stage.join(&relative))?;
                             chromium_payloads.insert(
                                 relative,
                                 FileEntry {
@@ -241,6 +248,26 @@ impl Checkpoint {
         })()
         // Leave failed captures intact. A retry archives them before starting.
     }
+}
+/// Bytes a capture copies: the file families, then each IndexedDB origin with its
+/// blobs, then Local Storage. Metadata only; the capture counts as it goes.
+pub(crate) fn capture_bytes(source: &Path) -> Result<u64> {
+    let mut total = inventory(source)?.values().map(|s| s.size).sum::<u64>();
+    if let Ok(entries) = fs::read_dir(source.join("IndexedDB")) {
+        for entry in entries {
+            let dir = entry?.path();
+            let name = dir.file_name().unwrap_or_default().to_string_lossy();
+            if let Some(stem) = name.strip_suffix(".indexeddb.leveldb") {
+                let blobs = dir.with_file_name(format!("{stem}.indexeddb.blob"));
+                total += disk::tree_bytes(&dir)? + disk::tree_bytes(&blobs)?;
+            }
+        }
+    }
+    let local = source.join("Local Storage/leveldb");
+    if local.is_dir() {
+        total += disk::tree_bytes(&local)?;
+    }
+    Ok(total)
 }
 /// Metadata-only stamp of everything a checkpoint would copy. An unchanged
 /// source costs a directory walk at launch, never a capture.

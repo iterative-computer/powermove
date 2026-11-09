@@ -262,6 +262,13 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
     let (source, native) = validate(config)?;
     let mut state = load_state(&native, &source)?;
     let _lock = lease(&native)?;
+    // Behind the open library nobody sees an explanation, so a folder macOS
+    // protects is opened only if the person allowed it at first launch.
+    let _folders = crate::source_access::ensure(
+        state
+            .folder_access
+            .unwrap_or(crate::source_access::Choice::Skip),
+    );
     let deltas = native.join("first-launch-deltas");
     let pending = deltas.join("pending");
     let next = Checkpoint::load(&pending)?;
@@ -270,7 +277,7 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
     let closure: ClosureInput = if availability.exists() {
         disk::json(&availability)?
     } else {
-        let c = closure::inventory(&next, &pending, &batches)?;
+        let c = closure::inventory(&next, &pending, &batches, &mut |_, _| Ok(()))?;
         disk::atomic(&availability, &c)?;
         c
     };

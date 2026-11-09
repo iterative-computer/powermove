@@ -10,11 +10,12 @@ use pm_first_launch::{
     Config, DeltaPrepared, Event, KeychainDenied, Launch, LowDisk, Outcome, ProfileRefused,
     onboarding_completed,
     secrets::MacKeychain,
-    surfaces::migration::{Failure, Gate, Model, Report},
+    source_access::{self, Activity, Choice as FolderChoice},
+    surfaces::migration::{Failure, Gate, Model, Report, bytes},
 };
 use pm_kernel::locks::{ElectronOwner, electron_owner};
 use pm_services::surface_backing::onboarding::{Choice as Chosen, Onboarding, Step as Onboard};
-use pm_shell::welcome::{Button, Choice, Frame, Progress, Row, Severity};
+use pm_shell::welcome::{Button, Choice, Frame, Progress, Row, Severity, StepRow};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -81,6 +82,8 @@ pub enum Run {
     Ordinary,
     WithConsent,
     SkipConsent,
+    /// After the folder explanation: Continue (macOS then asks) or Skip These Files.
+    Folders(FolderChoice),
 }
 #[derive(Clone, Debug)]
 pub enum Finished {
@@ -115,6 +118,8 @@ pub enum Effect {
     Watch,
     Quit,
     ShowReport,
+    /// Stop waiting on the unanswered macOS folder prompt; those files stay offline.
+    SkipFolder,
     /// Open the library and the editor, applying the choices if there are any.
     Enter(Option<serde_json::Value>),
 }
@@ -136,22 +141,6 @@ pub struct Flow {
     entry: Entry,
     /// Onboarding's choices, kept so a failed attach can be tried again.
     chosen: Option<serde_json::Value>,
-}
-fn bytes(value: u64) -> String {
-    let mut amount = value as f64;
-    let mut unit = "bytes";
-    for next in ["KB", "MB", "GB", "TB"] {
-        if amount < 1000. {
-            break;
-        }
-        amount /= 1000.;
-        unit = next;
-    }
-    if unit == "bytes" {
-        format!("{value} bytes")
-    } else {
-        format!("{amount:.1} {unit}")
-    }
 }
 impl Flow {
     pub fn new(plan: Plan) -> Self {
@@ -219,6 +208,15 @@ impl Flow {
         self.entry = Entry::Failed { details };
         vec![]
     }
+    /// The worker's live bytes and any unanswered folder prompt, polled. True if
+    /// the frame changed.
+    pub fn activity(&mut self, bytes: (u64, u64), waiting: Option<String>) -> bool {
+        let bytes = Some(bytes).filter(|(_, total)| *total > 0);
+        let changed = self.model.bytes != bytes || self.model.waiting_folder != waiting;
+        self.model.bytes = bytes;
+        self.model.waiting_folder = waiting;
+        changed
+    }
     pub fn message(&mut self, message: Message) -> Vec<Effect> {
         match message {
             Message::Event(event) => {
@@ -250,7 +248,9 @@ impl Flow {
                             vec![]
                         }
                     }
-                    Outcome::NeedsSecretConsent { .. } | Outcome::Complete { .. } => vec![],
+                    Outcome::NeedsSecretConsent { .. }
+                    | Outcome::NeedsFolderAccess { .. }
+                    | Outcome::Complete { .. } => vec![],
                 }
             }
             Finished::Ready(outcome, report) => {
@@ -403,6 +403,15 @@ impl Flow {
                 self.model.gate = Gate::Resuming;
                 vec![Effect::Run(Run::SkipConsent)]
             }
+            "allow_folders" | "skip_folders" if self.model.gate == Gate::FolderAccess => {
+                self.model.gate = Gate::Resuming;
+                vec![Effect::Run(Run::Folders(if id == "allow_folders" {
+                    FolderChoice::Allow
+                } else {
+                    FolderChoice::Skip
+                }))]
+            }
+            "skip_folder" if self.model.waiting_folder.is_some() => vec![Effect::SkipFolder],
             "show_report" => vec![Effect::ShowReport],
             "open_native" => self.after_migration(),
             _ => vec![],
@@ -415,22 +424,22 @@ impl Flow {
             }
             _ => self.model.view(),
         };
-        let progress = self
+        let paused = self.model.gate == Gate::Paused;
+        let steps = self
             .model
-            .progress
-            .as_ref()
-            .filter(|_| {
-                matches!(
-                    self.model.gate,
-                    Gate::Copying | Gate::Pausing | Gate::Paused
-                )
+            .rows()
+            .into_iter()
+            .map(|row| StepRow {
+                title: row.title,
+                value: row.value,
+                progress: row.active.map(|fraction| match fraction {
+                    Some(fraction) => Progress::Determinate(fraction),
+                    // A paused step with no total doesn't slide.
+                    None if paused => Progress::Determinate(0.),
+                    None => Progress::Indeterminate,
+                }),
             })
-            .map(|p| {
-                p.determinate()
-                    .map_or(Progress::Indeterminate, |(done, total)| {
-                        Progress::Determinate { done, total }
-                    })
-            });
+            .collect();
         let unread = self.report_unread.then(|| Row {
             symbol: "exclamationmark.triangle.fill",
             severity: Severity::Warning,
@@ -464,9 +473,9 @@ impl Flow {
             spinner: matches!(
                 self.model.gate,
                 Gate::WaitingLocal | Gate::WaitingForMacos | Gate::Resuming
-            ),
+            ) || self.model.waiting_folder.is_some(),
             status: view.status.filter(|s| !s.is_empty()),
-            progress,
+            steps,
             rows,
             details: self
                 .details
@@ -605,10 +614,10 @@ fn library_failed_frame(details: &str) -> Frame {
     Frame {
         surface: "N001".into(),
         title: "Your Library Couldn’t Open".into(),
-        line: "Nothing was changed. If Powermove Native is open in another window or on another account, quit it, then try again.".into(),
+        line: "Nothing was changed. If Powermove is open in another window or on another account, quit it, then try again.".into(),
         details: Some(details.to_owned()),
         buttons: vec![
-            Button::new("quit", "Quit Powermove Native").leading(),
+            Button::new("quit", "Quit Powermove").leading(),
             Button::new("try_again", "Try Again"),
         ],
         default: Some("try_again".into()),
@@ -622,7 +631,7 @@ fn updating_frame() -> Frame {
         line: "Your original app stays unchanged.".into(),
         status: Some("Bringing in your recent work…".into()),
         spinner: true,
-        buttons: vec![Button::new("quit", "Quit Powermove Native").leading()],
+        buttons: vec![Button::new("quit", "Quit Powermove").leading()],
         ..Frame::default()
     }
 }
@@ -632,10 +641,14 @@ pub fn spawn_run(
     config: Config,
     run: Run,
     pause: Arc<AtomicBool>,
+    activity: Arc<Activity>,
     tx: async_channel::Sender<Message>,
 ) {
     let native = config.native_profile.clone();
     std::thread::spawn(move || {
+        // Originals in folders macOS protects are opened only after the person
+        // saw the explanation, and never waited on past an unanswered prompt.
+        let _folders = source_access::install(FolderChoice::Ask, activity);
         let events = tx.clone();
         let stop = pause.clone();
         let hook = move |event: Event| -> Result<()> {
@@ -646,6 +659,7 @@ pub fn spawn_run(
         let result = match run {
             Run::Ordinary => pm_first_launch::run(&config, hook),
             Run::SkipConsent => pm_first_launch::skip_secret_consent(&config, hook),
+            Run::Folders(choice) => pm_first_launch::run_with_folder_access(&config, choice, hook),
             // Constructed only here, after the person's click for this request.
             Run::WithConsent => pm_first_launch::resume_with_secret_consent(
                 &config,
@@ -764,6 +778,8 @@ pub fn gate(
             },
             finish,
             pause: Default::default(),
+            activity: Default::default(),
+            running: Default::default(),
             flow: Rc::new(RefCell::new(Flow::new(plan))),
             window: Rc::default(),
             tx,
@@ -793,6 +809,9 @@ struct Driver {
     library: Library,
     finish: pm_shell::Finish,
     pause: Arc<AtomicBool>,
+    /// The worker's live bytes and folder prompt, polled while it runs.
+    activity: Arc<Activity>,
+    running: Rc<std::cell::Cell<bool>>,
     flow: Rc<RefCell<Flow>>,
     window: Rc<RefCell<Option<gpui::WindowHandle<pm_shell::welcome_view::WelcomeView>>>>,
     tx: async_channel::Sender<Message>,
@@ -806,6 +825,9 @@ impl Driver {
             async move |cx| {
                 while let Ok(message) = rx.recv().await {
                     cx.update(|cx| {
+                        if let Message::Finished(_) = &message {
+                            driver.running.set(false);
+                        }
                         if let Message::Finished(Finished::Failed(_, details)) = &message {
                             crate::error_log::shared(cx)
                                 .borrow_mut()
@@ -873,9 +895,17 @@ impl Driver {
                 Effect::Run(run) => {
                     self.pause.store(false, Ordering::Release);
                     if let Some(config) = self.library.plan.config.clone() {
-                        spawn_run(config, run, self.pause.clone(), self.tx.clone());
+                        spawn_run(
+                            config,
+                            run,
+                            self.pause.clone(),
+                            self.activity.clone(),
+                            self.tx.clone(),
+                        );
+                        self.poll(cx);
                     }
                 }
+                Effect::SkipFolder => self.activity.skip_waiting(),
                 Effect::Pause => self.pause.store(true, Ordering::Release),
                 Effect::Watch => {
                     if let Some(config) = &self.library.plan.config {
@@ -889,6 +919,28 @@ impl Driver {
                 Effect::Enter(choices) => self.enter(choices, cx),
             }
         }
+    }
+    /// Four times a second while the worker runs: its bytes and any folder prompt.
+    fn poll(&self, cx: &mut gpui::App) {
+        if self.running.replace(true) {
+            return;
+        }
+        let driver = self.clone();
+        cx.spawn(async move |cx| {
+            while driver.running.get() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let (bytes, waiting) = (driver.activity.bytes(), driver.activity.waiting());
+                cx.update(|cx| {
+                    let changed = driver.flow.borrow_mut().activity(bytes, waiting);
+                    if changed {
+                        driver.show(cx);
+                    }
+                });
+            }
+        })
+        .detach();
     }
     /// Library first, then the MCP server, then windows. Off main until the last.
     fn enter(&self, choices: Option<serde_json::Value>, cx: &mut gpui::App) {

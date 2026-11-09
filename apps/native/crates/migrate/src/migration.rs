@@ -8,7 +8,7 @@ use crate::{
     indexeddb::{Record, v2_fingerprint},
     snapshot::{
         Snapshot, archive_attempt, atomic_json, check_space, copy_verified_length, hash_file,
-        open_regular,
+        hash_file_counted, open_regular,
     },
 };
 use anyhow::{Context, ensure};
@@ -77,6 +77,10 @@ pub struct Reference {
     #[serde(default)]
     pub poster: bool,
     pub before: Availability,
+    /// Its original is in a folder macOS guards and couldn't be opened: denied,
+    /// skipped or unanswered. It stays offline, with its source, for a relink.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unreached: bool,
 }
 impl Reference {
     pub fn is_proxy(&self) -> bool {
@@ -501,34 +505,13 @@ pub fn migrate_many_with_disk(
         // even if a sampled legacy fingerprint happens to collide.
         let mut original = None;
         if !reference.poster {
-            let indexed_source = disk_records
-                .iter()
-                .any(|r| r.key == reference.key || reference.legacy_id.as_deref() == Some(&r.key));
-            if !indexed_source
-                && let Some(path) = &reference.source_path
-                && crate::library_media::is_resident(path)?
-                && identity_matches(path, reference)?
+            // The captured payload first: an original in a folder macOS guards is
+            // read only when nothing captured has its bytes.
+            if !reference.is_proxy()
+                && let Some(key) = &stored
+                && identity_matches(&object_path(root, &key.hash)?, reference)?
             {
-                let size = fs::metadata(path)?.len();
-                original = Some(import_file(
-                    root,
-                    path,
-                    size,
-                    ImportInfo {
-                        key: &format!("blake3-source:{}", sha256(&serde_json::to_vec(reference)?)),
-                        mime: "application/octet-stream",
-                        revision: None,
-                        at: None,
-                        expected: reference.original_blake3.as_deref(),
-                    },
-                )?);
-                if let Some(k) = original.as_mut() {
-                    ensure!(
-                        identity_matches(&object_path(root, &k.hash)?, reference)?,
-                        "original changed during migration"
-                    );
-                    k.source = "import".into();
-                }
+                original = Some(key.clone());
             }
             // Main's index binds each original to its full SHA-256.
             // Only the exact key/revision, verified again after copying, qualifies.
@@ -540,12 +523,35 @@ pub fn migrate_many_with_disk(
             {
                 original = Some(key.clone());
             }
+            let indexed_source = disk_records
+                .iter()
+                .any(|r| r.key == reference.key || reference.legacy_id.as_deref() == Some(&r.key));
             if original.is_none()
-                && !reference.is_proxy()
-                && let Some(key) = &stored
-                && identity_matches(&object_path(root, &key.hash)?, reference)?
+                && !indexed_source
+                && !reference.unreached
+                && let Some(path) = &reference.source_path
+                && crate::library_media::is_resident(path)?
+                && reached(identity_matches(path, reference))?
             {
-                original = Some(key.clone());
+                let size = fs::metadata(path)?.len();
+                let mut key = import_file(
+                    root,
+                    path,
+                    size,
+                    ImportInfo {
+                        key: &format!("blake3-source:{}", sha256(&serde_json::to_vec(reference)?)),
+                        mime: "application/octet-stream",
+                        revision: None,
+                        at: None,
+                        expected: reference.original_blake3.as_deref(),
+                    },
+                )?;
+                ensure!(
+                    identity_matches(&object_path(root, &key.hash)?, reference)?,
+                    "original changed during migration"
+                );
+                key.source = "import".into();
+                original = Some(key);
             }
         }
         let unavailable_disk = source_states.iter().any(|(key, (_, status))| {
@@ -792,7 +798,7 @@ fn import_file(root: &Path, source: &Path, size: u64, info: ImportInfo<'_>) -> R
         expected,
     } = info;
     check_space(root, size)?;
-    let (hash, read_size) = hash_file(source)?;
+    let (hash, read_size) = hash_file_counted(source)?;
     ensure!(read_size == size, "source length changed");
     if let Some(expected) = expected {
         ensure!(hash == expected, "source BLAKE3 differs from reference");
@@ -826,6 +832,13 @@ fn import_file(root: &Path, source: &Path, size: u64, info: ImportInfo<'_>) -> R
     };
     verify_key(root, &record)?;
     Ok(record)
+}
+/// A source macOS wouldn't let us open counts as not matching: it stays offline.
+fn reached(matched: Result<bool>) -> Result<bool> {
+    match matched {
+        Err(e) if crate::source_access::is_unreached(&e) => Ok(false),
+        other => other,
+    }
 }
 fn identity_matches(path: &Path, r: &Reference) -> Result<bool> {
     if let Some(hash) = &r.original_blake3 {

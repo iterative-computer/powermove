@@ -64,14 +64,21 @@ pub fn regular(path: &Path) -> Result<File> {
             "source is a dataless file; explicit source availability is required"
         );
     }
-    let f = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    let f = pm_native_migrate::source_access::open(
+        path,
+        OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW),
+    )?;
     ensure!(f.metadata()?.is_file(), "expected a regular file");
     Ok(f)
 }
 pub fn hash(path: &Path) -> Result<(String, u64)> {
+    hash_with(path, |_| {})
+}
+/// The pass whose bytes the running step counts: one per file it moves.
+pub fn hash_counted(path: &Path) -> Result<(String, u64)> {
+    hash_with(path, pm_native_migrate::source_access::add_bytes)
+}
+fn hash_with(path: &Path, mut read: impl FnMut(u64)) -> Result<(String, u64)> {
     let mut f = regular(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0; 1024 * 1024];
@@ -82,6 +89,7 @@ pub fn hash(path: &Path) -> Result<(String, u64)> {
             break;
         }
         hasher.update(&buf[..n]);
+        read(n as u64);
         size += n as u64;
     }
     Ok((hasher.finalize().to_hex().to_string(), size))
@@ -118,7 +126,7 @@ pub struct FileEntry {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stamp {
-    size: u64,
+    pub(crate) size: u64,
     modified: std::time::SystemTime,
     inode: u64,
     device: u64,
@@ -162,7 +170,7 @@ pub fn tree_bytes(root: &Path) -> Result<u64> {
     Ok(walk(root)?.values().map(|s| s.size).sum())
 }
 pub fn copy(source: &Path, target: &Path) -> Result<FileEntry> {
-    let (expected, size) = hash(source)?;
+    let (expected, size) = hash_counted(source)?;
     space(target.parent().context("missing parent")?, size)?;
     // clonefile keeps APFS snapshots cheap. Stream on other filesystems.
     #[cfg(target_os = "macos")]

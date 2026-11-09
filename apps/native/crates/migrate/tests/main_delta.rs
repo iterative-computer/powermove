@@ -114,6 +114,7 @@ fn source_link_import_verifies_full_identity_and_retries_availability_as_new_pas
             playback_proxy_version: 0,
             poster: false,
             before: Availability::Original,
+            unreached: false,
         }],
     };
     let dest = root.join("native");
@@ -184,6 +185,7 @@ fn linked_proxy_stays_proxy_and_interrupted_copy_resumes_without_deleting_source
             playback_proxy_version: 0,
             poster: false,
             before: Availability::ProxyOnly,
+            unreached: false,
         }],
     };
     let dest = root.join("native");

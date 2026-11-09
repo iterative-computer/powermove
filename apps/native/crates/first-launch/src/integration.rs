@@ -41,7 +41,10 @@ impl<E: Evidence, F: FnMut(Event) -> Result<()>> HandoffHost for Coordinator<'_,
         // TR evidence is advisory. Direct/skipped TR use the identical importer.
         let outcome = run(self.config, &mut self.events)?;
         let complete = match outcome {
-            Outcome::WaitingForElectron => return Ok(DeltaReport::default()),
+            // Both wait on the person; the copy isn't complete yet.
+            Outcome::WaitingForElectron | Outcome::NeedsFolderAccess { .. } => {
+                return Ok(DeltaReport::default());
+            }
             Outcome::NeedsSecretConsent { .. } => {
                 return Ok(DeltaReport {
                     complete: true,

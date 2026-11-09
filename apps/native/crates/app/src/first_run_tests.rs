@@ -44,7 +44,13 @@ fn drive(flow: &mut Flow, effects: Vec<Effect>) -> Vec<Effect> {
         };
         let (tx, rx) = async_channel::unbounded();
         let config = flow.plan.config.clone().unwrap();
-        spawn_run(config, run, Arc::new(AtomicBool::new(false)), tx);
+        spawn_run(
+            config,
+            run,
+            Arc::new(AtomicBool::new(false)),
+            Arc::default(),
+            tx,
+        );
         while let Ok(message) = rx.recv_blocking() {
             let end = matches!(message, Message::Finished(_));
             pending.extend(flow.message(message));
@@ -273,7 +279,7 @@ fn a_running_original_app_waits_and_the_copy_starts_when_it_quits() {
     let profile = plan.profile.clone();
     let mut flow = Flow::new(plan);
     assert_eq!(start(&mut flow), vec![Effect::Watch]);
-    titled(&flow.frame(), "Quit Powermove to Continue");
+    titled(&flow.frame(), "Quit the Original App to Continue");
     assert!(flow.frame().spinner);
     assert!(!profile.join("migration.json").exists());
     assert_eq!(
@@ -290,7 +296,7 @@ fn an_owner_on_another_mac_asks_for_a_check() {
     let mut flow = Flow::new(plan(&home));
     assert!(start(&mut flow).is_empty());
     let frame = flow.frame();
-    titled(&frame, "Powermove Might Still Be Open");
+    titled(&frame, "The Original App Might Still Be Open");
     assert_eq!(frame.default_action(), Some("check_again"));
 }
 #[test]
@@ -302,7 +308,13 @@ fn pausing_stops_at_a_durable_boundary_and_resume_picks_up() {
     let mut flow = Flow::new(plan);
     flow.start();
     let (tx, rx) = async_channel::unbounded();
-    spawn_run(config, Run::Ordinary, Arc::new(AtomicBool::new(true)), tx);
+    spawn_run(
+        config,
+        Run::Ordinary,
+        Arc::new(AtomicBool::new(true)),
+        Arc::default(),
+        tx,
+    );
     let mut paused = false;
     while let Ok(message) = rx.recv_blocking() {
         paused = matches!(message, Message::Finished(Finished::Paused));
@@ -352,7 +364,7 @@ fn a_foreign_destination_is_refused_without_touching_either_side() {
     let mut flow = Flow::new(plan);
     assert!(start(&mut flow).is_empty());
     let frame = flow.frame();
-    titled(&frame, "Powermove Native Can’t Start");
+    titled(&frame, "Powermove Can’t Start");
     assert!(frame.details.is_some());
 }
 #[test]
@@ -440,6 +452,7 @@ fn review(flow: &mut Flow, report: Result<pm_first_launch::surfaces::migration::
             blocked_owners: 0,
             proxy_only: 0,
             already_offline: 0,
+            not_reached: 0,
         },
         report,
     )));
@@ -477,6 +490,7 @@ fn an_unread_report_stops_on_the_summary_and_says_so() {
             blocked_owners: 0,
             proxy_only: 0,
             already_offline: 0,
+            not_reached: 0,
         },
         Err("unreadable".into()),
     )));
@@ -544,4 +558,62 @@ fn pause_waits_for_the_worker_and_resume_cannot_start_a_second_one() {
     flow.message(Message::Finished(Finished::Paused));
     titled(&flow.frame(), "Copying Is Paused");
     assert_eq!(flow.action("resume"), vec![Effect::Run(Run::Ordinary)]);
+}
+#[test]
+fn protected_folders_are_explained_then_a_waiting_prompt_can_be_skipped() {
+    let (_temp, home) = home();
+    source(&home.join(APPLICATION_SUPPORT));
+    let mut flow = Flow::new(plan(&home));
+    assert_eq!(flow.start(), vec![Effect::Run(Run::Ordinary)]);
+    // Copying: the card shows each step; the running one has live bytes.
+    flow.message(Message::Event(Event::Started(
+        pm_first_launch::Step::Checkpoint,
+    )));
+    assert!(flow.activity((250, 1000), None));
+    let frame = flow.frame();
+    titled(&frame, "Copying Your Library");
+    assert_eq!(frame.steps[0].title, "Library snapshot");
+    assert_eq!(frame.steps[0].value, "250 bytes of 1.0 KB");
+    assert_eq!(frame.steps[0].progress, Some(Progress::Determinate(0.25)));
+    assert_eq!(frame.steps[1].progress, None);
+    // Unchanged activity doesn't repaint.
+    assert!(!flow.activity((250, 1000), None));
+    flow.message(Message::Finished(Finished::Outcome(
+        Outcome::NeedsFolderAccess {
+            folders: vec![("Downloads".into(), 3)],
+        },
+    )));
+    let frame = flow.frame();
+    titled(&frame, "Allow Access to Your Media");
+    assert_eq!(frame.default.as_deref(), Some("allow_folders"));
+    assert_eq!(
+        (frame.steps[0].title.as_str(), frame.steps[0].value.as_str()),
+        ("Downloads", "3 files")
+    );
+    assert_eq!(
+        flow.action("allow_folders"),
+        vec![Effect::Run(Run::Folders(FolderChoice::Allow))]
+    );
+    // macOS's prompt is up and unanswered.
+    flow.message(Message::Event(Event::Started(
+        pm_first_launch::Step::Inventory,
+    )));
+    assert!(flow.activity((0, 0), Some("Downloads".into())));
+    let frame = flow.frame();
+    titled(&frame, "Waiting for macOS");
+    assert!(frame.spinner);
+    assert_eq!(frame.default, None);
+    assert_eq!(flow.action("skip_folder"), vec![Effect::SkipFolder]);
+    flow.activity((0, 0), None);
+    titled(&flow.frame(), "Copying Your Library");
+    // Skip These Files before macOS is ever asked.
+    flow.message(Message::Finished(Finished::Outcome(
+        Outcome::NeedsFolderAccess {
+            folders: vec![("Downloads".into(), 3)],
+        },
+    )));
+    assert_eq!(
+        flow.action("skip_folders"),
+        vec![Effect::Run(Run::Folders(FolderChoice::Skip))]
+    );
 }

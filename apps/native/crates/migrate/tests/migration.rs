@@ -32,6 +32,7 @@ fn reference(owner: &str, key: &str, before: Availability) -> Reference {
         playback_proxy_version: 0,
         poster: false,
         before,
+        unreached: false,
     }
 }
 fn keys(root: &Path) -> usize {
