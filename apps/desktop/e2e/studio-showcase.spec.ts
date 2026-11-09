@@ -325,7 +325,7 @@ test('authors and exports the original Studio showcase', async ({ session }) => 
           if(l.d?.text==='Rendered on a MacBook Pro.')l.p['position.y'].v=600;
         }
         for(const l of comp.layers)if(l.d?.text==='30,500 SEEDED SCATTER CANDIDATES')l.d.text='LIGHT / LAND / ATMOSPHERE';
-        if(cam)cam.d.data.environment.samples=/Light that bends/.test(comp.name)?64:32;
+        if(cam)cam.d.data.environment.samples=/Light that bends/.test(comp.name)?64:16;
       }
       for (const l of PM.proj.layers) {
         l.mblur = PM.P(true);

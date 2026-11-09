@@ -601,7 +601,9 @@ impl Host {
                     frame
                 } else if spp == 0 && denoiser != "metalfx" {
                     renderer.frame_pixels()
-                } else if denoise && !is_live && renderer.samples >= 16 {
+                // Final divides its total budget across shutter times. Keep
+                // requested denoising on those smaller batches as well.
+                } else if denoise && !is_live && (renderer.samples >= 16 || tier == "final" && renderer.samples >= 4) {
                     if self.oidn.is_none() {
                         self.oidn = Some(pm_studio::oidn::Denoiser::new()?);
                     }
@@ -903,5 +905,16 @@ mod tests {
         assert!(dimensions(0, 10).is_err());
         assert!(dimensions(99999, 10).is_err());
         assert!(dimensions(1920, 1080).is_ok());
+    }
+
+    #[cfg(feature = "oidn")]
+    #[test]
+    fn final_shutter_subsamples_keep_requested_denoising() {
+        let mut host = Host::new();
+        host.handle(Command::Preset { name: "chrome".into(), finish: blue(), time: 0. }, &[]).unwrap();
+        let command = serde_json::from_value(json!({"op":"render","width":64,"height":64,"tier":"final","samples":8,"reset":true,"denoise":true})).unwrap();
+        let (result, pixels) = host.handle(command, &[]).unwrap();
+        assert_eq!(result["denoiser"], "oidn");
+        assert_eq!(pixels.len(), 64 * 64 * 4);
     }
 }
