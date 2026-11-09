@@ -939,6 +939,9 @@ struct Runtime {
     scrub: bool,
     /// The last frame showed stand-ins: the landed counter it was drawn at.
     stand_in: Option<u64>,
+    /// A dragged frame was drawn below full resolution: draw it exact once
+    /// the playhead has stayed put until then (host s).
+    refine_at: Option<f64>,
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
@@ -1292,6 +1295,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     r.auto
                         .record((t.completed - t.worker_start) * 1000., f.budget_ms);
                 }
+                if t.gpu_ok && !t.cache_hit && f.spec.moment != Moment::Playing {
+                    r.auto.record_still(
+                        (t.completed - t.worker_start) * 1000.,
+                        r.interval * 1000.,
+                        f.spec.scale,
+                    );
+                }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
@@ -1450,6 +1460,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     ahead: 1.,
                     scrub: false,
                     stand_in: None,
+                    refine_at: None,
                     was_playing: false,
                     auto: Default::default(),
                     not_before: 0.,
@@ -1480,6 +1491,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             while let Some(cmd) = v.commands.pop_front() {
                 if let TransportCommand::Seek { mode, .. } = cmd {
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
+                    r.refine_at = None;
                 }
                 r.transport.command(cmd, (now * 1e6) as i64);
             }
@@ -1541,6 +1553,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if r.stand_in.is_some_and(|at| at != landed) {
                 r.stand_in = None;
                 v.dirty = !playing || v.dirty;
+            }
+            // The playhead stopped on a frame dragged at reduced resolution.
+            if !playing && r.refine_at.is_some_and(|at| now >= at) {
+                r.refine_at = None;
+                r.scrub = false;
+                v.dirty = true;
             }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
                 continue;
@@ -1785,6 +1803,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                             u64::from(s.stand_ins && spec.moment == Moment::Playing);
                         v.status.effective_quality = spec.scale;
                         if let Some(r) = runtime.get_mut(&id) {
+                            if spec.moment == Moment::Scrub && spec.scale < 1. {
+                                r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
+                            }
                             r.stand_in = s.stand_ins.then_some(landed_before);
                             r.drawable_misses = 0;
                             r.refusals = 0;
@@ -1893,6 +1914,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let waiting = runtime
                 .values()
                 .any(|r| r.stand_in.is_some() || r.not_before > now);
+            // A dragged frame waiting to be drawn exact wakes the loop then.
+            let settle = runtime
+                .values()
+                .filter_map(|r| r.refine_at)
+                .map(|at| (at - now).max(0.001))
+                .fold(f64::INFINITY, f64::min);
             let busy =
                 waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
             // Only back-offs pending, nothing playing: sleep until the first is due.
@@ -1937,6 +1964,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let timeout = engine
                 .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
                 .map_or(timeout, |retry| timeout.min(retry));
+            let timeout = if settle.is_finite() {
+                timeout.min(Duration::from_secs_f64(settle))
+            } else {
+                timeout
+            };
             let _ = wakes.recv_timeout(timeout);
         }
     }

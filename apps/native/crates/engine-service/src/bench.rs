@@ -313,7 +313,29 @@ pub fn run() -> anyhow::Result<()> {
     let forward = sweep(&mut (0..frames).map(|i| scrub_from + i * frame))?;
     let back = sweep(&mut (0..frames).rev().map(|i| scrub_from + i * frame))?;
     let cached = sweep(&mut (0..24).map(|i| scrub_from + (i % 4) * frame))?;
-    let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
+    // The playhead stops: its frame is drawn exact, at full resolution
+    // (Auto drags a slow project at reduced resolution).
+    let last = Ticks::new(scrub_from + 3 * frame)?;
+    let stopped = Instant::now();
+    let settle_ms = loop {
+        pm_text::host::serve(&mut font_service, fonts.take_asks());
+        viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
+        let status = viewer.status();
+        if status.effective_quality == 1.
+            && status
+                .frame
+                .as_ref()
+                .is_some_and(|f| f.time == last && f.completion_host_seconds.is_some())
+        {
+            break stopped.elapsed().as_secs_f64() * 1000.;
+        }
+        anyhow::ensure!(
+            stopped.elapsed() < Duration::from_secs(10),
+            "the stopped frame was never drawn exact"
+        );
+        std::thread::sleep(Duration::from_micros(100));
+    };
+    let summary =|v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
     let result = json!({
         "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
         "output":[width,height],"open_s":OPEN_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,"first_frame_s":first_frame_s,
@@ -324,7 +346,7 @@ pub fn run() -> anyhow::Result<()> {
         "stand_in_frames":stand_ins,"lowest_effective_quality":lowest_quality,
         "layer_failures":status.layer_failures.len(),
         "seek_ms":{"n":seeks.len(),"p50":percentile(&seeks,0.5),"p95":percentile(&seeks,0.95),"max":seeks.last(),"stuck":stuck},
-        "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"budget_120hz":9.333},
+        "scrub_ms":{"forward":summary(&forward),"back":summary(&back),"cached":summary(&cached),"settle_exact":settle_ms,"budget_120hz":9.333},
         "fill":fill,
         "on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}
     });

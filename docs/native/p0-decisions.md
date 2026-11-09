@@ -338,3 +338,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Palette and field menu: borderless query field at `heading` size after a muted magnifying glass, hairline under it; no bezeled search pill.
 - Native has no floating toasts: status notes (`Exported <file>`, extension toasts) show in the status line for `motion.note_hold` (2.2 s, v1's status toast); errors stay until replaced.
 - A native control whose node has `flexShrink` > 0 sits in a shrinking slot (basis = its fitting width) and truncates, so a narrow row keeps its later controls (agent composer).
+
+## Perf lane (wave 21)
+
+- A 3D text layer's layer-space raster density steps up to the next quarter octave (never below what its plane needs), so a plane turning in 3D keeps its text raster and glyph caches between steps.
+- Auto drags a slow project at half resolution (After Effects' adaptive resolution): a paused or dragged frame drawn at full resolution that took longer than a refresh puts dragged frames at `AUTO_FLOOR` until a reduced one predicts a full one inside a refresh; a dragged frame drawn reduced is drawn again exact 100 ms after the playhead stops (`SCRUB_SETTLE_SECONDS`). Full, ½ and ¼ are never adapted.
