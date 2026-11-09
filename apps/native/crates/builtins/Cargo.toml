@@ -29,6 +29,7 @@ pm-panel-media = { path = "../panel-media" }
 pm-panel-agentpanel = { path = "../panel-agentpanel" }
 pm-agents = { path = "../agents" }
 pm-services = { path = "../services" }
+pm-transcribe = { path = "../transcribe" }
 futures-lite = "2"
 pm-promedia = { path = "../promedia" }
 

@@ -1621,11 +1621,11 @@ exports[`transcription installed wire/AX state 1`] = `
             text "Fixture speech"
           text
             text "Fixture size"
-          text
-            text "Installed"
-          button push-button label="Remove…"
-            text "Remove…"
-Focus: ["settings.search","settings.sections","Remove…"]"
+          button push-button label="Use"
+            text "Use"
+          button push-button label="Delete…"
+            text "Delete…"
+Focus: ["settings.search","settings.sections","Use","Delete…"]"
 `;
 
 exports[`transcription error wire/AX state 1`] = `

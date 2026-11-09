@@ -605,11 +605,18 @@ impl Backend {
             })
             .collect::<Vec<_>>();
         let accounts = self.account_rows();
-        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready","speech":[]});
+        let speech = crate::speech::status();
+        let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
+        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
+            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default()});
+        if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(speech_rows.iter().cloned());
+        }
         if let Some(project) = project {
             publication["project"] = project;
             let mut rows = self.settings_rows()?;
             rows.extend(self.account_rows());
+            rows.extend(speech_rows);
             publication["rows"] = json!(rows);
             let p = self.published().ok_or("Project closed")?;
             let root = p.snapshot.root().ok_or("Project closed")?;
