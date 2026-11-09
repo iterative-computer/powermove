@@ -615,6 +615,10 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:num
   const preview = window.document.createElement('canvas');
   const alphaCapture: AlphaCapture | undefined = opts.alpha ? { canvas: preview } : undefined;
   const retention = trackStaticExport(PM, opts.mblur !== false);
+  // Agent/native exports may trade temporal samples for more samples at each
+  // shutter time. Preparation and capture must use the identical time set.
+  const opaqueShutterSamples = Number.isFinite(opts.mbSamples) && opts.mbSamples >= 1
+    ? Math.min(64, Math.round(opts.mbSamples)) : 16;
   const media = trackExportMedia(PM);
   let readback: Readback | null = null, ticket: ReadbackTicket | null = null;
   let readbackUnavailable = false, pixels: Uint8Array<ArrayBuffer> | null = null, image: ImageData | null = null;
@@ -702,7 +706,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:num
     };
     const prepare = (frame: number, time: number) => {
       stats.stage = 'decoding';
-      return stats.time('decode', frame, () => prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5}));
+      return stats.time('decode', frame, () => prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:opaqueShutterSamples,shutter:PM.proj.shutter||.5}));
     };
     const prepareNativeFrame = async (frame: number, time: number) => {
       retention.key(time); let allowed = artworkEligible();
@@ -791,7 +795,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:num
                 if (!opts.alpha) PM.quality = 1;
                 ticket = readback.begin(T, opts.alpha
                   ? { transparent: true, mblur: motionBlur, mbSamples: 20, shutter: PM.proj.shutter || .5 }
-                  : { mblur: motionBlur, mbSamples: motionBlur ? 16 : 1,
+                  : { mblur: motionBlur, mbSamples: motionBlur ? opaqueShutterSamples : 1,
                     shutter: PM.proj.shutter || .5, opaque: true, topDownOpaque: true });
               } finally { if (!opts.alpha) PM.quality = quality; stats.add('render', i, window.performance.now() - renderStarted); }
               // Rendering itself may invalidate a font or renderer cache. Stamp
@@ -862,7 +866,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:num
           // unsupported contexts keep their existing serial/repeat path.
           stats.stage = 'rendering';
           const renderStarted = window.performance.now();
-          const captured = opts.alpha ? null : renderOpaqueFrame(PM, T, W, H, { mblur: opts.mblur });
+          const captured = opts.alpha ? null : renderOpaqueFrame(PM, T, W, H, { mblur: opts.mblur, mbSamples: opaqueShutterSamples });
           const cv = captured ? preview : alphaFrame(T, W, H, opts.mblur, alphaCapture,
             fastAlphaCapture(W, H, retention.key(T) === null ? total : 0));
           // Cached static bytes own their pixels; repeats no longer need the

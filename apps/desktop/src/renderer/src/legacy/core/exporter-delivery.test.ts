@@ -1891,6 +1891,19 @@ describe('export delivery', () => {
     } finally { h.resolve(); await result; }
   });
 
+  it.each(['readback', 'serial'] as const)('uses the requested shutter budget for native %s preparation and capture', async path => {
+    const h = nativeReadback();
+    if (path === 'serial') h.PM.proj.layers[0].type = 'precomp';
+    const result = h.run({ mblur: true, mbSamples: 4 });
+    try {
+      await vi.waitFor(() => expect(h.write).toHaveBeenCalled()); h.resolve();
+      expect(await result).toEqual({ cancelled: false });
+      expect(h.prepare.mock.calls[0]![3]).toMatchObject({ mblur: true, mbSamples: 4 });
+      const captures = path === 'readback' ? h.begin : h.PM.GL.renderToPixels;
+      expect(captures.mock.calls[0]!.at(-1)).toMatchObject({ mblur: true, mbSamples: 4 });
+    } finally { h.resolve(); await result; }
+  });
+
   it.each(['saved', 'failed', 'cancelled'] as const)('drains native writes after speculative preparation fails while the prior frame is %s', async outcome => {
     const h = nativeReadback();
     let releasePreparation!: () => void;
