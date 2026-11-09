@@ -267,7 +267,7 @@ export function install(PM: PMRegistry): void {
     let contexts=timeContexts.get(PM.proj.id);
     if(!contexts){contexts=new Map();timeContexts.set(PM.proj.id,contexts);}
     const navigation=compositionNavigationTime(PM,id,options,
-      compId=>compId===PM.proj.compId?PM.time:views.get(viewKey(compId))?.time ?? PM.time,contexts);
+      compId=>compId===PM.proj.compId?PM.time:views.get(viewKey(compId))?.time,contexts);
     for(const link of navigation.links)contexts.set(link.child,`${link.parent}:${link.layer.id}`);
     const timeline = PM.Kernel?.services?.get?.('timeline');
     views.set(viewKey(PM.proj.compId), {
@@ -279,7 +279,9 @@ export function install(PM: PMRegistry): void {
     const view = views.get(viewKey(id));
     PM.replaceProject(next, { selection: { layers: view?.layers || [], keys: [], chan: null } });
     publishRotation(before, next);
-    PM.time = PM.clamp(options.time ?? navigation.time, 0, next.dur);
+    const fps=Math.max(1,Number(next.fps)||30);
+    const frame=Math.round(PM.clamp(options.time ?? navigation.time,0,next.dur)*fps+1e-7);
+    PM.time = Math.min(frame,Math.floor(next.dur*fps+1e-7))/fps;
     if (timeline) {
       if (Number.isFinite(view?.scrollT)) timeline.scrollT = view!.scrollT;
       if (Number.isFinite(view?.scrollY)) timeline.scrollY = view!.scrollY;

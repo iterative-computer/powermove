@@ -43,6 +43,31 @@ describe('compositions', () => {
     PM.Comps.create({name:'New'});expect(PM.time).toBe(0);
   });
 
+  it('keeps Intro and Outro unrelated when both contain Logo at different offsets',()=>{
+    const PM=composer();PM.proj.dur=100;
+    const intro=PM.proj.compId,logo=PM.Comps.create({name:'Logo',dur:6},{open:false});
+    PM.Comps.addToTimeline(logo,{from:2});
+    const outro=PM.Comps.create({name:'Outro',dur:100},{open:false});
+    const instance=PM.mkLayer('precomp',{from:50,dur:6});instance.d.comp=logo;
+    PM.proj.comps[outro].layers=[instance];
+    expect(PM.proj.compId).toBe(intro);PM.time=1;PM.Comps.open(outro);expect(PM.time).toBe(1);
+  });
+
+  it('rounds a retimed 24fps child to its own frame grid',()=>{
+    const PM=composer(),child=PM.Comps.create({name:'24fps',dur:6,fps:24},{open:false});
+    const layer=PM.Comps.addToTimeline(child,{from:0});layer.d.speed=1.5;
+    PM.time=1/30;PM.Comps.open(child);expect(PM.time).toBe(1/24);
+  });
+
+  it('uses the first instance when its parent timeline has never been visited',()=>{
+    const PM=composer();
+    const child=PM.Comps.create({name:'Child',dur:100},{open:false});
+    const parent=PM.Comps.create({name:'Parent',dur:100},{open:false});
+    const a=PM.mkLayer('precomp',{from:2,dur:10}),b=PM.mkLayer('precomp',{from:50,dur:50});
+    a.d.comp=child;b.d.comp=child;PM.proj.comps[parent].layers=[a,b];
+    PM.Comps.open(child);PM.time=51;PM.Comps.open(parent);expect(PM.time).toBe(53);
+  });
+
   it('maps precomp offsets and trim in both directions, including reopening an existing tab', () => {
     const PM=composer(),main=PM.proj.compId;
     const child=PM.Comps.create({name:'Child',dur:6},{open:false});

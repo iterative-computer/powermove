@@ -45,7 +45,7 @@ type Link={parent:string;child:string;layer:any};
 /** Carry the current time through nested instances, including tab switches
  * between siblings. Unrelated compositions share the current global time. */
 export function compositionNavigationTime(PM:any,target:string,options:{layerId?:string},
-  savedTime:(id:string)=>number,contexts:Map<string,string>):{time:number;links:Link[]} {
+  savedTime:(id:string)=>number|undefined,contexts:Map<string,string>):{time:number;links:Link[]} {
   const project=PM.proj,from=project.compId;
   const comps=new Map<string,any>([[from,project],...Object.entries(project.comps || {})]);
   const links:Link[]=[];
@@ -55,9 +55,9 @@ export function compositionNavigationTime(PM:any,target:string,options:{layerId?
   const rank=(link:Link)=>link.parent===from && link.layer.id===options.layerId ? 0
     : link.parent===from && PM.sel.layers.includes(link.layer.id) ? 1
     : contexts.get(link.child)===identity(link) ? 2
-    : savedTime(link.parent)>=link.layer.from && savedTime(link.parent)<link.layer.from+link.layer.dur ? 3 : 4;
+    : (savedTime(link.parent) ?? -Infinity)>=link.layer.from && (savedTime(link.parent) ?? -Infinity)<link.layer.from+link.layer.dur ? 3 : 4;
   links.sort((a,b)=>rank(a)-rank(b));
-  const pending=[{id:from,path:[] as Link[]}],seen=new Set([from]);
+  const pending=[{id:from,path:[] as Link[],descending:false}],seen=new Set([`${from}:false`]);
   for(let i=0;i<pending.length;i++){
     const current=pending[i]!;
     if(current.id===target){
@@ -67,15 +67,18 @@ export function compositionNavigationTime(PM:any,target:string,options:{layerId?
         // Expressions use the same composition scope as nested rendering.
         PM.scope.push(parent);
         try{time=id===link.parent ? sourceTime(PM,link.layer,time)
-          : compositionParentTime(PM,link.layer,time,savedTime(link.parent),parent);}
+          : compositionParentTime(PM,link.layer,time,savedTime(link.parent) ?? link.layer.from,parent);}
         finally{PM.scope.pop();}
         id=id===link.parent?link.child:link.parent;
       }
       return {time:Number.isFinite(time)?time:PM.time,links:current.path};
     }
     for(const link of links){
-      const next=link.parent===current.id?link.child:link.child===current.id?link.parent:null;
-      if(next&&!seen.has(next)){seen.add(next);pending.push({id:next,path:[...current.path,link]});}
+      const down=link.parent===current.id;
+      if(!down && current.descending)continue;
+      const next=down?link.child:link.child===current.id?link.parent:null;
+      const descending=current.descending || down,key=`${next}:${descending}`;
+      if(next&&!seen.has(key)){seen.add(key);pending.push({id:next,path:[...current.path,link],descending});}
     }
   }
   return {time:PM.time,links:[]};

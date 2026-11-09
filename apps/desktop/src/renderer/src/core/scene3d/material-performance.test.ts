@@ -1,3 +1,4 @@
+import {materialStaticPlan} from './material-static';
 import {afterEach,expect,it,vi} from 'vitest';
 import * as THREE from 'three';
 import {makePM} from '../../legacy/__tests__/make-pm';
@@ -197,4 +198,17 @@ it('starts retaining a nested image when decoding finishes and observes bitmap r
   expect(compositionTextureFrame(PM,receiver,map,3)).toBe(decoded);
   asset.el=new Bitmap();expect(compositionTextureFrame(PM,receiver,map,3)).not.toBe(decoded);
   expect(capture).toHaveBeenCalledTimes(4);clearCompositionTextures(PM);
+});
+
+it('builds a reused nested composition only once per static check',()=>{
+  const {PM,comp,paint}=editor('precomp');
+  const innerId=PM.Comps.create({name:'Repeated',w:64,h:64,dur:10},{open:false});
+  const inner=PM.proj.comps[innerId],shape=PM.mkLayer('shape');inner.layers=[shape];
+  paint.d={comp:innerId,w:64,h:64,speed:1,trim:0};
+  comp.layers=Array.from({length:50},(_,i)=>({...paint,id:'instance'+i}));
+  const read=vi.fn(()=>64);Object.defineProperty(inner,'w',{get:read});
+  const first=materialStaticPlan(PM,comp).plan!;
+  expect(first).not.toBeNull();expect(read.mock.calls.length).toBeLessThan(10);
+  const key=first.key(1);expect(first.key(1)).toBe(key);
+  shape.d.color='#FF0000';PM.touch();expect(materialStaticPlan(PM,comp).plan!.content).not.toBe(first.content);
 });

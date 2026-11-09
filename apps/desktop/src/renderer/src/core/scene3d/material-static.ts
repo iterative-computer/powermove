@@ -4,14 +4,17 @@ import { staticExportPlan, staticMaskSupported } from '../../legacy/core/static-
 import { staticEffectSupported, type StaticMaskProgram } from '../../legacy/core/static-effects';
 import type { EffectRef } from '../../legacy/core/export-effects';
 
-type Plan = { key:(time:number)=>string; effects:EffectRef[]; programs:StaticMaskProgram[]; content:unknown[] };
+type Plan = { key:(time:number)=>string; effects:EffectRef[]; programs:StaticMaskProgram[]; content:string };
 
 /** Prove that the entire source dependency tree is stationary. A precomp still
  * follows its own clock, including trim/speed and child entrances/exits. */
 export function materialStaticPlan(PM:any,comp:any,sourceId?:string):{plan:Plan|null;images:any[]} {
   const visiting=new Set<any>(),observedImages=new Set<any>();
+  const memo=new Map<any,Map<string,Plan|null>>();
   const build=(comp:any,sourceId?:string):Plan|null=>{
     if(!comp || visiting.has(comp) || visiting.size>=8)return null;
+    let entries=memo.get(comp);if(!entries){entries=new Map();memo.set(comp,entries);}
+    const memoKey=sourceId ?? '';if(entries.has(memoKey))return entries.get(memoKey)!;
     visiting.add(comp);
     try{
       const byId=new Map<string,any>(comp.layers.map((layer:any)=>[layer.id,layer]));
@@ -52,7 +55,7 @@ export function materialStaticPlan(PM:any,comp:any,sourceId?:string):{plan:Plan|
         matte:layer=>[layer.matteSource,...(layer.matteSources || []).map((m:any)=>m.source)]
           .filter(Boolean).every(id=>ids.has(id)),
       });
-      if(!key)return null;
+      if(!key){entries.set(memoKey,null);return null;}
       for(const layer of layers){
         effects.push(...layer.fx || []);
         if(layer.masks?.length){
@@ -62,14 +65,18 @@ export function materialStaticPlan(PM:any,comp:any,sourceId?:string):{plan:Plan|
         if(layer.matteSource || layer.matteSources?.length)programs.add('trackMatte');
       }
       const content:unknown[]=[comp.w,comp.h,comp.fps,comp.dur,comp.bg,comp.backgroundFill,layers];
-      for(const child of children.values()){
+      for(const child of new Set(children.values())){
         effects.push(...child.effects);
         for(const program of child.programs)programs.add(program);
         content.push(child.content);
       }
-      return {effects,programs:[...programs],content,key:time=>JSON.stringify([
-        key(time),...Array.from(children,([layer,child])=>child.key(sourceTime(PM,layer,time))),
-      ])};
+      let previousTime:number|undefined,previousKey='';
+      const plan:Plan={effects,programs:[...programs],content:JSON.stringify(content),key:time=>{
+        if(time===previousTime)return previousKey;
+        previousTime=time;
+        return previousKey=JSON.stringify([key(time),...Array.from(children,([layer,child])=>child.key(sourceTime(PM,layer,time)))]);
+      }};
+      entries.set(memoKey,plan);return plan;
     }finally{visiting.delete(comp);}
   };
   const plan=build(comp,sourceId);
