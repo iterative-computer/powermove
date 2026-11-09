@@ -47,6 +47,9 @@ mod session;
 mod shape_tool;
 mod sheets;
 mod smoke;
+mod store_window;
+#[cfg(test)]
+mod store_window_tests;
 mod surface_routes;
 mod surfaces;
 mod tasks_window;
@@ -137,9 +140,7 @@ fn main() -> Result<()> {
             ));
         } else if let Some(name) = review_override(&args[i], cfg!(debug_assertions)) {
             i += 1;
-            let value = args
-                .get(i)
-                .context("--appearance/--accessibility need a value")?;
+            let value = args.get(i).context("development overrides need a value")?;
             // SAFETY: single-threaded here; nothing has read the environment yet.
             unsafe { std::env::set_var(name, value) };
         } else if args[i].to_string_lossy().starts_with('-') {
@@ -357,6 +358,9 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
     match arg.to_str()? {
         "--appearance" => Some("PM_NATIVE_APPEARANCE"),
         "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
+        // A fixture Store on this Mac and its test signing key (store_install).
+        "--dev-store-origin" => Some("PM_DEV_STORE_ORIGIN"),
+        "--dev-store-key" => Some("PM_DEV_STORE_KEY"),
         _ => None,
     }
 }

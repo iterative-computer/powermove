@@ -40,6 +40,10 @@ impl Controller {
                 crate::updates::check_now(self.profile.clone(), window, cx)
             }
             "backgroundTasks" => self.open_tasks_window(cx),
+            "store" => crate::store_window::open(
+                crate::store_window::Services::system(self.kernel.clone(), self.profile.clone()),
+                cx,
+            ),
             _ => return false,
         }
         true

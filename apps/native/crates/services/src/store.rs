@@ -27,6 +27,11 @@ pub trait StoreTransport {
     /// auth headers out of errors/logs. No retry of mutation routes is possible here.
     fn send(&mut self, request: Request, max_bytes: usize) -> Result<Response>;
 }
+impl<T: StoreTransport + ?Sized> StoreTransport for Box<T> {
+    fn send(&mut self, request: Request, max_bytes: usize) -> Result<Response> {
+        (**self).send(request, max_bytes)
+    }
+}
 pub struct StoreClient<T> {
     origin: Url,
     pub transport: T,

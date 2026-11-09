@@ -249,6 +249,22 @@ fn listings(page: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// Where releases come from and the keys that may sign them.
+pub struct Source {
+    pub origin: &'static str,
+    pub trust: TrustStore,
+}
+/// This build's Store and pins; `None` while no key is pinned.
+pub fn source() -> Result<Option<Source>> {
+    if !available() {
+        return Ok(None);
+    }
+    Ok(Some(Source {
+        origin: origin(),
+        trust: pinned()?,
+    }))
+}
+
 /// Downloads a release and its signed envelope, verifies, installs.
 pub fn install(
     kernel: &dyn StoreAuthority,
@@ -257,11 +273,22 @@ pub fn install(
     release_id: &str,
     repo: &str,
 ) -> Result<String> {
-    if !available() {
+    let Some(source) = source()? else {
         return Err(Error::Host(
             "Store installs need a signed release, and the Store doesn't sign releases yet.".into(),
         ));
-    }
+    };
+    install_from(&source, kernel, profile, namespace, release_id, repo)
+}
+/// [`install`] from a given Store and pins.
+pub fn install_from(
+    source: &Source,
+    kernel: &dyn StoreAuthority,
+    profile: &Path,
+    namespace: &str,
+    release_id: &str,
+    repo: &str,
+) -> Result<String> {
     // Release ids are UUIDs; nothing else is ever put in a Store path.
     let uuid = release_id.len() == 36
         && release_id.bytes().enumerate().all(|(i, c)| {
@@ -274,10 +301,10 @@ pub fn install(
     if !uuid {
         return Err(Error::Invalid("Store release id"));
     }
-    let trust = pinned()?;
-    let base = origin().trim_end_matches('/');
+    let (origin, trust) = (source.origin, &source.trust);
+    let base = origin.trim_end_matches('/');
     let envelope = net::get_within(
-        origin(),
+        origin,
         &format!("{base}/v1/store/releases/{release_id}/signature"),
         MAX_ENVELOPE,
         30,
@@ -290,7 +317,7 @@ pub fn install(
     let signed: SignedRelease = serde_json::from_slice(&envelope.body)
         .map_err(|_| Error::Invalid("Store signed envelope"))?;
     let archive = net::get_within(
-        origin(),
+        origin,
         &format!("{base}/v1/store/releases/{release_id}/tar"),
         MAX_ARCHIVE,
         120,
@@ -304,7 +331,7 @@ pub fn install(
         namespace,
         &signed,
         &archive.body,
-        &trust,
+        trust,
         repo,
     )
 }
