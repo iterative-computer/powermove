@@ -314,22 +314,36 @@ export function SegmentedControl(
             },
             children: option.symbol ? undefined : option.label,
           },
+          // quiet-md toggle cell: the selected segment is a neutral wash with
+          // full ink, the rest caption grey; hover is the renderer's spring wash.
           {
             ...target,
             ...text,
-            borderRadius: token("metrics.inner_radius"),
+            display: "flex",
+            flexGrow: 1,
+            alignItems: "center",
+            justifyContent: "center",
+            paddingLeft: token("metrics.inset"),
+            paddingRight: token("metrics.inset"),
+            borderRadius: token("metrics.segment_radius"),
             ...(value === option.id
-              ? { background: token("colors.floating") }
-              : {}),
+              ? { background: token("colors.fill_strong") }
+              : { color: token("colors.secondary") }),
           },
         ),
       ),
     },
+    // One raised pill with a hairline edge; segments sit concentric inside it.
     {
       display: "flex",
       flexDirection: "row",
-      background: token("colors.field"),
-      borderRadius: token("metrics.control_radius"),
+      height: token("metrics.tab"),
+      padding: token("metrics.pill_inset"),
+      gap: token("metrics.pill_inset"),
+      background: token("colors.floating"),
+      borderWidth: token("metrics.border"),
+      borderColor: token("colors.hairline"),
+      borderRadius: token("metrics.pill_radius"),
     },
   );
 }
@@ -654,10 +668,12 @@ export function FormGroup(
           "text",
           {
             role: "heading",
+            // A quiet label over its card, on the rows' text column.
             style: {
-              color: token(muted ? "colors.muted" : "colors.text"),
-              fontSize: token("typography.title"),
-              fontWeight: token("typography.semibold_weight"),
+              color: token(muted ? "colors.muted" : "colors.secondary"),
+              fontSize: token("typography.label"),
+              fontWeight: token("typography.medium_weight"),
+              paddingLeft: token("metrics.inset"),
               marginBottom: token("metrics.gap"),
             },
           },
@@ -687,29 +703,60 @@ export function FormRow(
       role: "group",
       label,
       children: [
-        h("div", { "data-pm-slot": "label" }, [
-          h("text", { style: text }, label),
-          detail
-            ? h(
-                "text",
-                {
-                  style: {
-                    color: token("colors.muted"),
-                    fontSize: token("typography.minimum"),
+        // Title over its description on the left; the control trails,
+        // centred on the pair (Settings-sheet anatomy).
+        h(
+          "div",
+          {
+            "data-pm-slot": "label",
+            style: {
+              display: "flex",
+              flexDirection: "column",
+              flexGrow: 1,
+              gap: token("metrics.border"),
+            },
+          },
+          [
+            h(
+              "text",
+              { style: { ...text, fontSize: token("typography.title") } },
+              label,
+            ),
+            detail
+              ? h(
+                  "text",
+                  {
+                    style: {
+                      color: token("colors.muted"),
+                      fontSize: token("typography.label"),
+                    },
                   },
-                },
-                detail,
-              )
-            : null,
-        ]),
-        h("div", { "data-pm-slot": "control" }, control),
+                  detail,
+                )
+              : null,
+          ],
+        ),
+        h(
+          "div",
+          {
+            "data-pm-slot": "control",
+            style: { display: "flex", flexShrink: 0, alignItems: "center" },
+          },
+          control,
+        ),
       ],
     },
     {
       display: "flex",
       flexDirection: "row",
+      alignItems: "center",
       justifyContent: "space-between",
-      padding: token("metrics.inset"),
+      gap: token("metrics.inset"),
+      minHeight: token("metrics.form_row"),
+      paddingLeft: token("metrics.inset"),
+      paddingRight: token("metrics.inset"),
+      paddingTop: token("metrics.gap"),
+      paddingBottom: token("metrics.gap"),
     },
   );
 }

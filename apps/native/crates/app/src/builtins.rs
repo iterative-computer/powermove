@@ -1518,6 +1518,8 @@ impl Render for SurfaceWindow {
         let size = window.viewport_size();
         let panel = self.panel.clone();
         let popover = self.panel == "agent";
+        // Export is a sheet: no title bar band (its window fits its content).
+        let sheet = self.panel == "export";
         let (mut fill, mut band) = (0, 0.);
         let body = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
@@ -1526,7 +1528,7 @@ impl Render for SurfaceWindow {
             };
             fill = colour;
             // Windows with a transparent title bar keep their content below it.
-            band = if popover { 0. } else { titlebar };
+            band = if popover || sheet { 0. } else { titlebar };
             v.builtin_panel(
                 &panel,
                 pm_shell::layout::Rect {

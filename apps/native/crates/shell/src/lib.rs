@@ -7,6 +7,8 @@ pub mod layout;
 mod macos;
 pub mod menu;
 #[cfg(target_os = "macos")]
+pub mod motion;
+#[cfg(target_os = "macos")]
 mod native;
 #[cfg(target_os = "macos")]
 pub mod scopes;

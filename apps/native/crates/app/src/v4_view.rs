@@ -118,6 +118,8 @@ pub struct SurfaceView {
     leases: BTreeMap<Id, Option<SharedString>>,
     option_sets: BTreeMap<Id, Value>,
     focus: BTreeMap<Id, FocusHandle>,
+    /// Hover washes (pm-design springs), stepped once per render.
+    motion: pm_shell::motion::Motion<Id>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
@@ -172,6 +174,7 @@ impl SurfaceView {
             leases: BTreeMap::new(),
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
+            motion: Default::default(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
@@ -1243,6 +1246,18 @@ impl SurfaceView {
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
         let mut children: Vec<AnyElement> = vec![];
+        let wash = self.motion.hovers.amount(id);
+        if wash > 0. && !node.disabled {
+            let t = &self.table.tokens;
+            let alpha = (t.translucency.hover * wash * 255.).round() as u32;
+            let mut layer = div().absolute().inset_0();
+            layer.style().corner_radii = node.style.corner_radii.clone();
+            children.push(
+                layer
+                    .bg(rgba(t.colors.text << 8 | alpha))
+                    .into_any_element(),
+            );
+        }
         if let Some(geometry) = node.virtual_window {
             let (before, _) = geometry.spacers();
             children.push(div().flex_none().h(px(before as f32)).into_any_element());
@@ -1291,12 +1306,19 @@ impl SurfaceView {
         };
         let t = &self.table.tokens;
         let origin = self.origin.get();
+        // In its own sheet window (Export) the sheet is the whole window.
+        let own_window = node.component == Some(Component::SheetAnchor)
+            && window.viewport_size().width <= px(t.metrics.sheet_width_wide + 1.);
         let position = if node.component == Some(Component::SheetAnchor) {
             let width = window.viewport_size().width;
-            point(
-                (width - px(t.metrics.sheet_width)) / 2.,
-                px(t.metrics.toolbar),
-            )
+            if own_window {
+                point(px(0.), px(0.))
+            } else {
+                point(
+                    (width - px(t.metrics.sheet_width)) / 2.,
+                    px(t.metrics.toolbar),
+                )
+            }
         } else if let Some(bounds) = anchor.and_then(|id| self.anchors.borrow().get(&id).copied()) {
             bounds.bottom_left()
         } else if let Some((x, y)) = at {
@@ -1306,6 +1328,23 @@ impl SurfaceView {
         };
         let id = node.id;
         let mut wrapper = div().occlude().child(element);
+        if own_window {
+            // The sheet's window fits its content whenever that changes height.
+            wrapper = wrapper.child(
+                canvas(
+                    |bounds, window, _| {
+                        let size = window.viewport_size();
+                        let laid_out = bounds.size.height > px(1.);
+                        if laid_out && (size.height - bounds.size.height).abs() > px(0.5) {
+                            window.resize(gpui::size(size.width, bounds.size.height));
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
         if dismiss {
             wrapper = wrapper.on_mouse_down_out(cx.listener(move |v, _, _, cx| {
                 v.send(
@@ -1378,10 +1417,6 @@ impl SurfaceView {
                 )
             );
         if !disabled && (clickable || events.double_click) {
-            let hover = rgb(self.table.tokens.colors.hover);
-            if clickable {
-                element = element.hover_style(move |s| s.bg(hover));
-            }
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 let position = event.position();
@@ -1458,14 +1493,24 @@ impl SurfaceView {
                 }),
             );
         }
-        if events.hover {
+        // One hover handler: the control's wash (a spring, never a snap) and
+        // the panel's own pointer events.
+        let wash = clickable;
+        if wash || events.hover {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                let event = if *hovered {
-                    "pointerenter"
-                } else {
-                    "pointerleave"
-                };
-                v.pointer(id, event, EventDetail::default(), cx);
+                if wash {
+                    let tokens = v.table.tokens.clone();
+                    v.motion.hovers.hover(id, *hovered, &tokens);
+                    cx.notify();
+                }
+                if events.hover {
+                    let event = if *hovered {
+                        "pointerenter"
+                    } else {
+                        "pointerleave"
+                    };
+                    v.pointer(id, event, EventDetail::default(), cx);
+                }
             }));
         }
         if events.wheel {
@@ -1806,6 +1851,7 @@ impl Render for SurfaceView {
         {
             self.renders += 1;
         }
+        self.motion.frame(window);
         let t = &self.table.tokens;
         div()
             .relative()
