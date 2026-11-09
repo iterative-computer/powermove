@@ -204,9 +204,10 @@ fn an_ended_session_reads_as_signed_out_and_is_forgotten() {
 
 /// Keychain items in memory; `refuse` makes deletes fail as a locked or
 /// denied Keychain does.
+type ItemMap = std::collections::BTreeMap<(String, String), Vec<u8>>;
 #[derive(Clone, Default)]
 struct Items {
-    map: Arc<Mutex<std::collections::BTreeMap<(String, String), Vec<u8>>>>,
+    map: Arc<Mutex<ItemMap>>,
     refuse: Arc<Mutex<bool>>,
 }
 impl crate::cloud::Items for Items {
