@@ -301,3 +301,10 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Viewer gizmo: the rotation handle is a round knob and the anchor a circled cross (AE, v1); handles lead the engine's 120-line overlay budget.
 - Inspector Type Settings (v1): one row per variation axis of a text layer's font (`pm_text::registry::installed_family_axes`, cached per family in the presenter), plus axes the layer saved from a font this Mac lacks; a static font shows no section; a missing one adds a `Font · Not installed` status row (new read-only `status` control kind, additive) and a Refresh Fonts section action. Registered axes read by name (`wdth` → Width). Writes go through `set_axis`, which stores an axis the layer didn't have.
 - Inspector section actions (Add Mask, Add Text Animator, Refresh Fonts) draw as a quiet symbol + title text button on the label inset; they were empty buttons.
+
+## Store and accounts lane (wave 20)
+
+- Window ▸ Store is a native window (Project Library anatomy: source list of Discover, the seven kinds and Library; search field; quiet two-line rows; detail page with versions, Uses, Includes, Requires). Reads go through `pm-services`' Store client on worker threads, held to the Store origin at every redirect.
+- Store installs keep the pinned-signature admission: a release build without a pinned key shows Install disabled with the reason; no catalog-hash fallback (v1's TLS-plus-tarSha256 trust) was added. Development builds take `--dev-store-origin http://127.0.0.1:<port>/` and `--dev-store-key publisher:key-id:<hex>` for a fixture Store (`store_window_tests::serve_fixture_store`).
+- An update or uninstall moves the extension folder to `extensions/.archive/<id>-<seconds>` (never deleted, local edits kept there); uninstall also archives a natively installed release's kernel Store record. The Store marks "Installed"; edited-folder merge (v1's pull) is not ported.
+- Update notices are the Library's "Needs Attention" group, checked when Library opens and by Check for Updates (v1's boot and 6-hourly timer is not ported: no other surface showed its result).

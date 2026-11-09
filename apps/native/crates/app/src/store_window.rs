@@ -321,6 +321,7 @@ impl StoreWindow {
         }
         self.query = text.to_owned();
         self.detail = None;
+        self.message = None;
         if self.page == Page::Library {
             self.page = Page::Discover;
         }
@@ -352,6 +353,9 @@ impl StoreWindow {
             self.message = None;
             cx.notify();
         }
+    }
+    fn installed_repo(&self, repo: &str) -> bool {
+        matches!(&self.library, Load::Ready(items) if items.iter().any(|i| i.repo.as_deref() == Some(repo)))
     }
     /// The Library row of a listing: the Store install from its repository.
     fn installed(&self, listing: &Listing) -> Option<&Installed> {
@@ -394,6 +398,7 @@ impl StoreWindow {
             cx.notify();
             return;
         };
+        let updating = self.installed_repo(&repo);
         self.busy = Some(repo.clone());
         self.message = None;
         let (kernel, profile) = (self.services.kernel.clone(), self.services.profile.clone());
@@ -408,7 +413,11 @@ impl StoreWindow {
             ) {
                 Ok(_) => {
                     pm_compat_runner::host::rescan_all();
-                    Reply::Done(format!("{name} is installed."))
+                    Reply::Done(if updating {
+                        format!("{name} is updated.")
+                    } else {
+                        format!("{name} is installed.")
+                    })
                 }
                 Err(error) => Reply::Done(error.to_string()),
             }
@@ -571,8 +580,16 @@ pub fn open(services: Services, cx: &mut App) {
     }
     let t = pm_shell::tokens();
     let (m, tokens) = (t.metrics, t.clone());
+    // As the Project Library: full-size content under a transparent title
+    // bar, the sidebar on the behind-window blur.
+    let background = if t.translucent() {
+        gpui::MacosWindowBackground::Transparent
+    } else {
+        gpui::MacosWindowBackground::Opaque
+    };
     let _ = cx.open_window(
         WindowOptions::new()
+            .macos_window_background(background)
             .titlebar(Some(TitlebarOptions {
                 title: Some("Store".into()),
                 appears_transparent: true,
@@ -586,6 +603,9 @@ pub fn open(services: Services, cx: &mut App) {
                 ),
             )))),
         |window, cx| {
+            if tokens.translucent() {
+                pm_shell::window_backdrop(window, &tokens);
+            }
             cx.new(|cx| {
                 let mut store = StoreWindow::new(services, tokens, cx);
                 store.attach_search(window, cx);
@@ -615,7 +635,7 @@ impl StoreWindow {
             .items_center()
             .rounded(px(m.control_radius))
             .when(primary && enabled, |d| {
-                d.bg(rgb(c.accent)).text_color(rgb(c.accent_text))
+                d.bg(rgb(c.accent)).text_color(rgb(c.selected_text))
             })
             .when(!primary || !enabled, |d| d.bg(rgb(c.panel_secondary)))
             .when(!enabled, |d| d.text_color(rgb(c.muted)))
@@ -897,7 +917,7 @@ impl StoreWindow {
                 .flex_none()
                 .px(px(m.gap))
                 .pt(px(m.gap))
-                .text_color(rgb(c.accent))
+                .text_color(rgb(c.accent_text))
                 .child(format!("‹ {}", self.title_for_back()))
                 .on_click(cx.listener(|v, _, _, cx| v.back(cx)))
                 .into_any_element(),
@@ -973,6 +993,9 @@ impl StoreWindow {
             );
         }
         out.push(actions.into_any_element());
+        if let Some(message) = self.message_line() {
+            out.push(message.into_any_element());
+        }
         if primary && self.services.source.is_none() {
             out.push(
                 self.status(SIGNING)
@@ -1074,6 +1097,13 @@ impl StoreWindow {
         out.push(block("Versions", versions));
         out
     }
+    fn message_line(&self) -> Option<Div> {
+        let message = self.message.clone()?;
+        Some(
+            self.status(&message)
+                .debug_selector(|| "store-message".into()),
+        )
+    }
     fn title_for_back(&self) -> &'static str {
         if self.query.trim().is_empty() {
             self.page.title()
@@ -1142,16 +1172,14 @@ impl Render for StoreWindow {
             Some((listing, load)) => self.detail_view(&listing, &load, cx),
             None => self.list(cx),
         };
-        body = body.children(content);
-        if let Some(message) = &self.message {
-            body = body.child(
-                div()
-                    .debug_selector(|| "store-message".into())
-                    .p(px(m.gap))
-                    .text_color(rgb(c.secondary))
-                    .child(message.clone()),
-            );
+        // A list page says what happened above its rows; a detail page
+        // says it under its action (`detail_view`).
+        if self.detail.is_none()
+            && let Some(message) = self.message_line()
+        {
+            body = body.child(message);
         }
+        body = body.children(content);
         let content = div()
             .flex_1()
             .min_w(px(0.))
