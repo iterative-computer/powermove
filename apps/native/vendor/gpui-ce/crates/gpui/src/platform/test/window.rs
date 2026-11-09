@@ -45,6 +45,7 @@ pub(crate) struct TestWindowState {
     input_handler: Option<PlatformInputHandler>,
     text_input_configurations: Vec<TextInputConfiguration>,
     text_input_state_changes: Vec<TextInputStateChange>,
+    a11y_updates: Vec<accesskit::TreeUpdate>,
     visible: bool,
     is_fullscreen: bool,
     appearance: WindowAppearance,
@@ -110,6 +111,7 @@ impl TestWindow {
             input_handler: None,
             text_input_configurations: Vec::new(),
             text_input_state_changes: Vec::new(),
+            a11y_updates: Vec::new(),
             visible: params.show,
             is_fullscreen: false,
             appearance: WindowAppearance::Light,
@@ -152,6 +154,12 @@ impl TestWindow {
 
     pub fn text_input_state_changes(&self) -> Vec<TextInputStateChange> {
         self.0.lock().text_input_state_changes.clone()
+    }
+
+    /// Every accessibility update the window delivered, oldest first, emptying
+    /// the record.
+    pub fn take_a11y_updates(&self) -> Vec<accesskit::TreeUpdate> {
+        std::mem::take(&mut self.0.lock().a11y_updates)
     }
 
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
@@ -459,6 +467,10 @@ impl PlatformWindow for TestWindow {
 
     fn as_test(&mut self) -> Option<&mut TestWindow> {
         Some(self)
+    }
+
+    fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
+        self.0.lock().a11y_updates.push(tree_update);
     }
 
     #[cfg(target_os = "windows")]

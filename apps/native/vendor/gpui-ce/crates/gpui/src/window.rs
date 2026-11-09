@@ -1162,6 +1162,9 @@ pub(crate) struct PrepaintStateIndex {
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
     line_layout_index: LineLayoutIndex,
+    /// Powermove P-A11Y-CACHE: where the range's accessibility nodes start in
+    /// the frame's node log.
+    a11y_index: usize,
 }
 
 #[derive(Clone, Default)]
@@ -1619,6 +1622,10 @@ impl Window {
         let accessibility_force_disabled = cx.accessibility_force_disabled;
         let accessibility_forced = cx.accessibility_forced;
         let a11y_active_flag = Arc::new(AtomicBool::new(false));
+        // Powermove P-A11Y-CACHE: whether the adapter holds the last tree the
+        // window built; (re)activation starts the adapter from its initial
+        // tree, so the next update carries the whole tree.
+        let a11y_adapter_synced = Arc::new(AtomicBool::new(false));
         // Powermove: the newest tree built before assistive technology
         // connected. A window that draws no frame after activation (idle or
         // occluded) would otherwise expose only its empty root.
@@ -1645,9 +1652,11 @@ impl Window {
             platform_window.a11y_init(crate::A11yCallbacks {
                 activation: {
                     let active_flag = a11y_active_flag.clone();
+                    let synced = a11y_adapter_synced.clone();
                     let built = a11y_before_activation.clone();
                     Box::new(move || {
                         log::info!("Accessibility activated");
+                        synced.store(false, SeqCst);
                         active_flag.store(true, SeqCst);
                         activation_sender.send_blocking(()).log_err();
                         Some(built.lock().clone().unwrap_or_else(|| initial_tree.clone()))
@@ -1658,8 +1667,10 @@ impl Window {
                 }),
                 deactivation: {
                     let active_flag = a11y_active_flag.clone();
+                    let synced = a11y_adapter_synced.clone();
                     Box::new(move || {
                         log::info!("Accessibility deactivated");
+                        synced.store(false, SeqCst);
                         active_flag.store(false, SeqCst);
                         deactivation_sender.send_blocking(()).log_err();
                     })
@@ -2142,6 +2153,7 @@ impl Window {
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
             a11y: A11y::new(
                 a11y_active_flag,
+                a11y_adapter_synced,
                 a11y_before_activation,
                 accessibility_force_disabled,
                 accessibility_forced,
@@ -3474,9 +3486,7 @@ impl Window {
         self.tooltip_bounds.take();
 
         self.a11y.sync_active_flag();
-        if self.a11y.is_active() {
-            self.a11y.begin_frame();
-        }
+        self.a11y.begin_frame();
 
         let _inspector_width: Pixels = rems(30.0).to_pixels(self.rem_size());
         let root_size = {
@@ -3574,9 +3584,11 @@ impl Window {
                 tab_stop_count: self.next_frame.tab_stops.tab_stop_count(),
             };
             // clear the builder state regardless
-            let tree_update = self.a11y.end_frame(frame_info);
+            let to_adapter = should_send_a11y_update && self.a11y.adapter_listening();
+            let tree_update = self.a11y.end_frame(frame_info, to_adapter);
 
             if should_send_a11y_update
+                && let Some(tree_update) = tree_update
                 && let Some(tree_update) = self.a11y.keep_until_activation(tree_update)
             {
                 log::debug!(
@@ -3797,10 +3809,13 @@ impl Window {
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
+            a11y_index: self.a11y.node_index(),
         }
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        self.a11y
+            .replay(range.start.a11y_index..range.end.a11y_index, self.focus);
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
@@ -7232,6 +7247,25 @@ impl Window {
     pub fn set_a11y_forced(&mut self, forced: bool) {
         self.a11y.set_forced(forced);
         self.refresh();
+    }
+
+    /// Act as an assistive client connecting to this test window: the adapter
+    /// activates, and the updates it receives from then on are recorded for
+    /// [`Self::take_a11y_updates`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_a11y_activation(&mut self) {
+        self.a11y.simulate_activation();
+        self.refresh();
+    }
+
+    /// The accessibility updates delivered to a test window's adapter since the
+    /// last call, oldest first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_a11y_updates(&mut self) -> Vec<accesskit::TreeUpdate> {
+        self.platform_window
+            .as_test()
+            .map(|window| window.take_a11y_updates())
+            .unwrap_or_default()
     }
 
     /// Debug representation of the last frame's accessibility information.

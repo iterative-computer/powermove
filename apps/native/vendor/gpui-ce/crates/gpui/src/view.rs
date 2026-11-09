@@ -492,15 +492,15 @@ impl<V: View> Element for ViewElement<V> {
                             unicode_bidi: window.resolved_unicode_bidi(),
                         };
 
-                        // Powermove P-A11Y-CACHE: reused prepaint doesn't replay a
-                        // view's accessibility nodes, so while the tree is being built
-                        // a cached view prepaints again rather than vanish from it.
+                        // Powermove P-A11Y-CACHE: reused prepaint replays the view's
+                        // accessibility nodes from the last frame's tree; a frame
+                        // without one (just activated) renders every cached view.
                         if request_layout.element.is_none()
                             && let Some(mut element_state) = element_state
                             && element_state.cache_key == cache_key
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
-                            && !window.a11y.is_active()
+                            && !window.a11y.rebuilding()
                         {
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(element_state.prepaint_range.clone());

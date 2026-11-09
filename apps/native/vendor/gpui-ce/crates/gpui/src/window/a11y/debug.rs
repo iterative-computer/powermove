@@ -63,25 +63,21 @@ pub(crate) struct A11yDebug {
     frame_number: u64,
     /// Metadata about the most recently captured frame.
     last_frame: Option<CapturedFrame>,
-    /// Window-space bounds of every node in the last update, retained here
-    /// because the live map is cleared at the start of each frame.
-    last_node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
-    #[cfg(debug_assertions)]
-    last_node_info: FxHashMap<NodeId, NodeDebugInfo>,
 }
 
 impl A11yDebug {
+    /// Keeps the frame's whole tree. Powermove P-A11Y-CACHE: it is also the
+    /// tree the next frame's reused views replay their nodes from.
     pub(crate) fn capture(
         &mut self,
-        update: &TreeUpdate,
+        update: TreeUpdate,
         gpui_focus: Option<NodeId>,
         active_descendant: Option<NodeId>,
         window_title: Option<&SharedString>,
         frame: FrameDebugInfo,
-        node_bounds: &FxHashMap<NodeId, Bounds<Pixels>>,
     ) {
-        self.last_tree_update = Some(update.clone());
-        self.last_node_bounds = node_bounds.clone();
+        let node_count = update.nodes.len();
+        self.last_tree_update = Some(update);
         self.last_gpui_focus = gpui_focus;
         self.last_active_descendant = active_descendant;
         self.frame_number += 1;
@@ -89,21 +85,22 @@ impl A11yDebug {
             rendered_at: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
             frame_number: self.frame_number,
             window_title: window_title.cloned(),
-            node_count: update.nodes.len(),
+            node_count,
             tab_stop_count: frame.tab_stop_count,
             viewport_size: frame.viewport_size,
             scale_factor: frame.scale_factor,
         });
     }
 
-    /// The last update sent to the platform adapter, if a frame has produced one.
+    /// The whole tree of the last frame that built one.
     pub(crate) fn last_tree_update(&self) -> Option<&TreeUpdate> {
         self.last_tree_update.as_ref()
     }
 
-    /// Window-space bounds recorded for `id` in the last captured frame.
-    pub(crate) fn node_bounds(&self, id: NodeId) -> Option<Bounds<Pixels>> {
-        self.last_node_bounds.get(&id).copied()
+    /// The last frame's tree, whose nodes a reused view moves into the frame
+    /// being built.
+    pub(crate) fn rendered_tree_mut(&mut self) -> Option<&mut TreeUpdate> {
+        self.last_tree_update.as_mut()
     }
 
     /// Monotonic count of captured frames; zero before the first.
@@ -111,14 +108,13 @@ impl A11yDebug {
         self.frame_number
     }
 
-    #[cfg(debug_assertions)]
-    pub(crate) fn capture_node_info(&mut self, node_info: &FxHashMap<NodeId, NodeDebugInfo>) {
-        self.last_node_info = node_info.clone();
-    }
-
     /// Serialize the last tree update to a readable JSON string. Node ids are
     /// replaced with short ephemeral ids (`a`, `b`, ..., `z`, `aa`, ...).
-    pub(crate) fn to_json(&self) -> Option<String> {
+    pub(crate) fn to_json(
+        &self,
+        node_bounds: &FxHashMap<NodeId, Bounds<Pixels>>,
+        #[cfg(debug_assertions)] node_info: &FxHashMap<NodeId, NodeDebugInfo>,
+    ) -> Option<String> {
         let update = self.last_tree_update.as_ref()?;
 
         let mut ephemeral: FxHashMap<NodeId, String> = FxHashMap::default();
@@ -133,8 +129,7 @@ impl A11yDebug {
                 .cloned()
                 .unwrap_or_else(|| id.0.to_string());
             #[cfg(debug_assertions)]
-            let provenance = self
-                .last_node_info
+            let provenance = node_info
                 .get(id)
                 .map(|info| NodeProvenance {
                     element_id: info.element_id.as_deref(),
@@ -152,7 +147,7 @@ impl A11yDebug {
                 node,
                 &ephemeral,
                 &provenance,
-                self.last_node_bounds.get(id).copied(),
+                node_bounds.get(id).copied(),
             );
             nodes.insert(key, value);
         }
