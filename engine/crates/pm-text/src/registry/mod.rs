@@ -16,7 +16,7 @@
 #[cfg(all(target_os = "macos", feature = "system"))]
 mod coretext;
 #[cfg(all(target_os = "macos", feature = "system"))]
-pub use coretext::{CoreTextRegistry, FontMemoryUsage};
+pub use coretext::{CoreTextRegistry, FontMemoryUsage, installed_family_axes};
 
 use crate::font::{FontDesc, WebDescriptors};
 use serde::{Deserialize, Serialize};

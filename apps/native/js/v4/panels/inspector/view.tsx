@@ -39,6 +39,7 @@ const sectionActions: Record<SectionAction, string> = {
   mask: "Add Mask",
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
+  "refresh-fonts": "Refresh Fonts",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -178,7 +179,8 @@ function AlignmentStrip({
       style={{
         ...horizontal,
         gap: token("metrics.gap"),
-        height: token("metrics.row"),
+        paddingTop: token("metrics.gap"),
+        paddingBottom: token("metrics.gap"),
         paddingLeft: token("metrics.inset"),
         paddingRight: token("metrics.inset"),
       }}
@@ -197,7 +199,16 @@ function AlignmentStrip({
     >
       {[alignmentButtons.slice(0, 3), alignmentButtons.slice(3)].map(
         (group, index) => (
-          <div key={index} style={horizontal}>
+          // Two wells of three, sharing the row (v1's two button groups).
+          <div
+            key={index}
+            style={{
+              ...horizontal,
+              ...well,
+              flexGrow: 1,
+              justifyContent: "space-between",
+            }}
+          >
             {group.map((button) => (
               <Action
                 key={button.id}
@@ -274,6 +285,17 @@ function Field({
     );
   // Narrow the number/point union explicitly for strict TypeScript.
   if ("axes" in control) return null;
+  if (control.kind === "status")
+    return (
+      <text
+        style={{
+          color: token("colors.muted"),
+          fontSize: token("typography.label"),
+        }}
+      >
+        {control.value}
+      </text>
+    );
   const bound = {
     ...common,
     binding: control.binding.handle,
@@ -283,9 +305,13 @@ function Field({
   };
   switch (control.kind) {
     case "text":
-      // API-GAP I1: kit has no multiline text/line-limit recipe. Keep
-      // the authored text in the existing native text component pending that API.
-      return <TextField {...bound} value={control.value} />;
+      return (
+        <TextField
+          {...bound}
+          value={control.value}
+          multiline={control.multiline}
+        />
+      );
     case "choice":
       return (
         <PopUpButton
@@ -398,6 +424,18 @@ function Property({
       <InspectorRow
         label={row.label}
         title={row.locked ? "Locked layers can’t be edited." : row.label}
+        // A multi-line editor grows its row; the label and diamond sit at its top.
+        style={
+          row.control.kind === "text" && row.control.multiline
+            ? {
+                height: null,
+                minHeight: token("metrics.row"),
+                alignItems: "start",
+                paddingTop: token("metrics.inner_radius"),
+                paddingBottom: token("metrics.inner_radius"),
+              }
+            : undefined
+        }
         leading={
           row.animation ? (
             <Action
@@ -406,6 +444,21 @@ function Property({
               value={keyValue}
               disabled={disabled}
               active={row.animation !== "static"}
+              // One small mark whose shape says the state, as the timeline's:
+              // outline = static, half = animated, filled = key at playhead.
+              symbol={
+                row.animation === "key-at-playhead"
+                  ? "diamond.fill"
+                  : row.animation === "animated"
+                    ? "diamond.lefthalf.filled"
+                    : "diamond"
+              }
+              style={{
+                symbolSize: token("metrics.symbol_inline"),
+                color: token(
+                  row.animation === "static" ? "colors.muted" : "colors.accent",
+                ),
+              }}
               onActivate={(event) =>
                 session.send({
                   type: "key",
@@ -413,6 +466,15 @@ function Property({
                   removeAnimation: !!event.altKey,
                 })
               }
+            />
+          ) : row.control.kind === "status" ? (
+            // A fact row keeps the keyframe column, so its label lines up.
+            <div
+              role="presentation"
+              style={{
+                width: token("metrics.hit"),
+                minWidth: token("metrics.hit"),
+              }}
             />
           ) : null
         }
@@ -424,6 +486,8 @@ function Property({
               label="Lock aspect ratio"
               tooltip={row.linked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"}
               active={row.linked}
+              // Linked is a state, not an alert: the glyph stays neutral.
+              style={{ color: token("colors.secondary") }}
               disabled={disabled}
               onActivate={() =>
                 session.send({
@@ -535,7 +599,9 @@ export function InspectorPanel({
                   fontWeight: token("typography.semibold_weight"),
                 }}
               >
-                {target.count > 1 ? `${target.count} Layers` : target.first.name}
+                {target.count > 1
+                  ? `${target.count} Layers`
+                  : target.first.name}
               </text>
               <text
                 style={{
@@ -574,24 +640,47 @@ export function InspectorPanel({
             }
           >
             {section.action ? (
-              <Action
-                id={`section-action:${section.id}`}
-                label={sectionActions[section.action]}
-                disabled={target.kind === "layers" && target.first.locked}
-                onActivate={(event) =>
-                  section.action === "animator"
-                    ? session.nativeRequest({
-                        type: "animator-menu",
-                        anchor: event.currentTarget,
-                        items: section.presets ?? [],
-                      })
-                    : session.send({
-                        type: "section-action",
-                        section: section.id,
-                        action: section.action!,
-                      })
-                }
-              />
+              // A quiet text action on the label inset (it drew as an empty
+              // button: no symbol, no title).
+              <div
+                style={{
+                  ...horizontal,
+                  paddingLeft: token("metrics.inset"),
+                  paddingRight: token("metrics.inset"),
+                }}
+              >
+                <Action
+                  id={`section-action:${section.id}`}
+                  label={sectionActions[section.action]}
+                  symbol={
+                    section.action === "refresh-fonts"
+                      ? "arrow.clockwise"
+                      : "plus"
+                  }
+                  children={sectionActions[section.action]}
+                  style={{
+                    gap: token("metrics.inner_radius"),
+                    paddingLeft: token("metrics.inner_radius"),
+                    paddingRight: token("metrics.gap"),
+                    fontSize: token("typography.label"),
+                    symbolSize: token("metrics.symbol_inline"),
+                  }}
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={(event) =>
+                    section.action === "animator"
+                      ? session.nativeRequest({
+                          type: "animator-menu",
+                          anchor: event.currentTarget,
+                          items: section.presets ?? [],
+                        })
+                      : session.send({
+                          type: "section-action",
+                          section: section.id,
+                          action: section.action!,
+                        })
+                  }
+                />
+              </div>
             ) : null}
             {section.animators?.map((animator) => (
               <InspectorRow key={animator.id} label={animator.name}>
@@ -611,21 +700,21 @@ export function InspectorPanel({
               </InspectorRow>
             ))}
             {section.masks?.flatMap((mask) => [
-                <InspectorRow key={mask.id} label={mask.name}>
-                  <Action
-                    id={`remove-mask:${mask.id}`}
-                    label={`Remove ${mask.name}`}
-                    tooltip="Remove Mask"
-                    symbol="minus"
-                    disabled={target.kind === "layers" && target.first.locked}
-                    onActivate={() =>
-                      session.send({ type: "remove-mask", mask: mask.id })
-                    }
-                  />
-                </InspectorRow>,
-                ...mask.rows.map((row) => (
-                  <Property key={row.id} row={row} session={session} />
-                )),
+              <InspectorRow key={mask.id} label={mask.name}>
+                <Action
+                  id={`remove-mask:${mask.id}`}
+                  label={`Remove ${mask.name}`}
+                  tooltip="Remove Mask"
+                  symbol="minus"
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={() =>
+                    session.send({ type: "remove-mask", mask: mask.id })
+                  }
+                />
+              </InspectorRow>,
+              ...mask.rows.map((row) => (
+                <Property key={row.id} row={row} session={session} />
+              )),
             ])}
             {section.rows.map((row) => (
               <Property key={row.id} row={row} session={session} />

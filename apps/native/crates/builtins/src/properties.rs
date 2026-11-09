@@ -11,6 +11,11 @@ pub struct Properties {
     adapter: V4Adapter,
     key: String,
     handles: BTreeMap<String, String>,
+    /// What each font family offers for variation, read once (CoreText
+    /// enumerates every installed face); Refresh Fonts forgets it.
+    fonts: BTreeMap<String, pm_panel_inspector::content::FontFacts>,
+    /// The axes the Type Settings rows were built from, by row id.
+    axes: BTreeMap<String, pm_panel_inspector::content::FontAxis>,
     collapsed: BTreeMap<String, bool>,
     selection: Vec<String>,
     document: Option<u64>,
@@ -178,12 +183,24 @@ impl Properties {
                     (FieldType::Text, Value::String(_)) => {
                         json!({"kind":"text","multiline":id=="content.text","binding":lease,"value":value,"mixed":state.mixed})
                     }
+                    // The swatch and its hex beside it, both editable (v1).
                     (FieldType::Color, Value::String(_)) => {
-                        json!({"kind":"colour","binding":lease,"value":value,"mixed":state.mixed})
+                        let hex = self.lease(model, &format!("{id}#hex"), field.binding.clone())?;
+                        json!({"kind":"colour","binding":lease,"value":value,"mixed":state.mixed,
+                            "hexBinding":hex,"hex":value})
                     }
                     (FieldType::Font, Value::String(_)) => {
                         json!({"kind":"font","binding":lease,"value":value,"options":[],"mixed":state.mixed})
                     }
+                    // Text alignment is three glyphs, not a menu of words (v1).
+                    (FieldType::Choice, _) if id == "content.align" => json!({
+                        "kind":"segmented","binding":lease,"value":value,"mixed":state.mixed,
+                        "options":[
+                            {"id":"left","label":"Align Left","symbol":"text.alignleft"},
+                            {"id":"center","label":"Align Center","symbol":"text.aligncenter"},
+                            {"id":"right","label":"Align Right","symbol":"text.alignright"},
+                        ],
+                    }),
                     (FieldType::Choice, _) => {
                         let options = match id {
                             "content.shape" => {
@@ -215,7 +232,6 @@ impl Properties {
                                 }
                                 json!(options)
                             }
-                            "content.align" => json!(["left", "center", "right"]),
                             _ if contributed.is_some() => json!(
                                 contributed
                                     .iter()
@@ -264,6 +280,9 @@ impl Properties {
             }
             if !content.is_empty() {
                 sections.push(json!({"id":"content","title":"Content","collapsed":self.collapsed.get("content").copied().unwrap_or(false),"rows":content}));
+            }
+            if let Some(section) = self.type_settings(model, &layer, time)? {
+                sections.push(section);
             }
             if !audio {
                 let mut rows = vec![];
@@ -465,6 +484,73 @@ impl Properties {
             .iter()
             .any(|(path, h)| h == handle && channels == [path.clone()])
     }
+    /// Type Settings (v1): one row per variation axis of the text layer's
+    /// font, plus axes the layer saved from a font this Mac doesn't have. A
+    /// static font shows nothing; a missing one says so and offers Refresh Fonts.
+    fn type_settings(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        time: f64,
+    ) -> Result<Option<Value>, String> {
+        let source = model.layer(layer).map_err(|e| e.to_string())?;
+        if source.get("type").and_then(pm_model::Value::as_str) != Some("text") {
+            return Ok(None);
+        }
+        let family = source
+            .get("d")
+            .and_then(|d| d.get("font"))
+            .and_then(pm_model::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let facts = self
+            .fonts
+            .entry(family.clone())
+            .or_insert_with(|| font_facts(&family))
+            .clone();
+        let axes = model
+            .font_axes(layer, &facts, time)
+            .map_err(|e| e.to_string())?;
+        if axes.is_empty() && facts.readable {
+            return Ok(None);
+        }
+        self.axes.clear();
+        let mut rows = vec![];
+        for state in axes {
+            let id = format!("fontAxis.{}", state.axis.tag);
+            let lease = self.lease(
+                model,
+                &id,
+                Binding::Property(PropertyId::new(layer, format!("c.{id}"))),
+            )?;
+            let animation = match model.binding_state(
+                &Binding::Property(PropertyId::new(layer, format!("c.{id}"))),
+                time,
+            ) {
+                Ok(s) if s.key_at_playhead => "key-at-playhead",
+                Ok(s) if s.animated => "animated",
+                _ => "static",
+            };
+            let mut axis = json!({"binding":lease,"value":super::data::wire(&state.value),"step":1,"precision":2,"mixed":false});
+            if let Some(min) = state.axis.min {
+                axis["min"] = json!(min);
+            }
+            if let Some(max) = state.axis.max {
+                axis["max"] = json!(max);
+            }
+            rows.push(json!({"id":id,"label":axis_label(&state.axis.tag),"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":[axis]}}));
+            self.axes.insert(id, state.axis);
+        }
+        if !facts.readable {
+            rows.push(json!({"id":"fontAxis.status","label":"Font","locked":false,"disabled":true,"animation":null,
+                "control":{"kind":"status","value":"Not installed"}}));
+        }
+        let mut section = json!({"id":"type","title":"Type Settings","collapsed":self.collapsed.get("type").copied().unwrap_or(false),"rows":rows});
+        if !facts.readable {
+            section["action"] = json!("refresh-fonts");
+        }
+        Ok(Some(section))
+    }
     pub fn write(
         &self,
         model: &mut Inspector,
@@ -473,6 +559,25 @@ impl Properties {
         value: pm_model::Value,
         time: f64,
     ) -> Result<Request, String> {
+        // A variation axis may not be stored yet: set_axis creates it first.
+        if let Some((id, _)) = self
+            .handles
+            .iter()
+            .find(|(id, h)| *h == handle && id.starts_with("fontAxis."))
+            && let Some(axis) = self.axes.get(id)
+        {
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            return model
+                .set_axis(
+                    caller,
+                    &layer,
+                    axis,
+                    value.as_f64().ok_or("Expected a number")?,
+                    time,
+                    false,
+                )
+                .map_err(|e| e.to_string());
+        }
         if self
             .handles
             .get("content.independentCorners")
@@ -568,6 +673,11 @@ impl Properties {
                     body: pm_kernel::WriteBody::Commands(vec![command.into()]),
                 },
             )));
+        }
+        if intent["type"] == "section-action" && intent["action"] == "refresh-fonts" {
+            // Fonts installed since are read again on the next publication.
+            self.fonts.clear();
+            return Ok(None);
         }
         if intent["type"] == "section-action" && intent["action"] == "release-precomp" {
             let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
@@ -673,4 +783,37 @@ impl Properties {
             V4Plan::Service(_) => Err("Graph service unavailable".into()),
         }
     }
+}
+
+/// A family's variation facts from the installed fonts (`inspectFont`).
+fn font_facts(family: &str) -> pm_panel_inspector::content::FontFacts {
+    let installed = (!family.is_empty())
+        .then(|| pm_text::registry::installed_family_axes(family))
+        .flatten();
+    pm_panel_inspector::content::FontFacts {
+        readable: installed.is_some(),
+        axes: installed
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| pm_panel_inspector::content::FontAxis {
+                tag: String::from_utf8_lossy(&a.tag.to_be_bytes()).into_owned(),
+                default: a.default as f64,
+                min: Some(a.min as f64),
+                max: Some(a.max as f64),
+            })
+            .collect(),
+        faces: vec![],
+    }
+}
+/// The registered axes by name (OpenType); custom axes keep their tag.
+fn axis_label(tag: &str) -> String {
+    match tag {
+        "wght" => "Weight",
+        "wdth" => "Width",
+        "slnt" => "Slant",
+        "ital" => "Italic",
+        "opsz" => "Optical Size",
+        _ => tag,
+    }
+    .to_owned()
 }

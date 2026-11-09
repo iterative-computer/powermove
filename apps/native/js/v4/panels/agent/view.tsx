@@ -471,6 +471,7 @@ export function AgentView({
           justifyContent: "space-between",
           height: t("metrics.header"),
           paddingLeft: t("metrics.inset"),
+          paddingRight: t("metrics.gap"),
         }}
       >
         <text style={title}>Agent</text>
@@ -494,13 +495,16 @@ export function AgentView({
                 : "Switch thread"
             }
             disabled
-            metadata={{ apiGap: "threadPicker" }}
+            metadata={{ apiGap: "threadPicker", symbol: "chevron.down" }}
+            style={{ symbolSize: t("metrics.symbol_inline") }}
           />
           <UI.ToolbarItem
             disabled={s.composerDisabled}
             id="agent-new"
             label="New Thread"
             title="New Thread"
+            metadata={{ symbol: "plus" }}
+            style={{ symbolSize: t("metrics.symbol_panel") }}
             onClick={() => {
               if (!s.composerDisabled) send({ type: "newThread" });
             }}
@@ -509,6 +513,10 @@ export function AgentView({
             id="agent-presentation"
             label={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
             title={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
+            metadata={{
+              symbol: n.presentation === "popover" ? "pin" : "xmark",
+            }}
+            style={{ symbolSize: t("metrics.symbol_panel") }}
             onClick={() =>
               send({
                 type: "shell",
@@ -554,16 +562,23 @@ export function AgentView({
             label="Connect Your Agent"
             explanation={n.reason}
             action={
-              <>
-                <Push
-                  label="Try Again"
-                  onClick={() => send({ type: "retryConnection" })}
-                />
+              // A pair of buttons sits side by side, as in macOS alerts.
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "row",
+                  gap: t("metrics.gap"),
+                }}
+              >
                 <Push
                   label="Connection Settings…"
                   onClick={() => send({ type: "openSettings" })}
                 />
-              </>
+                <Push
+                  label="Try Again"
+                  onClick={() => send({ type: "retryConnection" })}
+                />
+              </div>
             }
           />
         ) : (

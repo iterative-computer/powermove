@@ -72,6 +72,17 @@ const cases: [string, () => ComponentChild][] = [
     () => <UI.TextField label="Name" value="Authored 🎬" binding="name" />,
   ],
   [
+    "text-field-multiline",
+    () => (
+      <UI.TextField
+        label="Text"
+        value={"Made with\nPowermove"}
+        binding="text"
+        multiline
+      />
+    ),
+  ],
+  [
     "pop-up-button",
     () => (
       <UI.PopUpButton
@@ -174,8 +185,10 @@ for (const [kind, fixture] of cases) {
   test(`${kind}: JSX commits pass the real Rust panel validator`, async () => {
     const { root, commits } = recorder();
     await root.render(fixture());
-    const n = node(root, kind);
+    // A variant case (`-multiline`) is still its component's node.
+    const n = node(root, kind.replace(/-multiline$/, ""));
     expect(n).toBeDefined();
+    if (kind.endsWith("-multiline")) expect(n.type).toBe("textarea");
     const rows = replay(commits);
     for (const row of rows) {
       expect(row.accepted).toBe(true);

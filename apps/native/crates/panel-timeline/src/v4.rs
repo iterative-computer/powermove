@@ -423,6 +423,7 @@ pub fn project_window(
                     value["kind"] = json!("layer");
                     value["layer"] = json!(id);
                     value["layerKind"] = json!(layer.kind);
+                    value["labelColor"] = json!(crate::render::Label::for_kind(&layer.kind).name());
                     value["index"] = if layer.group.is_some() {
                         Value::Null
                     } else {
@@ -499,9 +500,17 @@ fn track_window(
             let enabled = clips
                 .iter()
                 .all(|l| if audio { !l.audio_muted } else { l.visible });
+            // What the track holds, quietly after its name (v1): the clip's
+            // name, or how many clips.
+            let summary = match clips.as_slice() {
+                [] => String::new(),
+                [one] => one.name.to_string_lossy(),
+                many => format!("{} clips", many.len()),
+            };
             rows.push(json!({
                 "id": json!(["track", format!("{area:?}"), lane]).to_string(),
                 "kind": "track", "depth": 0, "track": label, "label": label, "audio": audio,
+                "summary": summary,
                 "enabled": enabled, "expanded": false, "selected": false,
                 "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
             }));

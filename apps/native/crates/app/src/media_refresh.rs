@@ -281,7 +281,11 @@ impl Controller {
     pub(crate) fn publish_offline_media(&self, cx: &mut Context<Self>) {
         if let Some(timeline) = self.builtins.timeline.clone() {
             let offline = self.offline_media();
-            timeline.update(cx, |t, cx| t.set_offline_media(offline, cx));
+            let sources = self.media.originals.clone();
+            timeline.update(cx, |t, cx| {
+                t.set_offline_media(offline, cx);
+                t.set_audio_sources(sources, cx);
+            });
         }
     }
     /// The pro media worker moved: renditions change the catalog; every

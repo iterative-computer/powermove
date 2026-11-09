@@ -169,6 +169,9 @@ pub struct NodeView {
     pub outline_window: Option<(usize, usize)>,
     /// A number field's unit, drawn after the value in `muted` (language §5).
     pub unit: Option<SharedString>,
+    /// `metadata.fixedWidthSample`: the node is at least as wide as this text in
+    /// its own font, so a changing readout (timecode) never reflows its row.
+    pub fixed_width: Option<SharedString>,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NumberFacts {
@@ -432,10 +435,27 @@ fn compile(
     if in_value_slot
         && matches!(
             component,
-            Some(Component::NumberField | Component::TextField | Component::PopUpButton)
+            Some(
+                Component::NumberField
+                    | Component::TextField
+                    | Component::PopUpButton
+                    | Component::SegmentedControl
+            )
         )
     {
         compiled.sheet = compiled.sheet.flex_1().min_w(px(0.)).overflow_hidden();
+    }
+    // A segmented control filling the value column shares it between its
+    // segments (Align: three equal cells, as wide as the wells beside it).
+    let in_filled_segments = component == Some(Component::Segment)
+        && node
+            .parent
+            .and_then(|p| surface.node(p))
+            .and_then(|p| p.parent)
+            .and_then(|g| surface.node(g))
+            .is_some_and(|g| g.props.get("data-pm-slot").and_then(Value::as_str) == Some("value"));
+    if in_filled_segments {
+        compiled.sheet = compiled.sheet.flex_1();
     }
     // A host-menu trigger in the value column (Font, Fill) reads as a well.
     // Icon actions beside wells (Position's Pad) keep their hit square.
@@ -533,6 +553,10 @@ fn compile(
         .flatten();
     let meta = node.props.get("metadata");
     NodeView {
+        fixed_width: meta
+            .and_then(|m| m.get("fixedWidthSample"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned().into()),
         local_change: node.listeners.contains_key("change"),
         cancel_change: meta
             .and_then(|m| m.get("cancelChange"))

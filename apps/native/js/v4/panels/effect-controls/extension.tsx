@@ -1,4 +1,9 @@
-import { createRoot, type Transport, type HostClient, type RootOptions } from "../../src";
+import {
+  createRoot,
+  type Transport,
+  type HostClient,
+  type RootOptions,
+} from "../../src";
 import { EffectsController } from "./controller";
 import { EffectControls, type PanelProps } from "./panel";
 import { PANEL_ID, PANEL_TITLE, type Platform } from "./contract";
@@ -24,8 +29,10 @@ export async function mountEffectControls(
     options.platform,
     options.subscriptionId,
   );
-  const root = createRoot(options.transport, (error) =>
-    options.platform.report(error), options.rootOptions,
+  const root = createRoot(
+    options.transport,
+    (error) => options.platform.report(error),
+    options.rootOptions,
   );
   try {
     await controller.start();

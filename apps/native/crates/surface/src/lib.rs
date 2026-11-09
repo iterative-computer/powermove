@@ -1,5 +1,7 @@
 //! Atomic, inspectable v4 native UI state. No JS, DOM, renderer, or platform dependency.
 pub mod binding;
+pub mod label;
+pub use label::humanize;
 pub mod interaction;
 pub mod style;
 pub mod tree;

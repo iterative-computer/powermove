@@ -11,6 +11,6 @@ pm-design = { path = "../design" }
 serde_json = "1"
 pm-kernel = { path = "../kernel" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-surface = { path = "../surface" }
 
 [dev-dependencies]
-pm-surface = { path = "../surface" }

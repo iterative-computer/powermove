@@ -327,12 +327,20 @@ impl Render for ErrorLogWindow {
                 .items_center()
                 .justify_center()
                 .gap(px(m.gap))
+                // The empty-state anatomy every panel uses: heading, then a
+                // reading line in `secondary`.
                 .child(
                     div()
-                        .text_size(px(t.typography.title))
+                        .text_size(px(t.typography.heading))
+                        .font_weight(FontWeight(t.typography.semibold_weight))
                         .child(LOG_EMPTY_TITLE),
                 )
-                .child(div().text_color(rgb(c.secondary)).child(LOG_EMPTY_LINE));
+                .child(
+                    div()
+                        .text_size(px(t.typography.reading))
+                        .text_color(rgb(c.secondary))
+                        .child(LOG_EMPTY_LINE),
+                );
         }
         for entry in log.entries.iter().rev() {
             body = body.child(
@@ -350,10 +358,24 @@ impl Render for ErrorLogWindow {
                     .child(entry.message.clone()),
             );
         }
+        // A seamless title band over the window's own material, as Settings
+        // and Export (`metrics.titlebar`).
+        // The title sits centred in the band, as macOS draws window titles.
+        let band = div()
+            .flex()
+            .flex_none()
+            .h(px(m.titlebar))
+            .items_center()
+            .justify_center()
+            .text_size(px(t.typography.title))
+            .font_weight(FontWeight(t.typography.medium_weight))
+            .text_color(rgb(c.secondary))
+            .child(LOG_TITLE);
         div()
             .size_full()
             .flex()
             .flex_col()
+            .child(band)
             .bg(rgb(c.panel))
             .text_color(rgb(c.text))
             .text_size(px(t.typography.body))
@@ -376,6 +398,7 @@ pub fn open(log: Shared, cx: &mut App) {
         WindowOptions::new()
             .titlebar(Some(TitlebarOptions {
                 title: Some(LOG_TITLE.into()),
+                appears_transparent: true,
                 ..Default::default()
             }))
             .window_bounds(Some(WindowBounds::Windowed(Bounds::new(

@@ -138,7 +138,10 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {f.timecode}
+                {/* While playing, the native timecode layer draws the time in
+                    this fixed-width slot every frame; the readout steps aside
+                    (S3: panels hear only play start and stop). */}
+                {f.playing ? "" : f.timecode}
               </UI.ToolbarItem>
             )}
             <text
@@ -518,7 +521,7 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
           {row.label}
         </text>
       </div>
-      <div style={line}>
+      <div style={{ ...line, paddingRight: t("metrics.gap") }}>
         {row.numeric && row.scaleLinked === undefined ? (
           <UI.NumberField
             id={`timeline:value:${row.id}`}
@@ -623,8 +626,41 @@ const TimelineRow = memo(
           <Property row={row} send={send} />
         ) : (
           <>
-            <text style={text}>{row.label}</text>
-            <div style={line}>
+            <div
+              style={{
+                ...line,
+                gap: t("metrics.gap"),
+                overflow: "hidden",
+                paddingLeft: t("metrics.inset"),
+              }}
+            >
+              <text
+                style={{
+                  ...text,
+                  fontWeight: t("typography.medium_weight"),
+                  fontVariantNumeric: "tabular-nums",
+                  flexShrink: 0,
+                }}
+              >
+                {row.label}
+              </text>
+              {row.summary && (
+                <text
+                  title={row.summary}
+                  style={{
+                    color: t("colors.secondary"),
+                    fontSize: t("typography.body"),
+                    flexGrow: 1,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {row.summary}
+                </text>
+              )}
+            </div>
+            <div style={{ ...line, paddingRight: t("metrics.gap") }}>
               <Icon
                 id={`timeline:track-enable:${row.id}`}
                 label={row.accessibilityLabel}

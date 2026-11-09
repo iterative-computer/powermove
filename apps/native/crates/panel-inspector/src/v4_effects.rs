@@ -306,7 +306,7 @@ impl EffectsPanel {
                         "label",
                         display
                             .map(|d| d.label.clone())
-                            .unwrap_or_else(|| key.clone())
+                            .unwrap_or_else(|| pm_surface::humanize(key))
                             .into(),
                     ),
                     (
@@ -320,7 +320,10 @@ impl EffectsPanel {
                     ),
                     (
                         "value",
-                        state.as_ref().map(|s| s.value.clone()).unwrap_or(raw),
+                        state
+                            .as_ref()
+                            .map(|s| s.value.clone())
+                            .unwrap_or(raw.clone()),
                     ),
                     (
                         "control",
@@ -349,6 +352,23 @@ impl EffectsPanel {
                     ),
                 ]);
                 let fields = p.as_object_mut().expect("parameter");
+                // Without a definition the stored data is kept whole in `value`;
+                // `display` is what the row shows: the value at rest, or
+                // Animated when keyed.
+                if state.is_none() {
+                    let keyed = raw
+                        .get("kf")
+                        .and_then(Value::as_array)
+                        .is_some_and(|k| !k.is_empty());
+                    let display = match raw.get("v") {
+                        Some(_) if keyed => Some(Value::String("Animated".into())),
+                        Some(v) => Some(v.clone()),
+                        None => None,
+                    };
+                    if let Some(display) = display {
+                        fields.insert("display", display);
+                    }
+                }
                 if let Some(d) = display {
                     if let Some(step) = d.step {
                         fields.insert("step", step.into());

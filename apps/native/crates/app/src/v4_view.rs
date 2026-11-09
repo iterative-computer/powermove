@@ -1182,6 +1182,17 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if let Some(sample) = &node.fixed_width {
+            let mut text = window.text_style();
+            text.refine(&node.style.text);
+            let size = text.font_size.to_pixels(window.rem_size());
+            let run = text.to_run(sample.len());
+            let width = window
+                .text_system()
+                .shape_line(sample.clone(), size, &[run])
+                .width;
+            element = element.min_w(width);
+        }
         if node.outline_column && self.natives.outline.column.get() > 0. {
             element = element.w(px(self.natives.outline.column.get()));
         }
@@ -1670,10 +1681,16 @@ impl SurfaceView {
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
         if let Some(symbol) = &node.symbol {
+            // The glyph takes the colour the panel declared (an active toggle's
+            // accent, a keyframe state); disabled is always `muted`.
             let ink = if node.disabled {
                 t.colors.muted
             } else {
-                t.colors.secondary
+                node.style.text.color.map_or(t.colors.secondary, |c| {
+                    let c = hsla_to_rgba(c);
+                    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+                    (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
+                })
             };
             element = element.child(pm_shell::symbol::symbol(
                 symbol,

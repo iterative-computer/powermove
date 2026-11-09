@@ -5637,6 +5637,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -8775,7 +8778,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "children": [
                     {
                       "props": {},
-                      "text": "00:00:04:16",
                       "type": "text",
                     },
                   ],
@@ -18585,22 +18587,46 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             {
                               "children": [
                                 {
-                                  "props": {},
-                                  "text": "A1",
+                                  "children": [
+                                    {
+                                      "props": {},
+                                      "text": "A1",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "flexShrink": 0,
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "fontVariantNumeric": "tabular-nums",
+                                      "fontWeight": {
+                                        "token": "typography.medium_weight",
+                                      },
+                                    },
+                                  },
                                   "type": "text",
                                 },
                               ],
                               "props": {
                                 "style": {
-                                  "color": {
-                                    "token": "colors.text",
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexDirection": "row",
+                                  "gap": {
+                                    "token": "metrics.gap",
                                   },
-                                  "fontSize": {
-                                    "token": "typography.body",
+                                  "overflow": "hidden",
+                                  "paddingLeft": {
+                                    "token": "metrics.inset",
                                   },
                                 },
                               },
-                              "type": "text",
+                              "type": "div",
                             },
                             {
                               "children": [
@@ -18666,6 +18692,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -21350,6 +21379,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "paddingRight": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",

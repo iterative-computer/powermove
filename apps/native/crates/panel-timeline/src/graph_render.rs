@@ -180,7 +180,7 @@ pub fn sample(
         }
         curves.push(Curve {
             id: format!("{layer_id}:{}", channel.path),
-            name: channel.path.clone(),
+            name: crate::property_label(&channel.path),
             focused: true,
             segments,
             points,
@@ -235,7 +235,7 @@ impl Graph {
             curves,
             min,
             max,
-            grid: vec![],
+            grid: grid(min, max),
             selection: None,
         })
     }
@@ -263,23 +263,40 @@ impl Graph {
                 seconds: 0.,
                 value: *value,
             })[1];
+            // Hairlines in the panel's line ink; the value just above, on the inset.
+            let (ink, alpha) = t.line();
             let mut line = Op::new(
                 format!("graph-grid:{label}"),
                 "rect",
                 Rect::new(bounds.x, y, bounds.width, t.metrics.border as f64),
-                c.separator,
+                ink,
             );
-            line.clip = Some(bounds);
+            line.opacity = alpha as f64;
+            let text = (t.typography.minimum * t.typography.dense_leading) as f64;
+            // The plot plus room above it for the top line's label.
+            let labelled = Rect::new(
+                bounds.x,
+                bounds.y - text,
+                bounds.width,
+                bounds.height + text,
+            );
+            line.clip = Some(labelled);
             ops.push(line);
             let mut label_op = Op::new(
                 format!("graph-value:{label}"),
                 "text",
-                Rect::new(bounds.x, y, bounds.width, t.typography.minimum as f64),
+                Rect::new(
+                    bounds.x + t.metrics.gap as f64,
+                    y - text,
+                    bounds.width,
+                    text,
+                ),
                 c.muted,
             );
+            label_op.detail = json!({"tabular":true});
             label_op.text = Some(label.clone());
             label_op.font_size = t.typography.minimum as f64;
-            label_op.clip = Some(bounds);
+            label_op.clip = Some(labelled);
             ops.push(label_op);
         }
         let from = v.scroll_time;
@@ -299,10 +316,14 @@ impl Graph {
             ops.push(path);
             if let Some(segment) = curve.segments.last() {
                 let p = point(segment.to);
+                // The name sits just above its curve's end, inside the plot.
+                let line = (t.typography.minimum * t.typography.dense_leading) as f64;
+                let y = (p[1] - line - t.metrics.border as f64)
+                    .clamp(bounds.y, (bounds.y + bounds.height - line).max(bounds.y));
                 let mut name = Op::new(
                     format!("curve-name:{}", curve.id),
                     "text",
-                    Rect::new(p[0], p[1], bounds.width, t.typography.minimum as f64),
+                    Rect::new(p[0] + t.metrics.gap as f64, y, bounds.width, line),
                     if curve.focused { c.text } else { c.secondary },
                 );
                 name.text = Some(curve.name.clone());
@@ -390,10 +411,61 @@ impl Graph {
         Ok(ops)
     }
 }
+/// Value lines at a round step giving four or five lines across the range,
+/// labelled with only the decimals the step needs.
+fn grid(min: f64, max: f64) -> Vec<(f64, String)> {
+    let raw = (max - min) / 4.;
+    if !(raw.is_finite() && raw > 0.) {
+        return vec![];
+    }
+    let magnitude = 10f64.powf(raw.log10().floor());
+    let step = [1., 2., 2.5, 5., 10.]
+        .into_iter()
+        .map(|f| f * magnitude)
+        .find(|s| *s >= raw)
+        .unwrap_or(10. * magnitude);
+    let decimals = (-(step.log10().floor())
+        + if (step / magnitude).fract() != 0. {
+            1.
+        } else {
+            0.
+        })
+    .max(0.) as usize;
+    let mut value = (min / step).ceil() * step;
+    let mut lines = vec![];
+    while value <= max + step * 1e-9 && lines.len() < 12 {
+        let shown = if value.abs() < step * 1e-9 { 0. } else { value };
+        lines.push((value, format!("{shown:.decimals$}")));
+        value += step;
+    }
+    lines
+}
 /// The handle side as it appears in op ids: `graph-handle:<key>:<in|out>`.
 pub fn side_name(side: EaseSide) -> &'static str {
     match side {
         EaseSide::In => "in",
         _ => "out",
+    }
+}
+#[cfg(test)]
+mod grid_tests {
+    #[test]
+    fn value_lines_land_on_round_steps_with_only_the_decimals_they_need() {
+        let lines = super::grid(0., 100.);
+        assert_eq!(
+            lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(),
+            ["0", "25", "50", "75", "100"]
+        );
+        let small = super::grid(-0.3, 0.9);
+        assert_eq!(
+            small.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(),
+            ["0.0", "0.5"]
+        );
+        assert!(
+            small
+                .iter()
+                .all(|(v, _)| (-0.3 - 1e-9..=0.9 + 1e-9).contains(v))
+        );
+        assert!(super::grid(1., 1.).is_empty());
     }
 }

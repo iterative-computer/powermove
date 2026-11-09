@@ -521,3 +521,25 @@ impl TimelineModel {
         .with_document(self.index.doc_id)
     }
 }
+
+/// A property row's name, shared by the outline and the graph: the transform
+/// names Properties uses, else the stored id in words (`blendMode` → `Blend Mode`).
+pub fn property_label(path: &str) -> String {
+    match path {
+        "position" => "Position",
+        "position.x" => "Position X",
+        "position.y" => "Position Y",
+        "position.z" => "Position Z",
+        "scale" => "Scale",
+        "scale.x" => "Scale X",
+        "scale.y" => "Scale Y",
+        "rotation" => "Rotation",
+        "opacity" => "Opacity",
+        "anchor" => "Anchor Point",
+        "anchor.x" => "Anchor Point X",
+        "anchor.y" => "Anchor Point Y",
+        "skew" => "Skew",
+        _ => return pm_surface::humanize(path),
+    }
+    .to_owned()
+}

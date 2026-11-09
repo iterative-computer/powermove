@@ -102,6 +102,8 @@ export interface PropertyRow extends RowBase {
 export interface TrackRow extends RowBase {
   kind: "track";
   track: string;
+  /** The clip's name, or how many clips the track holds. */
+  summary?: string;
   audio: boolean;
   enabled: boolean;
   expanded: boolean;

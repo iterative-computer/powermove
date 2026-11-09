@@ -1870,6 +1870,16 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
     };
     let half = t.metrics.gizmo_handle as f64 / 2. / frame.scale;
     let stem = t.metrics.rotation_stem as f64 / frame.scale;
+    // A circle as an octagon of engine lines (the rotation knob, the anchor ring).
+    let ring = |p: [f64; 2], r: f64, line: &mut dyn FnMut([f64; 2], [f64; 2])| {
+        let at = |i: usize| {
+            let a = i as f64 * std::f64::consts::FRAC_PI_4 + std::f64::consts::FRAC_PI_8;
+            [p[0] + r * a.cos(), p[1] + r * a.sin()]
+        };
+        for i in 0..8 {
+            line(at(i), at(i + 1));
+        }
+    };
     let square = |p: [f64; 2], line: &mut dyn FnMut([f64; 2], [f64; 2])| {
         let c = [
             [p[0] - half, p[1] - half],
@@ -1881,11 +1891,8 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
             line(c[i], c[(i + 1) % 4]);
         }
     };
-    for pose in poses {
-        for i in 0..4 {
-            line(pose.corners[i], pose.corners[(i + 1) % 4]);
-        }
-    }
+    // The box a press can take comes first: a huge selection over the
+    // engine's line budget loses its last per-layer outlines, never handles.
     let common = (poses.len() > 1).then(|| group_pose(poses)).flatten();
     if let Some(group) = &common {
         for i in 0..4 {
@@ -1895,7 +1902,7 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
             square(group.handle(i), &mut line);
         }
         line(group.handle(1), group.rotate_handle(stem));
-        square(group.rotate_handle(stem), &mut line);
+        ring(group.rotate_handle(stem), half, &mut line);
     }
     if let [pose] = poses
         && !pose.locked
@@ -1903,11 +1910,20 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
         for i in 0..8 {
             square(pose.handle(i), &mut line);
         }
+        // Rotation is a round knob, so it never reads as a scale handle.
         line(pose.handle(1), pose.rotate_handle(stem));
-        square(pose.rotate_handle(stem), &mut line);
+        ring(pose.rotate_handle(stem), half, &mut line);
+        // The anchor point: a ring with a cross through it (After Effects, v1).
         let a = pose.anchor;
-        line([a[0] - half, a[1]], [a[0] + half, a[1]]);
-        line([a[0], a[1] - half], [a[0], a[1] + half]);
+        let reach = t.metrics.anchor_mark as f64 / 2. / frame.scale;
+        ring(a, reach * 0.6, &mut line);
+        line([a[0] - reach, a[1]], [a[0] + reach, a[1]]);
+        line([a[0], a[1] - reach], [a[0], a[1] + reach]);
+    }
+    for pose in poses {
+        for i in 0..4 {
+            line(pose.corners[i], pose.corners[(i + 1) % 4]);
+        }
     }
     lines
 }
