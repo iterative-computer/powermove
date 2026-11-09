@@ -1,5 +1,6 @@
 """Cheap deterministic tests of the yardstick; no Blender or GPU needed."""
 import unittest
+from unittest.mock import patch
 import numpy as np
 from metrics import delta_e2000, exposure_match, lab, neutral, score, ssim_map
 
@@ -32,6 +33,18 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(np.isfinite(neutral(a)).all())
         self.assertTrue(np.isfinite(neutral(np.zeros_like(a))).all())
         self.assertLess(np.max(delta_e2000(lab(neutral(a)),lab(neutral(a)))),1e-10)
+
+    def test_energy_constants_match_quadrature(self):
+        from pathlib import Path
+        from generate_energy_lut import text
+        shader = Path(__file__).resolve().parents[2]/'crates/pm-studio/src/shaders/trace.wgsl'
+        self.assertIn(text(),shader.read_text())
+
+    def test_absent_blender_skips_without_building(self):
+        import run
+        with patch('sys.argv',['run.py']), patch.object(run,'blender_path',return_value=None), patch('subprocess.run') as child:
+            self.assertEqual(run.main(),0)
+            child.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -27,9 +27,9 @@ def decode(rgb):
 
 
 def lab(rgb):
-    xyz = rgb @ np.array([[.4124564, .3575761, .1804375],
+    xyz = np.einsum("...c,dc->...d", rgb, np.array([[.4124564, .3575761, .1804375],
                           [.2126729, .7151522, .0721750],
-                          [.0193339, .1191920, .9503041]]).T
+                          [.0193339, .1191920, .9503041]]))
     xyz /= np.array([.95047, 1, 1.08883])
     delta = 6/29
     f = np.where(xyz > delta**3, np.cbrt(xyz), xyz/(3*delta**2) + 4/29)
@@ -79,7 +79,7 @@ def blur(a):
 
 def ssim_map(a, b):
     """Wang SSIM: 11x11 Gaussian, sigma=1.5, L=1; computed on sRGB luma."""
-    a, b = a @ LUMA, b @ LUMA
+    a, b = np.sum(a*LUMA, axis=-1), np.sum(b*LUMA, axis=-1)
     ma, mb = blur(a), blur(b)
     va, vb = np.maximum(blur(a*a)-ma*ma, 0), np.maximum(blur(b*b)-mb*mb, 0)
     covariance = blur(a*b)-ma*mb
@@ -88,7 +88,7 @@ def ssim_map(a, b):
 
 
 def exposure_match(a, b, mask):
-    la, lb = a @ LUMA, b @ LUMA
+    la, lb = np.sum(a*LUMA, axis=-1), np.sum(b*LUMA, axis=-1)
     valid = mask & (la > .005) & (lb > .005)
     if not valid.any():
         return 1.
@@ -108,7 +108,7 @@ def score(a, b, masks, exposure=1):
         if not n:
             result[name] = dict(pixels=0, reason='region not visible / unsupported')
             continue
-        lum_a, lum_b = a[mask] @ LUMA, b[mask] @ LUMA
+        lum_a, lum_b = np.sum(a[mask]*LUMA, axis=-1), np.sum(b[mask]*LUMA, axis=-1)
         result[name] = dict(pixels=n, delta_e_mean=float(de[mask].mean()),
                             delta_e_p50=float(np.percentile(de[mask], 50)),
                             delta_e_p95=float(np.percentile(de[mask], 95)),
