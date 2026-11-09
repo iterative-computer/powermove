@@ -690,6 +690,8 @@ fn sync_target(
             p.view.shadows,
             p.view.bounds,
         );
+        target.renderer.set_iris(p.view.camera.iris);
+        target.renderer.set_ambient(p.view.ambient);
         target.renderer.set_projection(p.view.camera.orthographic);
         target
             .renderer

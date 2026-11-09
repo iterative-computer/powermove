@@ -13,7 +13,7 @@ export function describeCamera(view: StudioView, metersPerUnit=0.1): { camera: S
   const focal = 12 / Math.max(1e-8, c.tanY);
   return {
     camera: { position, target, fov: 2 * Math.atan(c.tanY) * 180 / Math.PI, f_stop: c.lensRadius > 0 ? focal*0.001/(2*metersPerUnit*c.lensRadius) : 0, focus: target, focal_mm: focal },
-    options: { projection: c.orthographic ? 'orthographic' : 'perspective', up: vec(c.up), ortho_height: c.orthographic ? c.tanY * 2 : 6, near: c.near ?? .01, far: c.far ?? 1000 },
+    options: { projection: c.orthographic ? 'orthographic' : 'perspective', up: vec(c.up), ortho_height: c.orthographic ? c.tanY * 2 : 6, near: c.near ?? .01, far: c.far ?? 1000, iris:c.iris },
   };
 }
 
@@ -24,7 +24,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
   for (let o = 0; o < input.materials.length; o += 32) {
     const m = input.materials;
     materials.push({ base: vec(m, o), metallic: m[o + 3]!, roughness: m[o + 4]!, coat: m[o + 5]!, coat_roughness: m[o + 6]!, transmission: m[o + 7]!, emission: vec(m, o + 8), screen: false, subsurface: m[o + 11]!, ior: m[o + 12]!, specular: m[o + 13]!, anisotropy: m[o + 15]!, sheen: m[o + 20]!, film_nm: m[o + 21]!, dispersion: m[o + 22]!, droplets: m[o + 23]! });
-    materialOptions.push({ opacity: m[o + 14]!, ambient_response: input.materialPolicies?.[o / 32]?.ambientResponse ?? 1, double_sided: input.materialPolicies?.[o / 32]?.doubleSided ?? true, unlit:(m[o+25]! & 8)!==0, alpha_test: input.materialPolicies?.[o / 32]?.alphaTest ?? 0, maps: [m[o + 16]!, m[o + 17]!, m[o + 28]!, m[o + 29]!, m[o + 19]!, m[o + 30]!] });
+    materialOptions.push({ opacity: m[o + 14]!, ambient_response: input.materialPolicies?.[o / 32]?.ambientResponse ?? 1, double_sided: input.materialPolicies?.[o / 32]?.doubleSided ?? true, unlit:(m[o+25]! & 8)!==0, appears_in_reflections:(m[o+25]! & 32)===0, alpha_test: input.materialPolicies?.[o / 32]?.alphaTest ?? 0, maps: [m[o + 16]!, m[o + 17]!, m[o + 28]!, m[o + 29]!, m[o + 19]!, m[o + 30]!] });
   }
   const coloredMaterials=new Map<string,number>();
   const nodes = new Uint32Array(input.blasNodes), baseNode = input.tlasNodes.byteLength / 64;
@@ -89,7 +89,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
   return {
     version: 1, scene: { meters_per_unit:input.metersPerUnit??0.1, world: input.world, objects, materials, lights, extra_lights: extra, layers, camera, backdrop: vec(view.backdrop), environment: [vec(view.environment.zenith), vec(view.environment.horizon)], exposure: view.exposure, shadow_catcher: view.shadowCatcher },
     layer_ids: [...input.objects], object_ids: identities, material_options: materialOptions, light_options: [...areaOptions, ...extraOptions],
-    camera_options: options, environment_options: { backdrop_opaque: view.backdropOpaque, shadows: view.shadows, floor_y: view.floorY, ground: vec(view.environment.ground) },
+    camera_options: options, environment_options: { backdrop_opaque: view.backdropOpaque, shadows: view.shadows, floor_y: view.floorY, ground: vec(view.environment.ground),ambient:vec(view.ambient ?? [0,0,0]) },
     textures: maps.map((source, index) => {
       const pixels = source instanceof Uint8Array ? source : (source.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D)!.getImageData(0, 0, MAP_SIZE, MAP_SIZE).data;
       return { id: `map-${index}`, width: MAP_SIZE, height: MAP_SIZE, rgba: Array.from(pixels) };
@@ -105,8 +105,8 @@ export function viewFromDescription(document: StudioSceneDescription, aspect: nu
   if(right.lengthSq()<1e-12){if(Math.abs(forward.y)>.9999)right.set(1,0,0);else right.crossVectors(forward,Math.abs(forward.z)<.9?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0)).normalize();}
   const up=right.clone().cross(forward).normalize();
   return {
-    camera: { position: tuple(c.position), forward: forward.toArray() as [number, number, number], right: right.toArray() as [number, number, number], up: up.toArray() as [number, number, number], tanY: o.projection === 'orthographic' ? o.ortho_height / 2 : Math.tan(c.fov * Math.PI / 360), aspect, lensRadius: c.f_stop > 0 ? c.focal_mm*0.001/(2*c.f_stop*metres) : 0, focus: c.focus ? position.distanceTo(new THREE.Vector3(...tuple(c.focus))) : position.distanceTo(target), orthographic: o.projection === 'orthographic', near: o.near, far: o.far },
-    exposure: s.exposure, backdrop: tuple(s.backdrop), backdropOpaque: document.environment_options.backdrop_opaque, shadowCatcher: s.shadow_catcher, shadows: document.environment_options.shadows, floorY: document.environment_options.floor_y,
+    camera: { position: tuple(c.position), forward: forward.toArray() as [number, number, number], right: right.toArray() as [number, number, number], up: up.toArray() as [number, number, number], tanY: o.projection === 'orthographic' ? o.ortho_height / 2 : Math.tan(c.fov * Math.PI / 360), aspect, lensRadius: c.f_stop > 0 ? c.focal_mm*0.001/(2*c.f_stop*metres) : 0, focus: c.focus ? position.distanceTo(new THREE.Vector3(...tuple(c.focus))) : position.distanceTo(target), orthographic: o.projection === 'orthographic', near: o.near, far: o.far, iris:o.iris },
+    ambient:document.environment_options.ambient?tuple(document.environment_options.ambient):[0,0,0],exposure: s.exposure, backdrop: tuple(s.backdrop), backdropOpaque: document.environment_options.backdrop_opaque, shadowCatcher: s.shadow_catcher, shadows: document.environment_options.shadows, floorY: document.environment_options.floor_y,
     environment: { zenith: tuple(s.environment[0]), horizon: tuple(s.environment[1]), ground: tuple(document.environment_options.ground) },
   };
 }
@@ -136,7 +136,7 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
     g.setAttribute('uv', new THREE.Float32BufferAttribute(o.mesh.uvs.flat(), 2)); g.setIndex(o.mesh.indices.flat());
     const colors=document.object_ids[i]?.vertex_colors;
     if(colors)g.setAttribute('color',new THREE.Float32BufferAttribute(colors.flat(),4));
-    const material=materials[o.material]!.clone();material.vertexColors=!!colors;
+    const material=materials[o.material]!.clone();material.userData.studioReflections=document.material_options[o.material]?.appears_in_reflections!==false;material.vertexColors=!!colors;
     const placements=document.scene.instances?.length?document.scene.instances.filter(p=>p.object===i):null;
     if(placements?.length===0){g.dispose();material.dispose();return;}
     const mesh=placements?new THREE.InstancedMesh(g,material,placements.length):new THREE.Mesh(g,material);

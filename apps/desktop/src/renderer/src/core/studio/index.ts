@@ -1,3 +1,4 @@
+import { attachStudioWorld } from '../scene3d/environment-render';
 import { studioGeometryIdle } from './blas';
 import * as THREE from 'three';
 import { extractScene, isPending, MAP_SIZE, type StudioPending, type StudioScene } from './extract';
@@ -58,7 +59,7 @@ export function studioProgress(PM: any): { samples: number; goal: number; refini
   const s = state(PM), preparing = preparingOf(s); if (preparing) return { samples: 0, goal: REFINE_SAMPLES, refining: false, preparing };
   if (s.preview === 'fast') return null; for (const j of s.jobs.values()) return { samples: j.samples, goal: REFINE_SAMPLES, refining: j.refining }; return null;
 }
-function mapCanvas(source: any, flipY: boolean): OffscreenCanvas {
+export function mapCanvas(source: any, flipY: boolean): OffscreenCanvas {
   const c = new OffscreenCanvas(MAP_SIZE, MAP_SIZE);
   {
     const ctx = c.getContext('2d')!;
@@ -74,7 +75,7 @@ function mapCanvas(source: any, flipY: boolean): OffscreenCanvas {
   return c;
 }
 
-function cameraOf(camera: THREE.Camera, w: number, h: number): StudioView['camera'] | null {
+export function cameraOf(camera: THREE.Camera, w: number, h: number): StudioView['camera'] | null {
   const pc = camera as THREE.PerspectiveCamera;
   const oc = camera as THREE.OrthographicCamera;
   if (!pc.isPerspectiveCamera && !oc.isOrthographicCamera) return null;
@@ -99,7 +100,7 @@ function cameraOf(camera: THREE.Camera, w: number, h: number): StudioView['camer
 /** The studio backdrop when a set is on and no background color was chosen. */
 export const STUDIO_BACKDROP = '#F6F5F8';
 
-function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3): StudioView {
+export function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3): StudioView {
   const raw = runtime.raw;
   const env = raw?.environment;
   const channel = (node: any, prefix: string, key: string, fallback: any) => {
@@ -109,6 +110,7 @@ function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3):
   };
   const value = (key: string, fallback: any) => channel(env, 'environment', key, fallback);
   // The lens: an f-number opens the aperture; focus defaults to the aim point.
+  camera.iris=[Number(channel(raw?.camera,'camera','irisShape',0)),Number(channel(raw?.camera,'camera','irisRotation',0))*Math.PI/180,Number(channel(raw?.camera,'camera','irisRoundness',0)),Number(channel(raw?.camera,'camera','irisAspect',1))];
   const fStop = Number(channel(raw?.camera, 'camera', 'fStop', 0));
   const focus = Number(channel(raw?.camera, 'camera', 'focusDistance', 0));
   const fov = Number(channel(raw?.camera, 'camera', 'fov', 45));
@@ -116,10 +118,11 @@ function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3):
     // Focal length from the field of view on a 24 mm-tall sensor, in scene units
     // scaled like the scene (1 unit ≈ 100 mm at product scale).
     const focalMm = 12 / Math.tan(THREE.MathUtils.degToRad(fov) / 2);
-    camera.lensRadius = (focalMm / (2 * fStop)) / 100;
+    camera.lensRadius = focalMm*.001 / (2 * fStop * (runtime.metersPerUnit ?? .1));
   }
   const target = raw?.camera ? new THREE.Vector3(Number(channel(raw.camera, 'camera', 'targetX', 0)), Number(channel(raw.camera, 'camera', 'targetY', 0)), Number(channel(raw.camera, 'camera', 'targetZ', 0))) : null;
   camera.focus = focus > 0 ? focus : target ? target.distanceTo(new THREE.Vector3(...camera.position)) : 1;
+  const ambientLights=(raw?.lights || []).filter((l:any)=>l.type==='ambient');
   const ambient = Number(value('ambient', 0.4));
   const sky = new THREE.Color(value('ambientColor', '#ffffff'));
   // three's hemisphere light lights a diffuse surface with albedo × color ×
@@ -127,11 +130,13 @@ function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3):
   const zenith = sky.clone().multiplyScalar(ambient);
   const ground = zenith.clone().multiplyScalar(0.35);
   const horizon = zenith.clone().lerp(ground, 0.5);
+  const ambientFill=new THREE.Color(0,0,0);
+  for(const light of ambientLights)ambientFill.add(new THREE.Color(channel(light,'light','color','#FFFFFF')).multiplyScalar(Number(channel(light,'light','intensity',1))));
   const catcher = !!env?.shadowCatcher && !bounds.isEmpty();
   const background = env?.background ? new THREE.Color(env.background) : catcher ? new THREE.Color(STUDIO_BACKDROP) : null;
   const display = background ? background.clone().convertLinearToSRGB() : null;
   return {
-    camera,
+    camera,ambient:ambientFill.toArray() as [number,number,number],
     exposure: Number(value('exposure', 1)),
     backdrop: display ? [display.r, display.g, display.b] : [0, 0, 0],
     backdropOpaque: !!background,
@@ -263,6 +268,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     // after the viewer has already received the worker's completed geometry.
     if (isPending(extracted)) { s.preparing.set(geometrySetKey, extracted); return null; }
     s.preparing.delete(geometrySetKey);
+    attachStudioWorld(extracted,runtime.studioWorld,runtime.metersPerUnit);
     if (!studioBackendFactory() && extracted.tris.byteLength > studioMaxBindingBytes()) throw new Error('This scene exceeds the Studio GPU buffer budget');
     const screens: Job['screens'] = [];
     const maps = extracted.maps.map((m, layer) => { if ('screen' in m) { screens.push({ layer, comp: m.screen }); return renderScreen?.(m.screen) ?? new Uint8Array(MAP_SIZE * MAP_SIZE * 4); } return mapCanvas(m.source, m.flipY); });

@@ -83,3 +83,11 @@ describe('MCP import_media on a desktop host', () => {
     await expect(mcpProjectTool(importer('failed') as never, '__mcp_import_media', { path: '/tmp/shot.png' })).rejects.toThrow('import failed');
   });
 });
+
+
+it('exports 3D render passes through the authenticated sequence exporter',async()=>{
+  const PM=editor();
+  await mcpProjectTool(PM as never,'__mcp_export_video',{format:'png',passes:['depth','normal'],alpha:true,motionBlur:false});
+  expect(PM.Export.run).toHaveBeenCalledWith(expect.objectContaining({format:'png',passes:['depth','normal'],fps:30,reportPath:true}));
+  await expect(mcpProjectTool(PM as never,'__mcp_export_video',{format:'mp4',passes:['depth']})).rejects.toThrow('require format png');
+});

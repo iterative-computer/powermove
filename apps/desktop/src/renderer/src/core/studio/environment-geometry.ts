@@ -117,7 +117,7 @@ export function sampleTerrain(input: StudioTerrain, x: number, z: number): { hei
     normal: new THREE.Vector3((-dx! * t.resolution) / t.size[0], 1, (-dz! * t.resolution) / t.size[1]).normalize(),
   };
 }
-function terrainMeshes(input: StudioTerrain): { mesh: StudioMesh; material: number }[] {
+export function terrainMeshes(input: StudioTerrain): { mesh: StudioMesh; material: number }[] {
   const t = terrainSettings(input),
     n = t.resolution;
   if (

@@ -1,3 +1,4 @@
+import { environmentProperties,evaluateEnvironmentNode } from './environment-data';
 import { extrusionProperties } from './extrusion-data';
 import { objectMapSets,mapImageId } from './material-maps';
 import { objectSchema, lightSchema, cameraSchema, environmentSchema, parseScene, validateSceneChannel, type Scene3D } from './schema';
@@ -41,7 +42,7 @@ export function parseLayer3DData(role: Layer3DRole, raw: any): any {
     if(Object.keys(raw.light?.p || {}).some(key=>['x','y','z','visible'].includes(key))) throw new Error('Use the light layer transform for position and visibility');
     const node=parseScene({lights:[{...input,id:'light'}]}).lights[0]!;
     const {x,y,z,visible,...p}=node.p;
-    return {light:{type:node.type,p,castShadow:node.castShadow}};
+    return {light:{type:node.type,p,castShadow:node.castShadow,...(node.world?{world:node.world}:{})}};
   }
   if(Object.keys(raw.camera?.p || {}).some(key=>['x','y','z'].includes(key))) throw new Error('Use the camera layer transform for position');
   const node=parseScene({camera:cameraSchema.parse(raw.camera ?? {}),environment:environmentSchema.parse(raw.environment ?? {})});
@@ -50,20 +51,21 @@ export function parseLayer3DData(role: Layer3DRole, raw: any): any {
 }
 export function layer3DProperties(layer: any): any[] {
   const role=layer3DRole(layer),data=layer?.d?.data;
-  if(!role)return extrusionProperties(layer);
+  if(!role)return [...extrusionProperties(layer),...environmentProperties(layer?.d)];
   const out:any[]=[];
   const collect=(p:any,prefix:string,group:string)=>{
     for(const [key,prop] of Object.entries<any>(p || {})) if(prop && Array.isArray(prop.kf))
       out.push({key:`${prefix}.${key}`,prop,label:({opacity:'Opacity',roughness:'Roughness',metallic:'Metallic',emissionColor:'Emission Color',emissionIntensity:'Emission Intensity',ambientResponse:'Ambient Response'} as Record<string,string>)[key] || key,group});
   };
   if(role==='object'){
+    out.push(...environmentProperties(data.object));
     collect(data.object?.material?.p,'m','Material');
     collect(data.object?.materialProperties,'mi','Material');
     for(const [index,p] of Object.entries(data.object?.sourceMaterialProperties || {}))collect(p,`mi.${index}`,`Material ${index}`);
     for(const [key,part] of Object.entries<any>(data.object?.parts || {}))for(const [field,prop] of Object.entries<any>(part?.p || {}))
       if(prop && Array.isArray(prop.kf))out.push({key:`pt.${key}.${field}`,prop,label:PART_LABELS[field] || field,group:part.name || 'Part'});
   }
-  if(role==='light')collect(data.light?.p,'light','Light');
+  if(role==='light'){collect(data.light?.p,'light','Light');out.push(...environmentProperties(data.light));}
   if(role==='camera'){collect(data.camera?.p,'camera','Camera');collect(data.environment?.p,'environment','Environment');}
   return out;
 }
@@ -74,6 +76,12 @@ export function validateLayer3DChannel(layer:any,path:string,property:any):void 
     const factor=alias.startsWith('s')?.01:1;
     objectSchema.shape.p.unwrap().shape[alias]!.parse({...property,v:property.v*factor,kf:property.kf.map((key:any)=>({...key,v:key.v*factor}))});
   }else validateSceneChannel(path,property);
+  if(layer3DRole(layer)==='object' && /^(terrain|scatter)\./.test(path)){
+    const data=clone(layer.d.data),[kind,key]=path.split('.');
+    if(key?.startsWith('region')){const [,region,field]=path.split('.');data.object.terrain.regions[Number(region!.slice(6))].p[field!]=clone(property);}
+    else if(data.object[kind!])data.object[kind!].p[key!]=clone(property);
+    parseLayer3DData('object',data);
+  }
   if(layer3DRole(layer)==='camera' && (path==='camera.near' || path==='camera.far')){
     const data=clone(layer.d.data);data.camera.p[path.slice(7)]=clone(property);parseLayer3DData('camera',data);
   }
@@ -94,8 +102,9 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
 }
 export function layer3DAssetIds(layer:any):string[] {
   const node=layer?.d?.data?.object;
-  if(!node)return [...new Set<string>(Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any))).filter((id):id is string=>!!id))];
-  return node?[...new Set<string>([node.source?.assetId,...objectMapSets(node).flatMap(maps=>Object.values(maps).map(mapImageId))].filter((id):id is string=>!!id))]:[];
+  const sources=[node?.world?.source,node?.terrain?.heightSource,layer?.d?.data?.light?.world?.source].filter((v):v is string=>typeof v==='string');
+  if(!node)return [...new Set<string>([...sources,...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any))).filter((id):id is string=>!!id)])];
+  return node?[...new Set<string>([...sources,node.source?.assetId,...objectMapSets(node).flatMap(maps=>Object.values(maps).map(mapImageId))].filter((id):id is string=>!!id))]:[];
 }
 
 /** Assemble a transient world for rendering; there is no scene container in project data. */
@@ -113,12 +122,14 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
   const values=(layer:any,p:any,prefix:string)=>Object.fromEntries(Object.entries<any>(p || {}).map(([key,prop])=>[key,ch(ev(layer,prop,`${prefix}.${key}`))]));
   const transform=(layer:any)=>Object.fromEntries(Object.entries(TRANSFORM_PATHS).map(([key,path])=>[key,ch((layer.p[path]?ev(layer,layer.p[path],path):key.startsWith('s')?100:0)/(key.startsWith('s')?100:1))]));
   const cameraLayer=layers.find((l:any)=>layer3DRole(l)==='camera' && active(l));
-  const objectLayers=layers.filter((l:any)=>layer3DRole(l)==='object' && active(l));
+  const scatterSources=new Set<string>();
+  for(const layer of layers)if(active(layer) && layer.d?.data?.object?.scatter){scatterSources.add(layer.d.data.object.scatter.model);scatterSources.add(layer.d.data.object.scatter.surface);}
+  const objectLayers=layers.filter((l:any)=>layer3DRole(l)==='object' && (active(l) || scatterSources.has(l.id)));
   const lightLayers=layers.filter((l:any)=>layer3DRole(l)==='light' && active(l));
   const allObjectIds=new Set(objectLayers.map((l:any)=>l.id));
   const objects=objectLayers.map((layer:any)=>{
-    const node=layer.d.data.object;
-    const p=transform(layer);
+    const node=evaluateEnvironmentNode(layer.d.data.object,(prop,path)=>ev(layer,prop,path));
+    const p=transform(layer);p.visible=ch(active(layer));
     // Native orientation is applied before the separately animated rotation.
     for(const [key,axis] of [['rx','x'],['ry','y'],['rz','z']] as const) if(layer.p[`orientation.${axis}`])p[key]!.v+=ev(layer,layer.p[`orientation.${axis}`],`orientation.${axis}`);
     return {...node,id:layer.id,name:layer.name,parent:allObjectIds.has(layer.parent)?layer.parent:null,p,
@@ -128,7 +139,7 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
       parts:Object.fromEntries(Object.entries<any>(node.parts || {}).map(([key,part])=>[key,{name:part.name,p:values(layer,part.p,`pt.${key}`)}]))};
   });
   const lights=lightLayers.map((layer:any)=>{
-    const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);
+    const node=evaluateEnvironmentNode(layer.d.data.light,(prop,path)=>ev(layer,prop,path)),p=values(layer,node.p,'light'),t=transform(layer);
     return {...node,id:layer.id,name:layer.name,p:{...p,x:t.x,y:t.y,z:t.z}};
   });
   // Never replace the implicit camera of a saved, unversioned composition.
@@ -138,7 +149,7 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
     ...Object.fromEntries(['x','y','z'].map(key=>[key,transform(cameraLayer)[key]]))}}:base.camera;
   const environment=cameraLayer?{...cameraLayer.d.data.environment,p:values(cameraLayer,cameraLayer.d.data.environment.p,'environment')}:base.environment;
   // New models are immediately visible; explicit lights replace this studio preset.
-  if(!lightLayers.length){
+  if(!lightLayers.length && !objects.some((o:any)=>o.world?.mode!=='none' && o.world)){
     let id='default_sun';while((composition?.layers || []).some((layer:any)=>layer.id===id))id+='x';
     lights.push(...parseScene({lights:[{id,type:'sun'}]}).lights);
   }

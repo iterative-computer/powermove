@@ -6,7 +6,7 @@ import { agentProjectSnapshot } from '../../../../shared/agent-project-snapshot'
 const empty = z.object({}).strict();
 const creation = z.object({ name: z.string().trim().min(1).max(120), width: z.number().int().min(2).max(8192).default(1920), height: z.number().int().min(2).max(8192).default(1080), fps: z.number().finite().min(1).max(120).default(30), duration: z.number().finite().min(0.1).max(36000).default(10) }).strict();
 const localPath = z.object({ path: z.string().min(1).max(4096).refine(value => /^(\/|[A-Za-z]:[\\/])/.test(value) && !value.includes('\0'), 'Provide an absolute local file path.') }).strict();
-const video = z.object({ name: z.string().min(1).max(120).optional(), format: z.enum(['mp4', 'prores']).default('mp4'), range: z.enum(['all', 'work']).default('all'), audio: z.boolean().default(true), motionBlur: z.boolean().default(true), alpha: z.boolean().default(false) }).strict();
+const video = z.object({ name: z.string().min(1).max(120).optional(), format: z.enum(['mp4', 'prores','png']).default('mp4'), passes:z.array(z.enum(['beauty','depth','normal','albedo','object_id','material_id','shadow'])).min(1).max(7).optional(), range: z.enum(['all', 'work']).default('all'), audio: z.boolean().default(true), motionBlur: z.boolean().default(true), alpha: z.boolean().default(false) }).strict();
 
 /** Authenticated main-only operations. They use the normal project and exporter APIs. */
 export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<string, unknown>): Promise<unknown> {
@@ -57,7 +57,8 @@ export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<
     if (tool === '__mcp_save_project') { empty.parse(args); options = { format: 'json', reportPath: true }; }
     else {
       const input = video.parse(args);
-      if (input.alpha && input.format !== 'prores') throw new Error('Transparent video requires ProRes.');
+      if(input.passes && input.format!=='png')throw new Error('Render passes require format png');
+      if (input.alpha && input.format !== 'prores' && input.format!=='png') throw new Error('Transparent video requires ProRes.');
       options = { ...input, mblur: input.motionBlur, fps: PM.proj.fps, scale: 1, reportPath: true };
     }
     const result = await PM.Export.run(options);

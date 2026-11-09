@@ -537,7 +537,7 @@ PM.allProps = (L: any) => {
   return out;
 };
 PM.findProp = (L: any, key: any) => {
-  if (/^(?:m\.[^.]+$|mi\.|pt\.|geo\.|ms\.|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
+  if (/^(?:m\.[^.]+$|mi\.|pt\.|geo\.|ms\.|(?:o|light|camera|environment|world|fog|terrain|scatter|materialOptions)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
   if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;

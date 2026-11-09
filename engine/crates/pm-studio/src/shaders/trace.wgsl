@@ -26,6 +26,8 @@ struct Params {
   ground: vec4f,       // environment radiance below the horizon; w: floor height
   caustic: vec4f,      // x: grid cell size, y: photons emitted so far, z: caustics on (1), w: photons this pass
   bounds: vec4f,       // scene centre (xyz) and radius, for sun photons
+  iris: vec4f,        // blades (0: circle), rotation radians, roundness, aspect
+  ambient: vec4f,     // dedicated AE Ambient layers: uniform diffuse illumination
 }
 
 // opts.w keeps the legacy projection bit; its high bit enables clipping.
@@ -44,7 +46,7 @@ struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, rig
 // emit: rgb, subsurface radius (0: none) · extra: ior, specular, opacity, anisotropy (-1..1)
 // maps: texture-array layers for color, emissive, occlusion-roughness-metal, normal (-1: none)
 // layers: sheen, thin-film thickness (nm), dispersion, water droplets
-// policy: ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16), alpha test
+// policy: ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32), alpha test
 // maps2: independent roughness, metalness, AO indices, normal-map scale
 struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f, layers: vec4f, policy: vec4f, maps2: vec4f }
 // pos.w: kind (0 softbox, 1 sphere, 2 spot, 3 sun).
@@ -231,6 +233,20 @@ fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
     if(sdata[P.counts.x*4u+hit.inst*9u+5u].w<0.5){hit.t+=offset;return hit;}
     let step=hit.t+ray_epsilon();origin+=rd*step;offset+=step;left-=step;
     if(left<=0.0){return Hit(tmax,-1,vec2f(0.0),0u);}
+  }
+  return Hit(tmax,-1,vec2f(0.0),0u);
+}
+
+// Material Options visibility applies to secondary camera paths only. Shadow
+// rays keep their independent casts-shadows policy.
+fn secondary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
+  var origin=ro;var offset=0.0;var left=tmax;
+  for(var i=0;i<1024;i++){
+    var hit=intersect(origin,rd,left,false);
+    if(hit.tri<0){return Hit(tmax,-1,vec2f(0.0),0u);}
+    if((u32(tri_material(hit.tri).policy.y)&32u)==0u){hit.t+=offset;return hit;}
+    let step=hit.t+ray_epsilon();origin+=rd*step;offset+=step;left-=step;
+    if(left<=0.0){break;}
   }
   return Hit(tmax,-1,vec2f(0.0),0u);
 }
@@ -1022,7 +1038,7 @@ fn droplets(n: vec3f, uv: vec2f, amount: f32) -> vec3f {
 // Radiance arriving along a mirror direction: a light, the dome, the floor
 // or another object (its emission plus one light sample).
 fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
-  let h = intersect(p, d, BIG, false);
+  let h = secondary_intersect(p, d, BIG);
   let tf = floor_t(p, d);
   let light_hit=closest_light(p,d,min(h.t,tf));
   if(light_hit.t<h.t && light_hit.t<tf){return light_emit(light_at(light_hit.light),p+d*light_hit.t,d);}
@@ -1078,9 +1094,23 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   if (P.cam_pos.w > 0.0 && P.opts.x == 0u) {
     let focus = ro + d * (P.cam_fwd.w / dot(d, fwd));
     let u = rnd2();
-    let r = sqrt(u.x) * P.cam_pos.w;
-    let a = 2.0 * PI * u.y;
-    ro = ro + P.cam_right.xyz * r * cos(a) + P.cam_up.xyz * r * sin(a);
+    var aperture=vec2f(0.);
+    let blades=u32(round(P.iris.x));
+    // Rejection sampling is uniform over the rounded polygon's area. The
+    // circumscribed disc gives bounded, efficient sampling even at 3 blades.
+    var lens_sample=u;
+    for(var attempt=0;attempt<64;attempt++){
+      let a=2.0*PI*lens_sample.y;let radius=sqrt(lens_sample.x);
+      var boundary=1.;
+      if(blades>=3u){let sector=2.0*PI/f32(blades);let local=a-floor(a/sector)*sector-sector*0.5;
+        boundary=mix(cos(PI/f32(blades))/cos(local),1.,clamp(P.iris.z,0.,1.));}
+      if(radius<=boundary){aperture=radius*vec2f(cos(a),sin(a));break;}
+      lens_sample=rnd2();
+    }
+    let cr=cos(P.iris.y);let sr=sin(P.iris.y);
+    aperture=vec2f(cr*aperture.x-sr*aperture.y,sr*aperture.x+cr*aperture.y);
+    aperture.x*=max(P.iris.w,0.1);
+    ro = ro + P.cam_pos.w*(P.cam_right.xyz*aperture.x+P.cam_up.xyz*aperture.y);
     rd = normalize(focus - ro);
   }
   if (camera_clip_on()) { ro += rd * max(0.0, camera_near() - dot(ro - P.cam_pos.xyz, fwd)) / max(dot(rd, fwd), 1e-6); }
@@ -1105,7 +1135,7 @@ fn path(px: vec2f) -> Sample {
   for (var b = 0u; b <= max_b + 2u; b++) {
     if (b > max_b && !primary) { break; }
     var h:Hit;
-    if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}else{h=intersect(ro,rd,BIG,false);}
+    if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}else{h=secondary_intersect(ro,rd,BIG);}
     let tf = floor_t(ro, rd);
     // Finite emitters terminate a secondary segment at the closest light.
     var light_distance=BIG;var seen_light=0u;
@@ -1207,6 +1237,7 @@ fn path(px: vec2f) -> Sample {
     }
     primary = false;
     let w = lobe_probs(m, nv);
+    s.radiance += tp*m.base.xyz*(1.-m.base.w)*(1.-m.spec.w)*P.ambient.xyz*m.policy.x;
     // Direct light.
     if (w.trans < 0.999) { s.radiance += tp * (sample_lights(p, n, v, m, w, false)+sample_environment(p,n,v,m,w)); }
     // Caustics: light focused onto this surface by glass or mirrors.

@@ -32,7 +32,7 @@ export type StudioObjectIdentity = {
   vertex_colors?: [number,number,number,number][];
 };
 export type StudioMaterialOptions = {
-  opacity: number; ambient_response: number; double_sided: boolean; alpha_test: number; unlit?: boolean;
+  opacity: number; ambient_response: number; double_sided: boolean; alpha_test: number; unlit?: boolean; appears_in_reflections?:boolean;
   /** Texture indices: color, emissive, roughness, metalness, normal, AO. -1 = none. */
   maps: [number, number, number, number, number, number];
 };
@@ -43,10 +43,10 @@ export type StudioTexture = {
 };
 export type StudioCameraOptions = {
   projection: 'perspective' | 'orthographic'; up: StudioVec3;
-  ortho_height: number; near: number; far: number;
+  ortho_height: number; near: number; far: number; iris?:[number,number,number,number];
 };
 export type StudioEnvironmentOptions = {
-  backdrop_opaque: boolean; shadows: boolean; floor_y: number; ground: StudioVec3;
+  backdrop_opaque: boolean; shadows: boolean; floor_y: number; ground: StudioVec3;ambient?:StudioVec3;
 };
 export type StudioLightOptions = { cast_shadow: boolean; distance: number; decay: number };
 export type StudioSceneDescription = {

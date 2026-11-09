@@ -69,25 +69,25 @@ all of them already exist in Powermove.
 
 | Capability | On main | How Studio renders it | studio-3d |
 |---|---|---|---|
-| Environment Light and HDRI | Uniform hemisphere only; no HDRI | Environment texture sampling required | Gap |
+| Environment Light and HDRI | Uniform hemisphere only; no HDRI | World sky/HDR/EXR or live comp/layer source; shared environment sampling | Verified |
 | Parallel / spot / point lights | Yes (parallel named sun) | Analytic lights | Verified |
-| Ambient / environment light types | Global ambient only, no dedicated layers | Environment illumination | Gap |
-| Material Options: Casts Shadows | Model and light flags | Shadow-ray visibility | Verified |
+| Ambient / environment light types | Global ambient only, no dedicated layers | Dedicated ambient diffuse illumination and environment source layers; parallel aliases sun | Verified |
+| Material Options: Casts Shadows | Model and light flags | Keyframeable Off/On/Only, independent primary/shadow visibility | Verified |
 | Material Options: Accepts Shadows | Model receiveShadow | Per-material direct-light shadow policy | Verified |
-| Material Options: Accepts Lights | No dedicated switch | Unlit material policy required | Gap |
-| Material Options: Appears in Reflections | No dedicated switch | Secondary-ray visibility required | Gap |
+| Material Options: Accepts Lights | No dedicated switch | Keyframeable unlit base-color policy on models and native 3D artwork | Verified |
+| Material Options: Appears in Reflections | No dedicated switch | Keyframeable secondary camera-path visibility; shadow policy remains independent | Verified |
 | Layers as materials, same-comp source | Yes; precomp/solid/image/video/text/shape | Live source texture | Verified |
 | Keyframeable Opacity/Roughness/Metallic | Yes | Main evaluated material channels | Verified |
 | Keyframeable Emission Color/Emission Intensity/Ambient Response | Yes | Main evaluated material channels | Verified |
 | Substance SBSAR | No | Substance runtime/import pipeline required | Gap |
 | Front / Bevel / Side / Back | Yes for extruded text/shapes | Distinct materials per triangle group | Verified |
 | Camera depth of field/focus | No | Studio thin lens from source branch | Kept |
-| Camera iris controls | No | Aperture shape controls required | Gap |
+| Camera iris controls | No | Keyframeable blade count, rotation, roundness, aspect; shared uniform aperture sampling | Verified |
 | Multiple views | Single camera/free view, no simultaneous panels | Preserve navigation; multi-view UI required | Gap |
 | glTF embedded animation | Yes | Pose evaluation before tracing | Kept |
 | FBX with embedded animation | No | Importer required | Gap |
-| 2D layers casting shadows onto 3D | No; native-plane casts explicitly disabled | Alpha shadow rays are supported; native-plane casts remain disabled | Gap |
-| Render passes | Internal per-layer/depth surfaces; no user export passes | AOV export interface required | Gap |
+| 2D layers casting shadows onto 3D | No; native-plane casts explicitly disabled | Native 3D planes cast alpha shadows and support receiving light/shadows through Material Options | Verified |
+| Render passes | Internal per-layer/depth surfaces; no user export passes | Beauty, depth, world normal, albedo, object/material ID and shadow as true RGBA16 PNG sequences | Verified |
 
 ## Studio features to retain
 
@@ -108,17 +108,17 @@ all of them already exist in Powermove.
 
 ## Verification
 
-The combined branch passes **55 3D Electron checks**: 53 non-film cases in
+The earlier integration baseline passed **55 3D Electron checks**: 53 non-film cases in
 one serial run, plus the two export films in a separate run. The extended film
 uses the corrected Final quality through nested shot compositions. The earlier
 WebGPU baseline also passed its complete 53-case matrix.
 
-Checklist totals: **59 verified**, **4 kept**, **0 pending**, **11 gaps**.
+Checklist totals: **66 verified**, **4 kept**, **0 pending**, **4 gaps**.
 
 | Area | Verified | Kept, further visual coverage needed | Gaps |
 |---|---:|---:|---:|
 | Main capabilities (43) | 41 | 1 | 1 |
-| Requested AE targets (19) | 7 | 2 | 10 |
+| Requested AE targets (19) | 14 | 2 | 3 |
 | Studio features (12) | 11 | 1 | 0 |
 
 - Main 3D, source layers, extrusion, lights, parts, switches, camera, masks and
@@ -161,9 +161,9 @@ retained. The broader glass/coat/sheen/film/dispersion family also needs further
 visual grading; this table does not claim full source-material fidelity.
 
 The audit's AE targets include features absent on main. They remain explicit
-gaps rather than being counted as regressions. Environment/world authoring,
-HDRI and asset scattering still need additional product work; geometry
-instancing now avoids rebuilding a BLAS for every repeated model.
+gaps rather than being counted as regressions. Environment/world, fog, terrain and scatter authoring now have document and
+agent contracts; their inspector/menu UI is a separate lane. Geometry
+instancing avoids rebuilding a BLAS for every repeated model.
 
 Baseline and Studio PNGs live outside Git at
 `/tmp/pm-shots/studio3d/laneA/`, with captions. No screenshots or local
@@ -201,3 +201,54 @@ CARGO_TARGET_DIR="$HOME/Developer/pm-target" nice -n 10 "$HOME/.cargo/bin/cargo"
 The Electron harness creates and removes isolated temporary user-data folders.
 `PM_SHOTS` and `PM_FILM_STILLS` optionally direct the new comparison and film
 PNGs to an external folder; those artifacts must never be committed.
+
+
+### Environment document integration
+
+The environment engine branch is integrated. A composition's World is an
+ordinary layer independent of the active camera. Fog Volume, Terrain and
+Scatter layers use the same document/edit boundary, keyframes, Undo, locks,
+serialization, protected channels and revision checks. Sky presets, HDR/EXR,
+live composition/layer sources, height fog, local volumes, procedural/image
+terrain with slope/height materials, and seeded surface scatter reach both
+native and WebGPU through the same prepared buffers. Hidden scatter prototypes
+remain usable; missing sources clear their copies and Undo restores them.
+See [the document/agent contract and examples](../../apps/desktop/docs/STUDIO.md#environment-document-and-agent-contract).
+
+The environment acceptance suite adds four Electron cases. The complete
+non-film 3D command now includes 57 cases. The current targeted unit suite
+contains 354 checks across 39 files; Rust has 51 library/host/GPU checks.
+Typecheck has zero errors and the existing IconCropper accessibility warning.
+The native/WebGPU transport harness passes hero and room comparisons (mean
+RGB differences below 0.006 code values out of 255), empty-scene transitions
+and native-process crash recovery. These checks do not establish Cycles parity
+or a full-editor performance guarantee.
+
+Additional verification covers actual HDR pixels above 1, live hidden-layer
+lighting, grayscale height input, deterministic seeded instances, source-cycle
+and stale-revision rejection, shadow-only alpha artwork, all seven 16-bit
+pass files through the normal sequence delivery, and deterministic iris
+shape/rotation/aspect changes in Final. Rust GPU tests check dedicated Ambient
+energy and reflection visibility independently with portable and hardware
+traversal. PNG byte checks verify a 16-bit IHDR and samples beyond 8-bit
+precision. Captures and captions are outside Git in
+`/tmp/pm-shots/studio3d/laneF/`.
+
+Remaining implementation limits are explicit:
+
+- No new environment/material/iris/pass-selection UI is included in this data
+  lane. The existing edit API is ready for that UI.
+- Fog boxes use world axis-aligned bounding extents when rotated. Sphere
+  non-uniform scale uses its largest axis.
+- Reflection visibility excludes all secondary camera paths, including
+  transmission/indirect paths. It preserves primary visibility and the
+  independent shadow flag.
+- Image-sequence passes are the evaluated 3D world. They omit later 2D
+  compositor effects/overlays and motion blur; data passes use a center ray
+  with a 0.5 opacity threshold. Shadow is a 32-sample direct analytic shadow
+  fraction. Auxiliary passes run the shared portable shader on WebGPU even
+  when the viewer uses native Metal. Per-frame metadata records ID mappings.
+- EXR output and iris diffraction fringes are not implemented. PNG output is
+  genuinely 16 bit, from floating GPU buffers, without RGBA8 expansion.
+- Sources/modes/preset selection are structural edits; evaluated settings use
+  ordinary timeline channels. EXR input assumes linear sRGB/Rec.709.

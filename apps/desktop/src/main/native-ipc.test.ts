@@ -96,6 +96,20 @@ describe('save IPC', () => {
       expect([...await readFile(path.join(folder, 'Project.pmv'))]).toEqual([7]);
     } finally { await rm(folder, { recursive: true, force: true }); }
   });
+  it('delivers agent render-pass sequences without a directory dialog',async()=>{
+    const folder=await mkdtemp(path.join(tmpdir(),'pm-agent-sequence-'));
+    const {ipcMain,invokes}=fakeIpcMain(),sender=Object.assign(new EventEmitter(),{isDestroyed:()=>false}),event=invokeEvent(sender);
+    electronMocks.browserWindowFromWebContents.mockReturnValue({isDestroyed:()=>false});
+    registerSaveIpc(ipcMain,{isTrustedSender:()=>true});
+    try{await withAgentExport(sender,folder,async()=>{
+      const token=await invokes.get(IPC.exportChoose)!(event,{name:'World.png',directory:true});
+      const result=await invokes.get(IPC.fileSave)!(event,{name:'World_depth_00000.png',data:new Uint8Array([137,80,78,71]),destinationToken:token}) as FileSaveResult;
+      expect(result).toMatchObject({ok:true,path:path.join(folder,'World','World_depth_00000.png')});
+      expect(await invokes.get(IPC.fileSave)!(event,{name:'passes_00000.json',data:new Uint8Array([123,125]),destinationToken:token})).toMatchObject({ok:true});
+      await expect(invokes.get(IPC.fileSave)!(event,{name:'unrelated.txt',data:new Uint8Array([1]),destinationToken:token})).rejects.toThrow('Invalid export frame name');await invokes.get(IPC.exportRelease)!(event,token);
+    });expect(electronMocks.dialogShowOpen).not.toHaveBeenCalled();expect(await readdir(path.join(folder,'World'))).toEqual(['World_depth_00000.png','passes_00000.json']);}
+    finally{await rm(folder,{recursive:true,force:true});}
+  });
   it('owns incremental transactions per sender and never publishes an incomplete upload', async () => {
     const folder = await mkdtemp(path.join(tmpdir(), 'pm-save-ipc-'));
     const output = path.join(folder, 'Project.pmv');

@@ -1,3 +1,4 @@
+import passesSource from '../../../../../../../engine/crates/pm-studio/src/shaders/passes.wgsl?raw';
 import traceSource from '../../../../../../../engine/crates/pm-studio/src/shaders/trace.wgsl?raw';
 import postSource from '../../../../../../../engine/crates/pm-studio/src/shaders/post.wgsl?raw';
 import presentSource from '../../../../../../../engine/crates/pm-studio/src/shaders/present.wgsl?raw';
@@ -22,6 +23,7 @@ export type StudioCamera = {
   aspect: number;
   lensRadius: number;
   focus: number;
+  iris?:[number,number,number,number];
   orthographic?: boolean;
   near?: number; far?: number;
 };
@@ -29,6 +31,7 @@ export type StudioCamera = {
 export type StudioView = {
   camera: StudioCamera;
   exposure: number;
+  ambient?:[number,number,number];
   /** Display-referred backdrop and whether the void shows it. */
   backdrop: [number, number, number];
   backdropOpaque: boolean;
@@ -47,8 +50,8 @@ const DENOISE_BYTES = 32;
 /** Final's denoiser: à-trous passes (steps 1…16) and how many standard deviations its edges allow. */
 const DENOISE_PASSES = 5;
 const DENOISE_SIGMA = 4;
-/** trace.wgsl's Params: 13 vec4. */
-const PARAMS_BYTES = 208;
+/** trace.wgsl's Params: 15 vec4. */
+const PARAMS_BYTES = 240;
 /** Photon grid slots (8 words each); must match trace.wgsl's GRID_CELLS. */
 const GRID_SLOTS = 1 << 19;
 /** Photons traced per sample batch when a scene has caustics. */
@@ -157,7 +160,7 @@ async function preparePipelines():Promise<Pipelines> {
   return pipelines;
 }
 
-type DenoisePipelines = { aovs: any; demod: any; step: any; finish: any; aovLayout: any; layout: any };
+type DenoisePipelines = { dataPass:any; aovs: any; demod: any; step: any; finish: any; aovLayout: any; layout: any };
 let denoisePipelines: DenoisePipelines | null = null;
 
 /** Final's denoiser (built the first time a Final or still frame needs it). */
@@ -178,13 +181,13 @@ async function prepareDenoise():Promise<DenoisePipelines> {
     label: 'studio denoise',
     entries: [uniform(0), storage(2, true), storage(3, true), storage(4, false), storage(5, true), storage(6, false), storage(7, true), storage(8, true), storage(9, true)],
   });
-  const aov = device.createShaderModule({ label: 'aov.wgsl', code: `${traceSource}\n@group(0) @binding(13) var<storage, read_write> aov: array<vec4f>;\n${aovSource}` });
+  const aov = device.createShaderModule({ label: 'aov.wgsl', code: `${traceSource}\n@group(0) @binding(13) var<storage, read_write> aov: array<vec4f>;\n${aovSource}\n${passesSource}` });
   const denoise = device.createShaderModule({ label: 'denoise.wgsl', code: denoiseSource });
   const compute = (module: any, l: any, entryPoint: string) => device.createComputePipelineAsync({
     label: entryPoint, layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module, entryPoint },
   });
   const prepared = {
-    aovs: compute(aov, aovLayout, 'aovs'), demod: compute(denoise, layout, 'demod'),
+    dataPass:compute(aov,aovLayout,'data_pass'),aovs: compute(aov, aovLayout, 'aovs'), demod: compute(denoise, layout, 'demod'),
     step: compute(denoise, layout, 'atrous_step'), finish: compute(denoise, layout, 'finish'), aovLayout, layout,
   };
   denoisePipelines=Object.fromEntries(await Promise.all(Object.entries(prepared).map(async([key,value])=>[key,await value]))) as DenoisePipelines;
@@ -320,6 +323,8 @@ export class StudioTarget {
     f.set([...view.environment.ground, view.floorY], 40);
     f.set([0, 0, 0, 0], 44);
     f.set(this.bounds, 48);
+    f.set(this.view!.camera.iris ?? [0,0,0,1],52);
+    f.set([...(this.view!.ambient ?? [0,0,0]),0],56);
     this.samples = 0;
   }
 
@@ -359,6 +364,8 @@ export class StudioTarget {
       const f = new Float32Array(this.base);
       f.set([this.bounds[3] / 160, this.photonsEmitted, 0, 0], 44);
       f.set(this.bounds, 48);
+      f.set(this.view!.camera.iris ?? [0,0,0,1],52);
+      f.set([...(this.view!.ambient ?? [0,0,0]),0],56);
       if (photons) {
         // Photons first, in their own submission, so this batch's camera paths see them.
         const pe = device.createCommandEncoder();
@@ -573,6 +580,33 @@ export class StudioTarget {
     pass.end();
     device.queue.submit([enc.finish()]);
     return entry.canvas;
+  }
+
+  /** Float output before RGBA8 packing, for genuine 16-bit sequence delivery. */
+  async readBeauty():Promise<Float32Array>{return this.readFloats(this.display[this.composed],this.width*this.height*16);}
+  private async readFloats(source:any,bytes:number):Promise<Float32Array>{
+    const read=device.createBuffer({size:bytes,usage:U.MAP_READ|U.COPY_DST});
+    try{const enc=device.createCommandEncoder();enc.copyBufferToBuffer(source,0,read,0,bytes);device.queue.submit([enc.finish()]);await read.mapAsync(1);return new Float32Array(read.getMappedRange().slice(0));}
+    finally{read.unmap();read.destroy();}
+  }
+  async dataPass(kind:number,salt=0):Promise<Float32Array>{
+    if(!this.view)throw new Error('Set the camera before exporting passes');
+    const d=buildDenoise(),p=build(),bytes=this.width*this.height*16;
+    const output=device.createBuffer({size:bytes,usage:U.STORAGE|U.COPY_SRC});
+    const params=device.createBuffer({size:PARAMS_BYTES,usage:U.UNIFORM|U.COPY_DST});
+    try{
+      const data=this.base.slice(0),u=new Uint32Array(data);
+      const nearBits=new Uint32Array(new Float32Array([this.view.camera.near ?? .01]).buffer)[0]!;
+      u.set([this.width,this.height,salt>>>0,1],28);u.set([this.lightCount,6,1,kind],32);
+      u.set([0,this.view.shadows?0:1,this.instanceCount,(0x80000000 | (nearBits & 0x7ffffffe) | (this.view.camera.orthographic?1:0))>>>0],36);
+      device.queue.writeBuffer(params,0,data);
+      const b=this.sceneBuffers,enc=device.createCommandEncoder(),pass=enc.beginComputePass();
+      pass.setPipeline(d.dataPass);pass.setBindGroup(0,device.createBindGroup({layout:d.aovLayout,entries:[
+        {binding:0,resource:{buffer:params}},{binding:1,resource:{buffer:b[0]}},{binding:2,resource:{buffer:b[1]}},{binding:3,resource:{buffer:b[2]}},{binding:4,resource:{buffer:b[3]}},
+        {binding:5,resource:this.mapTexture.createView({dimension:'2d-array'})},{binding:6,resource:p.sampler},{binding:11,resource:{buffer:b[4]}},{binding:13,resource:{buffer:output}}
+      ]}));pass.dispatchWorkgroups(Math.ceil(this.width/8),Math.ceil(this.height/8));pass.end();device.queue.submit([enc.finish()]);
+      return await this.readFloats(output,bytes);
+    }finally{params.destroy();output.destroy();}
   }
 
   /** How deep Live's reuse goes: pixels with geometry, and how many carry ≥ `deep` frames of history. */

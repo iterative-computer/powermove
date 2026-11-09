@@ -211,3 +211,173 @@ Imported glTF models using additional physical-material texture maps, texture
 transforms or secondary UV sets still have an appearance-parity gap. The six
 standard image slots exposed in Powermove's Materials UI are supported; the
 extended import cases are listed separately in the checklist.
+
+## Environment document and agent contract
+
+A composition can own one **World** layer. Fog Volume, Terrain and Scatter are
+also ordinary timeline layers. They use the existing `powermove.3d.object`
+definition with, respectively, `object.world`, `object.fog`, `object.terrain` or
+`object.scatter` data. The source plane is a serialization placeholder; World,
+fog and scatter do not render that plane. This contract adds no inspector or
+menu UI. A UI can use `api.scene3d.edit` with the same operations as agents.
+World belongs to the composition's layer stack, independently of which camera
+is active. Disabling/deleting its layer disables/removes that world. A dedicated
+Environment light's world is used when there is no enabled World layer.
+
+Examples for `edit_3d` (read `get_3d_scene` first):
+
+```json
+{"operation":"set_world","id":"world","world":{"mode":"sky","preset":"golden-hour","p":{"elevation":8,"azimuth":-70,"haze":2.5,"intensity":0.7,"sunIntensity":1,"visible":true,"metersPerUnit":1,"fogDensity":0.003,"fogColor":"#E6D4BE","fogHeightFalloff":0.15}}}
+{"operation":"add_fog","id":"mist","fog":{"p":{"shape":"box","width":6,"height":3,"depth":5,"density":0.035,"color":"#E6D4BE","anisotropy":0.5}}}
+{"operation":"update_object","target":"mist","patch":{"p":{"y":1.5}}}
+{"operation":"update_fog","target":"mist","patch":{"p":{"density":{"v":0.02,"kf":[{"t":0,"v":0.02},{"t":2,"v":0.05}]}}}}
+{"operation":"add_terrain","id":"ground","terrain":{"p":{"width":30,"depth":30,"resolution":64,"amplitude":3,"frequency":0.12,"octaves":5,"seed":41,"ridged":false},"regions":[{"p":{"minSlope":32,"color":"#8C7D64"}},{"p":{"minHeight":1.4,"color":"#A3A078"}},{"p":{"maxHeight":1.4,"color":"#687348"}}]}}
+{"operation":"add_object","object":{"id":"tree","source":{"primitive":"cone","parameters":{"radius":0.4,"height":2,"segments":8}},"material":{"p":{"color":"#334A2E","roughness":0.85}}}}
+{"operation":"add_scatter","id":"trees","scatter":{"model":"tree","surface":"ground","p":{"count":450,"density":1,"seed":71,"scaleMin":0.6,"scaleMax":1.4,"rotationMin":0,"rotationMax":360,"minSlope":0,"maxSlope":32,"minHeight":-2.5,"maxHeight":2.6}}}
+{"operation":"update_scatter","target":"trees","patch":{"p":{"count":1000,"seed":42}}}
+```
+
+World modes: `sky`, `hdri`, `none`. Sky presets: `clear-noon`, `golden-hour`,
+`overcast`, `blue-hour`, `night`. Selecting a preset sets its sun/haze defaults;
+explicit `p` values in that edit take precedence. Azimuth and rotation are
+degrees around +Y; elevation is degrees above the horizon. `haze` maps to
+physical sky turbidity. `sunRadius` is the angular radius in degrees.
+`visible:false` hides the environment from camera rays and retains its lighting
+and reflections. `metersPerUnit` defaults to 0.1 for the desktop document's
+existing product scale and controls physical lens conversion.
+
+`set_world` updates the existing World, or creates one when absent. Its `p`
+channels are `intensity`, `rotation`, `visible`, `metersPerUnit`, `elevation`,
+`azimuth`, `haze`, `sunIntensity`, `sunRadius`, `overcast`, `fogDensity`,
+`fogColor`, `fogAnisotropy`, `fogBaseHeight`, `fogHeightFalloff`, `fogDistance`,
+`adaptive`, `minSamples`, `relativeError`, `absoluteError`. `none` disables the
+sky/map while retaining atmosphere settings.
+
+Import Radiance `.hdr` or OpenEXR `.exr` with `import_media`; set the returned
+image asset ID as `world.source`. Linear HDR pixels are retained for lighting;
+a separate SDR poster serves the media browser. Runtime maps are bounded to
+2048×1024, 128 MB encoded input and 32 million decoded pixels. EXR data is
+interpreted as linear sRGB/Rec.709; convert other working spaces before import.
+A composition or a same-comp layer can also supply the environment:
+
+```json
+{"operation":"set_world","world":{"mode":"hdri","source":"IMPORTED_EXR_ASSET","p":{"intensity":1.5,"rotation":35,"visible":false}}}
+{"operation":"set_world","patch":{"mode":"hdri","source":{"compositionId":"SKY_COMP"}}}
+{"operation":"set_world","patch":{"mode":"hdri","source":{"layerId":"SKY_VIDEO_LAYER"}}}
+{"operation":"update_terrain","target":"ground","patch":{"heightSource":{"layerId":"GRAYSCALE_LAYER"}}}
+{"operation":"add_light","light":{"type":"ambient","p":{"intensity":0.2,"color":"#DCE5FF"}}}
+{"operation":"add_light","light":{"type":"environment","world":{"mode":"hdri","source":"IMPORTED_HDR_ASSET"},"p":{"intensity":1}}}
+```
+
+Composition/layer sources use the existing live-material source raster:
+hidden sources work, masks/effects are included, source transforms and opacity
+are excluded, and video/precomp timing is evaluated at the receiver's time.
+Reference cycles are rejected before edits commit. HDRI sources use linear HDR
+values; ordinary image, composition and layer sources are decoded from sRGB.
+
+Terrain can use procedural noise, `heightSource` (image asset/layer/comp), or
+normalized `heights` with exactly `(resolution+1)^2` entries. Image luminance
+becomes height multiplied by amplitude. Resolution is 2–256; octaves 1–12.
+Material regions are evaluated in order, first matching slope/height wins;
+otherwise the terrain's ordinary material is used. Slopes are degrees from up.
+There are at most eight regions. Their color, roughness, metalness and limits
+are channels, including `terrain.region0.color` and `terrain.region0.minSlope`.
+
+Scatter retains references to a model and surface/terrain layer. It samples
+surface triangles by area after parent/anchor transforms, reuses prototype
+geometry, and assigns all copies to the Scatter layer for compositing and
+picking. Seeded edits repeat exactly. Count is the number of candidate placements;
+density (0–1) and slope/height limits can reject candidates. Scale/rotation
+jitter uses min/max pairs. A source model's geometry, material and scale are
+retained; its position is replaced by each placement. Changing source geometry,
+materials or surface animation rebuilds placement data. Maximum 100,000
+candidates per Scatter and one million across a composition. Model/surface
+sources cannot themselves be scatter/fog/World layers. Hidden prototype/surface layers remain usable. Missing/deleted sources
+stay serialized and render no copies until restored.
+
+Fog volumes support box and sphere shapes. Width/height/depth are full local
+dimensions; sphere diameter is width. Position/scale use normal layer channels.
+The current transport contract has axis-aligned boxes: rotating a box uses its
+world bounding box. Use overlapping smaller volumes for angled shafts. There
+are at most 32 volumes. Density uses inverse scene units; anisotropy is −0.95
+to 0.95. Positive anisotropy scatters forward. The World supports global height
+fog through its fog fields.
+
+All evaluated settings use normal timeline channels: `world.KEY`, `fog.KEY`,
+`terrain.KEY`, `terrain.regionN.KEY`, `scatter.KEY`. Object transforms remain
+`position.x/y/z`, `rotation.x/y/rotation`, `scale.x/y/z`. Fields accept a plain
+value or `{v,kf,expr}`. `set_world` and the update operations route channel
+changes through the normal autokey, Undo, layer lock, hand-edit protection and
+revision guard. Source references, mode and preset selection are structural
+edits. `get_3d_scene` returns evaluated World/fog/terrain/scatter collections,
+raw layer content, channel paths and the revision baseline. No project JSON
+editing is required.
+
+## AE material, light and camera data
+
+Light types are `parallel` (alias `sun`), `spot`, `point`, `ambient`,
+`environment`, and Studio's `area` softbox. Ambient layers add uniform diffuse
+illumination, without a direction or shadows, independently of the world map.
+Environment layers use the World source contract and their light intensity
+multiplies its illumination.
+
+```json
+{"operation":"set_material_options","target":"MODEL_OR_3D_ARTWORK","patch":{"castsShadows":"only","acceptsShadows":true,"acceptsLights":true,"appearsInReflections":false}}
+{"operation":"set_camera","patch":{"p":{"fStop":1.4,"focusDistance":4,"irisShape":6,"irisRotation":30,"irisRoundness":0.25,"irisAspect":1.4}}}
+```
+
+Material Options are channels under `materialOptions.KEY`: casts `off/on/only`,
+accepts shadows, accepts lights and appears in reflections. Shadow-only layers
+remain in shadow/reflection transport but disappear from primary camera rays.
+Turning off lights gives an unlit base-color material. Turning off reflections
+excludes the layer from secondary camera paths (including transmission and
+indirect paths in this implementation), independently of its shadow flag.
+Old castShadow/receiveShadow documents retain their values until options are
+installed. Ordinary solids/images/video/text/shapes/precomps with 3D enabled
+share Studio's surface/shadow transport when Material Options are installed
+(or in an extrusion composition). This explicit opt-in preserves older flat
+artwork/group behavior. Their alpha texture also controls their shadow silhouette. Explicitly accepting
+lights allows their textures to receive shaded lighting and shadows.
+
+Iris shape is 0 for circular or 3–16 for a polygon's blade count. Rotation is
+degrees, roundness 0–1 blends toward a circle, and aspect stretches horizontally
+(0.1–10). These are `camera.irisShape/irisRotation/irisRoundness/irisAspect`
+channels. The same uniformly sampled aperture is used by native and WebGPU
+Final/Refine; Live keeps depth of field disabled while moving. Diffraction
+fringes are not implemented.
+
+## Render-pass image sequences
+
+Agents can call `export_video` with `format:"png"` and `passes`:
+
+```json
+{"format":"png","passes":["beauty","depth","normal","albedo","object_id","material_id","shadow"],"range":"work","audio":false,"motionBlur":false}
+```
+
+Programmatic callers can use `PM.Export.run({format:'png',passes:[...],...})`.
+`PM.Export.renderPasses(time,width,height,passes)` is an async iterator of
+`{pass,blob,metadata}` for hosts that own delivery. No export UI controls are
+added. Authenticated agents receive a unique output folder without a dialog;
+normal interactive exports retain the existing destination chooser.
+
+All pass files are genuine **RGBA16 PNG**, from floating GPU buffers, with no
+RGBA8 intermediate. Beauty is display-referred sRGB after Final path tracing
+and guide denoising; data passes have no sRGB tag. Auxiliary passes use the
+shared portable WGSL on WebGPU even when the viewer uses native Metal. EXR
+output is not supported by the desktop delivery pipeline yet.
+
+- Depth: normalized `(distance-near)/(far-near)`; background alpha is zero.
+- Normal: world XYZ mapped from −1..1 to 0..1.
+- Albedo: linear sRGB, without lighting.
+- Object/material ID: red channel stores the exact integer ID in 16-bit form;
+  zero is the background. IDs start at one.
+- Shadow: fraction of direct analytic illumination occluded (0 lit, 1 blocked),
+  using 32 light samples; this does not include indirect lighting/caustics.
+
+Each frame has `passes_00000.json` metadata with depth encoding and the current
+object-ID mapping. IDs reflect that frame's prepared geometry/material order;
+metadata is written per frame because animation/visibility can change it.
+Pass export is the evaluated 3D world; ordinary 2D overlays, per-layer compositor
+effects and motion blur are not applied to the data passes. Beauty uses the
+same 3D renderer without those later compositor operations. Data passes use a
+single center ray (with the camera aperture) and an opacity threshold of 0.5.

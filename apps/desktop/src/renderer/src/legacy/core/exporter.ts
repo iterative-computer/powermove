@@ -1,3 +1,4 @@
+import { renderStudioPasses,validatePasses } from '../../core/studio/passes';
 import { captureAgentFrame } from './agent-frame-capture';
 import { layerInputPlan, hasLayerInputs } from '../../core/effect-inputs';
 import { animateExportPreview } from './export-preview';
@@ -1060,6 +1061,23 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
 
 async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
   const dir = sequenceDirectory;
+  if(opts.passes){
+    const passes=validatePasses(opts.passes);
+    for(let i=0;i<total && !X.cancel;i++){
+      const time=t0+i/opts.fps;await prepareExportFrame(PM,time,PM.proj,{mblur:false,width:W,height:H});
+      let metadata:any;
+      for await(const output of renderStudioPasses(PM,time,W,H,passes)){
+        if(X.cancel)break;
+        const name=`${PM.proj.name || 'frame'}_${output.pass}_${String(i).padStart(5,'0')}.png`;
+        if(dir){const handle=await dir.getFileHandle(name,{create:true});const writer=await handle.createWritable();try{await writer.write(output.blob);await writer.close();}catch(error){await writer.abort?.();throw error;}}
+        else if(!await deliver(output.blob,name)){X.cancel=true;break;}
+        metadata=output.metadata;
+      }
+      if(metadata){const blob=new Blob([JSON.stringify({passes,...metadata},null,2)],{type:'application/json'});if(dir){const handle=await dir.getFileHandle(`passes_${String(i).padStart(5,'0')}.json`,{create:true});const writer=await handle.createWritable();await writer.write(blob);await writer.close();}else await deliver(blob,`passes_${String(i).padStart(5,'0')}.json`);}
+      ui.set(i+1,'writing render passes');await new Promise(r=>window.setTimeout(r,0));
+    }
+    return;
+  }
   const retention = trackStaticExport(PM, opts.mblur !== false);
   const captureCanvas = window.document.createElement('canvas');
   const alphaCapture: AlphaCapture | undefined = opts.alpha ? { canvas: captureCanvas } : undefined;
@@ -1163,6 +1181,8 @@ X.run = (opts: any) => run(Object.assign({}, X.defaults(), { name: PM.proj.name 
 
 /* Test hooks: the muxer is deterministic pure JS, so it is verifiable headlessly. */
 X.muxWebM = muxWebM;
+/** UI/extension hosts can stream 16-bit Studio passes through their chosen delivery. */
+X.renderPasses=(time:number,width:number,height:number,passes:unknown)=>renderStudioPasses(PM,time,width,height,validatePasses(passes));
 
 /* Await source decoding before an agent reviews a video frame. */
 X.snapshotAsync = (time: number, maxWidth = 480, options: { signal?: AbortSignal } = {}) =>

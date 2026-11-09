@@ -1,3 +1,4 @@
+import { worldSchema,materialOptionsSchema } from './environment-data';
 import { extrusionEligible, parseExtrusion } from './extrusion-data';
 import { extrusionCommands } from './extrusion-operations';
 import { materialPropertyPath,readMaterialProperties,type MaterialProperty } from './material-properties';
@@ -11,7 +12,8 @@ import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 import { studioCommands, type StudioEdit } from '../studio/operations';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|StudioEdit['operation'];
+  operation: 'set_world'|'add_fog'|'update_fog'|'add_terrain'|'update_terrain'|'add_scatter'|'update_scatter'|'set_material_options'|'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|StudioEdit['operation'];
+  world?:any;fog?:any;terrain?:any;scatter?:any;
   target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
   /** set_part: the part's key from listParts; patch null removes its offsets. */
   part?:string;
@@ -37,6 +39,19 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
   if (['apply_material','light_highlight','shot','set_studio','explode','drop_to_floor','place_on','auto_studio','soften'].includes(args.operation)) return studioCommands(PM, args as unknown as StudioEdit, (a, m) => sceneCommands(PM, a, m ?? meta));
+  if(args.operation==='set_world' || /^add_(fog|terrain|scatter)$/.test(args.operation)){
+    const comp=PM.curComp?.() || PM.proj;
+    const kind=args.operation==='set_world'?'world':args.operation.slice(4);
+    const existing=kind==='world'?comp.layers.find((l:any)=>l.d?.data?.object?.world):null;
+    const data=(args as any)[kind] || args.patch || {};
+    const p={...data.p};
+    if(kind==='world' && data.preset){Object.assign(p,({
+      'clear-noon':{elevation:45,haze:2,overcast:0,sunIntensity:1},'golden-hour':{elevation:6,haze:3,overcast:0,sunIntensity:1},
+      'overcast':{elevation:45,haze:4,overcast:1,sunIntensity:.1},'blue-hour':{elevation:-5,haze:2,overcast:0,sunIntensity:0},'night':{elevation:-20,haze:2,overcast:0,sunIntensity:0}
+    } as any)[data.preset],data.p || {});}
+    if(existing)return sceneCommands(PM,{operation:'update_object',target:existing.id,patch:{world:{...existing.d.data.object.world,...data,p:{...existing.d.data.object.world.p,...p}}}},meta);
+    return sceneCommands(PM,{operation:'add_object',id:args.id,name:args.name || ({world:'World',fog:'Fog Volume',terrain:'Terrain',scatter:'Scatter'} as any)[kind],object:{source:{primitive:'plane'},[kind]:{...data,p}}},meta);
+  }
   const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface','part']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
@@ -47,6 +62,13 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     if(PM.L?.(id))throw new Error(`Layer id already exists: ${id}`);
     let data:any,props:any,visible=true;
     if(role==='object'){
+      if(node.world && (PM.curComp?.() || PM.proj).layers.some((l:any)=>l.d?.data?.object?.world))throw new Error('A composition has one World layer');
+      if(node.scatter){
+        const pending=(id:string)=>commands.find(c=>c.type==='add_layer' && c.id===id)?.content?.data?.object;
+        const model={d:{data:{object:PM.L?.(node.scatter.model)?.d?.data?.object || pending(node.scatter.model)}}},surface={d:{data:{object:PM.L?.(node.scatter.surface)?.d?.data?.object || pending(node.scatter.surface)}}};
+        if(!model?.d?.data?.object || model.d.data.object.scatter || model.d.data.object.fog || model.d.data.object.world)throw new Error('Scatter needs a model layer');
+        if(!surface?.d?.data?.object || surface.d.data.object.scatter || surface.d.data.object.fog || surface.d.data.object.world)throw new Error('Scatter needs a surface or terrain layer');
+      }
       const parsed=parseScene({objects:[{...node,id,parent:null}]}).objects[0]!;
       const {id:_,name,parent,p,...object}=parsed;data={object};props=nativeProperties(p);
       const visibility=p.visible!;
@@ -54,7 +76,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       visible=visibility.v;
     }else if(role==='light'){
       const parsed=parseScene({lights:[{...node,id}]}).lights[0]!;
-      const {x,y,z,visible:visibility,...p}=parsed.p;data={light:{type:parsed.type,p,castShadow:parsed.castShadow}};props=nativeProperties({x,y,z});
+      const {x,y,z,visible:visibility,...p}=parsed.p;data={light:{type:parsed.type,p,castShadow:parsed.castShadow,...(parsed.world?{world:parsed.world}:{})}};props=nativeProperties({x,y,z});
       if(visibility!.kf.length || visibility!.expr)throw new Error('Animated visibility is not supported; use light intensity');
       visible=visibility!.v;
     }else{
@@ -74,8 +96,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     for(const node of scene.objects)mapping.set(node.id,uid('object'));
     let first:string|undefined;
     const pending=[...scene.objects],added=new Set<string>();
-    while(pending.length){const index=pending.findIndex(n=>!n.parent || added.has(n.parent));const node=pending.splice(index,1)[0]!;
-      const id=add('object',{...node,parent:node.parent?mapping.get(node.parent):null},mapping.get(node.id));added.add(node.id);first ||= id;}
+    while(pending.length){const index=pending.findIndex(n=>(!n.parent || added.has(n.parent)) && (!n.scatter || added.has(n.scatter.model) && added.has(n.scatter.surface)));if(index<0)throw new Error('Scene has missing or cyclic environment references');const node=pending.splice(index,1)[0]!;
+      const id=add('object',{...node,...(node.scatter?{scatter:{...node.scatter,model:mapping.get(node.scatter.model),surface:mapping.get(node.scatter.surface)}}:{}),parent:node.parent?mapping.get(node.parent):null},mapping.get(node.id));added.add(node.id);first ||= id;}
     for(const node of scene.lights)add('light',node);
     const cameraId=add('camera',{camera:scene.camera,environment:scene.environment});first ||= cameraId;
     return {commands,id:first};
@@ -93,6 +115,20 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   if(args.operation==='set_camera' || args.operation==='set_environment'){
     if(layer3DRole(layer)!=='camera')layer=(PM.curComp?.() || PM.proj).layers.find((l:any)=>layer3DRole(l)==='camera' && l.on!==false);
     if(!layer){const id=add('camera',args.operation==='set_camera'?{camera:args.patch || {}}:{camera:{},environment:args.patch || {}});return {commands,id};}
+  }
+  if(args.operation==='set_material_options' && layer && !layer3DRole(layer)){
+    if(!['solid','image','video','text','shape','precomp'].includes(layer.type) || !layer.threeD)throw new Error('Enable 3D on this artwork first');
+    if(layer.lock || (PM.groupAncestors?.(layer)||[]).some((g:any)=>g.lock))throw new Error('Unlock the layer first');
+    const options=materialOptionsSchema.parse(layer.d.materialOptions || {});
+    const fields=args.patch?.p || args.patch || {};
+    materialOptionsSchema.parse({p:{...options.p,...fields}});
+    const commands:any[]=[{type:'set_content',target:layer.id,patch:{materialOptions:options}}];
+    for(const [key,value] of Object.entries<any>(fields)){
+      const path=`materialOptions.${key}`;
+      if(value && typeof value==='object')commands.push({type:'set_property',target:layer.id,path,value:value.v,mode:'value'},{type:'replace_keyframes',target:layer.id,path,keyframes:(value.kf||[]).map((k:any)=>({time:k.t,value:k.v,ease:k.ease||'linear',hold:k.hold||false})),expression:value.expr||null});
+      else commands.push({type:'set_property',target:layer.id,path,value,mode:PM.autokey?'keyframe':'auto'});
+    }
+    return {commands,id:layer.id};
   }
   if(layer && extrusionEligible(layer) && ['set_extrusion','set_surface_material_map','set_surface_material_properties','set_material_map','set_material_properties'].includes(args.operation)){
     if(layer.lock || (PM.groupAncestors?.(layer) || []).some((g:any)=>g.lock))throw new Error('Unlock the 3D layer before editing it');
@@ -128,6 +164,29 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     }
   };
   switch(args.operation){
+    case 'update_fog': case 'update_terrain': case 'update_scatter':{
+      const kind=args.operation.slice(7) as 'fog'|'terrain'|'scatter';
+      if(role!=='object' || !content.object[kind])throw new Error(`Choose a ${kind} layer`);
+      const value={...content.object[kind],...patch,p:{...content.object[kind].p,...patch.p}};
+      for(const [key,v] of Object.entries(patch.p || {}))setChannel(`${kind}.${key}`,v);
+      delete patch.p;content.object[kind]={...value,p:content.object[kind].p};
+      break;
+    }
+    case 'set_material_options':{
+      if(role!=='object')throw new Error('Choose a model or 3D artwork layer');
+      const options=materialOptionsSchema.parse(content.object.materialOptions || {p:{castsShadows:content.object.castShadow?'on':'off',acceptsShadows:content.object.receiveShadow}});
+      content.object.materialOptions=options;
+      const fields=args.patch?.p || args.patch || {};
+      materialOptionsSchema.parse({p:{...options.p,...fields}});
+      for(const [key,value] of Object.entries(fields)){
+        const path=`materialOptions.${key}`;
+        const prop=options.p[key];
+        if(!prop)throw new Error(`Unknown material option: ${key}`);
+        if(typeof value==='object' && value!==null){const v=value as any;commands.push({type:'set_property',target:layer.id,path,value:v.v,mode:'value'},{type:'replace_keyframes',target:layer.id,path,keyframes:(v.kf||[]).map((k:any)=>({time:k.t,value:k.v,ease:k.ease||'linear',hold:k.hold||false})),expression:v.expr||null});}
+        else commands.push({type:'set_property',target:layer.id,path,value,mode:PM.autokey?'keyframe':'auto'});
+      }
+      break;
+    }
     case 'set_material_map':{
       const check=canAssignMaterialMap(PM,layer.id,args.materialIndex ?? null,args.slot!,args.map ?? null);
       if(!check.ok)throw new Error(check.reason);
@@ -199,6 +258,11 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     }
     case 'update_object':{
       if(role!=='object')throw new Error('Choose a model layer');
+      if(patch.world){
+        const current=content.object.world || worldSchema.parse({});
+        for(const [key,value] of Object.entries(patch.world.p || {}))setChannel(`world.${key}`,value);
+        patch.world={...current,...patch.world,p:current.p};
+      }
       transformPatch(patch.p);delete patch.p;
       if(patch.material?.p){for(const [key,value] of Object.entries(patch.material.p))setChannel(`m.${key}`,value);delete patch.material.p;}
       const next={...content.object,...patch,material:patch.material?{...content.object.material,...patch.material}:content.object.material};
@@ -210,6 +274,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       if(role!=='light')throw new Error('Choose a light layer');
       const p=patch.p || {};transformPatch(p);
       for(const [key,value] of Object.entries(p))if(!TRANSFORM_PATHS[key] && key!=='visible')setChannel(`light.${key}`,value);
+      if(patch.world?.p){for(const [key,value] of Object.entries(patch.world.p))setChannel(`world.${key}`,value);patch.world={...content.light.world,...patch.world,p:content.light.world?.p};}
       delete patch.p;delete patch.name;
       content.light={...content.light,...patch};break;
     }
@@ -251,6 +316,7 @@ export function editScene(PM: any,args: Scene3DEdit,meta: EditMeta = {}): EditRe
 }
 
 export function validateSceneLayer(layer: any,PM?:any): void {
+  if(layer.d?.materialOptions)layer.d.materialOptions=materialOptionsSchema.parse(layer.d.materialOptions);
   const role=layer3DRole(layer);
   if(role)layer.d.data=parseLayer3DData(role,layer.d.data);
   else if(layer.d?.definition===SCENE3D_DEFINITION)layer.d.data.scene=parseScene(layer.d.data.scene);

@@ -28,3 +28,16 @@ it('scopes automatic delivery to the owning tool, preserves existing files and c
     expect(await agentExportDestination(owner, 'Video.mp4')).toBeUndefined();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+it('reserves unique image-sequence folders and only removes empty reservations',async()=>{
+  const directory=await mkdtemp(path.join(os.tmpdir(),'pm-agent-passes-')),owner={};
+  try{
+    let first='',empty='';
+    await withAgentExport(owner,directory,async()=>{
+      first=(await agentExportDestination(owner,'World.png',true))!;
+      empty=(await agentExportDestination(owner,'World.png',true))!;
+      expect(first).not.toBe(empty);await writeFile(path.join(first,'depth_00000.png'),'frame');
+    });
+    expect(await stat(path.join(first,'depth_00000.png'))).toBeTruthy();expect(await stat(empty).catch(()=>null)).toBeNull();
+  }finally{await rm(directory,{recursive:true,force:true});}
+});

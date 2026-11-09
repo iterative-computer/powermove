@@ -121,7 +121,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       screenLayer = mapIndex.get(key) ?? -1;
       if (screenLayer < 0) { screenLayer = maps.length; maps.push({ screen }); mapIndex.set(key, screenLayer); }
     }
-    const basic = m.isMeshBasicMaterial || m.userData?.studioUnlit;
+    const basic = (m.isMeshBasicMaterial && !m.userData?.studioLitArtwork) || m.userData?.studioUnlit || m.userData?.studioAcceptsLights===false;
     const metallic = basic ? 0 : m.metalness ?? 0;
     const roughness = basic ? 1 : m.roughness ?? 1;
     const transmission = m.transmission ?? 0;
@@ -137,7 +137,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       // Studio's material layers: sheen, thin film (nm), dispersion, droplets.
       m.sheen ?? 0, m.iridescence > 0 ? (m.iridescenceThicknessRange?.[1] ?? 400) : 0, m.userData?.studioDispersion ?? m.dispersion ?? 0, m.userData?.droplets ?? 0,
       m.userData?.materialAmbientUniform?.value ?? 1,
-      (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0), m.alphaTest ?? 0, 0,
+      (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0) | (m.userData?.studioReflections===false?32:0), m.alphaTest ?? 0, 0,
       layer(m.roughnessMap), layer(m.metalnessMap), layer(m.aoMap), m.normalScale?.x ?? 1,
     ];
     const fingerprint=values.join(',');i=materialValues.get(fingerprint);

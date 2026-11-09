@@ -27,6 +27,8 @@ struct Params {
     caustic: [f32; 4],
     /// Scene centre and radius (where sun photons aim).
     bounds: [f32; 4],
+    iris: [f32; 4],
+    ambient:[f32;4],
 }
 
 /// Hashed photon grid slots (8 words each); must match trace.wgsl.
@@ -566,6 +568,9 @@ impl Renderer {
         self.base.bounds = bounds; self.bounds = bounds; self.samples = 0;
     }
 
+    pub fn set_ambient(&mut self,ambient:[f32;3]){self.base.ambient=[ambient[0],ambient[1],ambient[2],0.];self.samples=0;}
+    pub fn set_iris(&mut self,iris:[f32;4]){self.base.iris=iris;self.samples=0;}
+
     /// Camera, backdrop and environment only (no geometry upload).
     pub fn set_camera(&mut self, scene: &Scene) {
         let c = &scene.camera;
@@ -588,6 +593,8 @@ impl Renderer {
             ground: (scene.environment.1 * 0.5).to4(0.0),
             caustic: [0.0; 4],
             bounds: self.bounds,
+            iris: [0.,0.,0.,1.],
+            ambient:[0.;4],
         };
         self.exposure = scene.exposure;
         // Product scenes show their backdrop; the app's layers leave the void transparent.

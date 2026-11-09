@@ -346,8 +346,11 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       if (!isCurrent()) return null;
       let selectedPath: string | undefined;
       if (request.directory) {
-        const result = await dialog.showOpenDialog(window, { title: 'Export PNG Sequence', properties: ['openDirectory', 'createDirectory'] });
-        if (!result.canceled) selectedPath = result.filePaths[0];
+        selectedPath=await agentExportDestination(event.sender,name,true);
+        if(!selectedPath){
+          const result = await dialog.showOpenDialog(window, { title: 'Export PNG Sequence', properties: ['openDirectory', 'createDirectory'] });
+          if (!result.canceled) selectedPath = result.filePaths[0];
+        }
       } else {
         const options = { defaultPath: name, filters: saveFiltersForName(name) };
         selectedPath = await agentExportDestination(event.sender, name);
@@ -433,7 +436,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     if (payload.destinationToken !== undefined && (!destination || destination.token !== payload.destinationToken || projectId !== undefined)) {
       throw new Error('Unknown export destination');
     }
-    if (destination?.directory && (name !== payload.name || path.extname(name).toLowerCase() !== '.png')) throw new Error('Invalid export frame name');
+    if (destination?.directory && (name !== payload.name || (path.extname(name).toLowerCase() !== '.png' && !/^passes_[0-9]{5,9}\.json$/.test(name)))) throw new Error('Invalid export frame name');
 
     let data = payload['data'];
     let stream: AsyncIterable<Uint8Array> | undefined;

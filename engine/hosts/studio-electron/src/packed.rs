@@ -26,7 +26,10 @@ pub struct CameraBasis {
     pub orthographic: bool,
     pub near: Option<f32>,
     pub far: Option<f32>,
+    #[serde(default="default_iris")]
+    pub iris:[f32;4],
 }
+fn default_iris()->[f32;4]{[0.,0.,0.,1.]}
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Environment {
     pub zenith: [f32; 3],
@@ -45,6 +48,8 @@ pub struct View {
     pub floor_y: f32,
     pub environment: Environment,
     pub bounds: [f32; 4],
+    #[serde(default)]
+    pub ambient:[f32;3],
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,6 +145,9 @@ impl View {
             || c.tan_y <= 0.
             || !c.aspect.is_finite()
             || c.aspect <= 0.
+            || self.ambient.iter().any(|x|!x.is_finite()||*x<0.)
+            || c.iris.iter().any(|x|!x.is_finite())
+            || c.iris[0]<0. || c.iris[0]>16. || c.iris[2]<0. || c.iris[2]>1. || c.iris[3]<0.1 || c.iris[3]>10.
             || c.position
                 .iter()
                 .chain(c.forward.iter())

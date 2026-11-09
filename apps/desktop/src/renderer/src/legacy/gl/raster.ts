@@ -1,3 +1,4 @@
+import { decodeEnvironmentImage } from '../../core/scene3d/environment-image';
 import { layoutRichText, type RichLayout } from '../core/rich-text';
 import { compositePaint, gradientStyle, paintShape, shapeOutline } from './drawing';
 import {parseCube,MAX_CUBE_BYTES} from '../../core/cube-lut';
@@ -1137,6 +1138,9 @@ async function playbackProxy(file: any, name: string, onStage?: (label: string, 
 async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCurrent }: any) {
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if(kind==='lut'){if(blob.size>MAX_CUBE_BYTES)throw new Error('LUT exceeds the 16 MiB file limit');const sourceText=await blob.text(),lut=parseCube(sourceText);return{id,name,kind,format:'cube',blob,lut,size:blob.size,w:lut.width,h:lut.height,dur:0};}
+  if(kind==='image' && /\.(hdr|exr)$/i.test(name)){
+    onStage?.('Decoding environment');return {id,name,kind,blob,size:blob.size,...await decodeEnvironmentImage(blob,name)};
+  }
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta, onStage, assertCurrent });
   if (kind === 'model') {
     if(blob.size>512*1024*1024)throw new Error('3D models must be smaller than 512 MB');

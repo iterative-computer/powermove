@@ -13,6 +13,7 @@ import type { LightViewerState, LightViewerGuides, Scene3DViewerRect, LightViewC
 export type { LightViewerState, LightViewerGuides, Scene3DViewerRect, LightViewCamera, Point2D, Point3D } from '../core/scene3d/light-view';
 import type { Scene3DEdit } from '../core/scene3d/operations';
 export type { Scene3D, SceneObject, SceneLight, SceneSource, SceneChannel } from '../core/scene3d/schema';
+export type { WorldData,WorldInput,FogData,TerrainData,ScatterData,MaterialOptionsData } from '../core/scene3d/environment-data';
 export type { Scene3DEdit } from '../core/scene3d/operations';
 export type { EffectLayerInput, EffectInputStage, EffectInputSpace, EffectInput, EffectPathInput, EffectAssetInput } from '../core/types/project';
 import type {

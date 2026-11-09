@@ -41,9 +41,10 @@ export function extrusionEligible(layer:any):boolean {return layer?.type==='text
 export function isExtrudedLayer(layer:any):boolean {return extrusionEligible(layer) && layer.threeD===true && layer.d?.extrusion?.enabled===true;}
 const planeTypes=new Set(['text','shape','solid','image','video','precomp']);
 /** Legacy flat projects keep their original renderer. In an extrusion scene,
- * native 3D planes share its camera and depth without changing saved data. */
+ * native 3D planes share its camera/depth. Explicit Material Options opt a
+ * plane into Studio in other 3D compositions without changing old projects. */
 export function isShared3DPlane(comp:any,layer:any):boolean {
-  return layer?.threeD===true && planeTypes.has(layer.type) && !isExtrudedLayer(layer) && (comp?.layers || []).some(isExtrudedLayer);
+  return layer?.threeD===true && planeTypes.has(layer.type) && !isExtrudedLayer(layer) && ((comp?.layers || []).some(isExtrudedLayer) || !!layer.d?.materialOptions);
 }
 /** Absent data is read as disabled, without rewriting old projects. */
 export function parseExtrusion(raw:any):ExtrusionData {

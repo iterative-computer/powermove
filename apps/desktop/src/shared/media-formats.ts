@@ -29,7 +29,8 @@ export const CONVERTED_VIDEO_EXTENSIONS = [
   'mkv', 'avi', 'wmv', 'asf', 'flv', 'mpg', 'mpeg', 'm2v', 'mts', 'm2ts', 'ts', '3gp', '3g2', 'mxf', 'ogv', 'dv', 'vob',
 ] as const;
 
-const IMAGE = new Set<string>([...NATIVE_IMAGE_EXTENSIONS, ...CONVERTED_IMAGE_EXTENSIONS]);
+export const ENVIRONMENT_IMAGE_EXTENSIONS=['hdr','exr'] as const;
+const IMAGE = new Set<string>([...ENVIRONMENT_IMAGE_EXTENSIONS,...NATIVE_IMAGE_EXTENSIONS, ...CONVERTED_IMAGE_EXTENSIONS]);
 const ANIMATED = new Set<string>(ANIMATED_IMAGE_EXTENSIONS);
 const CONVERTED_IMAGE = new Set<string>(CONVERTED_IMAGE_EXTENSIONS);
 const NATIVE_VIDEO = new Set<string>(NATIVE_VIDEO_EXTENSIONS);
@@ -61,7 +62,7 @@ export const MEDIA_ACCEPT = [
   ...[...NATIVE_IMAGE_EXTENSIONS, ...CONVERTED_IMAGE_EXTENSIONS,
     ...NATIVE_VIDEO_EXTENSIONS, ...CONVERTED_VIDEO_EXTENSIONS,
     ...AUDIO_EXTENSIONS].map(extension => `.${extension}`),
-  '.obj', '.glb', '.gltf', '.step', '.stp', '.iges', '.igs', '.brep', '.ply', '.splat', '.pmv',
+  '.hdr', '.exr', '.obj', '.glb', '.gltf', '.step', '.stp', '.iges', '.igs', '.brep', '.ply', '.splat', '.pmv',
   // Subtitles import as a captions layer.
   '.srt', '.vtt',
 ].join(',');

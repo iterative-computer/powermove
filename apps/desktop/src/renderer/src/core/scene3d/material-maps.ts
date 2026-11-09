@@ -28,7 +28,7 @@ export function objectMapSets(object:any):MaterialMaps[] {
 }
 export function layerMaterialMaps(layer:any):MaterialMap[] {
   const objects=layer?.d?.data?.scene?.objects || (layer?.d?.data?.object?[layer.d.data.object]:[]);
-  return [...objects.flatMap((object:any)=>objectMapSets(object).flatMap(maps=>Object.values(maps))),...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values<MaterialMap>(surface.maps || {}))];
+  return [...objects.flatMap((object:any)=>[...objectMapSets(object).flatMap(maps=>Object.values(maps)),object.world?.source,object.terrain?.heightSource].filter(Boolean)),...([layer?.d?.data?.light?.world?.source].filter(Boolean)),...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values<MaterialMap>(surface.maps || {}))];
 }
 export function mapImageId(map:MaterialMap|undefined):string|undefined {return typeof map==='string'?map:undefined;}
 export function layerCompositionIds(layer:any):string[] {
@@ -105,6 +105,7 @@ export function materialLayerLinks(PM:any,receiverId:string):MaterialLayerLink[]
     ?[{materialIndex,...(extrusionEligible(layer)?{surface:EXTRUSION_SURFACES[materialIndex!]}:{}),slot:slot as MaterialSlot,layerId:map.layerId,status:materialLayerStatus(PM.proj,receiverId,map.layerId)}]:[]));
 }
 export function remapMaterialLayerLinks(layer:any,ids:ReadonlyMap<string,string>):void {
+  const scatter=layer?.d?.data?.object?.scatter;if(scatter)for(const key of ['model','surface'])if(ids.has(scatter[key]))scatter[key]=ids.get(scatter[key])!;
   for(const map of layerMaterialMaps(layer))if(typeof map==='object' && 'layerId' in map && ids.has(map.layerId))map.layerId=ids.get(map.layerId)!;
 }
 export function listValidMaterialCompositions(PM:any,layerId:string):{id:string;name:string;w:number;h:number;fps:number;dur:number}[] {

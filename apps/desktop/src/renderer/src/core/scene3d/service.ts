@@ -32,11 +32,12 @@ function scanReferences(PM:any,comp:any,scan:ReferenceScan):void {
     const layer=layers[i];
     localCount=0;
     const node=layer?.d?.data?.object;if(!node){
+      if(typeof layer.d?.data?.light?.world?.source==='string')append(layer.d.data.light.world.source);
       if(isShared3DPlane(comp,layer))append(layer.d?.asset);
       for(const surface of Object.values<any>(layer?.d?.extrusion?.surfaces || {}))for(const map of Object.values<any>(surface.maps || {})){const id=mapImageId(map);if(id)append(id);}
       maxLocalCount=Math.max(maxLocalCount,localCount);continue;
     }
-    append(node.source?.assetId);
+    append(node.source?.assetId);if(typeof node.world?.source==='string')append(node.world.source);if(typeof node.terrain?.heightSource==='string')append(node.terrain.heightSource);
     const maps=node.material?.maps;
     // Object.values snapshots keys and rechecks enumerability as getters run.
     // A for..in fast path would miss maps whose later descriptors change.
@@ -108,6 +109,12 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
       else if((node as THREE.RectAreaLight).isRectAreaLight)node.lookAt(target);
     }
     runtime.scene.updateMatrixWorld(true);
+    runtime.refreshEnvironment();
+    for(const layer of comp.layers)if(!layer3DRole(layer) && layer.d?.materialOptions){
+      const object=runtime.objects.get(layer.id);if(!object)continue;
+      const p=Object.fromEntries(Object.entries<any>(layer.d.materialOptions.p).map(([k,prop])=>[k,PM.evP(layer,prop,time,`materialOptions.${k}`)]));
+      object.traverse((mesh:any)=>{if(!mesh.isMesh)return;mesh.castShadow=p.castsShadows!=='off';mesh.receiveShadow=p.acceptsShadows;mesh.userData.studioPrimaryVisible=p.castsShadows!=='only';for(const m of Array.isArray(mesh.material)?mesh.material:[mesh.material]){m.userData.studioAcceptsLights=p.acceptsLights;m.userData.studioLitArtwork=p.acceptsLights;m.userData.studioReflections=p.appearsInReflections;}});
+    }
     compositionCache.set(runtime,{comp,time,revision,assets:PM.proj.assets,references});
   }
   runtime.resizeCamera(comp.w,comp.h);

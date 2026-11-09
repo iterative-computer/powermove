@@ -1,3 +1,5 @@
+import { channelValues } from './environment-data';
+import { environmentImage,environmentImageKey,terrainSettings,makeTerrain,syncEnvironmentGraph } from './environment-render';
 import { disposeStudioSplats } from '../studio/splat-raster';
 import { buildExtrusionGeometry } from './extrusion-geometry';
 import { EXTRUSION_SURFACES } from './extrusion-data';
@@ -56,6 +58,7 @@ const cachedExtrusionGeometries=new WeakSet<THREE.BufferGeometry>();
 function disposeTree(object: THREE.Object3D): void {
   const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
   object.traverse((child: any)=>{
+    if(child.userData.studioSharedPrototype){child.dispose?.();if(child.userData.studioOwnsGeometry)geometries.add(child.geometry);if(child.userData.studioOwnsMaterial)for(const m of Array.isArray(child.material)?child.material:[child.material])materials.add(m);return;}
     if (child.geometry) geometries.add(child.geometry);
     for (const m of Array.isArray(child.material) ? child.material : [child.material]) if (m) materials.add(m);
   });
@@ -134,6 +137,8 @@ export class SceneRuntime {
   }
 
   private makeObject(node: SceneObject): THREE.Object3D {
+    if(node.world || node.fog || node.scatter)return new THREE.Group();
+    if(node.terrain)return makeTerrain(node,terrainSettings(node.terrain,environmentImage(node.terrain.heightSource,node.id,this.getter,this.compositionGetter)));
     if ('assetId' in node.source) {
       const asset = this.getter(node.source.assetId);
       if (asset?.object3d) {
@@ -182,7 +187,8 @@ export class SceneRuntime {
     // CAD assemblies and splat captures run to tens of millions; Studio prepares large models in the background.
     if(importedVertices>30_000_000)throw new Error('Imported scene exceeds 30 million vertices; simplify or split the models');
     for (const node of data.objects) {
-      const source = signature(node.source)+':'+node.useSourceMaterials,asset='assetId' in node.source ? assets(node.source.assetId) : null;
+      const terrainImage=node.terrain?environmentImage(node.terrain.heightSource,node.id,assets,compositionGetter):null;
+      const source = signature(node.source)+':'+node.useSourceMaterials+(node.terrain?JSON.stringify([node.terrain,environmentImageKey(terrainImage)]):''),asset='assetId' in node.source ? assets(node.source.assetId) : null;
       let object = this.objects.get(node.id);
       if (!object || this.sources.get(node.id)!==source || this.assetRefs.get(node.id)!==asset) {
         if (object) this.remove(node.id,object);
@@ -193,13 +199,20 @@ export class SceneRuntime {
       const v = values(node.p,`o.${node.id}`);
       object.position.set(v.x,v.y,v.z);object.rotation.set(radians(v.rx),radians(v.ry),radians(v.rz),'XYZ');
       object.scale.set(v.sx,v.sy,v.sz);object.visible=v.visible !== false;
+      // Scatter meshes share their prototype materials; only the environment
+      // synchronizer may edit their policy or rebuild their instances.
+      if(node.scatter || node.world || node.fog)continue;
       const m = values(node.material.p,`o.${node.id}.m`), maps=node.material.maps;
       const intrinsic=values(node.materialProperties,`o.${node.id}.mi`);
       const properties=(index:number)=>({...intrinsic,...values(node.sourceMaterialProperties?.[index],`o.${node.id}.mi.${index}`)});
       this.traverseOwned(object,(c:any)=>{
         c.userData.sceneId=node.id;
         if (!c.isMesh) return;
-        c.castShadow=node.castShadow;c.receiveShadow=node.receiveShadow;
+        const options=node.materialOptions?channelValues(node.materialOptions.p):null;
+        c.castShadow=options?options.castsShadows!=='off':node.castShadow;c.receiveShadow=options?options.acceptsShadows:node.receiveShadow;
+        c.userData.studioPrimaryVisible=options?.castsShadows!=='only';
+        for(const material of Array.isArray(c.material)?c.material:[c.material]){material.userData.studioAcceptsLights=options?.acceptsLights!==false;material.userData.studioReflections=options?.appearsInReflections!==false;}
+        if(c.userData.terrainRegion){const p=c.userData.terrainRegion;c.material.color.set(p.color);c.material.roughness=p.roughness;c.material.metalness=p.metalness;return;}
         if (c.userData.splat) { c.castShadow=c.receiveShadow=false; return; }
         if (c.userData.missing) return;
         if(node.useSourceMaterials){
@@ -242,6 +255,7 @@ export class SceneRuntime {
           c.material=new THREE.MeshPhysicalMaterial();
         }
         const material=c.material as THREE.MeshPhysicalMaterial;
+        material.userData.studioAcceptsLights=options?.acceptsLights!==false;material.userData.studioReflections=options?.appearsInReflections!==false;
         material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
         material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
         material.clearcoat=m.clearcoat ?? 0;material.clearcoatRoughness=m.clearcoatRoughness ?? .03;
@@ -282,7 +296,7 @@ export class SceneRuntime {
       let object=this.objects.get(node.id) as THREE.Light|undefined;
       if (!object || object.userData.lightType!==node.type) {
         if (object) this.remove(node.id,object);
-        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():node.type==='area'?new THREE.RectAreaLight():new THREE.PointLight();
+        object=node.type==='ambient' || node.type==='environment'?new THREE.AmbientLight():node.type==='sun' || node.type==='parallel'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():node.type==='area'?new THREE.RectAreaLight():new THREE.PointLight();
         object.userData.lightType=node.type;object.userData.sceneId=node.id;this.objects.set(node.id,object);this.scene.add(object);
         if ('target' in object) this.scene.add((object as THREE.DirectionalLight).target);
       }
@@ -314,9 +328,11 @@ export class SceneRuntime {
     this.ambient.intensity=environment.ambient;
     const studioSet=!!data.environment.shadowCatcher;
     this.scene.background=data.environment.background?new THREE.Color(data.environment.background):studioSet?new THREE.Color(STUDIO_SET_BACKDROP):null;
-    this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
+    this.scene.updateMatrixWorld(true);syncEnvironmentGraph(this,data,assets,compositionGetter);this.camera.updateMatrixWorld(true);this.revision++;
     for(const [key,entry] of this.textures)if(!this.usedTextures.has(key)){entry.texture.dispose();this.textures.delete(key);}
   }
+
+  refreshEnvironment():void {syncEnvironmentGraph(this,this.raw,this.getter,this.compositionGetter);}
 
   private syncExtrusion(sample:ExtrusionMeshSample):void {
     let mesh=this.objects.get(sample.id) as THREE.Mesh|undefined;
@@ -349,7 +365,7 @@ export class SceneRuntime {
       if(!entry){const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=false;texture.minFilter=texture.magFilter=THREE.LinearFilter;entry={texture,source:null};this.textures.set(key,entry);}
       if(entry.source!==frame){entry.texture.image={data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.source=frame;}
       const material=(mesh.material as THREE.MeshBasicMaterial[])[0]!;if(material.map!==entry.texture){material.map=entry.texture;material.needsUpdate=true;}
-      mesh.userData.nativePlane=true;mesh.castShadow=false;return;
+      mesh.userData.nativePlane=true;return;
     }
     if(mesh.userData.fillColor!==sample.color){
       const color=new THREE.Color(sample.color),attribute=mesh.geometry.getAttribute('color');

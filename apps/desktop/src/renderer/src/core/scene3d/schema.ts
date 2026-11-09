@@ -1,3 +1,4 @@
+import { worldSchema, fogSchema, terrainSchema, scatterSchema, materialOptionsSchema, validateEnvironmentChannel, environmentProperties,validateEnvironmentNode } from './environment-data';
 import { validateExtrusionChannel } from './extrusion-data';
 import { z } from 'zod';
 import { layer3DProperties } from './layers';
@@ -90,15 +91,17 @@ export const objectSchema = z.object({
   sourceMaterialProperties: z.record(z.string().regex(/^(0|[1-9][0-9]{0,4})$/),intrinsicPropertiesSchema).default({}),
   sourceMaterials: z.record(z.string().regex(/^(0|[1-9][0-9]{0,4})$/),mapsSchema).default({}),
   parts: z.record(z.string().regex(PART_KEY),partSchema).default({}),
+  world:worldSchema.optional(),fog:fogSchema.optional(),terrain:terrainSchema.optional(),scatter:scatterSchema.optional(),materialOptions:materialOptionsSchema.optional(),
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
-  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot','area']).default('sun'),
+  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','parallel','point','spot','area','ambient','environment']).default('sun'),
   p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
     color:[color,'#FFFFFF'], intensity:[num(0,10000),3], distance:[num(0,100000),0], decay:[num(0,4),2],
     angle:[num(1,89),45], penumbra:[num(0,1),.4], visible:[z.boolean(),true],
     // Area lights are softboxes: width × height facing their target. Larger is softer.
     width:[num(.001,100000),2], height:[num(.001,100000),1.2] }).default({} as any),
+  world:worldSchema.optional(),
   castShadow: z.boolean().default(true)
 }).strict();
 export const cameraSchema = z.object({
@@ -107,7 +110,8 @@ export const cameraSchema = z.object({
     fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000],
     // A physical lens for Studio: f-number (0: everything sharp) and the
     // distance in focus (0: the aim point).
-    fStop:[num(0,64),0], focusDistance:[num(0,100000),0] }).default({} as any)
+    fStop:[num(0,64),0], focusDistance:[num(0,100000),0],
+    irisShape:[num(0,16),0],irisRotation:[num(-360000,360000),0],irisRoundness:[num(0,1),0],irisAspect:[num(.1,10),1] }).default({} as any)
 }).strict();
 export const environmentSchema = z.object({
   p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1] }).default({} as any),
@@ -138,15 +142,20 @@ export function parseScene(raw: unknown): Scene3D {
     parts:Object.fromEntries(Object.entries(o.parts || {}).map(([key,part])=>[key,{...part,p:partTransformSchema.parse(part.p || {})}])),material:materialSchema.parse({ ...o.material,p:materialSchema.shape.p.parse(o.material?.p || {}) })}));
   scene.camera = cameraSchema.parse({...scene.camera,p:cameraSchema.shape.p.parse(scene.camera.p || {})});
   scene.environment = environmentSchema.parse({...scene.environment,p:environmentSchema.shape.p.parse(scene.environment.p || {})});
-  scene.lights = scene.lights.map(l => lightSchema.parse({...l,p:lightSchema.shape.p.parse(l.p || {})}));
+  scene.lights = scene.lights.map(l => lightSchema.parse({...l,...(l.type==='environment' && !l.world?{world:worldSchema.parse({})}:{}),p:lightSchema.shape.p.parse(l.p || {})}));
   const ids = new Set<string>(['camera']);
   let vertices = 0;
   for (const node of [...scene.objects,...scene.lights]) {
     if (ids.has(node.id)) throw new Error(`Duplicate 3D id: ${node.id}`);
     ids.add(node.id);
   }
+  if(scene.objects.reduce((n,o)=>n+Number(o.scatter?.p.count?.v || 0),0)>1000000)throw new Error('At most one million scattered placements per composition');
+  if(scene.objects.filter(o=>o.world).length>1)throw new Error('A composition has one World layer');
+  if(scene.objects.filter(o=>o.fog).length>32)throw new Error('At most 32 fog volumes');
   const byId = new Map(scene.objects.map(o => [o.id,o]));
   for (const object of scene.objects) {
+    validateEnvironmentNode(object);
+    if([object.world,object.fog,object.terrain,object.scatter].filter(Boolean).length>1)throw new Error('Choose one environment layer kind');
     const chain = new Set([object.id]);
     let parent = object.parent;
     while (parent) {
@@ -156,6 +165,8 @@ export function parseScene(raw: unknown): Scene3D {
       if (!ancestor) throw new Error(`Missing 3D parent: ${parent}`);
       parent = ancestor.parent;
     }
+    if(object.terrain){vertices+=(Math.round(object.terrain.p.resolution!.v)+1)**2;continue;}
+    if(object.world || object.fog || object.scatter)continue;
     if ('primitive' in object.source) {
       const source=object.source,s=source.parameters?.segments || 48;
       vertices+=source.primitive==='box'?24:source.primitive==='roundedBox'?6*(2*(source.parameters?.segments ?? 6)+1)**2:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)
@@ -192,14 +203,14 @@ export function sceneProperties(layer: any): any[] {
     for (const [key,prop] of Object.entries<any>(node?.p || {})) if (prop && Array.isArray(prop.kf))
       out.push({key:`${prefix}.${key}`,prop,label:key,group:name});
   };
-  for (const o of scene.objects || []) { collect({p:o.materialProperties},`o.${o.id}.mi`,`${o.name} material`);for(const [index,p] of Object.entries(o.sourceMaterialProperties || {}))collect({p},`o.${o.id}.mi.${index}`,`${o.name} material ${index}`); collect(o,`o.${o.id}`,o.name);collect(o.material,`o.${o.id}.m`,`${o.name} material`); }
+  for (const o of scene.objects || []) { collect({p:o.materialProperties},`o.${o.id}.mi`,`${o.name} material`);for(const [index,p] of Object.entries(o.sourceMaterialProperties || {}))collect({p},`o.${o.id}.mi.${index}`,`${o.name} material ${index}`); out.push(...environmentProperties(o).map(p=>({...p,key:`o.${o.id}.${p.key}`})));collect(o,`o.${o.id}`,o.name);collect(o.material,`o.${o.id}.m`,`${o.name} material`); }
   for (const l of scene.lights || []) collect(l,`light.${l.id}`,l.name);
   collect(scene.camera,'camera','Camera');collect(scene.environment,'environment','Scene');
   return out;
 }
 
 export function validateSceneChannel(path:string,property:unknown):void {
-  if(validateExtrusionChannel(path,property))return;
+  if(validateEnvironmentChannel(path,property) || validateExtrusionChannel(path,property))return;
   const part=PART_PATH.exec(path.replace(/^o\.[^.]+\./,''));
   if(part){partTransformSchema.shape[part[2] as keyof typeof partTransformSchema.shape]!.parse(property);return;}
   const intrinsic=/^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?([^.]+)$/.exec(path);
@@ -220,5 +231,10 @@ export function validateSceneChannel(path:string,property:unknown):void {
 }
 
 export function sceneAssetIds(scene: Scene3D): string[] {
-  return [...new Set(scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x)))];
+  const sources=scene.objects.flatMap(o=>[
+    ...('assetId' in o.source?[o.source.assetId]:[]),o.world?.source,o.terrain?.heightSource,
+    ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId))
+  ]);
+  sources.push(...scene.lights.map(l=>l.world?.source));
+  return [...new Set(sources.filter((source):source is string=>typeof source==='string'))];
 }

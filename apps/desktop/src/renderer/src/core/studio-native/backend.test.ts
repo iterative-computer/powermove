@@ -22,7 +22,8 @@ describe('native Studio adapter', () => {
     const request={tier:'final' as const,size:{width:64,height:64},samples:16,accumulate:false};
     (await backend.render({...request,layer:'box'})).release?.();(await backend.render(request)).release?.();
     backend.setView({...view,camera:{...view.camera,position:[1,0,5]}});(await backend.render(request)).release?.();
-    expect(renders.map(r=>r.reset)).toEqual([true,false,true]);backend.dispose();
+    expect(renders.map(r=>r.reset)).toEqual([true,false,true]);
+    (await backend.render({...request,layer:'world',background:true})).release?.();expect(renders.at(-1)).toMatchObject({layer:1,background:true,reset:false});backend.dispose();
   });
   it('uploads binary geometry once and sends a small patch while the camera moves', async () => {
     const calls: { command: StudioNativeCommand; bytes: number }[] = [];

@@ -1,3 +1,4 @@
+import { materialOptionsSchema,validateEnvironmentNode } from '../../core/scene3d/environment-data';
 import { contentSlot } from './content-properties';
 import { extrusionEligible, parseExtrusion } from '../../core/scene3d/extrusion-data';
 import { layerInputPlan, hasLayerInputs, validateEffectInputs } from '../../core/effect-inputs';
@@ -53,7 +54,22 @@ const LAYER_FIELDS: any = new Set([
 let live: any = null;
 
 const validateInputGraphs = (commands?: any[]) => {
-  if(!commands || commands.some(command=>['add_layer','set_content','add_effect','set_effect','apply_preset'].includes(command.type) || command.type==='set_layer' && (command.patch?.matteSource!==undefined||command.patch?.matteSources!==undefined)))validateCompositionMaps(PM.proj);
+  if(!commands || commands.some(command=>['add_layer','set_content','add_effect','set_effect','apply_preset'].includes(command.type) || command.type==='set_layer' && (command.patch?.matteSource!==undefined||command.patch?.matteSources!==undefined))){validateCompositionMaps(PM.proj);
+    for(const comp of [PM.proj,...Object.values<any>(PM.proj.comps || {})]){
+      const objects=(comp.layers || []).map((l:any)=>l.d?.data?.object).filter(Boolean);
+      if(objects.filter((o:any)=>o.world).length>1)throw new Error('A composition has one World layer');
+      if(objects.filter((o:any)=>o.fog).length>32)throw new Error('At most 32 fog volumes');
+      if(objects.reduce((n:number,o:any)=>n+Number(o.scatter?.p.count?.v || 0),0)>1000000)throw new Error('At most one million scattered placements per composition');
+      for(const object of objects)validateEnvironmentNode(object);
+      for(const layer of comp.layers || [])if(layer.d?.data?.object?.scatter){
+        const scatter=layer.d.data.object.scatter;
+        for(const id of [scatter.model,scatter.surface]){
+          const target=comp.layers.find((candidate:any)=>candidate.id===id);if(!target)continue;
+          const node=target.d?.data?.object;if(id===layer.id || !node || node.scatter || node.fog || node.world)throw new Error('Scatter sources must be model or terrain layers in the same composition');
+        }
+      }
+    }
+  }
   // Scalar drags cannot change texture dependencies. Keep graph validation off
   // their critical path, and allow ordinary edits to imported invalid data.
   if (commands && !commands.some(command => ['add_effect','apply_preset','group_layers','ungroup_layers','move_to_group','reorder_layer'].includes(command.type)
@@ -295,7 +311,7 @@ function setProperty(command: any, presets?: KeyPresets) {
   const current: any = PM.evP(layer, prop, command.time == null ? PM.time : command.time, channel);
   let value: any = command.value;
   if (typeof current === 'number') value = finite(value, channel);
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer)))validate3DChannel(layer,channel,{...prop,v:value});
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer) || layer.d?.materialOptions))validate3DChannel(layer,channel,{...prop,v:value});
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
@@ -341,7 +357,7 @@ function replaceKeyframes(command: any) {
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
     return { time, value, ease: key.ease || 'linear', hold: !!key.hold, id: key.id, temporal: key.temporal, spring: key.spring, handles: key.handles };
   });
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer))){
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer) || layer.d?.materialOptions)){
     const candidate={...prop,kf:[...(command.replace===false?prop.kf:[]),...next.map((k:any)=>({t:k.time,v:k.value}))]};
     if(command.expression!==undefined){const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);candidate.expr=command.expression || null;}
     validate3DChannel(layer,channel,candidate);
@@ -378,7 +394,7 @@ function replaceKeyframes(command: any) {
     PM.setKeysOn(prop, next.map((key: any) => ({ t: key.time, v: key.value, ease: key.ease, hold: key.hold })), PM.proj.fps);
   }
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer)))validate3DChannel(layer,channel,prop);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer) || layer.d?.materialOptions))validate3DChannel(layer,channel,prop);
   PM.touch();
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
@@ -454,6 +470,13 @@ function setContent(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  if(patch.materialOptions!==undefined){
+    patch.materialOptions=materialOptionsSchema.parse(patch.materialOptions);
+    if(isGeneratedOrigin(meta.origin)){
+      const future=new Map(sceneProperties({...layer,d:{...layer.d,materialOptions:patch.materialOptions}}).map(p=>[p.key,p.prop]));
+      for(const {key,prop} of sceneProperties(layer))if(lockedIntent(layer,key) && JSON.stringify(prop)!==JSON.stringify(future.get(key)))throw new Error(`Preserved hand-edited ${key}`);
+    }
+  }
   if(patch.extrusion!==undefined){
     if(!extrusionEligible(layer))throw new Error('Only text and shape layers can be extruded');
     patch.extrusion=parseExtrusion(patch.extrusion);

@@ -170,8 +170,10 @@ export class NativeStudioBackend implements StudioBackend {
       this.width = width; this.height = height;
       const start = performance.now(); await this.upload(); const uploadMs = performance.now() - start;
       const objects = this.prepared?.objects ?? (this.document ?? this.description?.())?.layer_ids ?? [];
-      const layer = request.layer === undefined ? undefined : objects.indexOf(request.layer);
-      if (layer === -1) throw new Error('Studio output layer is missing');
+      const index = request.layer === undefined ? undefined : objects.indexOf(request.layer);
+      // World/fog layers own no triangles. A nonmatching mask keeps only the
+      // optional backdrop, without treating their pixels as the whole scene.
+      const layer = index === -1 ? objects.length : index;
       const renderKey=`${this.revision}:${this.time}:${this.width}:${this.height}:${request.tier}:${request.samples}:${request.denoise!==false}`;
       const reply = await this.send({ op: 'render', width: this.width, height: this.height, tier: request.tier, samples: request.samples, reset: request.accumulate === false && this.rendered!==renderKey, goal: true, denoise: request.denoise !== false, layer, background: request.background === true, sharedTexture: !!this.textureUnsubscribe, time: this.time });
       if (request.signal?.aborted) throw new Error('Studio frame cancelled');

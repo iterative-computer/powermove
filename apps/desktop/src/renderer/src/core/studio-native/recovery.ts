@@ -15,7 +15,7 @@ export class RecoveringStudioBackend implements StudioBackend {
   private closed = false;
   get id(): string { return this.fallback?.id ?? this.native.id; }
   constructor(private native: StudioBackend, private fallbackFactory: StudioBackendFactory, private context: StudioBackendContext) {}
-  async initialize(): Promise<void> { try { await this.native.initialize(); } catch { await this.recover(); } }
+  async initialize(): Promise<void> { try { await this.native.initialize(); } catch (error) { console.warn('Native Studio initialization failed; using WebGPU',error);await this.recover(); } }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription) {
     this.input = { scene, maps, description }; this.camera = null;
     const active = this.fallback ?? this.native;
@@ -36,6 +36,7 @@ export class RecoveringStudioBackend implements StudioBackend {
     try { return await (this.fallback ?? this.native).render(request); }
     catch (error) {
       if (request.signal?.aborted || this.fallback) throw error;
+      console.warn('Native Studio frame failed; using WebGPU',error);
       return (await this.recover()).render(request);
     }
   }

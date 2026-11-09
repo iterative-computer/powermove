@@ -63,7 +63,8 @@ export class WebGpuStudioBackend implements StudioBackend {
     if (changed || t.samples < goal) t.trace(Math.max(0, goal - t.samples), request.tier === 'live' ? 2 : 8, changed, request.tier === 'live' ? 6 : 64, Math.round(this.time * 9600));
     const denoise = request.denoise !== false;
     if (entry.resolved !== t.samples || entry.denoise !== denoise) { t.resolve(request.tier === 'live' ? 4 : 0, request.tier === 'final' && denoise); entry.resolved = t.samples; entry.denoise = denoise; }
-    const index = request.layer ? this.scene.objects.indexOf(request.layer) : -1;
+    const found = request.layer ? this.scene.objects.indexOf(request.layer) : -1;
+    const index = request.layer && found < 0 ? this.scene.objects.length : found;
     return { source: t.present(`${request.layer ?? '*'}:${request.background === true}`, index, request.background === true), width, height, samples: t.samples, version: `${this.revision}:${this.time}:${this.viewKey}:${key}:${t.samples}` };
   }
   bounds(layer?: string): StudioBounds | null {
