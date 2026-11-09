@@ -235,6 +235,11 @@ pub fn bundle_id() -> Option<String> {
         .bundleIdentifier()
         .map(|id| id.to_string())
 }
+/// Opens a local file in its default app.
+pub fn open_path(path: &std::path::Path) -> bool {
+    objc2_foundation::NSURL::from_file_path(path)
+        .is_some_and(|url| objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url))
+}
 /// Selects `path` in Finder.
 pub fn reveal(path: &std::path::Path) {
     use objc2_app_kit::NSWorkspace;

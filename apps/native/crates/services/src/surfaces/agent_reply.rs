@@ -63,6 +63,160 @@ pub fn local_media(raw: &str, home: &Path) -> Option<PathBuf> {
     }
     Some(path)
 }
+/// An image, video or sound a reply names (main's agent markdown media).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyMedia {
+    pub kind: MediaKind,
+    /// The local path, resolved, or the `https` address as written.
+    pub path: String,
+    /// The alt text, or the file name.
+    pub name: String,
+    /// A web address: opened only when the person asks.
+    pub remote: bool,
+}
+impl ReplyMedia {
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            MediaKind::Image => "image",
+            MediaKind::Video => "video",
+            MediaKind::Audio => "audio",
+        }
+    }
+}
+fn file_name(value: &str) -> String {
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(value)
+        .to_owned()
+}
+/// main's `mediaRun`: a local media path anywhere it's written; a web
+/// address only when written as an image (`![alt](https://…)`, `<img>`).
+fn media_at(target: &str, alt: &str, image: bool, home: &Path) -> Option<ReplyMedia> {
+    let name = |path: &str| {
+        if alt.is_empty() {
+            file_name(path)
+        } else {
+            alt.to_owned()
+        }
+    };
+    if let Some(local) = local_media(target, home) {
+        let path = local.to_string_lossy().into_owned();
+        return Some(ReplyMedia {
+            kind: media_type(&local)?.0,
+            name: name(&path),
+            path,
+            remote: false,
+        });
+    }
+    let target = target.trim();
+    if image && target.len() > 8 && target[..8].eq_ignore_ascii_case("https://") {
+        let bare = target.split(['?', '#']).next().unwrap_or(target);
+        return Some(ReplyMedia {
+            kind: media_type(Path::new(bare)).map_or(MediaKind::Image, |(kind, _)| kind),
+            name: name(target),
+            path: target.to_owned(),
+            remote: true,
+        });
+    }
+    None
+}
+/// The media a reply's prose names, in reading order, once per path:
+/// `![alt](path)`, `[text](path)`, `<img src>`, a path in backticks, or a
+/// bare absolute or `~/` path. Fenced code is code, never media.
+pub fn reply_media(text: &str, home: &Path) -> Vec<ReplyMedia> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    static LINK: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"^(!?)\[((?:[^\]\[]|\[[^\]\[]*\])*)\]\((?:<([^<>\n]+)>|((?:[^()\s<>]|\([^()\s]*\))+))(?:\s+"[^"]*")?\)"#).unwrap()
+    });
+    static IMG: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?i)^<img\s[^<>]*?src=["']([^"']+)["'][^<>]*>"#).unwrap());
+    static ALT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?i)alt=["']([^"']*)["']"#).unwrap());
+    static BARE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)^(?:~/|/)[^\s<>()\[\]`'"]*\.(?:png|jpe?g|gif|webp|avif|svg|bmp|mp4|m4v|mov|webm|mp3|m4a|wav|aac|ogg|flac)"#).unwrap()
+    });
+    fn scan(text: &str, home: &Path, out: &mut Vec<ReplyMedia>) {
+        let push = |media: Option<ReplyMedia>, out: &mut Vec<ReplyMedia>| {
+            if let Some(media) = media
+                && !out.iter().any(|m| m.path == media.path)
+            {
+                out.push(media);
+            }
+        };
+        let mut i = 0;
+        while i < text.len() {
+            let rest = &text[i..];
+            let prev = text[..i].chars().next_back().unwrap_or(' ');
+            if rest.starts_with('\\') {
+                i += 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+                continue;
+            }
+            if rest.starts_with('`') {
+                let ticks = rest.len() - rest.trim_start_matches('`').len();
+                let fence = &rest[..ticks];
+                if let Some(end) = rest[ticks..].find(fence) {
+                    let inner = &rest[ticks..ticks + end];
+                    push(media_at(inner.trim(), "", false, home), out);
+                    i += ticks + end + ticks;
+                } else {
+                    i += ticks;
+                }
+                continue;
+            }
+            if let Some(m) = IMG.captures(rest) {
+                let alt = ALT
+                    .captures(&m[0])
+                    .map_or(String::new(), |a| a[1].to_owned());
+                push(media_at(&m[1], &alt, true, home), out);
+                i += m[0].len();
+                continue;
+            }
+            if let Some(m) = LINK.captures(rest) {
+                let image = !m[1].is_empty();
+                let target = m.get(3).or(m.get(4)).map_or("", |t| t.as_str());
+                let label = &m[2];
+                // A linked image ([![alt](src)](url)) shows the picture too.
+                if !image {
+                    scan(label, home, out);
+                }
+                push(
+                    media_at(target, if image { label } else { "" }, image, home),
+                    out,
+                );
+                i += m[0].len();
+                continue;
+            }
+            if matches!(prev, ' ' | '\t' | '\n' | '(' | '[' | '{' | '\'' | '"')
+                && let Some(m) = BARE.find(rest)
+                && !rest[m.end()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '/')
+            {
+                push(media_at(m.as_str(), "", false, home), out);
+                i += m.end();
+                continue;
+            }
+            i += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    let mut out = Vec::new();
+    let mut prose = String::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+        } else if !fenced {
+            prose.push_str(line);
+            prose.push('\n');
+        }
+    }
+    scan(&prose, home, &mut out);
+    out
+}
 pub fn safe_link(raw: &str) -> bool {
     url::Url::parse(raw).is_ok_and(|u| {
         matches!(u.scheme(), "http" | "https")
@@ -162,6 +316,47 @@ impl RemoteMedia {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reply_media_finds_what_main_rendered_in_reading_order_once() {
+        let home = Path::new("/Users/p");
+        let text = "Before ![before](/tmp/before.png) and `~/out/render.mov`.\n\
+            See /tmp/clip.mp3, [the take](file:///tmp/take%201.wav) and \
+            ![remote](https://example.com/a.webp?x=1) and \
+            <img src=\"/tmp/i.gif\" alt=\"Logo\">. Again /tmp/before.png.\n\
+            ```\n/tmp/in-code.png\n```\n\
+            Not media: [web](https://example.com/b.png), /tmp/notes.txt, \
+            ../x.png, a/tmp/y.png, /tmp/z.pngs, \\/tmp/escaped.png";
+        let found: Vec<_> = reply_media(text, home)
+            .into_iter()
+            .map(|m| (m.kind_name(), m.path, m.name, m.remote))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("image", "/tmp/before.png".into(), "before".into(), false),
+                (
+                    "video",
+                    "/Users/p/out/render.mov".into(),
+                    "render.mov".into(),
+                    false
+                ),
+                ("audio", "/tmp/clip.mp3".into(), "clip.mp3".into(), false),
+                (
+                    "audio",
+                    "/tmp/take 1.wav".into(),
+                    "take 1.wav".into(),
+                    false
+                ),
+                (
+                    "image",
+                    "https://example.com/a.webp?x=1".into(),
+                    "remote".into(),
+                    true
+                ),
+                ("image", "/tmp/i.gif".into(), "Logo".into(), false),
+            ]
+        );
+    }
     #[test]
     fn local_media_requires_supported_absolute_paths_and_explicit_home() {
         let home = std::env::temp_dir();

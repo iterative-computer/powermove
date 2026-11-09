@@ -539,13 +539,31 @@ impl Backend {
         let window =
             pm_panel_agentpanel::v4::Window::new(panel, active).map_err(|e| format!("{e:?}"))?;
         let count = window.count(panel).map_err(|e| format!("{e:?}"))?;
-        let snapshot = window
+        let mut snapshot = window
             .snapshot(
                 panel,
                 count.saturating_sub(64)..count,
                 crate::agent_host::now_ms(),
             )
             .map_err(|e| format!("{e:?}"))?;
+        // The images, videos and sounds each reply names, for its cards.
+        let home = reply_home();
+        for item in snapshot["rows"]["items"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            let value = &mut item["value"];
+            let media: Vec<Value> = reply_media(value, &home)
+                .iter()
+                .map(
+                    |m| json!({"kind":m.kind_name(),"path":m.path,"name":m.name,"remote":m.remote}),
+                )
+                .collect();
+            if !media.is_empty() {
+                value["media"] = json!(media);
+            }
+        }
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
         let (connection, reason) = self.native.agent_link.connection(provider);
         let needs_answer = session.needs_answer();
@@ -1173,6 +1191,27 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "openMedia" {
+                        // Only a file or address one of this thread's replies names.
+                        let path = action["path"].as_str().unwrap_or_default();
+                        let home = reply_home();
+                        let media = state
+                            .panel
+                            .session(&thread)
+                            .map_err(|e| format!("{e:?}"))?
+                            .conversation
+                            .values()
+                            .flat_map(prose_rows)
+                            .flat_map(|row| reply_media(row, &home))
+                            .find(|m| m.path == path)
+                            .ok_or("This file can't be opened from here.")?;
+                        drop(state);
+                        self.native.platform.push((
+                            "agent.media".into(),
+                            json!({"path":media.path,"remote":media.remote,"reveal":action["reveal"] == true}),
+                        ));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "openVisual" {
                         // A saved reply is checked again before it's shown (main's
                         // readVisualReply); the window opens its own viewer.
@@ -1414,6 +1453,30 @@ pub(crate) fn layer_numbers(p: &Published) -> bool {
         .and_then(|c| c.get("timeline"))
         .and_then(|t| t.get("showLayerNumbers"))
         .is_none_or(|v| *v != pm_model::Value::Bool(false))
+}
+
+/// The home folder `~/` paths in replies resolve against.
+fn reply_home() -> std::path::PathBuf {
+    std::env::var_os("HOME").map(Into::into).unwrap_or_default()
+}
+/// The media an agent's prose names: an assistant message, or a text step of
+/// a run's trace (one row each in the panel); none for anything else.
+fn reply_media(
+    row: &Value,
+    home: &std::path::Path,
+) -> Vec<pm_services::surfaces::agent_reply::ReplyMedia> {
+    let prose = (row["role"] == "assistant" && row["error"] != true) || row["kind"] == "text";
+    if !prose {
+        return Vec::new();
+    }
+    pm_services::surfaces::agent_reply::reply_media(row["text"].as_str().unwrap_or_default(), home)
+}
+/// Every row of a stored message that can carry agent prose.
+fn prose_rows(message: &Value) -> Vec<&Value> {
+    match message["steps"].as_array() {
+        Some(steps) if message["role"] == "trace" => steps.iter().collect(),
+        _ => vec![message],
+    }
 }
 
 #[cfg(test)]

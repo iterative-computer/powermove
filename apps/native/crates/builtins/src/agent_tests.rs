@@ -1477,3 +1477,88 @@ fn a_result_that_cant_be_saved_is_kept_until_it_is() {
     );
     panel.panels.close();
 }
+#[test]
+fn media_a_reply_names_gets_a_card_that_opens_only_that_file() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // The fake provider answers "Saw: <last line>".
+    panel.send("![Before](/tmp/before.png) and https://example.com/a.png and /tmp/take.wav");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Before") && text.contains("Image"),
+        "{text}\n{}",
+        panel.agent().lock().unwrap().panel.raw_archive()
+    );
+    assert!(
+        text.contains("take.wav") && text.contains("Sound"),
+        "{text}"
+    );
+    // A web address written as a link (not an image) is no card.
+    assert!(!text.contains("Image on the web"), "{text}");
+    let open = |panel: &mut Agent, suffix: &str| {
+        let id = panel
+            .surface()
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("id").and_then(Value::as_str))
+            .find(|id| id.ends_with(suffix))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("no {suffix}"));
+        panel.panels.take_platform_requests();
+        panel.click(&id);
+        panel.panels.take_platform_requests()
+    };
+    let requests = open(&mut panel, "-media-0");
+    let request = requests
+        .iter()
+        .find(|r| r.operation == "agent.media")
+        .expect("open request");
+    assert_eq!(
+        request.input,
+        json!({"path":"/tmp/before.png","remote":false,"reveal":false})
+    );
+    let requests = open(&mut panel, "-media-1-reveal");
+    assert_eq!(
+        requests
+            .iter()
+            .find(|r| r.operation == "agent.media")
+            .unwrap()
+            .input,
+        json!({"path":"/tmp/take.wav","remote":false,"reveal":true})
+    );
+    // Only a file a reply names: anything else is refused, nothing opens.
+    let refused = {
+        let backend = panel
+            .panels
+            .broker
+            .entry("agent")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut backend = backend.lock().unwrap();
+        backend
+            .native_command(
+                "panel.agent.dispatch",
+                &json!({"action":{"type":"openMedia","path":"/tmp/elsewhere.png","reveal":false}}),
+            )
+            .err()
+    };
+    assert_eq!(
+        refused.as_deref(),
+        Some("This file can't be opened from here.")
+    );
+    assert!(
+        !panel
+            .panels
+            .take_platform_requests()
+            .iter()
+            .any(|r| r.operation == "agent.media")
+    );
+    panel.panels.close();
+}

@@ -1070,6 +1070,27 @@ impl Controller {
                     gpui_macos::child_window::present(&viewer, true);
                     Ok(Value::Null)
                 }
+                "agent.media" => {
+                    // A file or address a reply names (checked by the panel's
+                    // host): the file opens in its own app or shows in Finder;
+                    // a web address goes to the browser.
+                    let input = &request.input;
+                    let path = input["path"].as_str().unwrap_or_default();
+                    let opened = if input["remote"] == true {
+                        path.starts_with("https://") && crate::platform::open_url(path)
+                    } else if input["reveal"] == true {
+                        crate::platform::reveal(std::path::Path::new(path));
+                        true
+                    } else {
+                        crate::platform::open_path(std::path::Path::new(path))
+                    };
+                    if !opened {
+                        self.errors
+                            .borrow_mut()
+                            .tell("Agent", "That file couldn’t be opened. It may have moved.");
+                    }
+                    Ok(Value::Null)
+                }
                 "agent.close" => {
                     if let Some(handle) = self.builtins.windows.remove("agent") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
