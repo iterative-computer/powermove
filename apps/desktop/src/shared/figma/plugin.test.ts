@@ -287,7 +287,7 @@ it("exports only a node whose image hash has no asset bytes", async () => {
   expect(doc.images).toEqual({});
 });
 
-it("preserves resolved AUTO line spacing for auto-width text without changing explicit spacing", async () => {
+it.each(["\n","\r\n","\u2028","\u2029"])("preserves resolved AUTO line spacing with %j", async (separator) => {
   vi.resetModules();
   const make = (id: string, text: string, height: number, lineHeight: any) => ({
     id, type: "TEXT", name: id, width: 240, height,
@@ -298,7 +298,7 @@ it("preserves resolved AUTO line spacing for auto-width text without changing ex
       fontSize: 80, fills: [], lineHeight, letterSpacing: {unit: "PIXELS", value: 0}, listOptions: {type: "NONE"}}],
   });
   const nodes = [make("single", "Label", 160, {unit: "AUTO"}),
-    make("multiline", "One\nTwo", 332, {unit: "AUTO"}),
+    make("multiline", "One"+separator+"Two", 332, {unit: "AUTO"}),
     make("explicit", "Label", 100, {unit: "PIXELS", value: 100})];
   const page: any = {id: "page", children: nodes, selection: nodes};
   nodes.forEach((node: any) => node.parent = page);
