@@ -85,7 +85,7 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
     const references=new Map<string,any>();
     for(const id of scan.ids)references.set(id,scan.byId.get(id)!.asset);
     const starts=new Map<string,number>(comp.layers.map((l:any)=>[l.id,l.from]));
-    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);if(!layer)return null;let loading=false;const frame=compositionTextureFrame(PM,layer,map,time,()=>{loading=true;});return loading?'loading':frame;},compositionExtrusions(PM,comp,time));
+    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map,minimum)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);if(!layer)return null;let loading=false;const frame=compositionTextureFrame(PM,layer,map,time,()=>{loading=true;},minimum);return loading?'loading':frame;},compositionExtrusions(PM,comp,time));
     const models=comp.layers.filter((l:any)=>layer3DRole(l)==='object');
     // Use exactly the native layer hierarchy, orientation and anchor matrices.
     // Flattening the evaluated world avoids applying parent transforms twice.
@@ -190,7 +190,7 @@ export function sceneRuntime(PM:any,layer:any,time=PM.time || 0):SceneRuntime|nu
   let pool=runtimes.get(PM);if(!pool){pool=new Map();runtimes.set(PM,pool);}
   let runtime=pool.get(layer.id);if(!runtime){runtime=new SceneRuntime();pool.set(layer.id,runtime);}
   // Retain geometry across edits and frame changes; refresh only evaluated channels.
-  runtime.sync(scene,(id:string)=>PM.assets?.get?.(id), (prop:any,path:string)=>PM.evP?PM.evP(layer,prop,time,path):prop.v,time-layer.from,false,undefined,(_id,map)=>compositionTextureFrame(PM,layer,map,time));
+  runtime.sync(scene,(id:string)=>PM.assets?.get?.(id), (prop:any,path:string)=>PM.evP?PM.evP(layer,prop,time,path):prop.v,time-layer.from,false,undefined,(_id,map,minimum)=>compositionTextureFrame(PM,layer,map,time,undefined,minimum));
   return runtime;
 }
 export function pruneSceneRuntimes(PM:any):void {

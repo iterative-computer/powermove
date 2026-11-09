@@ -3,7 +3,7 @@
   "id": "powermove-local",
   "api": "1.0.0",
   "main": "dist/code.js",
-  "ui": "ui.html",
+  "ui": "dist/ui.html",
   "editorType": [
     "figma"
   ],

@@ -29,7 +29,7 @@ import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
 import { disposeSceneRuntimes } from '../../core/scene3d/service';
-import { parseSvg } from '../core/svg-import';
+import { parseSvg,svgImportRepair } from '../core/svg-import';
 import { isStreamedMedia } from '../../host/streamed-media';
 import { forgetVideo, trackVideo } from '../core/video-residency';
 import { inspectorService, viewerService } from '../core/services';
@@ -881,6 +881,10 @@ function rasterDrawing(d: any, geometry: any, paths: any[] | null, crop?: Raster
   if(crop)ctx.translate(-crop.x,-crop.y);
   ctx.scale(density,density);ctx.translate(-x0,-y0);
   const outline = primitive ? shapeOutline(d) : new Path2D(), ends:any[]=[],strokeOutlines:any[]=[],fills=new Map<string,{path:Path2D;rule:string}>();
+  if(primitive&&d.shape==='line'){
+    ends.push({x:0,y:d.h/2,angle:Math.PI,cap:d.strokeStyle?.startCap??d.strokeStyle?.cap??'ROUND'},{x:d.w,y:d.h/2,angle:0,cap:d.strokeStyle?.endCap??d.strokeStyle?.cap??'ROUND'});
+    d={...d,color:'transparent',fillGradient:undefined,stroke:Math.max(1,d.stroke||6),strokeColor:d.color,strokeGradient:d.strokeGradient??d.fillGradient,strokeStyle:{...d.strokeStyle,align:'center',cap:'NONE'}};
+  }
   if(paths)for(const record of paths) {
     const v=record.values,vs=v.vertices,p=new Path2D(); if(!vs.length)continue;
     p.moveTo(vs[0].x,vs[0].y);
@@ -979,9 +983,7 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
   if (e && e.bytes > maxSourceBytes) return null;
   if (!e) {
-    const strokeReach = Math.max(1,d.strokeStyle?.join==='miter'?Math.min(100,d.strokeStyle.miterLimit??4):1,
-      [d.strokeStyle?.cap,d.strokeStyle?.startCap,d.strokeStyle?.endCap,...(paths??[]).flatMap((r:any)=>[r.values.startCap,r.values.endCap])].some(c=>/ARROW|TRIANGLE|DIAMOND|CIRCLE/.test(c??''))?4:1);
-    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:advanced?{...record.values,strokeWidth:Math.max(record.values.strokeWidth,(d.stroke??0)*strokeReach)}:record.values,matrix:record.matrix})))
+    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:advanced?{...record.values,...d.strokeStyle,strokeWidth:Math.max(record.values.strokeWidth,(d.stroke??0)*(d.strokeStyle?.align==='outside'?2:1))}:record.values,matrix:record.matrix})))
       : L.type === 'text' ? textRasterGeometry(d,scale) : shapeRasterGeometry(d,scale);
     if ((crop?.width ?? geometry.width) * (crop?.height ?? geometry.height) * 4 > maxSourceBytes) return null;
     // Animated text can paint beyond the ordinary text geometry; leave that
@@ -1824,6 +1826,17 @@ PM.assets = {
       const meta: any = project.assets?.[a.id];
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
     });
+    // Old SVG imports discarded author CSS and compound fill membership.
+    // Hydrate migrations in place, without a user edit or undo entry.
+    const svgRepairs:Array<{layer:any;patch:Record<string,unknown>}>=[];
+    for(const asset of restored.filter((a:any)=>a.format==='svg'&&a.svg)){
+      const layers=[project.layers,...Object.values<any>(project.comps || {}).map(comp=>comp.layers)].flat().filter((layer:any)=>layer?.d?.svgSourceAsset===asset.id&&!layer.d.svgImportVersion&&!layer.d.svgImportCheckedVersion);
+      if(!layers.length)continue;
+      const source=await asset.persistBlob.text();
+      if(epoch!==assetEpoch||PM.proj!==project)return {restored:[],missing:[],stale:true};
+      for(const layer of layers){const patch=svgImportRepair(layer,source,asset.svg);svgRepairs.push({layer,patch:{...patch,svgImportCheckedVersion:2}});}
+    }
+    if(svgRepairs.length){for(const {layer,patch} of svgRepairs)Object.assign(layer.d,patch);checkpointAssetMetadata(project);}
     const backfill = results.filter((result: any) => result.asset && !result.posterBlob && !result.kept);
     if (backfill.length) setTimeout(() => {
       void (async () => {

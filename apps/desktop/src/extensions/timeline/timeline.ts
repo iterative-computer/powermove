@@ -735,11 +735,20 @@ function edgeSnapping(event?: any) {
 }
 function beginDrag(event: any, options: any) {
   let control: any;
+  let previousX=0,previousY=0,previousModifiers='';
   const finish = (kind: 'up' | 'cancel') => (...args: any[]) => {
     activeDrags.delete(control);
     return options[kind]?.(...args);
   };
-  control = api.ui.drag(event, { ...options, up: finish('up'), cancel: finish('cancel') });
+  control = api.ui.drag(event, { ...options,
+    move:(dx:number,dy:number,pointer:PointerEvent)=>{
+      // Browsers can emit a stationary pointermove when a modifier changes.
+      // Releasing Shift must not replace a snapped preview with raw timing,
+      // but Alt/Cmd/Ctrl (precision, centred scale) still apply immediately.
+      const modifiers=`${!!pointer?.altKey}${!!pointer?.metaKey}${!!pointer?.ctrlKey}`;
+      if(dx===previousX&&dy===previousY&&modifiers===previousModifiers)return;
+      previousX=dx;previousY=dy;previousModifiers=modifiers;options.move?.(dx,dy,pointer);
+    },up: finish('up'), cancel: finish('cancel') });
   activeDrags.add(control);
   return control;
 }
@@ -3530,13 +3539,19 @@ function scrub(e: any) {
     T.snapGuide = resolved.lock?.target ?? null;
     present(resolved.delta);
   };
+  let initialized=false;
   const set = (ev: any) => {
     const r = T.cv.getBoundingClientRect();
-    rawTime = x2t(ev.clientX - r.left);
+    const nextTime=x2t(ev.clientX-r.left);
+    if(initialized&&nextTime===rawTime)return;
+    rawTime=nextTime;initialized=true;
     if (ev?.shiftKey) updateShiftHeld(true);
     apply();
   };
-  const refresh = () => apply();
+  const refresh = () => {
+    if(shiftSnapping())apply();
+    else {snapper.reset(rawTime);T.snapGuide=null;invalidateTime();}
+  };
   const cleanup = () => {
     if (refreshActiveScrub === refresh) refreshActiveScrub = null;
     scrubPresentationTime = null; T.snapGuide = null;

@@ -69,6 +69,8 @@ describe('composition material maps',()=>{
   it('samples source time and frame rate, bounds resolution, and reuses unchanged source frames',()=>{
     const {PM,source}=editor(),layer=PM.L('model'),map={compositionId:source};layer.from=.5;
     expect(PM.Edit.apply({type:'set_content',target:'model',patch:{speed:2,trim:.25}}).ok).toBe(true);
+    const paint=PM.mkLayer('solid');paint.d.color=PM.P('#FF0000');paint.d.color.kf=[PM.KF(0,'#FF0000'),PM.KF(1,'#0000FF')];
+    PM.proj.comps[source].layers.push(paint);PM.touch();
     const capture=vi.fn((..._args:any[])=>new Uint8Array(128*64*4));PM.GL.renderMaterialComposition=capture;
     const first=compositionTextureFrame(PM,layer,map,.5)!;
     expect(capture.mock.calls[0]?.slice(1,4)).toEqual([.25,128,64]);
@@ -77,7 +79,9 @@ describe('composition material maps',()=>{
     expect(PM.Edit.apply({type:'set_content',target:'model',patch:{timeRemap:true,sourceTime:1.5}}).ok).toBe(true);
     expect(materialCompositionSample(PM,layer,map,.5)?.time).toBe(1.5);
     PM.proj.comps[source].w=4096;PM.proj.comps[source].h=2048;
-    expect(materialCompositionSample(PM,layer,map,.5)).toMatchObject({width:1024,height:512});
+    expect(materialCompositionSample(PM,layer,map,.5)).toMatchObject({width:4096,height:2048});
+    PM.GL.maxTextureSize=2048;
+    expect(materialCompositionSample(PM,layer,map,.5)).toMatchObject({width:2048,height:1024});
     expect(materialCompositionSample(PM,layer,{compositionId:PM.proj.compId},.5)).toBeNull();
     PM.Comps.remove(source);expect(compositionTextureFrame(PM,layer,map,1)).toBeNull();
   });

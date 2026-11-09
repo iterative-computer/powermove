@@ -898,9 +898,10 @@ export function convertFigma(
         clip = [{ ref: mask.ref, mode: "alpha" }];
       }
       siblings(node.children, node, c.ref, clip);
-      for (let i = 0; i < strokes.length; i++)
+      // Figma paints later fills over earlier fills; our layer stack is top first.
+      for (let i = strokes.length - 1; i >= 0; i--)
         paintLayer(undefined, strokes[i], `stroke-${i}`, c.ref, local);
-      for (let i = 0; i < fills.length; i++)
+      for (let i = fills.length - 1; i >= 0; i--)
         paintLayer(fills[i], undefined, `fill-${i}`, c.ref, local);
       for (const [i, e] of node.effects.entries())
         if (e.visible !== false && e.type === "BACKGROUND_BLUR") {
@@ -973,9 +974,10 @@ export function convertFigma(
       }
     } else if (stacked) {
       c = add("group", {});
-      for (let i = 0; i < strokes.length; i++)
+      // Figma paints later fills over earlier fills; our layer stack is top first.
+      for (let i = strokes.length - 1; i >= 0; i--)
         paintLayer(undefined, strokes[i], `stroke-${i}`, c.ref, local);
-      for (let i = 0; i < fills.length; i++)
+      for (let i = fills.length - 1; i >= 0; i--)
         paintLayer(fills[i], undefined, `fill-${i}`, c.ref, local);
     } else
       c = add(

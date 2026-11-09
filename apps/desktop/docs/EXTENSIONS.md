@@ -392,6 +392,50 @@ Transitions, motion and `prefersReducedMotion` behave the same in both.
 
 For built-in editable 3D model, light and camera layers, use `edit_3d`/`get_3d_scene` and `api.scene3d`; see `SCENE3D.md` for geometry, materials, lighting and animation examples.
 
+For evaluated selection geometry use `api.scene3d.geometryBounds(ids, time)`.
+It returns unprojected `{x0,y0,z0,x1,y1,z1}` in scene world units: X right,
+Y up, Z toward the default camera. Groups and parent descendants are included;
+imported models use their evaluated vertices, including parts, skin and morphs.
+Native planes and extrusions use the renderer's composition-to-scene basis.
+Missing/loading geometry throws instead of measuring a placeholder. A wholly
+nonvisual selection returns null. This is a tool-time geometry query, not a
+per-frame UI poll; viewer bounds remain projected 2D rectangles.
+
+For animation-preserving bounds pivots use
+`await api.groups.createBoundsNull(ids, index, {replace:false})`, where index
+is 0–8 in row-major order from top-left to bottom-right. It uses the playhead's
+evaluated bounds and inserts ordinary identity nulls, retaining original
+keyframes, expressions and animated parent/group chains. Selected hierarchies
+include their descendants. One shared null controls the combined selection,
+including mixed native artwork and models, in one Undo transaction. Existing
+null controllers are wrapped by the new null; their children keep their links.
+Separate animated parent/group branches stay intact below the nearest shared
+context. Controller transforms convert between scene units and pixels during
+evaluation rather than rebasing source channels;
+`result.data.result.nullIds` lists them and the resulting controls are selected.
+Locks and index-dependent expressions are checked before mutation.
+New nulls span the selected layers' earliest start through latest end. A single
+source therefore gives its null the same start and duration. Replacement keeps
+the existing null's timing.
+`{replace:true}` repositions a selected static identity null, or a null with
+all its direct children selected; create a new null
+around transformed/animated controls to retain their animation. Do not emulate
+this operation with playhead-only reparent compensation or frame baking.
+
+Scene-space nulls use the native model gizmo. `api.scene3d.nullViewerPosition`
+projects their evaluated anchor through the actual viewer camera; scene-unit
+coordinates must never be passed to the composition-pixel plane projection.
+The viewer draws null markers even when deselected, reports them through
+`viewer.nullMarkers()`, and hides them with Show Layer Controls. Markers are
+editor overlays and never appear in rendered or exported frames.
+Native nulls retain the same projected rectangle when deselected. Their
+outline fades when idle and brightens on hover; anchors and transform handles
+show only while selected. Marker snapshots include those rectangle
+`corners` in stage-relative CSS pixels.
+`api.scene3d.nullViewerState` supplies the pivot and full control plane for
+model-space nulls and native nulls in extrusion scenes. Both follow the active
+camera or Free View, and keep their outline when selected or deselected.
+
 Full types: `api.ts` (next to this file in the agent API pack). Summary:
 
 ### Sandbox API (apiVersion 3)

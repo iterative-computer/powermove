@@ -1,4 +1,4 @@
-import {layerMaterialMaps} from '../../core/scene3d/material-maps';
+import {layerMaterialMaps,materialSourceLayers,materialSourceActive} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layerInputPlan, hasLayerInputs } from '../../core/effect-inputs';
 import { evaluatedValue } from './content-properties';
@@ -21,9 +21,11 @@ export function videoClipsAt(PM: any, time: number): VideoClip[] {
       const layers = PM.ProjectIndex?.layersOfType
         ? [...PM.ProjectIndex.layersOfType('video', comp), ...PM.ProjectIndex.layersOfType('precomp', comp), ...PM.ProjectIndex.layersOfType('extension',comp)]
         : comp.layers;
+      const sourceIds=sourceLayerId?new Set(materialSourceLayers(comp,sourceLayerId).map((layer:any)=>layer.id)):null;
       for (const layer of layers) {
-        if(sourceLayerId && layer.id!==sourceLayerId && !required.has(layer.id))continue;
-        if (!PM.active(layer, at) && !((required.has(layer.id) || layer.id===sourceLayerId) && at >= layer.from-1e-6 && (at < layer.from+layer.dur-1e-6 || Math.abs(at-comp.dur)<=1e-6 && Math.abs(at-layer.from-layer.dur)<=1e-6))) continue;
+        const sourceMember=!!sourceIds?.has(layer.id);
+        if(sourceLayerId && !sourceMember && !required.has(layer.id))continue;
+        if (!(sourceMember?materialSourceActive(PM,comp,sourceLayerId!,layer,at):PM.active(layer, at)) && !((required.has(layer.id) || layer.id===sourceLayerId) && at >= layer.from-1e-6 && (at < layer.from+layer.dur-1e-6 || Math.abs(at-comp.dur)<=1e-6 && Math.abs(at-layer.from-layer.dur)<=1e-6))) continue;
         const materialMaps=layerMaterialMaps(layer).filter(map=>typeof map==='object');
         if(materialMaps.length){
           for(const map of materialMaps){

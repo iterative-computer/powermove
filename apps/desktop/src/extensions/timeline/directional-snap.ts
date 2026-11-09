@@ -33,8 +33,8 @@ function targetBound(targets: IndexedTarget[], time: number, inclusive = false):
 }
 
 /** A gesture-local latch. Nearby edges never attract the pointer: an anchor
- * must cross a target to acquire it. Continuing past the release distance or
- * reversing direction releases it, allowing precise movement beside an edge.
+ * must cross a target to acquire it. Moving past the release distance releases
+ * it; tiny reversals while lifting a mouse or trackpad keep the alignment.
  * Pass every pointer sample, including when snapping is disabled, so enabling
  * it midway through a drag cannot catch targets already passed. */
 export function createDirectionalSnapper(initialDelta = 0) {
@@ -62,8 +62,7 @@ export function createDirectionalSnapper(initialDelta = 0) {
         const anchor = anchors[lock.anchor];
         const exists = anchor && targets.some(target => target.time === lock!.target
           && (!target.edge || target.edge === anchor.edge));
-        if (exists && (!direction || direction === lock.direction)
-          && Math.abs(anchor.time + raw - lock.target) <= radius + epsilon) {
+        if (exists && Math.abs(anchor.time + raw - lock.target) <= radius + epsilon) {
           return { delta: lock.target - anchor.time, lock };
         }
         lock = null;

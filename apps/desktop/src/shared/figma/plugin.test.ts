@@ -286,3 +286,28 @@ it("exports only a node whose image hash has no asset bytes", async () => {
   expect(doc.nodes[0].raster).toBeDefined();
   expect(doc.images).toEqual({});
 });
+
+it.each(["\n","\r\n","\u2028","\u2029"])("preserves resolved AUTO line spacing with %j", async (separator) => {
+  vi.resetModules();
+  const make = (id: string, text: string, height: number, lineHeight: any) => ({
+    id, type: "TEXT", name: id, width: 240, height,
+    absoluteTransform: [[1, 0, 12000], [0, 1, -4000]],
+    characters: text, textAutoResize: "WIDTH_AND_HEIGHT", textAlignHorizontal: "LEFT",
+    textAlignVertical: "TOP", paragraphSpacing: 12, fills: [], strokes: [], effects: [],
+    getStyledTextSegments: () => [{start: 0, end: text.length, fontName: {family: "Synthetic tall font", style: "Regular"},
+      fontSize: 80, fills: [], lineHeight, letterSpacing: {unit: "PIXELS", value: 0}, listOptions: {type: "NONE"}}],
+  });
+  const nodes = [make("single", "Label", 160, {unit: "AUTO"}),
+    make("multiline", "One"+separator+"Two", 332, {unit: "AUTO"}),
+    make("explicit", "Label", 100, {unit: "PIXELS", value: 100})];
+  const page: any = {id: "page", children: nodes, selection: nodes};
+  nodes.forEach((node: any) => node.parent = page);
+  vi.stubGlobal("__html__", "");
+  vi.stubGlobal("figma", {showUI: vi.fn(), on: vi.fn(), currentPage: page,
+    root: {getPluginData: () => "synthetic", setPluginData: vi.fn()}, ui: {postMessage: vi.fn()}});
+  const file = new URL("../../../../../packages/figma-plugin/code.ts", import.meta.url).pathname;
+  const {serializeSelection} = await import(file);
+  const doc = await serializeSelection();
+  expect(doc.nodes.map((n: any) => n.text.leading)).toEqual([160, 160, 100]);
+  expect(doc.nodes.map((n: any) => n.text.runs[0].leading)).toEqual([160, 160, 100]);
+});

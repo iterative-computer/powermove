@@ -354,12 +354,7 @@
     <AnimatedRow {layer} label="Corner radius" path="c.radius"><NumField {api} {mixed} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" /></AnimatedRow>
   {/if}
   {#if layer.type === 'shape'}
-    {#if shape === 'line'}
-      <AnimatedRow {layer} label="Stroke" path="c.stroke"><NumField {api} {mixed} get={get('stroke', 0)} edit={edit('stroke', 'Stroke')} label="Stroke" step={0.5} min={0} unit="px" /></AnimatedRow>
-      <AnimatedRow {layer} label="Stroke color" path="c.strokeColor"><ColorField {api} {mixed} get={get('strokeColor', '#FFFFFF')} edit={edit('strokeColor', 'Stroke')} label="Stroke" /></AnimatedRow>
-    {:else}
-      <StrokeRows {layer} {content} />
-    {/if}
+    <StrokeRows {layer} {content} />
     {#if shape === 'polygon' || shape === 'star'}
       <AnimatedRow {layer} label="Points" path="c.points"><NumField {api} {mixed} get={get('points', 5)} edit={edit('points', 'Points')} label="Points" step={1} min={3} max={24} /></AnimatedRow>
     {/if}

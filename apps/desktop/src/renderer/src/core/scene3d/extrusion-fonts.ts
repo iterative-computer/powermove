@@ -2,7 +2,7 @@ import { create, type Font } from 'fontkit';
 import { resolveContent } from '../../legacy/core/content-properties';
 import { isExtrudedLayer } from './extrusion-data';
 import { sourceTime } from '../../legacy/core/retiming';
-import { layerMaterialMaps } from './material-maps';
+import { layerMaterialMaps, materialSourceLayers, materialSourceActive } from './material-maps';
 import { materialCompositionSample } from './composition-textures';
 import { styleDescriptor } from '../../typography/font-catalog';
 
@@ -65,11 +65,13 @@ export async function prepareExtrusionFonts(PM:any,project:any,time:number,seen=
   if(seen.has(key))return;if(seen.size>128)throw new Error('Extrusion font preparation exceeded composition nesting budget');seen.add(key);
   const pending:Promise<void>[]=[];
   PM.scope?.push?.(project);
-  try{for(const layer of project.layers || []){
-    if(sourceLayerId && layer.id!==sourceLayerId)continue;
+  const sourceLayers=sourceLayerId?materialSourceLayers(project,sourceLayerId):null;
+  const groupSource=sourceLayers?.some((layer:any)=>layer.id===sourceLayerId&&layer.type==='group');
+  try{for(const layer of sourceLayers || project.layers || []){
+    if(groupSource&&!materialSourceActive(PM,project,sourceLayerId!,layer,time))continue;
     if(!sourceLayerId && (PM.active? !PM.active(layer,time):layer.on===false))continue;
     // A layer-as-material supplies its flat source artwork; it needs no mesh.
-    if(!sourceLayerId && isExtrudedLayer(layer) && layer.type==='text'){
+    if((!sourceLayerId||groupSource) && isExtrudedLayer(layer) && layer.type==='text'){
       const entry=requestExtrusionFont(PM,resolveContent(PM,layer,time));
       pending.push(Promise.resolve(entry.pending).then(()=>{if(entry.error)throw new Error(entry.error);}));
       for(const range of layer.d.styles || []){

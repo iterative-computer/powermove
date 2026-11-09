@@ -5,11 +5,34 @@ export const MATERIAL_SLOTS = ['color','normal','roughness','metalness','emissiv
 export type MaterialSlot = typeof MATERIAL_SLOTS[number];
 export type MaterialMaps = Partial<Record<MaterialSlot,MaterialMap>>;
 export interface SourceMaterialInfo {index:number;name:string;slots:MaterialSlot[];maps:MaterialMaps}
-export type MaterialSourceGroup = 'Comps'|'Footage'|'Solids'|'Text & Shapes';
+export type MaterialSourceGroup = 'Comps'|'Groups'|'Footage'|'Solids'|'Text & Shapes';
 export interface MaterialSourceLayer {id:string;name:string;type:string;group:MaterialSourceGroup}
 export interface MaterialLayerLink {surface?:ExtrusionSurface;materialIndex:number|null;slot:MaterialSlot;layerId:string;status:'ready'|'missing'|'ineligible'|'cycle'}
-const sourceGroups:Record<string,MaterialSourceGroup>={precomp:'Comps',image:'Footage',video:'Footage',solid:'Solids',text:'Text & Shapes',shape:'Text & Shapes'};
-export function materialSourceEligible(layer:any):boolean {return !!sourceGroups[layer?.type] && !layer?.d?.data?.object;}
+const sourceGroups:Record<string,MaterialSourceGroup>={precomp:'Comps',group:'Groups',image:'Footage',video:'Footage',solid:'Solids',text:'Text & Shapes',shape:'Text & Shapes'};
+export function materialSourceEligible(layer:any,comp?:any):boolean {
+  const is3D=(layer:any)=>layer.threeD || layer.d?.definition?.startsWith('powermove.3d.') || layer.d?.data?.object || layer.d?.data?.camera || layer.d?.data?.scene || isExtrudedLayer(layer);
+  return !!sourceGroups[layer?.type] && !is3D(layer) && !(comp && materialSourceLayers(comp,layer.id).some(is3D));
+}
+/** Group sources own their complete subtree; membership is independent of stack order. */
+export function materialSourceLayers(comp:any,sourceId:string):any[] {
+  const source=comp.layers.find((layer:any)=>layer.id===sourceId);
+  if(source?.type!=='group')return source?[source]:[];
+  const children=new Map<string,any[]>();
+  for(const layer of comp.layers){const list=children.get(layer.group)||[];list.push(layer);children.set(layer.group,list);}
+  const ids=new Set<string>(),pending=[source];
+  while(pending.length){const layer=pending.pop()!;if(ids.has(layer.id))continue;ids.add(layer.id);if(layer.type==='group')pending.push(...children.get(layer.id)||[]);}
+  return comp.layers.filter((layer:any)=>ids.has(layer.id));
+}
+/** Hidden source roots still supply pixels; child visibility and timing remain authored. */
+export function materialSourceActive(PM:any,comp:any,sourceId:string,layer:any,time:number):boolean {
+  if(layer.id===sourceId)return layer.type==='group' || time>=layer.from-1e-6 &&
+    (time<layer.from+layer.dur-1e-6 || Math.abs(time-comp.dur)<=1e-6 && Math.abs(time-layer.from-layer.dur)<=1e-6);
+  if(!PM.active({...layer,group:null},time))return false;
+  const ancestors=PM.groupAncestors?.(layer,comp.layers)||[],at=ancestors.findIndex((group:any)=>group.id===sourceId);
+  return !ancestors.slice(0,Math.max(0,at)).some((group:any)=>{
+    const on=group.on;return !(on&&typeof on==='object'?(PM.evP?.(group,on,time,'l.on')??on.v):on);
+  });
+}
 /** Generated geometry supplies UVs; custom and imported meshes must own them. */
 export function materialReceiverHasUVs(PM:any,layer:any):boolean {
   const source=layer?.d?.data?.object?.source;
@@ -60,9 +83,11 @@ function materialGraph(project:any):Map<string,string[]> {
   for(const comp of projectCompositions(project)){
     const key=(id:string)=>JSON.stringify(['layer',comp.id,id]);
     graph.set(JSON.stringify(['comp',comp.id]),(comp.layers || []).map((l:any)=>key(l.id)));
-    const ids=new Set((comp.layers || []).map((l:any)=>l.id));
+    const ids=new Set((comp.layers || []).map((l:any)=>l.id)),children=new Map<string,string[]>();
+    for(const layer of comp.layers || [])if(layer.group){const list=children.get(layer.group)||[];list.push(key(layer.id));children.set(layer.group,list);}
     for(const layer of comp.layers || []){
       const deps:string[]=[];
+      if(layer.type==='group')deps.push(...children.get(layer.id)||[]);
       if(layer.type==='precomp' && layer.d?.comp)deps.push(JSON.stringify(['comp',layer.d.comp]));
       for(const map of layerMaterialMaps(layer))if(typeof map==='object'){
         if('compositionId' in map)deps.push(JSON.stringify(['comp',map.compositionId]));
@@ -87,14 +112,14 @@ export function materialLayerStatus(project:any,receiverId:string,sourceId:strin
   const owner=materialOwner(project,receiverId),source=owner?.layers?.find((l:any)=>l.id===sourceId);
   if(!source)return 'missing';
   if(sourceId===receiverId)return 'cycle';
-  if(!materialSourceEligible(source))return 'ineligible';
+  if(!materialSourceEligible(source,owner))return 'ineligible';
   const key=(id:string)=>JSON.stringify(['layer',owner.id,id]);
   return reaches(materialGraph(project),key(sourceId),key(receiverId))?'cycle':'ready';
 }
 export function listEligibleMaterialLayers(PM:any,receiverId:string):{group:MaterialSourceGroup;layers:MaterialSourceLayer[]}[] {
   const owner=materialOwner(PM.proj,receiverId),receiver=owner?.layers.find((l:any)=>l.id===receiverId);
   if(!materialReceiverHasUVs(PM,receiver))return [];
-  const groups:MaterialSourceGroup[]=['Comps','Footage','Solids','Text & Shapes'];
+  const groups:MaterialSourceGroup[]=['Comps','Groups','Footage','Solids','Text & Shapes'];
   return groups.map(group=>({group,layers:(owner.layers || []).filter((layer:any)=>sourceGroups[layer.type]===group && materialLayerStatus(PM.proj,receiverId,layer.id)==='ready')
     .map((layer:any)=>({id:layer.id,name:layer.name,type:layer.type,group}))}));
 }
@@ -129,7 +154,7 @@ export function validateCompositionMaps(project:any):void {
     if(reaches(graph,source,receiver))throw new Error('Composition or layer material reference would create a cycle');
   }
   for(const comp of projectCompositions(project))for(const layer of comp.layers || [])for(const map of layerMaterialMaps(layer))
-    if(typeof map==='object' && 'layerId' in map){const source=comp.layers.find((l:any)=>l.id===map.layerId);if(source && !materialSourceEligible(source))throw new Error('Layer material source must be a precomp, solid, image, video, text or shape');}
+    if(typeof map==='object' && 'layerId' in map){const source=comp.layers.find((l:any)=>l.id===map.layerId);if(source && !materialSourceEligible(source,comp))throw new Error('Layer material source must be a group, precomp, solid, image, video, text or shape');}
 }
 export function listModelMaterials(PM:any,layerId:string):SourceMaterialInfo[] {
   const layer=PM.L?.(layerId),object=layer?.d?.data?.object;

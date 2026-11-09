@@ -2,68 +2,48 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <style>/* POWERMOVE_TOKENS */</style>
     <style>
-      :root {
-        color-scheme: light dark;
-      }
-      * {
-        box-sizing: border-box;
-      }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        padding: 20px;
-        font:
-          12px/1.5 Inter,
-          system-ui,
-          sans-serif;
-        background: var(--figma-color-bg, #fff);
-        color: var(--figma-color-text, #222);
+        padding: var(--pad);
+        font: var(--fs-md)/var(--lh) var(--f-ui);
+        background: var(--bg-panel);
+        color: var(--tx);
       }
-      h1 {
-        margin: 0 0 12px;
-        font-size: 14px;
-        font-weight: 600;
-      }
-      p {
-        margin: 10px 0;
-        color: var(--figma-color-text-secondary, #777);
-      }
+      h1 { margin: 0 0 var(--pad); font-size: var(--fs-md); font-weight: var(--fw-semibold); }
+      p { margin: 0 0 var(--pad); color: var(--tx-2); }
       button {
-        padding: 8px 12px;
+        min-height: var(--ctl-h);
+        padding: 4px var(--gut);
         border: 0;
-        border-radius: 4px;
-        background: var(--figma-color-bg-brand, #0d99ff);
-        color: var(--figma-color-text-onbrand, #fff);
+        border-radius: var(--r-xs);
+        font: inherit;
+        font-weight: var(--fw-medium);
+        background: var(--bg-field);
+        color: var(--tx);
         cursor: pointer;
+        transition: background var(--dur-1) var(--ease);
       }
-      button:disabled {
-        opacity: 0.5;
-        cursor: default;
-      }
-      button:focus-visible {
-        outline: 2px solid var(--figma-color-border-brand, #0d99ff);
-        outline-offset: 2px;
-      }
-      #primary {
-        width: 100%;
-        margin-top: 6px;
-      }
-      #copy {
-        display: block;
-        background: transparent;
-        color: var(--figma-color-text-brand, #0d99ff);
-        padding: 4px 0;
-        margin-top: 12px;
-      }
+      button:hover { background: var(--bg-row-hi); }
+      button:disabled { opacity: var(--disabled); cursor: default; }
+      button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      #primary { width: 100%; background: var(--accent); color: var(--on-accent); }
+      #primary:hover:enabled { background: var(--accent-hover); }
+      #copy { display: block; width: 100%; margin-top: var(--gap); }
+      #result { margin: var(--pad) 0 0; font-size: var(--fs-sm); }
       #code {
-        font-size: 24px;
-        letter-spacing: 0.15em;
+        padding: var(--gut);
+        border-radius: var(--r-xs);
+        background: var(--bg-field);
+        font: 24px/var(--lh-tight) var(--f-mono);
+        letter-spacing: .15em;
+        text-align: center;
         font-variant-numeric: tabular-nums;
-        color: var(--figma-color-text, #222);
+        color: var(--tx);
       }
-      [hidden] {
-        display: none !important;
-      }
+      [hidden] { display: none !important; }
     </style>
   </head>
   <body data-state="offline">
@@ -74,6 +54,15 @@
     <p id="result" hidden role="status"></p>
     <button id="copy" hidden>Copy for Powermove</button>
     <script>
+      const preferredTheme = matchMedia('(prefers-color-scheme: dark)');
+      function syncTheme() {
+        const classes = document.documentElement.classList;
+        document.documentElement.dataset.theme = classes.contains('figma-dark')
+          ? 'dark' : classes.contains('figma-light') ? 'light' : preferredTheme.matches ? 'dark' : 'light';
+      }
+      new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+      preferredTheme.addEventListener('change', syncTheme);
+      syncTheme();
       const endpoint = 'http://localhost:47832',
         $ = (id) => document.getElementById(id),
         post = (pluginMessage) => parent.postMessage({ pluginMessage }, '*');

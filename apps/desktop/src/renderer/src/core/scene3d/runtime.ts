@@ -7,11 +7,13 @@ import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { type MaterialMap } from './material-maps';
 import type { CompositionTextureFrame } from './composition-textures';
+import { projectedMaterialSize, type MaterialTextureSize } from './material-resolution';
 import { parseScene, type Scene3D, type SceneObject, type SceneSource } from './schema';
 
 export type SceneEvaluator = (property: any,path: string) => any;
-export type SceneCompositionGetter = (objectId:string,map:MaterialMap)=>CompositionTextureFrame|null|'loading';
+export type SceneCompositionGetter = (objectId:string,map:MaterialMap,minimum?:MaterialTextureSize)=>CompositionTextureFrame|null|'loading';
 export type SceneAssetGetter = (id: string) => any;
+type MaterialSource = {id:MaterialMap;objectId:string;imported:boolean;binding:string;original?:THREE.Texture|null;nativeArtwork:boolean;minimum?:MaterialTextureSize};
 const radians = THREE.MathUtils.degToRad;
 let outputRenderer:THREE.WebGLRenderer|null=null;
 let outputDepth:{owner:SceneRuntime;key:string}|null=null;
@@ -68,6 +70,10 @@ export class SceneRuntime {
   private assetRefs = new Map<string,any>();
   private textures = new Map<string,{source:any;texture:THREE.Texture}>();
   private usedTextures=new Set<string>();
+  private materialBindings=new Map<string,{key:string;texture:THREE.Texture}>();
+  private usedBindings=new Set<string>();
+  private compositionFrames=new Map<string,ReturnType<SceneCompositionGetter>>();
+  private materialSources=new Map<string,MaterialSource>();
   private extrusionGeometries=new Map<string,{geometry:THREE.BufferGeometry;bytes:number}>();
   private extrusionGeometryBytes=0;
   private compositionGetter:SceneCompositionGetter=()=>null;
@@ -86,14 +92,25 @@ export class SceneRuntime {
 
   private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null,nativeArtwork=false): THREE.Texture|null {
     if (!id) return null;
+    // UV transforms belong to a material, but identical sources and sampling
+    // settings can use one GPU texture across all its meshes/material slots.
+    const sampling=original?[original.channel,original.wrapS,original.wrapT,original.offset.toArray(),original.repeat.toArray(),
+      original.center.toArray(),original.rotation,original.matrixAutoUpdate,original.matrix.toArray()]:null;
+    const bindingKey=JSON.stringify([objectId,imported,binding,nativeArtwork,sampling]);this.usedBindings.add(bindingKey);
     if(typeof id==='object'){
-      const key=`comp:${objectId}:${imported}:${binding}`;
-      const frame=this.compositionGetter(objectId,id);
+      const key=JSON.stringify(['comp',objectId,id,imported,nativeArtwork,sampling]);
+      const request={id,objectId,imported,binding,original,nativeArtwork,minimum:this.materialSources.get(key)?.minimum};
+      this.materialSources.set(key,request);
+      const captureKey=JSON.stringify([objectId,id,request.minimum]);
+      if(!this.compositionFrames.has(captureKey))this.compositionFrames.set(captureKey,this.compositionGetter(objectId,id,request.minimum));
+      const frame=this.compositionFrames.get(captureKey)!;
       if(frame==='loading'){
-        this.materialsPending=true;this.usedTextures.add(key);
-        return this.textures.get(key)?.texture ?? null;
+        this.materialsPending=true;
+        const previous=this.materialBindings.get(bindingKey);
+        if(previous)this.usedTextures.add(previous.key);
+        return previous?.texture ?? null;
       }
-      if(!frame){this.warnings.push(`Missing material texture: ${JSON.stringify(id)}`);return null;}
+      if(!frame){this.materialBindings.delete(bindingKey);this.warnings.push(`Missing material texture: ${JSON.stringify(id)}`);return null;}
       this.usedTextures.add(key);
       let entry=this.textures.get(key);
       if(!entry || entry.texture.image.width!==frame.width || entry.texture.image.height!==frame.height){
@@ -101,19 +118,22 @@ export class SceneRuntime {
         entry?.texture.dispose();
         const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);
         texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=!imported && !nativeArtwork;
-        texture.minFilter=THREE.LinearFilter;texture.magFilter=THREE.LinearFilter;
+        texture.generateMipmaps=true;texture.minFilter=THREE.LinearMipmapLinearFilter;texture.magFilter=THREE.LinearFilter;texture.anisotropy=16;
         entry={source:null,texture};this.textures.set(key,entry);
       }
       if(entry.source!==frame){entry.texture.image={data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.texture.userData.materialHasAlpha='layerId' in id && frame.hasAlpha;entry.source=frame;}
+      this.materialBindings.set(bindingKey,{key,texture:entry.texture});
       this.textureCoordinates(entry.texture,original);return entry.texture;
     }
+    this.materialBindings.delete(bindingKey);
     const asset = this.getter(id),source = asset?.el || asset?.bitmap;
     if (!source || asset.kind !== 'image') { this.warnings.push(`Missing texture: ${id}`);return null; }
-    const key = `${id}:${colorSpace}:${imported}:${binding}`;this.usedTextures.add(key);
+    const key = JSON.stringify(['image',id,colorSpace,imported,nativeArtwork,sampling]);this.usedTextures.add(key);
     let entry = this.textures.get(key);
     if (!entry || entry.source !== source) {
       entry?.texture.dispose();
       const texture = new THREE.Texture(source);
+      texture.anisotropy=16;
       texture.colorSpace = colorSpace ? THREE.SRGBColorSpace : THREE.NoColorSpace;
       texture.flipY=!imported && !nativeArtwork;texture.needsUpdate = true;texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
       entry = {source,texture};this.textures.set(key,entry);
@@ -164,7 +184,7 @@ export class SceneRuntime {
     // Channel edits mutate the original scene; retain those live channels.
     const data = raw as Scene3D;
     const validated = this.parsed!;
-    this.getter=assets;this.evaluation=evaluate;this.warnings=[];this.compositionGetter=compositionGetter;this.usedTextures.clear();this.materialsPending=false;
+    this.getter=assets;this.evaluation=evaluate;this.warnings=[];this.compositionGetter=compositionGetter;this.usedTextures.clear();this.usedBindings.clear();this.compositionFrames.clear();this.materialsPending=false;
     const keep = new Set([...validated.objects,...validated.lights,...extrusions].map(o=>o.id));
     for (const [id,object] of this.objects) if (!keep.has(id)) this.remove(id,object);
     const values = (p:any,prefix:string) => Object.fromEntries(Object.entries<any>(p || {}).map(([k,v])=>{
@@ -242,7 +262,7 @@ export class SceneRuntime {
         material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
         for (const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],
           ['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const) {
-          const texture=this.texture(node.sourceMaterials?.[0]?.[key] || maps[key],isColor,node.id);
+          const texture=this.texture(node.sourceMaterials?.[0]?.[key] || maps[key],isColor,node.id,false,key);
           if (material[slot]!==texture) { material[slot]=texture;material.needsUpdate=true; }
         }
         applyMaterialProperties(material,properties(0),{opacity:m.opacity,transparent:m.opacity<1,depthWrite:m.opacity>=1,roughness:m.roughness,metalness:m.metalness});
@@ -300,6 +320,9 @@ export class SceneRuntime {
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
     for(const [key,entry] of this.textures)if(!this.usedTextures.has(key)){entry.texture.dispose();this.textures.delete(key);}
+    for(const key of this.materialSources.keys())if(!this.usedTextures.has(key))this.materialSources.delete(key);
+    for(const key of this.materialBindings.keys())if(!this.usedBindings.has(key))this.materialBindings.delete(key);
+    this.compositionFrames.clear();
   }
 
   private syncExtrusion(sample:ExtrusionMeshSample):void {
@@ -363,6 +386,34 @@ export class SceneRuntime {
     else { camera.left=-3*aspect;camera.right=3*aspect;camera.top=3;camera.bottom=-3; }
     camera.updateProjectionMatrix();camera.updateMatrixWorld();
   }
+  /** Resolve material detail after native transforms and the final output
+   * camera are known. This also covers high-resolution exports and free view. */
+  prepareMaterialTextures(w:number,h:number,camera=this.camera,limit=8192):void {
+    if(!this.materialSources.size)return;
+    this.scene.updateMatrixWorld(true);camera.updateMatrixWorld(true);
+    try{
+      for(const [key,request] of this.materialSources){
+        const object=this.objects.get(request.objectId),previous=this.textures.get(key)?.texture;
+        if(!object || !previous)continue;
+        const demand=projectedMaterialSize(object,previous,w,h,camera);if(!demand)continue;
+        const smaller=request.minimum && demand.width<=request.minimum.width/4 && demand.height<=request.minimum.height/4;
+        const minimum={width:Math.min(limit,Math.max(demand.width,smaller?0:request.minimum?.width || 0)),height:Math.min(limit,Math.max(demand.height,smaller?0:request.minimum?.height || 0))};
+        if(!smaller && request.minimum && minimum.width<=request.minimum.width && minimum.height<=request.minimum.height)continue;
+        request.minimum=minimum;
+        if(previous.image.width>=minimum.width && previous.image.height>=minimum.height)continue;
+        const next=this.texture(request.id,true,request.objectId,request.imported,request.binding,request.original,request.nativeArtwork);
+        if(!next || next===previous)continue;
+        this.scene.traverse((child:any)=>{
+          if(!child.isMesh)return;
+          for(const material of Array.isArray(child.material)?child.material:[child.material]){
+            for(const slot of Object.keys(material))if(material[slot]===previous){material[slot]=next;material.needsUpdate=true;}
+            if(material.map===next && next.userData.materialHasAlpha){material.transparent=true;material.depthWrite=false;}
+          }
+        });
+        for(const binding of this.materialBindings.values())if(binding.key===key)binding.texture=next;
+      }
+    }finally{this.compositionFrames.clear();}
+  }
   render(w:number,h:number,objectId?:string,depthIds?:Set<string>,background=true,camera=this.camera): HTMLCanvasElement {
     if (!this.renderer) {
       // Output passes share one GPU context; a project can contain many 3D layers.
@@ -372,6 +423,10 @@ export class SceneRuntime {
       this.renderer.shadowMap.type=THREE.PCFSoftShadowMap;
     }
     const width=Math.max(1,Math.min(8192,Math.round(w))),height=Math.max(1,Math.min(8192,Math.round(h)));
+    this.resizeCamera(width,height,camera);
+    this.prepareMaterialTextures(width,height,camera,this.renderer.capabilities.maxTextureSize);
+    // A material composition can render its own 3D scene using this shared
+    // renderer. Restore the receiving pass's dimensions after that capture.
     if(this.renderer.domElement.width!==width || this.renderer.domElement.height!==height){
       this.renderer.setSize(width,height,false);outputDepth=null;
     }
@@ -464,6 +519,24 @@ export class SceneRuntime {
       });
     return box;
   }
+  /** Tight evaluated mesh bounds for tools. Unlike navigation's inexpensive
+   * boxes, this includes part poses, morph targets and skinned vertices. */
+  geometryBounds(ids:readonly string[],basis=new THREE.Matrix4()):THREE.Box3 {
+    this.scene.updateMatrixWorld(true);
+    const box=new THREE.Box3(),point=new THREE.Vector3();
+    for(const id of new Set(ids)){
+      const object=this.objects.get(id);
+      if(!object)throw new Error(`Geometry is unavailable for ${id}`);
+      if(object.userData.missing)throw new Error(`Model ${id} is still loading or missing`);
+      object.traverseVisible((child:any)=>{
+        if(!child.isMesh)return;
+        child.skeleton?.update();
+        const matrix=basis.clone().multiply(child.matrixWorld),positions=child.geometry.getAttribute('position');
+        for(let i=0;i<(positions?.count || 0);i++)box.expandByPoint(child.getVertexPosition(i,point).applyMatrix4(matrix));
+      });
+    }
+    return box;
+  }
   private traverseOwned(object:THREE.Object3D,visit:(child:THREE.Object3D)=>void):void {
     const walk=(child:THREE.Object3D)=>{visit(child);for(const nested of child.children)
       if(this.objects.get(nested.userData.sceneId)!==nested)walk(nested);};
@@ -479,7 +552,7 @@ export class SceneRuntime {
   }
   dispose():void {
     for(const [id,object] of this.objects)this.remove(id,object);
-    for(const {texture} of this.textures.values())texture.dispose();this.textures.clear();
+    for(const {texture} of this.textures.values())texture.dispose();this.textures.clear();this.materialBindings.clear();this.compositionFrames.clear();this.materialSources.clear();
     for(const {geometry} of this.extrusionGeometries.values()){cachedExtrusionGeometries.delete(geometry);geometry.dispose();}this.extrusionGeometries.clear();this.extrusionGeometryBytes=0;
     outputOwners.delete(this);
     if(outputOwners.size===0&&outputRenderer){outputRenderer.dispose();outputRenderer.forceContextLoss();outputRenderer=null;}

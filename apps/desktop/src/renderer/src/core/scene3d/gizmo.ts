@@ -1,7 +1,7 @@
 import {viewportCamera} from './viewport';
 import * as THREE from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { layer3DRole, isModelGroup, type Layer3DRole } from './layers';
+import { layer3DRole, isModelGroup, isModelNull, isSceneNull, type Layer3DRole } from './layers';
 import { isExtrudedLayer, isShared3DPlane } from './extrusion-data';
 import { nativeSceneBridge, nativeTransformValues } from './native-transform';
 import { parent3D,world3D } from '../../legacy/core/space-3d';
@@ -101,7 +101,7 @@ export function createSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=
   let live:SceneGizmo|null=null,renderer:THREE.WebGLRenderer|null=null,disposed=false;
   let selection:string[]=[];
   // Native artwork shares the rendered scene's camera and keeps viewer fallback gestures.
-  const roleOf=(id:string)=>{const layer=PM.L?.(id);return layer3DRole(layer) || isModelGroup(PM,layer) || isExtrudedLayer(layer) || isShared3DPlane(PM.curComp?.()||PM.proj,layer);};
+  const roleOf=(id:string)=>{const layer=PM.L?.(id);return layer3DRole(layer) || isModelGroup(PM,layer) || isSceneNull(PM,layer) || isExtrudedLayer(layer) || isShared3DPlane(PM.curComp?.()||PM.proj,layer);};
   return {
     update(rect,ids) {
       if(disposed)return;
@@ -157,7 +157,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
   const listen=(target:any,event:string,callback:any,options?:any)=>{target.addEventListener(event,callback,options);cleanup.push(()=>target.removeEventListener(event,callback,options));};
 
   const layer=(id:string)=>PM.L?.(id);
-  const roleOf=(l:any)=>layer3DRole(l) || (isModelGroup(PM,l)?'group':isExtrudedLayer(l)||isShared3DPlane(PM.curComp?.()||PM.proj,l)?'artwork':null);
+  const roleOf=(l:any)=>layer3DRole(l) || (isModelGroup(PM,l)||isSceneNull(PM,l)?'group':isExtrudedLayer(l)||isShared3DPlane(PM.curComp?.()||PM.proj,l)?'artwork':null);
   const editable=(l:any)=>!!l&&!l.lock&&!(PM.groupAncestors?.(l)||[]).some((g:any)=>g.lock);
   const ev=(l:any,prop:any,path:string,fallback=0)=>prop?Number(PM.evP(l,prop,PM.time,path)):fallback;
   const channel=(l:any,path:string,fallback=0)=>ev(l,l.p?.[path],path,fallback);
@@ -185,10 +185,10 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       if(!role||!editable(l)||(role==='camera'&&id===active))continue;
       if(PM.active&&!PM.active(l,PM.time))continue;
       const lightType=role==='light'?l.d?.data?.light?.type:undefined;
-      const native=role==='artwork',bridge=native?nativeSceneBridge(PM.curComp?.()||PM.proj):new THREE.Matrix4();
-      const object=role==='object'||native?runtimeWorld?.objects.get(id) ?? null:null;
-      if((role==='object'||native)&&!object)continue;
-      const position=role==='object'||native?object!.getWorldPosition(new THREE.Vector3())
+      const nativeArtwork=role==='artwork',native=nativeArtwork||l.type==='null'&&!isModelNull(PM,l),bridge=native?nativeSceneBridge(PM.curComp?.()||PM.proj):new THREE.Matrix4();
+      const object=role==='object'||nativeArtwork?runtimeWorld?.objects.get(id) ?? null:null;
+      if((role==='object'||nativeArtwork)&&!object)continue;
+      const position=role==='object'||nativeArtwork?object!.getWorldPosition(new THREE.Vector3())
         :new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,l,PM.time)));
       const content=role==='light'?l.d?.data?.light?.p:role==='camera'?l.d?.data?.camera?.p:null,prefix=role==='light'?'light':'camera';
       const target=content?vec(['X','Y','Z'].map(axis=>ev(l,content[`target${axis}`],`${prefix}.target${axis}`))).applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,l,PM.time))):null;

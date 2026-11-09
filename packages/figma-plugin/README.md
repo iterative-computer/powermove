@@ -24,7 +24,7 @@ The development manifest uses the stable local ID `powermove-local`. Real Figma 
 
 ## Building and packaging
 
-For contributors: `bun run --cwd packages/figma-plugin build` produces `dist/code.js`. The desktop Vite build and electron-builder's before-pack hook both build the plugin. `extraResources` ships only the manifest, UI and compiled code. The main process resolves development and packaged resource paths separately and checks a content fingerprint before refreshing the stable copy.
+For contributors: `bun run --cwd packages/figma-plugin build` produces `dist/code.js` and `dist/ui.html`. The UI bundles the shared Powermove design tokens and follows the Figma host’s light or dark theme. The desktop Vite build and electron-builder's before-pack hook both build the plugin. `extraResources` ships only the manifest, UI and compiled code. The main process resolves development and packaged resource paths separately and checks a content fingerprint before refreshing the stable copy.
 
 ## Publishing to the Figma Community
 

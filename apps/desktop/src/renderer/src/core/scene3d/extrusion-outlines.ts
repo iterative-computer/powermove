@@ -61,21 +61,22 @@ function pathContours(values:any,divisions:number):Point[][]{
 }
 export function shapeOutlines(d:any,divisions=10,records?:any[]):Outline[]{
   if(records){
-    const out:Outline[]=[],fills=new Map<string,{contours:Point[][];color:string;opacity:number}>();
+    const out:Outline[]=[],fills=new Map<string,{contours:Point[][];strokes:Outline[];rule:'nonzero'|'evenodd';color:string;opacity:number}>();
     for(const {v,matrix} of records)for(let copy=0;copy<Math.min(256,Math.max(1,Math.round(v.copies)));copy++){
       const angle=copy*v.repeatRotation*Math.PI/180,c=Math.cos(angle),s=Math.sin(angle);
       const transform=([x,y]:Point):Point=>{const xx=c*x-s*y+copy*v.repeatX,yy=s*x+c*y+copy*v.repeatY;return [matrix[0]*xx+matrix[2]*yy+matrix[4],matrix[1]*xx+matrix[3]*yy+matrix[5]];};
-      const contours=pathContours(v,divisions),full=v.closed && v.trimEnd-v.trimStart>=99.999;
-      const strokes=v.strokeWidth>0?contours.flatMap(contour=>strokeContours(contour,v.strokeWidth,full)):[];
-      if(full && v.fillEnabled){
-        const local=subtractOutlines(resolveContours(contours),strokes),key=JSON.stringify([v.fill,v.fillOpacity]);
-        let group=fills.get(key);if(!group){group={contours:[],color:v.fill,opacity:v.fillOpacity/100};fills.set(key,group);}
-        group.contours.push(...local.flatMap(o=>[o.outer,...o.holes]).map(r=>r.map(transform)));
+      const contours=pathContours(v,divisions),full=v.trimEnd-v.trimStart>=99.999;
+      const strokes=v.strokeWidth>0?contours.flatMap(contour=>strokeContours(contour,v.strokeWidth,!!v.closed&&full)):[];
+      if(full && (v.closed||v.fillOpen) && v.fillEnabled){
+        const key=JSON.stringify([v.fillGroup??'legacy',copy,v.fill,v.fillOpacity,v.fillRule]);
+        let group=fills.get(key);if(!group){group={contours:[],strokes:[],rule:v.fillRule==='evenodd'?'evenodd':'nonzero',color:v.fill,opacity:v.fillOpacity/100};fills.set(key,group);}
+        group.contours.push(...contours.map(r=>r.map(transform)));
+        group.strokes.push(...strokes.map(o=>({...o,outer:o.outer.map(transform),holes:o.holes.map(h=>h.map(transform))})));
       }
       out.push(...strokes.map(o=>({...o,outer:o.outer.map(transform),holes:o.holes.map(h=>h.map(transform)),color:v.stroke,opacity:v.strokeOpacity/100})));
     }
     // Matching vector fills form compound paths, including nested counters.
-    for(const group of fills.values())out.unshift(...resolveContours(group.contours).map(o=>({...o,color:group.color,opacity:group.opacity})));
+    for(const group of fills.values())out.unshift(...subtractOutlines(resolveContours(group.contours,group.rule),group.strokes).map(o=>({...o,color:group.color,opacity:group.opacity})));
     return out;
   }
   const w=Math.max(.001,Number(d.w)||100),h=Math.max(.001,Number(d.h)||100);let contours:Point[][]=[];

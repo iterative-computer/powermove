@@ -225,7 +225,7 @@ export function allFeatures(): FigmaDoc {
     'LINEAR_BURN',
   ])
     add(`Blend ${blendMode}`, { blendMode });
-  add('Multiple blended fills', { fills: [{ ...solid(0.1, 0.6, 1), blendMode: 'SCREEN' }, solid()] });
+  add('Multiple blended fills', { fills: [solid(), { ...solid(0.1, 0.6, 1), blendMode: 'SCREEN' }] });
   add('Noise effect', {
     effects: [
       {

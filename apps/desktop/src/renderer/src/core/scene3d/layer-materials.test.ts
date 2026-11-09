@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import {makePM} from '../../legacy/__tests__/make-pm';
 import {editScene} from './operations';
 import {LAYER3D_DEFINITIONS,compositionScene,layer3DProperties} from './layers';
-import {listEligibleMaterialLayers,materialLayerLinks,validateCompositionMaps} from './material-maps';
+import {materialLayerStatus,listEligibleMaterialLayers,materialLayerLinks,validateCompositionMaps} from './material-maps';
 import {compositionTextureFrame,materialCompositionSample} from './composition-textures';
 import {readMaterialProperties,setAmbientResponse} from './material-properties';
 import {parseScene,sceneProperties} from './schema';
@@ -48,11 +48,11 @@ describe('layers as materials',()=>{
   });
   it('groups same-comp sources, includes hidden artwork, excludes nonvisual layers and receiver',()=>{
     const {PM,add}=editor();
-    for(const type of ['precomp','image','video','text','shape','adjustment','null','audio'])add(type,type);
+    for(const type of ['precomp','group','image','video','text','shape','adjustment','null','audio'])add(type,type);
     PM.L('paint').on=false;
     const groups=listEligibleMaterialLayers(PM,'model');
-    expect(groups.map(g=>g.group)).toEqual(['Comps','Footage','Solids','Text & Shapes']);
-    expect(groups.flatMap(g=>g.layers.map(l=>l.id))).toEqual(['precomp','image','video','paint','text','shape']);
+    expect(groups.map(g=>g.group)).toEqual(['Comps','Groups','Footage','Solids','Text & Shapes']);
+    expect(groups.flatMap(g=>g.layers.map(l=>l.id))).toEqual(['precomp','group','image','video','paint','text','shape']);
     const other=PM.Comps.create({name:'Other'},{open:false});PM.proj.comps[other].layers.push({...PM.mkLayer('solid'),id:'other-paint'});
     expect(groups.flatMap(g=>g.layers.map(l=>l.id))).not.toContain('other-paint');
   });
@@ -109,7 +109,7 @@ describe('layers as materials',()=>{
     expect(PM.GL.renderMaterialComposition.mock.calls[0].slice(1)).toEqual([1,80,40,1,'paint']);
     expect(compositionTextureFrame(PM,PM.L('model'),{layerId:'paint'},1.001)).toBe(a);
     expect(materialCompositionSample(PM,PM.L('model'),{layerId:'paint'},1.05)?.time).toBeCloseTo(31/30);
-    source.d.w=4096;source.d.h=2048;expect(materialCompositionSample(PM,PM.L('model'),{layerId:'paint'},1)).toMatchObject({width:1024,height:512});
+    source.d.w=4096;source.d.h=2048;expect(materialCompositionSample(PM,PM.L('model'),{layerId:'paint'},1)).toMatchObject({width:4096,height:2048});
     PM.proj.layers=PM.proj.layers.filter((l:any)=>l.id!=='paint');
     expect(compositionTextureFrame(PM,PM.L('model'),{layerId:'paint'},1)).toBeNull();
   });
@@ -193,4 +193,34 @@ describe('intrinsic material properties',()=>{
     listener.mockClear();PM.hist.undo();expect(listener).toHaveBeenCalled();subscription.dispose();listener.mockClear();
     PM.hist.redo();expect(listener).not.toHaveBeenCalled();
   });
+});
+
+it('uses nested groups and prevents feedback through any descendant, including membership edits',()=>{
+  const {PM,add,source,set}=editor();
+  const group=add('artwork','group'),nested=add('nested-group','group');nested.group=group.id;source.group=nested.id;group.on=false;PM.touch();
+  expect(set({layerId:group.id}).ok).toBe(true);
+  expect(materialLayerLinks(PM,'model')).toMatchObject([{layerId:group.id,status:'ready'}]);
+  const before=PM.serialize();
+  expect(PM.Edit.apply({type:'move_to_group',targets:['model'],group:nested.id})).toMatchObject({ok:false,message:expect.stringContaining('cycle')});
+  expect(PM.serialize()).toBe(before);
+  PM.L(source.id).fx=[{inputs:{provider:{layerId:'model'}}}];
+  expect(set({layerId:group.id})).toMatchObject({ok:false,message:expect.stringContaining('cycle')});
+});
+
+it('prepares visible videos inside hidden group sources with their composition clock',()=>{
+  const {PM,add,set}=editor(),group=add('artwork','group'),nested=add('nested','group'),video=add('movie','video'),hidden=add('hidden','video');
+  group.on=false;nested.group=group.id;video.group=nested.id;hidden.group=nested.id;hidden.on=false;
+  video.from=.5;video.dur=2;video.d.asset=hidden.d.asset='movie-asset';video.d.speed=2;
+  PM.assets.map.set('movie-asset',{kind:'video',el:{},dur:3});PM.touch();
+  expect(set({layerId:group.id}).ok).toBe(true);
+  const materialClips=videoClipsAt(PM,1).filter(c=>c.id.startsWith('material-layer:'));
+  expect(materialClips).toHaveLength(1);expect(materialClips[0]).toMatchObject({id:'material-layer:artwork/movie',time:1,at:1});
+  nested.on=false;PM.touch();expect(videoClipsAt(PM,1).filter(c=>c.id.startsWith('material-layer:'))).toHaveLength(0);
+});
+
+it('rejects groups with nested 3D sources during both assignment and sampling',()=>{
+  const {PM,add}=editor(),group=add('g','group'),nested=add('nested','group');nested.group=group.id;
+  const camera=add('camera','extension');camera.group=nested.id;camera.d.definition=LAYER3D_DEFINITIONS.camera;
+  expect(materialLayerStatus(PM.proj,'model','g')).toBe('ineligible');
+  expect(editScene(PM,{operation:'set_material_map',target:'model',slot:'color',map:{layerId:'g'},materialIndex:0})).toMatchObject({ok:false});
 });

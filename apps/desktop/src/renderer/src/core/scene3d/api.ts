@@ -2,11 +2,12 @@ import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-d
 import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
 import { createMaterialThumbnails } from './material-thumbnails';
 import { readMaterialProperties } from './material-properties';
-import {lightViewerState,lightPositionFromViewer,lightViewerGuides} from './light-view';
+import {lightViewerState,lightPositionFromViewer,lightViewerGuides,nullViewerPosition,nullViewerState} from './light-view';
 import {canAssignMaterialMap,listModelMaterials,listValidMaterialCompositions,listEligibleMaterialLayers,materialLayerLinks} from './material-maps';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
+import { geometryBounds } from './geometry-bounds';
 import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } from './schema';
 import { convertLegacyScene } from './migration';
 import { prepareModelImport } from './import-bundle';
@@ -25,7 +26,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
   // these events. UI consumers never need to intercept individual commands.
   let materialSignature='';
   const changed=()=>{
-    const signature=JSON.stringify([PM.proj?.revision,PM.proj?.compId,(PM.curComp?.() || PM.proj)?.layers?.map((l:any)=>[l.id,l.name,l.d?.data?.object?.material?.maps,l.d?.data?.object?.sourceMaterials,l.d?.data?.object?.materialProperties,l.d?.data?.object?.sourceMaterialProperties,l.d?.extrusion,l.threeD,l.type])]);
+    const signature=JSON.stringify([PM.proj?.revision,PM.proj?.compId,(PM.curComp?.() || PM.proj)?.layers?.map((l:any)=>[l.id,l.name,l.group,l.d?.data?.object?.material?.maps,l.d?.data?.object?.sourceMaterials,l.d?.data?.object?.materialProperties,l.d?.data?.object?.sourceMaterialProperties,l.d?.extrusion,l.threeD,l.type])]);
     if(signature===materialSignature)return;materialSignature=signature;
     emit('scene3d:materials',{layerIds:(PM.curComp?.() || PM.proj)?.layers?.filter((l:any)=>l.d?.data?.object || extrusionEligible(l)).map((l:any)=>l.id) || []});
     for(const listener of materialListeners)listener();
@@ -48,6 +49,9 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     emit('scene3d:selection',selection());PM.bus?.emit?.('scene3d:selection');PM.invalidate?.();
   };
   return {
+    geometryBounds:(ids,time)=>geometryBounds(PM,ids,time),
+    nullViewerPosition:(id,time,rect)=>nullViewerPosition(PM,id,time,rect),
+    nullViewerState:(id,time,rect)=>nullViewerState(PM,id,time,rect),
     getExtrusion:(layerId,time)=>readExtrusion(PM,PM.L?.(layerId),time),
     setExtrusion:(layerId,patch,meta)=>editScene(PM,{operation:'set_extrusion',target:layerId,patch},{origin:'interface',...meta}),
     listSurfaces:layerId=>listExtrusionSurfaces(PM,layerId),

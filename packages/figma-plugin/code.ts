@@ -168,6 +168,27 @@ export async function serializeSelection(): Promise<FigmaDoc> {
       ]);
       const first = segments[0],
         size = first?.fontSize ?? 16;
+      // Auto-width text exposes its resolved line boxes directly. AUTO is
+      // font-dependent (often much taller than 1.2em for CJK fonts); estimating
+      // it moves glyphs relative to adjacent shapes on the first import.
+      const lineCount = n.characters.split(/\r\n|[\n\r\u2028\u2029]/).length;
+      const uniformAuto =
+        n.textAutoResize === 'WIDTH_AND_HEIGHT' &&
+        segments.length > 0 &&
+        segments.every(
+          (s: any) =>
+            s.lineHeight?.unit === 'AUTO' &&
+            s.fontName.family === first.fontName.family &&
+            s.fontName.style === first.fontName.style &&
+            s.fontSize === size &&
+            !s.listSpacing &&
+            s.listOptions?.type !== 'ORDERED' &&
+            s.listOptions?.type !== 'UNORDERED',
+        );
+      const paragraphSpacing = typeof n.paragraphSpacing === 'number' ? n.paragraphSpacing : 0;
+      const autoLeading = uniformAuto
+        ? Math.max(1, (n.height - paragraphSpacing * (lineCount - 1)) / lineCount)
+        : size * 1.2;
       out.text = {
         characters: n.characters,
         runs: await Promise.all(
@@ -190,7 +211,9 @@ export async function serializeSelection(): Promise<FigmaDoc> {
                 ? s.lineHeight.value
                 : s.lineHeight?.unit === 'PERCENT'
                   ? (s.fontSize * s.lineHeight.value) / 100
-                  : s.fontSize * 1.2,
+                  : uniformAuto
+                    ? autoLeading
+                    : s.fontSize * 1.2,
             paragraphSpacing: s.paragraphSpacing,
             paragraphIndent: s.paragraphIndent,
             listSpacing: s.listSpacing,
@@ -210,7 +233,7 @@ export async function serializeSelection(): Promise<FigmaDoc> {
             ? first.lineHeight.value
             : first?.lineHeight.unit === 'PERCENT'
               ? (size * first.lineHeight.value) / 100
-              : size * 1.2,
+              : autoLeading,
         tracking:
           first?.letterSpacing.unit === 'PERCENT'
             ? (size * first.letterSpacing.value) / 100

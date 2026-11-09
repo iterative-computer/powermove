@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-const FILES = ['manifest.json', 'ui.html', 'dist/code.js'] as const;
+const FILES = ['manifest.json', 'dist/ui.html', 'dist/code.js'] as const;
 export function figmaPluginSource(appPath: string, resourcesPath: string, packaged: boolean): string {
   return packaged ? path.join(resourcesPath, 'figma-plugin') : path.resolve(appPath, '../../packages/figma-plugin');
 }
