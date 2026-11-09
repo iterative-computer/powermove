@@ -144,6 +144,7 @@ export interface SetLayerCommand extends LayerTargetedCommand {
 }
 
 export interface CompositionPatch {
+  views3d?: import('../scene3d/view-state').StoredViews;
   /** Project-wide working precision, in bits per color channel. */
   colorDepth?: import('../color-depth').ColorDepth;
   name?: string;

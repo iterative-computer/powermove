@@ -54,10 +54,10 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
     let mut order: Vec<u32> = (0..tris.len() as u32).collect();
     let mut nodes = vec![Node::default(); 1];
     nodes.reserve(tris.len() * 2);
-    let mut stack = vec![(0usize, 0usize, tris.len())];
+    let mut stack = vec![(0usize, 0usize, tris.len(), 0usize)];
     // Reserve slot 1 so children always come in pairs at even offsets.
     nodes.push(Node::default());
-    while let Some((index, first, count)) = stack.pop() {
+    while let Some((index, first, count, depth)) = stack.pop() {
         let mut b = Aabb::EMPTY;
         let mut cb = Aabb::EMPTY;
         for &t in &order[first..first + count] {
@@ -67,7 +67,9 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
         let leaf = |nodes: &mut Vec<Node>| {
             nodes[index] = Node { min: [b.lo.x, b.lo.y, b.lo.z], left_first: first as u32, max: [b.hi.x, b.hi.y, b.hi.z], count: count as u32 };
         };
-        if count <= 2 {
+        // TLAS and BLAS share this builder. The smallest WGSL stack has 24
+        // slots, so stop skewed SAH chains before pushing beyond that stack.
+        if count <= 2 || depth >= 20 {
             leaf(&mut nodes);
             continue;
         }
@@ -133,8 +135,8 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
         nodes.push(Node::default());
         nodes.push(Node::default());
         nodes[index] = Node { min: [b.lo.x, b.lo.y, b.lo.z], left_first: left as u32, max: [b.hi.x, b.hi.y, b.hi.z], count: 0 };
-        stack.push((left, first, mid - first));
-        stack.push((left + 1, mid, first + count - mid));
+        stack.push((left, first, mid - first, depth + 1));
+        stack.push((left + 1, mid, first + count - mid, depth + 1));
     }
     (nodes, order)
 }
@@ -270,6 +272,22 @@ mod tests {
         assert!(nodes.is_empty() && order.is_empty());
         let wide = widen(&nodes);
         assert_eq!((wide[0].lcount, wide[0].rcount), (u32::MAX, u32::MAX));
+    }
+    #[test]
+    fn skewed_sah_trees_fit_the_shader_stack() {
+        let tris:Vec<_>=(0..240).map(|i|{
+            let x=2f32.powf(i as f32/2.);
+            [v3(x,0.,0.),v3(x,1.,0.),v3(x,0.,1.)]
+        }).collect();
+        let (nodes,order)=build(&tris);
+        let mut stack=vec![(0usize,0usize)];let mut leaves=0;
+        while let Some((index,depth))=stack.pop(){
+            assert!(depth<=20);
+            let node=nodes[index];
+            if node.count>0 {leaves+=node.count as usize;}
+            else {stack.push((node.left_first as usize,depth+1));stack.push((node.left_first as usize+1,depth+1));}
+        }
+        assert_eq!(leaves,tris.len());assert_eq!(order.len(),tris.len());
     }
 
     #[test]

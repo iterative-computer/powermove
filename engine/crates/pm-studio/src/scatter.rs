@@ -53,12 +53,12 @@ impl Instance {
                 .to_array()
                 .iter()
                 .chain(self.rotation.to_array().iter())
-                .any(|x| !x.is_finite())
+                .any(|x| !x.is_finite() || x.abs()>1e8)
             || self
                 .scale
                 .to_array()
                 .iter()
-                .any(|x| !x.is_finite() || *x < 1e-4)
+                .any(|x| !x.is_finite() || *x < 1e-4 || *x>10000.)
             || self.layer.is_some_and(|l| l >= 8_388_607)
         {
             Err("invalid instance transform, source object or layer".into())

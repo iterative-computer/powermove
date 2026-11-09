@@ -145,6 +145,16 @@ impl View {
             || c.tan_y <= 0.
             || !c.aspect.is_finite()
             || c.aspect <= 0.
+            || !c.focus.is_finite() || c.focus <= 0.
+            || !c.lens_radius.is_finite() || c.lens_radius < 0.
+            || !self.floor_y.is_finite()
+            || c.near.is_some_and(|v| !v.is_finite() || v < 0.)
+            || !c.far.unwrap_or(1000.).is_finite() || c.far.unwrap_or(1000.) <= c.near.unwrap_or(0.01)
+            || [c.forward,c.right,c.up].iter().any(|v| (Vec3::from(*v).length_squared()-1.).abs()>0.01)
+            || Vec3::from(c.forward).dot(Vec3::from(c.up)).abs()>0.01
+            || Vec3::from(c.forward).dot(Vec3::from(c.right)).abs()>0.01
+            || Vec3::from(c.right).dot(Vec3::from(c.up)).abs()>0.01
+            || self.backdrop.iter().chain(self.environment.zenith.iter()).chain(self.environment.horizon.iter()).chain(self.environment.ground.iter()).any(|v| !v.is_finite() || *v<0.)
             || self.ambient.iter().any(|x|!x.is_finite()||*x<0.)
             || c.iris.iter().any(|x|!x.is_finite())
             || c.iris[0]<0. || c.iris[0]>16. || c.iris[2]<0. || c.iris[2]>1. || c.iris[3]<0.1 || c.iris[3]>10.
@@ -164,6 +174,7 @@ impl View {
 impl PackedScene {
     pub fn new(u: Upload, binary: &[u8]) -> Result<Self, String> {
         u.view.validate()?;
+        pm_studio::validation::validate_scene_budget(u.tris.length / std::mem::size_of::<GpuTri>(),u.instance_count,u.materials.length / std::mem::size_of::<GpuMaterial>(),u.sdata.length)?;
         let positions = u.positions.typed::<[f32; 4]>(binary)?;
         let tris = u.tris.typed::<GpuTri>(binary)?;
         let nodes = u.nodes.typed::<WideNode>(binary)?;
@@ -184,6 +195,7 @@ impl PackedScene {
         let trailer_start=u.light_count*4+u.instance_count*9;
         if sdata.len()>trailer_start && !(u.light_count==0 && u.instance_count==0 && sdata.len()==1) {pm_studio::environment::validate_packed(&sdata[trailer_start..],u.light_count)?;}
         if tris.iter().any(|t| !triangle_shading_is_finite(t)) || positions
+            .iter().flatten().any(|v|v.abs()>1e8) || positions
             .iter()
             .flatten()
             .chain(bytemuck::cast_slice::<GpuMaterial, f32>(&materials))
@@ -192,10 +204,13 @@ impl PackedScene {
         {
             return Err("prepared scene contains non-finite data".into());
         }
+        for m in &materials {m.validate()?;}
         for t in tris.iter().filter(|_| u.instance_count > 0) {
             if t.uv2m[2] < 0.
+                || t.uv2m[2].fract() != 0.
                 || t.uv2m[2] as usize >= materials.len()
                 || t.uv2m[3] < 0.
+                || t.uv2m[3].fract() != 0.
                 || t.uv2m[3] as usize >= u.objects.len()
             {
                 return Err("prepared triangle has invalid material/object index".into());
@@ -203,7 +218,7 @@ impl PackedScene {
         }
         validate_instance_flags(&sdata,u.light_count,u.instance_count,u.objects.len())?;
         validate_top(&nodes[..u.top_nodes], u.instance_count)?;
-        let lights = sdata[..u.light_count * 4]
+        let lights: Vec<pm_studio::scene::GpuLight> = sdata[..u.light_count * 4]
             .chunks_exact(4)
             .map(|s| pm_studio::scene::GpuLight {
                 pos: s[0],
@@ -212,6 +227,7 @@ impl PackedScene {
                 radiance: s[3],
             })
             .collect();
+        for l in &lights {l.validate()?;}
         let prepared = Prepared {
             instancing:None,
             positions,
@@ -289,6 +305,10 @@ impl PackedScene {
             .any(|x| !x.is_finite())
         {
             return Err("patch contains non-finite data".into());
+        }
+        for m in &materials {m.validate()?;}
+        for rows in sdata[..self.prepared.lights.len()*4].chunks_exact(4) {
+            pm_studio::scene::GpuLight{pos:rows[0],u:rows[1],v:rows[2],radiance:rows[3]}.validate()?;
         }
         let lights=self.prepared.lights.len();let count=self.placements.len();let trailer=lights*4+count*9;
         if sdata.len()>trailer && !(lights==0&&count==0&&sdata.len()==1){pm_studio::environment::validate_packed(&sdata[trailer..],lights)?;}
@@ -480,7 +500,7 @@ fn placements(p: &Prepared, count: usize) -> Result<(Vec<RtGeometry>, Vec<RtPlac
             rows[0][0], rows[1][0], rows[2][0], 0., rows[0][1], rows[1][1], rows[2][1], 0.,
             rows[0][2], rows[1][2], rows[2][2], 0., rows[0][3], rows[1][3], rows[2][3], 1.,
         ]);
-        if !inv.is_finite() || inv.determinant().abs() < 1e-12 {
+        if !inv.is_finite() || !inv.determinant().is_finite() || inv.determinant().abs() < 1e-12 || !inv.inverse().is_finite() {
             return Err("invalid instance transform".into());
         }
         let m = inv.inverse().to_cols_array_2d();
@@ -500,14 +520,14 @@ fn triangle_shading_is_finite(triangle: &GpuTri) -> bool {
     // a floating-point value. Validate only the actual shading coordinates.
     triangle.n.iter().flat_map(|n| n[..3].iter())
         .chain(triangle.uv01.iter()).chain(triangle.uv2m.iter())
-        .chain(triangle.tangent.iter()).chain(triangle.uv01_secondary.iter()).chain(triangle.uv2_secondary.iter()).chain(triangle.tangent_secondary.iter()).all(|v| v.is_finite())
+        .chain(triangle.tangent.iter()).chain(triangle.uv01_secondary.iter()).chain(triangle.uv2_secondary.iter()).chain(triangle.tangent_secondary.iter()).all(|v| v.is_finite() && v.abs()<=1e8)
 }
 fn triangle_range(nodes: &[WideNode], root: u32, triangles: usize) -> Result<(u32, u32), String> {
     let mut stack = vec![(root, 0usize)];
     let mut visited = std::collections::HashSet::new();
     let (mut lo, mut hi) = (u32::MAX, 0);
     while let Some((i, depth)) = stack.pop() {
-        if depth >= 60 || !visited.insert(i) {
+        if depth >= 38 || !visited.insert(i) {
             return Err("cyclic/duplicate or excessively deep BLAS node".into());
         }
         let n = nodes
@@ -548,7 +568,7 @@ fn validate_top(nodes: &[WideNode], instances: usize) -> Result<(), String> {
     let mut visited = std::collections::HashSet::new();
     let mut seen = vec![false; instances];
     while let Some((i, depth)) = stack.pop() {
-        if depth >= 60 || !visited.insert(i) {
+        if depth >= 22 || !visited.insert(i) {
             return Err("cyclic or excessively deep TLAS".into());
         }
         let n = nodes.get(i).ok_or("TLAS child outside top-level buffer")?;
@@ -589,6 +609,32 @@ fn validate_top(nodes: &[WideNode], instances: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn valid_view() -> View {
+        serde_json::from_value(serde_json::json!({
+            "camera":{"position":[0,0,6],"forward":[0,0,-1],"right":[1,0,0],"up":[0,1,0],
+                "tanY":0.5,"aspect":1.5,"lensRadius":0,"focus":6,"near":0.01,"far":1000},
+            "exposure":1,"backdrop":[0,0,0],"backdropOpaque":true,"shadowCatcher":false,
+            "shadows":true,"floorY":0,"environment":{"zenith":[1,1,1],"horizon":[1,1,1],"ground":[1,1,1]},"bounds":[0,0,0,1]
+        })).unwrap()
+    }
+    #[test]
+    fn rejects_non_finite_and_degenerate_prepared_views() {
+        valid_view().validate().unwrap();
+        for field in 0..8 {
+            let mut v = valid_view();
+            match field {
+                0 => v.camera.focus = f32::NAN,
+                1 => v.camera.lens_radius = f32::INFINITY,
+                2 => v.floor_y = f32::NAN,
+                3 => v.environment.horizon[0] = f32::INFINITY,
+                4 => v.camera.forward = [0.;3],
+                5 => v.camera.up = v.camera.forward,
+                6 => v.camera.near = Some(f32::NAN),
+                _ => v.camera.far = Some(0.001),
+            }
+            assert!(v.validate().is_err(), "invalid view field {field} accepted");
+        }
+    }
     #[test]
     fn packed_vertex_colour_bits_are_not_floating_point_shading() {
         let good = GpuTri { n: [[0., 1., 0., f32::from_bits(0xffffffff)]; 3], uv01: [0.; 4], uv2m: [0.; 4], tangent: [1., 0., 0., 1.], uv01_secondary:[0.;4], uv2_secondary:[0.;4], tangent_secondary:[1.,0.,0.,1.] };

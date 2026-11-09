@@ -205,6 +205,7 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Renderer, String> {
+        crate::validation::target_bytes(width,height,u64::MAX)?;
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::METAL;
         let instance = wgpu::Instance::new(desc);
@@ -261,6 +262,7 @@ impl Renderer {
     /// Studio on a host's device (the native engine's): no hardware ray
     /// tracing unless the device was created with ray queries (`rt`).
     pub fn with_device(device: wgpu::Device, queue: wgpu::Queue, adapter: String, rt_ok: bool, width: u32, height: u32) -> Result<Renderer, String> {
+        crate::validation::target_bytes(width,height,u64::from(device.limits().max_storage_buffer_binding_size))?;
         if device.limits().max_storage_buffers_per_shader_stage < 10 {
             return Err("Studio needs 10 storage buffers per shader stage".into());
         }

@@ -1,4 +1,5 @@
 import { materialOptionsSchema,validateEnvironmentNode } from '../../core/scene3d/environment-data';
+import { parseStoredViews } from '../../core/scene3d/view-state';
 import { contentSlot } from './content-properties';
 import { extrusionEligible, parseExtrusion } from '../../core/scene3d/extrusion-data';
 import { layerInputPlan, hasLayerInputs, validateEffectInputs } from '../../core/effect-inputs';
@@ -19,7 +20,7 @@ import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/co
 import { layer3DRole, isAlways3DLayer, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
 import { validateCompositionMaps } from '../../core/scene3d/material-maps';
 import { validateSceneLayer } from '../../core/scene3d/operations';
-import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
+import { sceneProperties,parseScene,validateSceneChannel,sceneObjectVertices,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { applyPatch, type Patch } from '../../../../shared/patch';
@@ -54,9 +55,14 @@ const LAYER_FIELDS: any = new Set([
 let live: any = null;
 
 const validateInputGraphs = (commands?: any[]) => {
-  if(!commands || commands.some(command=>['add_layer','set_content','add_effect','set_effect','apply_preset'].includes(command.type) || command.type==='set_layer' && (command.patch?.matteSource!==undefined||command.patch?.matteSources!==undefined))){validateCompositionMaps(PM.proj);
+  const structural=!commands || commands.some(command=>['add_layer','set_content','add_effect','set_effect','apply_preset'].includes(command.type) || command.type==='set_layer' && (command.patch?.matteSource!==undefined||command.patch?.matteSources!==undefined));
+  if(structural)validateCompositionMaps(PM.proj);
+  if(structural || commands?.some(command=>['set_property','replace_keyframes'].includes(command.type) && /^(terrain|scatter)\./.test(command.path || ''))){
     for(const comp of [PM.proj,...Object.values<any>(PM.proj.comps || {})]){
-      const objects=(comp.layers || []).map((l:any)=>l.d?.data?.object).filter(Boolean);
+      const objects=(comp.layers || []).filter((l:any)=>layer3DRole(l)==='object').map((l:any)=>l.d.data.object);
+      if(objects.length>512)throw new Error('At most 512 3D objects per composition');
+      if((comp.layers || []).filter((l:any)=>layer3DRole(l)==='light').length>4096)throw new Error('At most 4096 3D lights per composition');
+      if(objects.reduce((n:number,o:any)=>n+sceneObjectVertices(o),0)>500_000)throw new Error('3D scene exceeds the geometry budget');
       if(objects.filter((o:any)=>o.world).length>1)throw new Error('A composition has one World layer');
       if(objects.filter((o:any)=>o.fog).length>32)throw new Error('At most 32 fog volumes');
       if(objects.reduce((n:number,o:any)=>n+Number(o.scatter?.p.count?.v || 0),0)>1000000)throw new Error('At most one million scattered placements per composition');
@@ -138,7 +144,7 @@ function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain'], ['views3d']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker' || type === 'remove_marker') return [['markers']];
@@ -666,9 +672,10 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth', 'audioGain']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth', 'audioGain', 'views3d']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
+  if (patch.views3d != null) p.views3d = parseStoredViews(patch.views3d);
   if (patch.colorDepth != null) {
     if (![8, 16, 32].includes(patch.colorDepth)) throw new Error('Color depth must be 8, 16, or 32');
     if (PM.GL?.supportedColorDepths && !PM.GL.supportedColorDepths.includes(patch.colorDepth)) {

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { finishBlas, finishBlasInWorker, finishGeometryInWorker, WORKER_TRIANGLES, type BlasData } from './blas';
+import { finishBlas, finishBlasInWorker, finishGeometryInWorker, disposeStudioGeometryWorkers, WORKER_TRIANGLES, type BlasData } from './blas';
 import { partKeyOf, partsRoot } from '../scene3d/model-parts';
 import { gather, geometryPayload } from './gather';
 import { buildBvh } from './bvh';
@@ -18,6 +18,7 @@ export { STUDIO_MATERIAL_FLOATS, STUDIO_TRIANGLE_FLOATS } from './layout';
 import { STUDIO_MATERIAL_FLOATS, STUDIO_TRIANGLE_FLOATS } from './layout';
 import { packImportedMaterial } from './imported-material';
 import { planStudioTextures } from './texture-budget';
+import { STUDIO_SCENE_BYTES } from './resource-budget';
 
 /** An image map, or a live screen: a composition rendered each frame. */
 export type StudioMap = { source: TexImageSource; flipY: boolean } | { screen: string };
@@ -165,6 +166,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   const blases: Blas[] = [];
   const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean; color?:[number,number,number]; layerOverride?:number; primaryVisible:boolean }[] = [];
   let pending = 0, total = 0;
+  const residentBlases=new Set<Blas>();let residentBytes=0;
   for (const { mesh, id } of meshes) {
     const materialStart=materials.length, mapStart=maps.length, blasStart=blases.length, instanceStart=instances.length, previousBounds=bounds.clone();
     const rollback=()=>{
@@ -186,6 +188,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     const deformation=skinned.isSkinnedMesh?Array.from(skinned.skeleton.boneMatrices).join(','):'';
     const morph=mesh.morphTargetInfluences?.join(',') ?? '';
     const key = `${blasKey(g, mi, oi)}:${deformation}:${morph}:${mats.map((m:any)=>!!m?.vertexColors).join(',')}`;
+    if (background && failedFor.get(mesh) === key) { rollback(); continue; }
     const previous=blasCache.get(mesh);
     let blas = previous?.key===key?previous:sharedBlases.get(key);
     if (!blas || blas.key !== key) {
@@ -193,13 +196,14 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       if (background && building?.key === key) { pending += building.triangles; total += building.triangles; continue; }
       const vertexCount=g.getIndex()?.count ?? posAttr.count;
       const estimated=(Array.isArray(mesh.material) && g.groups.length ? g.groups : [{start:0,count:vertexCount,materialIndex:0}]).reduce((n,group)=>n+((mi[group.materialIndex ?? 0] ?? -1)>=0?Math.floor(Math.min(group.count,vertexCount-group.start)/3):0),0);
+      if (estimated * 320 > STUDIO_SCENE_BYTES) throw new Error('Studio mesh exceeds the geometry memory budget; simplify the model');
       if(background && !deformation && !mesh.morphTargetInfluences?.some(v=>v!==0) && estimated>=WORKER_TRIANGLES && failedFor.get(mesh)!==key){
         buildingFor.set(mesh,{key,triangles:estimated});pending+=estimated;total+=estimated;
         void finishGeometryInWorker(geometryPayload(g,mi,oi)).then(data=>{
           if(buildingFor.get(mesh)?.key!==key)return;buildingFor.delete(mesh);
           const bounds=new THREE.Box3(new THREE.Vector3(...data.bounds.slice(0,3) as [number,number,number]),new THREE.Vector3(...data.bounds.slice(3) as [number,number,number]));
           const blas={...data,key,bounds};blasCache.set(mesh,blas);rememberBlas(blas);background.onReady();
-        },()=>{buildingFor.delete(mesh);failedFor.set(mesh,key);background.onReady();});
+        },error=>{if(buildingFor.get(mesh)?.key!==key)return;buildingFor.delete(mesh);failedFor.set(mesh,key);reportLayerFailure(mesh,id,'geometry preparation',error);background.onReady();});
         continue;
       }
       const { corners, shading, bounds: box } = gather(mesh, g, mi, oi);
@@ -214,10 +218,11 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
           buildingFor.delete(mesh);
           const blas={key,bounds:box,...data};blasCache.set(mesh,blas);rememberBlas(blas);
           onReady();
-        }, () => {
-          // A failed worker: build this mesh in place next time.
+        }, error => {
+          if (buildingFor.get(mesh)?.key !== key) return;
           buildingFor.delete(mesh);
           failedFor.set(mesh, key);
+          reportLayerFailure(mesh,id,'geometry preparation',error);
           onReady();
         });
         continue;
@@ -227,10 +232,15 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     }
     total += blas.triangles;
     if (!blas.triangles) {rollback();continue;}
-    blases.push(blas);
+    const blasBytes=residentBlases.has(blas)?0:blas.positions.byteLength+blas.tris.byteLength+blas.nodes.byteLength;
     let root:THREE.Object3D=mesh;while(root.parent && root.parent!==scene && root.parent.userData.sceneId===id)root=root.parent;
     const part=mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh);
     const instanced=mesh as THREE.InstancedMesh,count=instanced.isInstancedMesh?instanced.count:1;
+    if (!Number.isInteger(count) || count<0 || instanced.isInstancedMesh && count>instanced.instanceMatrix.count)
+      throw new Error('Invalid mesh instance count');
+    if (instances.length+count>1_000_000 || residentBytes+blasBytes+(instances.length+count)*512>STUDIO_SCENE_BYTES)
+      throw new Error('Studio scene exceeds the geometry memory budget; reduce mesh detail or scatter count');
+    blases.push(blas);
     for(let instance=0;instance<count;instance++){
       const world=mesh.matrixWorld.clone();if(instanced.isInstancedMesh){const local=new THREE.Matrix4();instanced.getMatrixAt(instance,local);world.multiply(local);}
       const inverse=world.clone().invert();
@@ -245,6 +255,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       bounds.union(worldBounds);
     }
     if(instances.length===instanceStart)rollback();
+    else if(!residentBlases.has(blas)){residentBlases.add(blas);residentBytes+=blasBytes;}
     } catch(error) { rollback();reportLayerFailure(mesh,id,'scene extraction',error); }
   }
   if (pending) return { pending, total };
@@ -364,7 +375,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
 
 type Blas = BlasData & { key: string; bounds: THREE.Box3 };
 
-const blasCache = new WeakMap<THREE.Object3D, Blas>();
+let blasCache = new WeakMap<THREE.Object3D, Blas>();
 const sharedBlases=new Map<string,Blas>();let sharedBlasBytes=0;
 function rememberBlas(blas:Blas):void{
  if(sharedBlases.has(blas.key))return;
@@ -373,9 +384,14 @@ function rememberBlas(blas:Blas):void{
  while(sharedBlasBytes+bytes>256*1024*1024 && sharedBlases.size){const [key,old]=sharedBlases.entries().next().value!;sharedBlases.delete(key);sharedBlasBytes-=old.positions.byteLength+old.tris.byteLength+old.nodes.byteLength;}
  sharedBlases.set(blas.key,blas);sharedBlasBytes+=bytes;
 }
-const buildingFor = new WeakMap<THREE.Object3D, { key: string; triangles: number }>();
-const failedFor = new WeakMap<THREE.Object3D, string>();
+let buildingFor = new WeakMap<THREE.Object3D, { key: string; triangles: number }>();
+let failedFor = new WeakMap<THREE.Object3D, string>();
 const geometryCache = new Map<string, { positions: Float32Array; tris: Float32Array; blasNodes: ArrayBuffer; roots: Map<Blas, number>; triangles: number; tlasCapacity: number }>();
+export function clearStudioGeometryCaches(): void {
+  buildingFor = new WeakMap(); failedFor = new WeakMap(); blasCache = new WeakMap();
+  sharedBlases.clear(); sharedBlasBytes = 0; geometryCache.clear();
+  disposeStudioGeometryWorkers();
+}
 const versions = new WeakMap<object, number>();
 let nextVersion = 1;
 /** A stable identity for attribute contents (three bumps `.version` on edits). */

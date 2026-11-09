@@ -22,10 +22,11 @@ export async function* renderStudioPasses(PM:any,time:number,width:number,height
   attachStudioWorld(scene,(runtime as any).studioWorld,(runtime as any).metersPerUnit);
   runtime.resizeCamera(width,height);const camera=cameraOf(runtime.camera,width,height);if(!camera)throw new Error('Unsupported pass camera');
   const view=viewOf(runtime,camera,scene.bounds);
+  const mapSize=scene.mapSize ?? MAP_SIZE;
   const maps=scene.maps.map(map=>{
-    if('source' in map)return mapCanvas(map.source,map.flipY);
-    const comp=compositionById(PM.proj,map.screen);if(!comp)return new Uint8Array(MAP_SIZE*MAP_SIZE*4);
-    return PM.GL.renderMaterialComposition(comp,time,MAP_SIZE,MAP_SIZE,time) || new Uint8Array(MAP_SIZE*MAP_SIZE*4);
+    if('source' in map)return mapCanvas(map.source,map.flipY,mapSize);
+    const comp=compositionById(PM.proj,map.screen);if(!comp)return new Uint8Array(mapSize*mapSize*4);
+    return PM.GL.renderMaterialComposition(comp,time,mapSize,mapSize,time) || new Uint8Array(mapSize*mapSize*4);
   });
   const target=new StudioTarget(width,height),seed=Math.floor(time*1000000)>>>0;
   try{

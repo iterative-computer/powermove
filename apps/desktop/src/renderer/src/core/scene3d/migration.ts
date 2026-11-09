@@ -2,6 +2,7 @@ import { parseScene,sceneProperties,SCENE3D_DEFINITION } from './schema';
 import { sceneForLayer } from './service';
 import { sceneCommands } from './operations';
 import { layer3DRole,initializeLayer3D } from './layers';
+import { remapMaterialLayerLinks } from './material-maps';
 import type { EditResult } from '../types/commands';
 
 /** Explicit, undoable upgrade. Existing documents otherwise keep their original renderer. */
@@ -61,6 +62,7 @@ export function convertLegacyScene(PM:any,layerId:string):EditResult {
       next.id=c.id;next.from=layer.from;next.dur=layer.dur;
       next.d={definition:c.content.definition,version:1,w:layer.d.w,h:layer.d.h,params:{},data:c.content.data};
       initializeLayer3D(next,c.properties);next.parent=c.parent===madeId?layerId:c.parent || null;
+      if(madeId)remapMaterialLayerLinks(next,new Map([[madeId,layerId]]));
       if(c===first){next.fx=layer.fx;next.masks=layer.masks;next.blend=layer.blend;next.on=layer.on;next.group=layer.group;next.mblur=layer.mblur;}
       for(const prop of [...Object.values<any>(next.p),...sceneProperties(next).map(p=>p.prop)])for(const key of prop.kf || [])key.i=PM.uid('kf');
       return next;

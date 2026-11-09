@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { patchStudioScene, type StudioBackend, type StudioBounds, type StudioCameraDescription, type StudioCameraOptions, type StudioFrame, type StudioRenderRequest, type StudioSceneDescription, type StudioScenePatch, type StudioTextureSource } from '../scene3d/studio-backend';
 import { type StudioScene } from './extract';
-import { initStudioGpu, studioGpuFailure, StudioTarget, type StudioView } from './gpu';
+import { initStudioGpu, studioGpuFailure, studioGpuReady, studioGpuGeneration, studioMaxBindingBytes, StudioTarget, type StudioView } from './gpu';
 import { compileSceneDescription, viewFromDescription } from './scene-description';
+import { STUDIO_SESSION_BYTES, studioSceneBytes, studioTargetBytes } from './resource-budget';
 
 /** The page runs the same Studio WGSL as Rust; three.js supplies geometry/math only. */
 export class WebGpuStudioBackend implements StudioBackend {
@@ -16,9 +17,12 @@ export class WebGpuStudioBackend implements StudioBackend {
   private time = 0;
   private revision = 0;
   private viewKey = '';
-  private targets = new Map<string, { target: StudioTarget; revision: number; viewKey: string; time: number; resolved: number; denoise: boolean }>();
+  private deviceGeneration = studioGpuGeneration();
+  private disposed = false;
+  private targets = new Map<string, { target: StudioTarget; bytes: number; revision: number; viewKey: string; time: number; resolved: number; denoise: boolean }>();
   async initialize(): Promise<void> { if (!await initStudioGpu()) throw new Error('Studio could not start WebGPU'); }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription): void {
+    studioSceneBytes(scene, maps.length, studioMaxBindingBytes() || Infinity);
     this.scene = scene; this.maps = maps; this.description = description; this.document = null; this.revision++;
   }
   setScene(document: StudioSceneDescription): void {
@@ -42,19 +46,37 @@ export class WebGpuStudioBackend implements StudioBackend {
   setView(view: StudioView): void {
     this.view = view; this.viewKey = JSON.stringify(view);
   }
-  render(request: StudioRenderRequest): StudioFrame {
+  render(request: StudioRenderRequest): StudioFrame | Promise<StudioFrame> {
+    if (this.disposed) throw new Error('Studio session is closed');
+    if (!studioGpuReady()) return this.recover(request);
+    if (this.deviceGeneration !== studioGpuGeneration()) {
+      this.clearTargets(); this.deviceGeneration = studioGpuGeneration();
+    }
     if(studioGpuFailure())throw new Error(studioGpuFailure()!);
     if (request.signal?.aborted) throw new Error('Studio frame cancelled');
     if (!this.scene || !this.view) throw new Error('Set a Studio scene and camera before rendering');
-    const width = Math.max(2, Math.min(8192, Math.round(request.size.width))), height = Math.max(2, Math.min(8192, Math.round(request.size.height)));
+    const width = Math.max(2, Math.round(request.size.width)), height = Math.max(2, Math.round(request.size.height));
+    const bytes = studioTargetBytes(width, height, studioMaxBindingBytes()) + studioSceneBytes(this.scene, this.maps.length, studioMaxBindingBytes());
+    if (bytes > STUDIO_SESSION_BYTES) throw new Error('Studio exceeds the 2 GiB session budget; reduce mesh detail or output size');
     const key = `${request.tier}:${width}:${height}`;
     let entry = this.targets.get(key);
+    // Reuse the active target; release least recently used tiers before allocating
+    // their replacement. The scene/document remain available for replay.
+    let retained = [...this.targets.entries()].filter(([k]) => k !== key).reduce((n, [, value]) => n + value.bytes, 0);
+    for (const [oldKey, old] of this.targets) {
+      if (oldKey === key) continue;
+      if (oldKey.startsWith(`${request.tier}:`) || retained + bytes > STUDIO_SESSION_BYTES) {
+        old.target.destroy(); this.targets.delete(oldKey); retained -= old.bytes;
+      }
+    }
     if (!entry) {
       // A tier keeps just its current resolution; resizing must not retain GPU targets.
       for (const [oldKey, old] of this.targets) if (oldKey.startsWith(`${request.tier}:`)) { old.target.destroy(); this.targets.delete(oldKey); }
       const target = new StudioTarget(width, height); target.live = request.tier === 'live';
-      entry = { target, revision: -1, viewKey: '', time: NaN, resolved: -1, denoise: false }; this.targets.set(key, entry);
+      entry = { target, bytes, revision: -1, viewKey: '', time: NaN, resolved: -1, denoise: false }; this.targets.set(key, entry);
     }
+    entry.bytes = bytes;
+    this.targets.delete(key); this.targets.set(key, entry);
     const t = entry.target;
     if (entry.revision !== this.revision) { t.setScene(this.scene, this.maps); entry.revision = this.revision; entry.viewKey = ''; entry.resolved = -1; }
     const changed = entry.viewKey !== this.viewKey || entry.time !== this.time;
@@ -75,8 +97,16 @@ export class WebGpuStudioBackend implements StudioBackend {
     return box.isEmpty() ? null : { min: { x: box.min.x, y: box.min.y, z: box.min.z }, max: { x: box.max.x, y: box.max.y, z: box.max.z } };
   }
   async liveHistory(){for(const [key,entry] of this.targets)if(key.startsWith('live:'))return entry.target.historyStats();return null;}
+  private async recover(request: StudioRenderRequest): Promise<StudioFrame> {
+    this.clearTargets();
+    if (!await initStudioGpu()) throw new Error('Studio could not recover WebGPU');
+    if (this.disposed || request.signal?.aborted) throw new Error('Studio frame cancelled');
+    this.deviceGeneration = studioGpuGeneration();
+    return this.render(request);
+  }
+  private clearTargets(): void { for (const { target } of this.targets.values()) target.destroy(); this.targets.clear(); }
   private disposeGraph(): void {
     this.graph?.traverse((o: any) => { o.geometry?.dispose(); for (const m of Array.isArray(o.material) ? o.material : [o.material]) m?.dispose(); }); this.graph = null;
   }
-  dispose(): void { for (const { target } of this.targets.values()) target.destroy(); this.targets.clear(); this.disposeGraph(); this.scene = null; this.maps = []; this.description = null; this.document = null; }
+  dispose(): void { this.disposed = true; this.clearTargets(); this.disposeGraph(); this.scene = null; this.maps = []; this.description = null; this.document = null; }
 }

@@ -1,5 +1,6 @@
 import { compositionExtrusions } from './extrusion-render';
 import { pruneStudio } from '../studio';
+import { clearStudioGeometryCaches } from '../studio/extract';
 import { isExtrudedLayer, isShared3DPlane } from './extrusion-data';
 import {mapImageId} from './material-maps';
 import {compositionTextureFrame,clearCompositionTextures} from './composition-textures';
@@ -7,7 +8,7 @@ import * as THREE from 'three';
 import { world3D,parent3D,depthOrderedLayers } from '../../legacy/core/space-3d';
 import { SceneRuntime } from './runtime';
 import { createScene,parseScene,SCENE3D_DEFINITION,type Scene3D } from './schema';
-import { compositionScene, layer3DRole,isModelGroup } from './layers';
+import { compositionScene, compositionSceneWarnings, layer3DRole,isModelGroup } from './layers';
 
 const runtimes = new WeakMap<object,Map<string,SceneRuntime>>();
 const legacyScenes = new WeakMap<object,{signature:string;scene:Scene3D}>();
@@ -87,7 +88,8 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
     const references=new Map<string,any>();
     for(const id of scan.ids)references.set(id,scan.byId.get(id)!.asset);
     const starts=new Map<string,number>(comp.layers.map((l:any)=>[l.id,l.from]));
-    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);if(!layer)return null;let loading=false;const frame=compositionTextureFrame(PM,layer,map,time,()=>{loading=true;});return loading?'loading':frame;},compositionExtrusions(PM,comp,time));
+    const evaluated=compositionScene(PM,time,comp);
+    runtime.sync(evaluated,(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);if(!layer)return null;let loading=false;const frame=compositionTextureFrame(PM,layer,map,time,()=>{loading=true;});return loading?'loading':frame;},compositionExtrusions(PM,comp,time));
     const models=comp.layers.filter((l:any)=>layer3DRole(l)==='object');
     // Use exactly the native layer hierarchy, orientation and anchor matrices.
     // Flattening the evaluated world avoids applying parent transforms twice.
@@ -110,6 +112,9 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
     }
     runtime.scene.updateMatrixWorld(true);
     runtime.refreshEnvironment();
+    const warnings=compositionSceneWarnings(evaluated);
+    runtime.warnings.push(...warnings);
+    if(warnings.length)PM.toast?.(warnings[0],{key:'studio-scatter-budget'});
     for(const layer of comp.layers)if(!layer3DRole(layer) && layer.d?.materialOptions){
       const object=runtime.objects.get(layer.id);if(!object)continue;
       const p=Object.fromEntries(Object.entries<any>(layer.d.materialOptions.p).map(([k,prop])=>[k,PM.evP(layer,prop,time,`materialOptions.${k}`)]));
@@ -209,6 +214,7 @@ export function pruneSceneRuntimes(PM:any):void {
   for(const [id,runtime] of pool)if(!id.startsWith('composition:')&&!keep.has(id)){runtime.dispose();pool.delete(id);}
 }
 export function disposeSceneRuntimes(PM:any):void {
+  clearStudioGeometryCaches();
   pruneStudio(PM,()=>false);
   clearCompositionTextures(PM);
   const pool=runtimes.get(PM);for(const runtime of pool?.values() || [])runtime.dispose();pool?.clear();

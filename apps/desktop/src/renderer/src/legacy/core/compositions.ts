@@ -21,11 +21,11 @@ import type { PMRegistry } from '../registry';
 import type { Patch, PathPart } from '../../../../shared/patch';
 
 /** Fields that belong to a composition rather than to the project. */
-export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'scene3dDefaultsVersion'] as const;
+export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'scene3dDefaultsVersion', 'views3d'] as const;
 /** Composition fields that may be absent (absent = default). When the open
  * composition changes they must be cleared rather than inherited, or one
  * composition's value would leak into the next. */
-const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['audioGain', 'scene3dDefaultsVersion']);
+const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['audioGain', 'scene3dDefaultsVersion', 'views3d']);
 /** Top-level project key → key on a stored composition. */
 const ROOT_TO_COMP: Record<string, string> = {
   compId: 'id', compName: 'name',

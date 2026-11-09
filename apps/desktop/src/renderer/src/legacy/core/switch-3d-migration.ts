@@ -6,7 +6,7 @@ import { groupAncestors } from './layer-groups';
  * then tells the truth. Version 2 projects are left alone. */
 export const SWITCH_3D_VERSION = 2;
 export function migrateInherited3D(project: any): any {
-  if (!project || typeof project !== 'object' || project.switch3DVersion === SWITCH_3D_VERSION) return project;
+  if (!project || typeof project !== 'object' || typeof project.switch3DVersion === 'number' && project.switch3DVersion >= SWITCH_3D_VERSION) return project;
   const migrate = (container: any) => {
     const layers: any[] = Array.isArray(container?.layers) ? container.layers : [];
     for (const layer of layers) {

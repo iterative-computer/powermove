@@ -16,7 +16,7 @@ import { listMedia, importMedia, manageMedia } from './media-management';
 import { checkProject } from './project-check';
 import { CHECK_PROJECT_TOOL, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentCompositionInfo } from '../../../../shared/media-tools';
 import { editScene } from '../../core/scene3d/operations';
-import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
+import { compositionScene,compositionSceneWarnings,layer3DRole } from '../../core/scene3d/layers';
 import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
 import { validateEffect, effectValidationWarnings } from '../../kernel/glsl';
 import { applyMemoryOperation, listMemory, memoryEnabled, memoryIndex, MEMORY_DISABLED_MESSAGE, type MemoryOperation } from '../../core/memory';
@@ -679,7 +679,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   if (request.tool === 'get_3d_scene') {
     const layers=PM.proj.layers.filter((l:any)=>layer3DRole(l) || isExtrudedLayer(l) || l.threeD && l.d?.materialOptions);
     const evaluated=compositionScene(PM,PM.time);
-    const state={layerId:request.arguments.target || null,scene:evaluated,
+    const state={layerId:request.arguments.target || null,scene:evaluated,warnings:compositionSceneWarnings(evaluated),
       world:evaluated.objects.find(o=>o.world)?.world ?? null,fogVolumes:evaluated.objects.filter(o=>o.fog),terrains:evaluated.objects.filter(o=>o.terrain),scatters:evaluated.objects.filter(o=>o.scatter),
       layers:layers.map((l:any)=>({id:l.id,name:l.name,role:l.d?.data?.object?.world?'world':l.d?.data?.object?.fog?'fog':l.d?.data?.object?.terrain?'terrain':l.d?.data?.object?.scatter?'scatter':layer3DRole(l) || (isExtrudedLayer(l)?l.type==='text'?'3d-text':'3d-shape':'3d-artwork'),extrusion:readExtrusion(PM,l),surfaces:listExtrusionSurfaces(PM,l.id),parent:l.parent,visible:l.on,locked:l.lock,from:l.from,duration:l.dur,content:l.d.data || l.d,materials:listModelMaterials(PM,l.id),parts:listLayerParts(PM,l).map(({key,name,parent})=>({key,name,parent})),validCompositions:listValidMaterialCompositions(PM,l.id)})),
       channels:layers.flatMap((layer:any)=>PM.allProps(layer).map((p:any)=>({layerId:layer.id,path:p.key,value:PM.evP(layer,p.prop,PM.time,p.key),keyframeCount:p.prop.kf.length}))),

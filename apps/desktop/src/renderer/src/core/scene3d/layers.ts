@@ -126,7 +126,10 @@ export function layer3DAssetIds(layer:any):string[] {
 }
 
 /** Assemble a transient world for rendering; there is no scene container in project data. */
+const sceneWarnings=new WeakMap<Scene3D,string[]>();
+export const compositionSceneWarnings=(scene:Scene3D):readonly string[]=>sceneWarnings.get(scene) || [];
 export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curComp?.() || PM.proj):Scene3D {
+  const warnings:string[]=[];
   const layers=(composition?.layers || []).filter((l:any)=>layer3DRole(l));
   const active=(layer:any)=>PM.active?PM.active(layer,time):layer.on!==false;
   const ev=(layer:any,prop:any,path:string)=>{
@@ -146,7 +149,7 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
   const lightLayers=layers.filter((l:any)=>layer3DRole(l)==='light' && active(l));
   const allObjectIds=new Set(objectLayers.map((l:any)=>l.id));
   const objects=objectLayers.map((layer:any)=>{
-    const node=evaluateEnvironmentNode(layer.d.data.object,(prop,path)=>ev(layer,prop,path));
+    const node=evaluateEnvironmentNode(layer.d.data.object,(prop,path)=>ev(layer,prop,path),message=>warnings.push(message));
     const p=transform(layer);p.visible=ch(active(layer));
     // Native orientation is applied before the separately animated rotation.
     for(const [key,axis] of [['rx','x'],['ry','y'],['rz','z']] as const) if(layer.p[`orientation.${axis}`])p[key]!.v+=ev(layer,layer.p[`orientation.${axis}`],`orientation.${axis}`);
@@ -160,6 +163,12 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
     const node=evaluateEnvironmentNode(layer.d.data.light,(prop,path)=>ev(layer,prop,path)),p=values(layer,node.p,'light'),t=transform(layer);
     return {...node,id:layer.id,name:layer.name,p:{...p,x:t.x,y:t.y,z:t.z}};
   });
+  const candidates=objects.reduce((n:number,object:any)=>n+(object.scatter?.p.count.v || 0),0);
+  if(candidates>1_000_000){
+    const ratio=1_000_000/candidates;
+    for(const object of objects)if(object.scatter)object.scatter.p.count.v=Math.floor(object.scatter.p.count.v*ratio);
+    warnings.push('Studio reduced animated scatter density to fit the one-million-instance budget. Saved counts are unchanged.');
+  }
   // Never replace the implicit camera of a saved, unversioned composition.
   // Schema defaults remain v1 for legacy scene containers and templates too.
   const base=parseScene(composition?.scene3dDefaultsVersion===2?{camera:{p:{x:0,y:0,z:6}}}:{});
@@ -176,5 +185,6 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
   // Structural source references change only on content edits. Keep signatures
   // and generated geometry reusable across animated frames after validation.
   scene.objects.forEach((object,index)=>{object.source=objects[index]!.source;});
+  sceneWarnings.set(scene,[...new Set(warnings)]);
   return scene;
 }

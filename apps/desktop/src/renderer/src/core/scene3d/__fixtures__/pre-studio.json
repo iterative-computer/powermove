@@ -1,0 +1,14 @@
+{
+  "switch3DVersion": 1,
+  "scene3dDefaultsVersion": 1,
+  "layers": [
+    { "id": "group", "type": "group", "name": "Old 3D group", "threeD": true },
+    { "id": "artwork", "type": "solid", "name": "Inherited 3D", "group": "group", "threeD": false }
+  ],
+  "scene": {
+    "version": 1,
+    "objects": [{ "id": "model", "source": { "primitive": "box" }, "castShadow": false, "receiveShadow": false, "p": { "x": 2, "ry": 15 } }],
+    "camera": { "p": { "x": 3, "y": 2, "z": 6 } },
+    "environment": { "p": { "ambient": 0.5, "exposure": 1 } }
+  }
+}

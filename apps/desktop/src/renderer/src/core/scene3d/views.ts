@@ -4,6 +4,7 @@ import { layer3DRole } from './layers';
 import { isExtrudedLayer } from './extrusion-data';
 import { frameView } from './navigation';
 import { studioLayer } from '../studio';
+import { parseStoredViews, type StoredViews } from './view-state';
 import {
   applySidePose, applyViewportPose, getViewportMode, onViewportChange, setViewportMode, sideDirection, viewportKey,
   viewportPose, viewportSide, type ViewPose, type ViewSide
@@ -30,14 +31,33 @@ export const PANE_VIEWS: ReadonlyArray<{ id: PaneView; label: string }> = [
 ];
 export const paneViewLabel = (view: PaneView): string => PANE_VIEWS.find(v => v.id === view)?.label ?? 'Custom View';
 
-type Entry = { layout: ViewLayout; active: number; panes: ViewPane[] };
-const entries = new WeakMap<object, Map<string, Entry>>();
+type Entry = { layout: ViewLayout; active: number; panes: ViewPane[]; stored: unknown };
+const entries = new WeakMap<object, { project: object; comps: Map<string, Entry> }>();
 const listeners = new WeakMap<object, Set<() => void>>();
 function entry(PM: any): Entry {
-  let map = entries.get(PM); if (!map) { map = new Map(); entries.set(PM, map); }
-  const key = viewportKey(PM); let value = map.get(key);
-  if (!value) { value = { layout: 1, active: 0, panes: [{ view: 'camera', pose: null }] }; map.set(key, value); }
+  let owner = entries.get(PM);
+  if (!owner || owner.project !== PM.proj) { owner = { project: PM.proj, comps: new Map() }; entries.set(PM, owner); }
+  const comp = PM.curComp?.() || PM.proj, key = viewportKey(PM), stored = comp.views3d;
+  let value = owner.comps.get(key);
+  if (!value || value.stored !== stored) {
+    const changed = !!value;
+    let saved: StoredViews | null = null;
+    try { if (stored) saved = parseStoredViews(stored); } catch { /* Older/malformed view preferences use one camera view. */ }
+    value = saved ? { ...saved, stored, panes: saved.panes.map(pane => ({ view: pane.view, pose: pane.pose ? { position: new THREE.Vector3(...pane.pose.position), target: new THREE.Vector3(...pane.pose.target), zoom: pane.pose.zoom } : null })) }
+      : { layout: 1, active: 0, panes: [{ view: 'camera', pose: null }], stored };
+    owner.comps.set(key, value);
+    // On initial load retain the current transient orbit unless a saved layout
+    // exists. Undo/Redo restores the selected pane as well as its label.
+    if (saved || changed || stored !== undefined) load(PM, value.panes[value.active]!);
+  }
   return value;
+}
+function save(PM:any,e:Entry,label:string):void {
+  e.panes[e.active]=current(PM);
+  const views3d:StoredViews={layout:e.layout,active:e.active,panes:e.panes.map(pane=>({view:pane.view,pose:pane.pose?{position:pane.pose.position.toArray() as [number,number,number],target:pane.pose.target.toArray() as [number,number,number],zoom:pane.pose.zoom}:null}))};
+  const result=PM.Edit.apply({type:'set_composition',patch:{views3d}},{label,origin:'interface'});
+  if(!result.ok)throw new Error(result.message);
+  e.stored=(PM.curComp?.() || PM.proj).views3d;
 }
 function notify(PM: any): void { for (const listener of listeners.get(PM) || []) listener(); PM.invalidate?.('render'); }
 export function onViewsChange(PM: any, listener: () => void): () => void {
@@ -95,6 +115,7 @@ export function setViewLayout(PM: any, layout: ViewLayout): void {
   const previous = e.panes.filter((_, i) => i !== e.active);
   const extra = others.map((view, i) => previous[i] && previous[i]!.view !== mine.view ? previous[i]! : { view, pose: null });
   e.panes = [...extra, mine]; e.active = e.panes.length - 1; e.layout = layout;
+  save(PM,e,'Change 3D view layout');
   notify(PM);
 }
 /** Select a pane: the viewer takes over its view. */
@@ -102,6 +123,7 @@ export function setActivePane(PM: any, index: number): void {
   const e = entry(PM); if (!Number.isInteger(index) || index < 0 || index >= e.panes.length || index === e.active) return;
   e.panes[e.active] = current(PM); e.active = index;
   load(PM, e.panes[index]!);
+  save(PM,e,'Select 3D view');
   notify(PM);
 }
 /** Choose what a pane looks through. A side view starts framed on the scene. */
@@ -110,10 +132,11 @@ export function setPaneView(PM: any, index: number, view: PaneView): void {
   if (index === e.active) {
     const pane: ViewPane = view === 'custom' ? { view, pose: e.panes[index]?.view === 'custom' ? e.panes[index]!.pose : null } : { view, pose: null };
     if (view === 'custom' && !pane.pose && getViewportMode(PM) === 'editor') pane.pose = viewportPose(PM);
-    load(PM, pane); notify(PM); return;
+    load(PM, pane); save(PM,e,'Change 3D view'); notify(PM); return;
   }
   if (!e.panes[index]) return;
   e.panes[index] = { view, pose: null };
+  save(PM,e,'Change 3D view');
   notify(PM);
 }
 

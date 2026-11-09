@@ -46,6 +46,25 @@ fn receiver() -> Scene {
     }
 }
 #[test]
+fn zero_normals_and_degenerate_triangles_keep_healthy_pixels_lit() {
+    let original=receiver();
+    let mut broken=original.clone();
+    broken.objects[0].mesh.normals.fill(Vec3::ZERO);
+    broken.objects[0].mesh.indices.push([0,0,0]);
+    broken.validate().unwrap();
+    let mut renderer=Renderer::new(24,24).expect("GPU");
+    for hardware in [false,true] {
+        renderer.hardware_rt=hardware;
+        renderer.set_scene(&original,&original.prepare());renderer.trace(8,2,true,1000);
+        let expected=renderer.linear_beauty();
+        renderer.set_scene(&broken,&broken.prepare());renderer.trace(8,2,true,1000);
+        let actual=renderer.linear_beauty();
+        assert!(actual.iter().all(|v|v.is_finite()));
+        let difference=expected.iter().zip(&actual).map(|(a,b)|(a-b).abs()).sum::<f32>()/actual.len() as f32;
+        assert!(difference<0.001,"zero normals changed healthy lighting by {difference} (hardware={hardware})");
+    }
+}
+#[test]
 fn analytic_fog_shadows_do_not_add_null_collision_noise() {
     let mut scene = receiver();
     scene.world.volumes.push(Volume {

@@ -292,6 +292,8 @@ impl Host {
                 if let Some(c) = camera {
                     scene::validate_camera(&c)?;
                 }
+                if let Some(m) = &materials { for m in m { m.validate()?; } }
+                if let Some(l) = &lights { for l in l { l.validate()?; } }
                 r.patch_transforms(&transforms)?;
                 if content_changed {
                     self.history_revision += 1;
@@ -511,6 +513,23 @@ impl Host {
                 }
                 self.frame_counter = self.frame_counter.wrapping_add(1);
                 let frame_id = self.frame_counter;
+                let prepared = self.packed.as_ref().map(|p| &p.prepared)
+                    .or_else(|| self.resident.as_ref().map(|r| &r.prepared)).ok_or("no scene")?;
+                let instances = self.packed.as_ref().map(|p| p.placements.len())
+                    .or_else(|| self.resident.as_ref().map(|r| r.placements.len())).unwrap_or(0);
+                let scene_bytes = pm_studio::validation::validate_scene_budget(prepared.tris.len(),instances,prepared.materials.len(),prepared.sdata.len()*16)? as u64;
+                let maps_bytes = self.screen.as_ref().map_or(0,|(_,_,_,bytes)|bytes.len() as u64);
+                let needed = pm_studio::validation::target_bytes(w,h,u64::MAX)? + scene_bytes + maps_bytes
+                    + if is_live {u64::from(width)*u64::from(height)*32} else {0};
+                if needed > pm_studio::validation::SESSION_BUDGET_BYTES {
+                    return Err("Studio exceeds the 2 GiB session budget; reduce mesh detail, scatter count or output size".into());
+                }
+                let other = if is_live { &mut self.full } else { &mut self.live };
+                let other_bytes = other.as_ref().map_or(0,|t|{
+                    let (w,h)=t.renderer.size();
+                    pm_studio::validation::target_bytes(w,h,u64::MAX).unwrap_or(u64::MAX/2)+scene_bytes+maps_bytes
+                });
+                if other_bytes + needed > pm_studio::validation::SESSION_BUDGET_BYTES { *other = None; }
                 let slot = if is_live {
                     &mut self.live
                 } else {
@@ -810,6 +829,22 @@ mod tests {
             .is_err()
         );
         assert!(h.handle(Command::Bounds { layer: None }, &[]).is_ok());
+    }
+    #[test]
+    fn oversized_scene_is_rejected_before_bvh_build_and_preserves_previous_scene() {
+        let mut h=Host::new();
+        h.handle(Command::Preset{name:"hero".into(),finish:blue(),time:0.},&[]).unwrap();
+        let revision=h.revision;
+        let old_positions=h.resident.as_ref().unwrap().prepared.positions.clone();
+        let mut scene=pm_studio::scene::preset("hero","blue",0.).unwrap();
+        scene.objects.truncate(1);
+        scene.objects[0].mesh.indices.resize(1_100_000,[0,1,2]);
+        let error=h.handle(Command::Scene{scene,meshes:vec![],identities:vec![],transforms:vec![]},&[]).unwrap_err();
+        assert!(error.contains("budget"));
+        assert_eq!(h.revision,revision);
+        assert_eq!(h.resident.as_ref().unwrap().prepared.positions,old_positions);
+        assert!(h.live.is_none() && h.full.is_none());
+        assert!(h.handle(Command::Bounds{layer:None},&[]).is_ok());
     }
     #[test]
     fn metal_instances_keep_the_glass_sphere() {

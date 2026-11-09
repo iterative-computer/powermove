@@ -168,25 +168,30 @@ export function parseScene(raw: unknown): Scene3D {
       if (!ancestor) throw new Error(`Missing 3D parent: ${parent}`);
       parent = ancestor.parent;
     }
-    if(object.terrain){vertices+=(Math.round(object.terrain.p.resolution!.v)+1)**2;continue;}
-    if(object.world || object.fog || object.scatter)continue;
-    if ('nature' in object.source)vertices+=object.source.nature==='conifer'?56000:object.source.nature==='grass'?400:object.source.nature==='rock'?350:15000;
-    if ('primitive' in object.source) {
-      const source=object.source,s=source.parameters?.segments || 48;
-      vertices+=source.primitive==='box'?24:source.primitive==='roundedBox'?6*(2*(source.parameters?.segments ?? 6)+1)**2:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)
-        :source.primitive==='sphere'||source.primitive==='torus'?(s+1)*(Math.max(8,Math.floor(s/2))+1):(s+1)*12;
-    }
-    if ('extrude' in object.source) vertices+=object.source.extrude.length*(object.source.bevel?60:12);
-    if ('mesh' in object.source) vertices += object.source.mesh.positions.length / 3;
-    if ('lathe' in object.source) {
-      if (object.source.lathe.some(([r])=>r<0)) throw new Error('Lathe radii cannot be negative');
-      vertices += object.source.lathe.length * (object.source.segments || 48);
-    }
+    if ('lathe' in object.source && object.source.lathe.some(([r])=>r<0))throw new Error('Lathe radii cannot be negative');
+    vertices+=sceneObjectVertices(object);
   }
   if (vertices > 500_000) throw new Error('3D scene exceeds the geometry budget');
   const camera = scene.camera.p as Record<string, SceneChannel>;
   if (camera.far!.v <= camera.near!.v) throw new Error('Camera far plane must be beyond its near plane');
   return scene;
+}
+
+/** Cheap document budget shared by parsing and the transactional edit boundary. */
+export function sceneObjectVertices(object:any):number {
+  if(object.terrain)return (Math.round(object.terrain.p.resolution.v)+1)**2;
+  if(object.world || object.fog || object.scatter || !object.source)return 0;
+  const source=object.source;
+  if('nature' in source)return source.nature==='conifer'?56000:source.nature==='grass'?400:source.nature==='rock'?350:15000;
+  if('primitive' in source){
+    const segments=source.parameters?.segments || 48;
+    return source.primitive==='box'?24:source.primitive==='roundedBox'?6*(2*(source.parameters?.segments ?? 6)+1)**2:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)
+      :source.primitive==='sphere'||source.primitive==='torus'?(segments+1)*(Math.max(8,Math.floor(segments/2))+1):(segments+1)*12;
+  }
+  if('extrude' in source)return source.extrude.length*(source.bevel?60:12);
+  if('mesh' in source)return source.mesh.positions.length/3;
+  if('lathe' in source)return source.lathe.length*(source.segments || 48);
+  return 0;
 }
 
 export function createObject(id: string, source: SceneSource = {primitive:'box'}, name = 'Object'): SceneObject {

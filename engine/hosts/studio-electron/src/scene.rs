@@ -55,7 +55,9 @@ fn point(m: Mat4, p: Vec3) -> Vec3 {
 fn matrix(t: &[f32; 16]) -> Result<Mat4, String> {
     let m = Mat4::from_cols_array(t);
     if !m.is_finite()
+        || !m.determinant().is_finite()
         || m.determinant().abs() < 1e-12
+        || !m.inverse().is_finite()
         || t[3] != 0.
         || t[7] != 0.
         || t[11] != 0.
@@ -372,57 +374,37 @@ impl Metadata for Scene {
         }
     }
 }
-pub fn validate(s: &Scene) -> Result<(), String> {
-    s.world.validate()?;
-    if !s.meters_per_unit.is_finite()||s.meters_per_unit<=0.{return Err("scene scale must be positive metres per unit".into());}
-    for i in &s.instances {i.validate(s.objects.len())?;}
-    if s.objects.len() > 65535 {
-        return Err("scene needs 1–65535 objects".into());
-    }
-    if s.materials.is_empty() {
-        return Err("scene needs materials".into());
-    }
-    validate_camera(&s.camera)?;
-    for o in &s.objects {
-        let m = &o.mesh;
-        if o.material >= s.materials.len()
-            || m.positions.is_empty()
-            || m.indices.is_empty()
-            || m.normals.len() != m.positions.len()
-            || m.uvs.len() != m.positions.len()
-            || !m.colors.is_empty() && m.colors.len()!=m.positions.len()
-            || !m.triangle_materials.is_empty() && (m.triangle_materials.len()!=m.indices.len() || m.triangle_materials.iter().any(|&i|i>=s.materials.len()))
-        {
-            return Err("invalid mesh attributes or material index".into());
-        }
-        if m.positions
-            .iter()
-            .chain(m.normals.iter()).chain(m.colors.iter())
-            .any(|p| !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite())
-            || m.indices
-                .iter()
-                .flatten()
-                .any(|&i| i as usize >= m.positions.len())
-        {
-            return Err("invalid mesh coordinates or indices".into());
-        }
-    }
-    Ok(())
-}
+pub fn validate(s: &Scene) -> Result<(), String> { s.validate() }
 
-pub fn validate_camera(c: &pm_studio::scene::Camera) -> Result<(), String> {
-    if !c.fov.is_finite()
-        || !(0.1..179.).contains(&c.fov)
-        || (c.target - c.position).length() < 1e-6
-    {
-        return Err("invalid camera".into());
-    }
-    Ok(())
-}
+pub fn validate_camera(c: &pm_studio::scene::Camera) -> Result<(), String> { c.validate() }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_invalid_uvs_materials_and_camera_before_preparation() {
+        let original = pm_studio::scene::preset("hero", "blue", 0.).unwrap();
+        for field in 0..8 {
+            let mut s = original.clone();
+            match field {
+                0 => s.objects[0].mesh.uvs[0][0] = f32::NAN,
+                1 => s.materials[0].ior = 0.,
+                2 => s.materials[0].emission.x = f32::INFINITY,
+                3 => s.materials[0].roughness = -1.,
+                4 => s.camera.position.x = f32::NAN,
+                5 => s.camera.f_stop = f32::INFINITY,
+                6 => s.camera.focus = Some(v3(f32::NAN, 0., 0.)),
+                _ => s.exposure = f32::INFINITY,
+            }
+            assert!(validate(&s).is_err(), "invalid scene field {field} reached preparation");
+        }
+    }
+    #[test]
+    fn rejects_overflowing_transform_determinants() {
+        let mut transform=IDENTITY;
+        transform[0]=1e30;transform[5]=1e30;transform[10]=1e30;
+        assert!(matrix(&transform).is_err());
+    }
     #[test]
     fn transform_patch_reuses_geometry_and_updates_bounds() {
         let s = pm_studio::scene::preset("hero", "blue", 0.).unwrap();

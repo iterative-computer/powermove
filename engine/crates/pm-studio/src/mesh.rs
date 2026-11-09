@@ -245,6 +245,7 @@ pub fn sphere(center: Vec3, radius: f32, rings: usize, segments: usize) -> Mesh 
 /// A Wavefront OBJ (triangles or polygons; positions, normals, texcoords).
 /// A `.usdz` converts to OBJ with macOS ModelIO (`tools/usdz-to-obj.swift`).
 pub fn load_obj(text: &str, scale: f32) -> Mesh {
+    if !scale.is_finite() { return Mesh::default(); }
     let (mut p, mut n, mut t) = (Vec::new(), Vec::new(), Vec::new());
     let mut m = Mesh::default();
     let mut cache = std::collections::HashMap::new();
@@ -256,24 +257,34 @@ pub fn load_obj(text: &str, scale: f32) -> Mesh {
             Some("vn") => n.push(v3(f(&mut it), f(&mut it), f(&mut it))),
             Some("vt") => t.push([f(&mut it), f(&mut it)]),
             Some("f") => {
-                let ids: Vec<u32> = it
-                    .map(|c| {
-                        *cache.entry(c.to_string()).or_insert_with(|| {
-                            let mut parts = c.split('/');
-                            let idx = |s: Option<&str>, len: usize| -> Option<usize> {
-                                let v: i64 = s?.parse().ok()?;
-                                Some(if v < 0 { (len as i64 + v) as usize } else { v as usize - 1 })
-                            };
-                            let pi = idx(parts.next(), p.len()).unwrap_or(0);
-                            let ti = idx(parts.next(), t.len());
-                            let ni = idx(parts.next(), n.len());
-                            m.positions.push(p[pi]);
-                            m.uvs.push(ti.map(|i| t[i]).unwrap_or([0.0, 0.0]));
-                            m.normals.push(ni.map(|i| n[i]).unwrap_or(Vec3::ZERO));
-                            (m.positions.len() - 1) as u32
-                        })
+                // OBJ indexes are 1-based, or relative to the vertices seen
+                // at this face. Resolve before caching so repeated negative
+                // tokens after new vertices do not alias an earlier face.
+                let parsed: Option<Vec<_>> = it.map(|corner| {
+                    let mut parts=corner.split('/');
+                    let index=|text:&str,len:usize|->Option<usize>{
+                        let raw=text.parse::<i64>().ok()?;
+                        let i=if raw<0 {(len as i64).checked_add(raw)?}else{raw.checked_sub(1)?};
+                        (i>=0 && (i as usize)<len).then_some(i as usize)
+                    };
+                    let pi=index(parts.next()?,p.len())?;
+                    let optional=|text:Option<&str>,len:usize|->Option<Option<usize>>{
+                        match text {None|Some("")=>Some(None),Some(text)=>Some(Some(index(text,len)?))}
+                    };
+                    let ti=optional(parts.next(),t.len())?;
+                    let ni=optional(parts.next(),n.len())?;
+                    if parts.next().is_some(){return None;}
+                    Some((pi,ti,ni))
+                }).collect();
+                let Some(parsed)=parsed else {continue;};
+                let ids:Vec<u32>=parsed.into_iter().map(|(pi,ti,ni)|{
+                    *cache.entry((pi,ti,ni)).or_insert_with(||{
+                        m.positions.push(p[pi]);
+                        m.uvs.push(ti.map(|i|t[i]).unwrap_or([0.,0.]));
+                        m.normals.push(ni.map(|i|n[i]).unwrap_or(Vec3::ZERO));
+                        (m.positions.len()-1) as u32
                     })
-                    .collect();
+                }).collect();
                 for k in 1..ids.len().saturating_sub(1) {
                     m.indices.push([ids[0], ids[k], ids[k + 1]]);
                 }
@@ -292,4 +303,25 @@ pub fn load_obj(text: &str, scale: f32) -> Mesh {
         }
     }
     m
+}
+
+#[cfg(test)]
+mod robustness_tests {
+    use super::*;
+    #[test]
+    fn malformed_obj_indices_skip_only_the_broken_face() {
+        let vertices="v 0 0 0\nv 1 0 0\nv 0 1 0\n";
+        for face in ["f 0 1 2","f 1 2 99","f -99 -2 -1","f 1/99 2/99 3/99","f 1//99 2//99 3//99"] {
+            let m=load_obj(&format!("{vertices}{face}\nf 1 2 3"),1.);
+            assert_eq!(m.indices.len(),1,"{face}");
+            assert!(m.normals.iter().all(|n|(n.length()-1.).abs()<1e-6));
+        }
+    }
+    #[test]
+    fn relative_obj_indices_follow_each_faces_current_vertex_count() {
+        let m=load_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\nv 0 0 1\nf -3 -2 -1",1.);
+        assert_eq!(m.indices.len(),2);
+        let last=m.indices[1][2] as usize;
+        assert_eq!(m.positions[last],v3(0.,0.,1.));
+    }
 }

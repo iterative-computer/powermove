@@ -34,7 +34,14 @@ const reset = (b: Float64Array, o = 0) => { b.fill(Infinity, o, o + 3); b.fill(-
 
 /** `corners` holds 9 floats per triangle. Returns wide nodes and the triangle order. */
 export function buildBvh(corners: Float32Array): Bvh {
+  if (corners.length % 9) throw new Error('BVH positions must contain complete triangles');
+  if (!corners.every(Number.isFinite)) throw new Error('BVH positions must be finite');
   const count = corners.length / 9;
+  if (!count) {
+    const nodes = new ArrayBuffer(64), words = new Uint32Array(nodes);
+    words[7] = words[15] = EMPTY_LEAF;
+    return { nodes, order: new Uint32Array(0) };
+  }
   const lo = new Float64Array(count * 3), hi = new Float64Array(count * 3), ce = new Float64Array(count * 3);
   for (let t = 0; t < count; t++) {
     for (let a = 0; a < 3; a++) {
@@ -47,11 +54,11 @@ export function buildBvh(corners: Float32Array): Bvh {
   for (let i = 0; i < count; i++) order[i] = i;
   const nodes = new Nodes();
   nodes.push(); nodes.push(); // root, plus a pad so children come in pairs
-  const stack: number[] = [0, 0, count];
+  const stack: number[] = [0, 0, count, 0];
   const b = new Float64Array(6), cb = new Float64Array(6), acc = new Float64Array(6);
   const bins = new Float64Array(BINS * 6), binN = new Int32Array(BINS), leftA = new Float64Array(BINS), leftN = new Int32Array(BINS);
   while (stack.length) {
-    const n = stack.pop()!, first = stack.pop()!, index = stack.pop()!;
+    const depth = stack.pop()!, n = stack.pop()!, first = stack.pop()!, index = stack.pop()!;
     reset(b); reset(cb);
     for (let k = first; k < first + n; k++) {
       const t = order[k]!;
@@ -62,7 +69,9 @@ export function buildBvh(corners: Float32Array): Bvh {
     }
     nodes.bounds.set(b, index * 6);
     const leaf = () => { nodes.left[index] = first; nodes.count[index] = n; };
-    if (n <= 2) { leaf(); continue; }
+    // The smallest shared WGSL traversal stack has 24 entries. Keep room for
+    // both children when SAH makes a highly unbalanced tree.
+    if (n <= 2 || depth >= 20) { leaf(); continue; }
     let best = Infinity, bestAxis = 0, bestSplit = 0;
     for (let axis = 0; axis < 3; axis++) {
       const l0 = cb[axis]!, l1 = cb[3 + axis]!;
@@ -107,7 +116,7 @@ export function buildBvh(corners: Float32Array): Bvh {
     if (mid === first || mid === first + n) mid = first + (n >> 1);
     const left = nodes.push(); nodes.push();
     nodes.left[index] = left; nodes.count[index] = 0;
-    stack.push(left, first, mid - first, left + 1, mid, first + n - mid);
+    stack.push(left, first, mid - first, depth + 1, left + 1, mid, first + n - mid, depth + 1);
   }
   return { nodes: widen(nodes), order };
 }

@@ -68,11 +68,33 @@ export function validateEnvironmentChannel(path:string,property:unknown):boolean
   field.parse(property);return true;
 }
 /** All source references remain structural; all evaluated settings are normal channels. */
-export function evaluateEnvironmentNode(node:any,evaluate:(prop:any,path:string)=>any):any{
+export function evaluateEnvironmentNode(node:any,evaluate:(prop:any,path:string)=>any,warning?:(message:string)=>void):any{
   const result={...node};
   for(const key of Object.keys(ENVIRONMENT_SCHEMAS))if(node[key]){
     result[key]={...node[key],p:Object.fromEntries(Object.entries<any>(node[key].p).map(([k,prop])=>[k,{v:evaluate(prop,`${key}.${k}`),kf:[],expr:null}]))};
     if(key==='terrain')result[key].regions=node[key].regions.map((r:any,i:number)=>({...r,p:Object.fromEntries(Object.entries<any>(r.p).map(([k,prop])=>[k,{v:evaluate(prop,`terrain.region${i}.${k}`),kf:[],expr:null}]))}));
+  }
+  const ranges=(p:any)=>{
+    for(const [min,max] of [['minSlope','maxSlope'],['minHeight','maxHeight'],['scaleMin','scaleMax'],['rotationMin','rotationMax']])if(p?.[min!] && p?.[max!] && p[min!].v>p[max!].v){
+      p[max!].v=p[min!].v;warning?.('Studio clamped a crossed animated environment range. Saved keyframes are unchanged.');
+    }
+  };
+  ranges(result.scatter?.p);
+  for(const region of result.terrain?.regions || [])ranges(region.p);
+  const terrain=result.terrain;
+  if(terrain?.heights.length){
+    const original=Math.sqrt(terrain.heights.length)-1,resolution=Math.round(terrain.p.resolution.v);
+    // A fixed height image remains the source as grid resolution animates.
+    // Resample the evaluated copy rather than changing the saved source data.
+    if(original!==resolution){
+      const values=terrain.heights;
+      terrain.heights=Array.from({length:(resolution+1)**2},(_,i)=>{
+        const x=(i%(resolution+1))/resolution*original,y=Math.floor(i/(resolution+1))/resolution*original;
+        const a=Math.floor(x),b=Math.floor(y),u=x-a,v=y-b;
+        const at=(x:number,y:number)=>values[Math.min(original,y)*(original+1)+Math.min(original,x)];
+        return (at(a,b)*(1-u)+at(a+1,b)*u)*(1-v)+(at(a,b+1)*(1-u)+at(a+1,b+1)*u)*v;
+      });
+    }
   }
   return result;
 }

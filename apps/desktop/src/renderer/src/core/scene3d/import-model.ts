@@ -21,9 +21,17 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
       throw new Error('Use a self-contained GLB with embedded textures and geometry. External glTF files are not loaded.');
   }
   // Budgets sized for CAD assemblies: up to 10M triangles in up to 65,536 parts.
-  let predictedVertices=0;
+  let predictedVertices=0,decodedBytes=0;
+  const components:Record<string,number>={SCALAR:1,VEC2:2,VEC3:3,VEC4:4,MAT2:4,MAT3:12,MAT4:16};
+  const componentBytes:Record<number,number>={5120:1,5121:1,5122:2,5123:2,5125:4,5126:4};
   for(const accessor of json.accessors || []) {
     if(!Number.isSafeInteger(accessor.count)||accessor.count<0||accessor.count>MAX_MODEL_TRIANGLES*3)throw new Error('Invalid or oversized glTF geometry');
+    const size=(components[accessor.type]??0)*(componentBytes[accessor.componentType]??0);
+    if(!size)throw new Error('Invalid glTF accessor type');
+    // Sparse and buffer-less accessors allocate their full decoded array even
+    // when the input JSON is tiny. Bound the total before invoking GLTFLoader.
+    decodedBytes+=accessor.count*size;
+    if(decodedBytes>512*1024**2)throw new Error('GLB exceeds the 512 MiB decoded geometry memory budget; simplify the model');
   }
   for(const mesh of json.meshes || [])for(const primitive of mesh.primitives || [])
     predictedVertices+=json.accessors?.[primitive.attributes?.POSITION]?.count || 0;
@@ -51,6 +59,7 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   try{result=await loader.parseAsync(data,'');}
   finally{ktx?.dispose();for(const url of embedded.values())URL.revokeObjectURL(url);}
   const scene=result.scene;
+  if(!scene)throw new Error('GLB has no supported scene');
   let vertices=0,triangles=0;
   scene.traverse((object:any)=>{
     if(object.userData.studioFbxVisible===false)object.visible=false;

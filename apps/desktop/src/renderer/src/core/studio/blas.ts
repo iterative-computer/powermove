@@ -35,52 +35,79 @@ export const WORKER_TRIANGLES = 20_000;
 
 type Payload={corners:Float32Array;shading:Float32Array}|{geometry:GeometryPayload};
 export type GeometryBlas=BlasData & {bounds:number[]};
-type Job={payload:Payload;resolve:(b:any)=>void;reject:(e:unknown)=>void};
+type Job={payload:Payload;bytes:number;resolve:(b:any)=>void;reject:(e:unknown)=>void};
 export function prepareBlasPayload(payload:Payload):BlasData|GeometryBlas {
  if('geometry' in payload){const g=gatherPayload(payload.geometry);return {...finishBlas(g.corners,g.shading),bounds:[...g.bounds.min.toArray(),...g.bounds.max.toArray()]};}
  return finishBlas(payload.corners,payload.shading);
 }
 const queue: Job[] = [];
-const idle: Worker[] = [];
-let workers = 0;
+const idle = new Map<Worker, ReturnType<typeof setTimeout>>();
+const active = new Map<Worker, {job:Job;timer:ReturnType<typeof setTimeout>}>();
+const workers = new Set<Worker>();
+let retainedBytes = 0;
+const WORKER_BYTES = 512 * 1024 ** 2;
 const pendingBuilds=new Set<Promise<unknown>>();
 function track<T>(promise:Promise<T>):Promise<T>{const pending=promise.finally(()=>pendingBuilds.delete(pending));pendingBuilds.add(pending);return pending;}
 export async function studioGeometryIdle():Promise<void>{await Promise.allSettled([...pendingBuilds]);}
-
 const maxWorkers = Math.max(1, Math.min(4, ((globalThis as any).navigator?.hardwareConcurrency ?? 4) - 1));
 
+function retire(worker:Worker):void {
+  const timer=idle.get(worker);if(timer)clearTimeout(timer);idle.delete(worker);
+  worker.onmessage=null;worker.onerror=null;worker.terminate();workers.delete(worker);
+}
+/** The pool belongs to this renderer page. Project close cancels its retained
+ * inputs and callbacks; the next project starts a fresh bounded pool. */
+export function disposeStudioGeometryWorkers():void {
+  for(const {job,timer} of active.values()){clearTimeout(timer);job.reject(new Error('Studio project closed'));}
+  for(const job of queue)job.reject(new Error('Studio project closed'));
+  queue.length=0;active.clear();retainedBytes=0;
+  for(const worker of [...workers])retire(worker);
+}
+function finish(worker:Worker,result?:BlasData,error?:unknown):void {
+  const running=active.get(worker);if(!running)return;
+  clearTimeout(running.timer);active.delete(worker);retainedBytes-=running.job.bytes;
+  // Resolved promises can retain their large result. Never leave a completed
+  // job's resolve closure installed on an idle worker.
+  worker.onmessage=null;worker.onerror=null;
+  if(error){retire(worker);running.job.reject(error);}
+  else {idle.set(worker,setTimeout(()=>retire(worker),5000));running.job.resolve(result);}
+  pump();
+}
 function pump(): void {
-  while (queue.length) {
-    let worker = idle.pop();
-    if (!worker && workers < maxWorkers) {
-      try {
-        worker = new Worker(new URL('./blas.worker.ts', import.meta.url), { type: 'module' });
-        workers++;
-      } catch {
-        // No workers (tests, restricted contexts): build in place.
-        const job = queue.shift()!;
-        try { job.resolve(prepareBlasPayload(job.payload)); } catch (e) { job.reject(e); }
-        continue;
-      }
+  while(queue.length){
+    let worker=idle.keys().next().value as Worker|undefined;
+    if(worker){clearTimeout(idle.get(worker));idle.delete(worker);}
+    if(!worker && workers.size<maxWorkers){
+      try {worker=new Worker(new URL('./blas.worker.ts',import.meta.url),{type:'module'});workers.add(worker);}
+      catch(error){const job=queue.shift()!;retainedBytes-=job.bytes;job.reject(error);continue;}
     }
-    if (!worker) return;
-    const job = queue.shift()!;
-    const w = worker;
-    w.onmessage = (e: MessageEvent) => { idle.push(w); job.resolve(e.data as BlasData); pump(); };
-    w.onerror = (e) => { workers--; w.terminate(); job.reject(e); pump(); };
+    if(!worker)return;
+    const job=queue.shift()!,w=worker;
+    const timer=setTimeout(()=>finish(w,undefined,new Error('Studio geometry preparation timed out')),30_000);
+    active.set(w,{job,timer});
+    w.onmessage=e=>finish(w,e.data);
+    w.onerror=e=>finish(w,undefined,e);
     const payload=job.payload,transfers='geometry' in payload?[...Object.values(payload.geometry.attributes).map(a=>a.array.buffer),...(payload.geometry.index?[payload.geometry.index.buffer]:[])]:[payload.corners.buffer,payload.shading.buffer];
-    w.postMessage(payload,transfers);
+    try {w.postMessage(payload,[...new Set(transfers)]);}
+    catch(error){finish(w,undefined,error);}
   }
 }
-
+function enqueue<T>(payload:Payload):Promise<T>{
+  const geometry='geometry' in payload?payload.geometry:null;
+  const input=geometry?Object.values(geometry.attributes).reduce((n,a)=>n+a.array.byteLength,geometry.index?.byteLength??0):('corners' in payload?payload.corners.byteLength+payload.shading.byteLength:0);
+  const triangles=geometry?(geometry.index?.length??((geometry.attributes.position?.array.length??0)/3))/3:('corners' in payload?payload.corners.length/9:0);
+  const bytes=input+triangles*320;
+  if(!Number.isFinite(bytes) || retainedBytes+bytes>WORKER_BYTES)return Promise.reject(new Error('Studio geometry preparation exceeds the memory budget; simplify the model'));
+  retainedBytes+=bytes;
+  return track(new Promise((resolve,reject)=>{queue.push({payload,bytes,resolve,reject});pump();}));
+}
 /** Build in the worker pool. The arrays are transferred (unusable afterwards). */
 export function finishBlasInWorker(corners: Float32Array, shading: Float32Array): Promise<BlasData> {
-  if (typeof Worker === 'undefined') return Promise.resolve(finishBlas(corners, shading));
-  return track(new Promise((resolve, reject) => { queue.push({ payload:{corners,shading}, resolve, reject }); pump(); }));
+  if(typeof Worker==='undefined')return Promise.resolve(finishBlas(corners,shading));
+  return enqueue({corners,shading});
 }
-
-/** Gather triangles and build their BVH in a worker, so large imports never block input. */
-export function finishGeometryInWorker(geometry:GeometryPayload):Promise<GeometryBlas> {
- if(typeof Worker==='undefined')return Promise.resolve(prepareBlasPayload({geometry}) as GeometryBlas);
- return track(new Promise((resolve,reject)=>{queue.push({payload:{geometry},resolve,reject});pump();}));
+/** Gather triangles and build their BVH without blocking editor input. */
+export function finishGeometryInWorker(geometry:GeometryPayload):Promise<GeometryBlas>{
+  if(typeof Worker==='undefined')return Promise.resolve(prepareBlasPayload({geometry}) as GeometryBlas);
+  return enqueue({geometry});
 }

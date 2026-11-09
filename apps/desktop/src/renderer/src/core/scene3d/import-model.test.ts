@@ -37,6 +37,10 @@ describe('on-demand model decoder', () => {
     await expect(loadGltf(new Blob([JSON.stringify({ nodes: Array.from({ length: 65_537 }, () => ({})) })]))).rejects.toThrow('complexity budget');
     expect(decoder.loads).toBe(0);
   });
+  it('rejects aggregate decoded accessor memory before sparse arrays can be allocated',async()=>{
+    const source={asset:{version:'2.0'},accessors:Array.from({length:5},()=>({count:30_000_000,componentType:5126,type:'VEC4'}))};
+    await expect(loadGltf(new Blob([JSON.stringify(source)]))).rejects.toThrow('decoded geometry memory budget');
+  });
 
   it('decodes the first real model and shares the decoder on later imports', async () => {
     const [first, second] = await Promise.all([loadGltf(triangleGlb()), loadGltf(triangleGlb())]);

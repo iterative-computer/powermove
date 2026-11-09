@@ -5,6 +5,7 @@ import presentSource from '../../../../../../../engine/crates/pm-studio/src/shad
 import aovSource from '../../../../../../../engine/crates/pm-studio/src/shaders/aov.wgsl?raw';
 import denoiseSource from '../../../../../../../engine/crates/pm-studio/src/shaders/denoise.wgsl?raw';
 import { MAP_SIZE, STUDIO_MATERIAL_FLOATS, type StudioScene } from './extract';
+import { STUDIO_CANVAS_BYTES, STUDIO_SESSION_BYTES, studioSceneBytes, studioTargetBytes } from './resource-budget';
 
 /*
  * The app's WebGPU host for the Studio tracer. Same WGSL as the Rust engine
@@ -65,11 +66,14 @@ const U = (globalThis as any).GPUBufferUsage, T = (globalThis as any).GPUTexture
 let devicePromise: Promise<any> | null = null;
 let device: any = null;
 let failure: string | null = null;
+let deviceGeneration = 0;
+export const studioGpuGeneration = (): number => deviceGeneration;
 
 /** Starts WebGPU once; Studio renders after it resolves (the old renderer covers the gap). */
 export function initStudioGpu(): Promise<any> {
   if (!GPU) { failure = 'WebGPU is not available'; return Promise.resolve(null); }
   devicePromise ??= (async () => {
+    let initializing: any = null;
     try {
       const adapter = await GPU.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) throw new Error('No WebGPU adapter');
@@ -82,14 +86,20 @@ export function initStudioGpu(): Promise<any> {
           maxBufferSize: adapter.limits.maxBufferSize,
         },
       });
+      initializing = device;
       failure=null;
+      deviceGeneration++;
       const created=device;
-      created.addEventListener('uncapturederror',(event:any)=>{failure=event.error?.message || String(event.error);});
-      created.lost.then((info: any) => { if(device!==created)return;failure = `WebGPU device lost: ${info.message}`; device = null; devicePromise = null; pipelines=null;denoisePipelines=null; });
-      await Promise.all([preparePipelines(),prepareDenoise()]);
+      created.addEventListener('uncapturederror',(event:any)=>{if(device===created)failure=event.error?.message || String(event.error);});
+      created.lost.then(() => { if(device!==created)return;failure = 'WebGPU device lost'; deviceGeneration++; device = null; devicePromise = null; pipelines=null;denoisePipelines=null; });
+      await Promise.all([preparePipelines(created),prepareDenoise(created)]);
+      if (device !== created) return null;
       return device;
     } catch (error) {
-      failure = String(error);
+      if (!initializing || device === initializing) {
+        failure = String(error); device = null; devicePromise = null; pipelines = null; denoisePipelines = null;
+        initializing?.destroy?.();
+      }
       return null;
     }
   })();
@@ -113,9 +123,9 @@ function uniform(binding: number, visibility = S.COMPUTE) {
 }
 
 function build():Pipelines {if(!pipelines)throw new Error('Studio shaders are still preparing');return pipelines;}
-async function preparePipelines():Promise<Pipelines> {
+async function preparePipelines(owner = device):Promise<Pipelines> {
   if(pipelines)return pipelines;
-  const traceLayout = device.createBindGroupLayout({
+  const traceLayout = owner.createBindGroupLayout({
     label: 'studio trace',
     entries: [
       uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true),
@@ -124,19 +134,19 @@ async function preparePipelines():Promise<Pipelines> {
       storage(7, false), storage(8, false), storage(9, false), storage(10, false), storage(11, true), storage(12, false),
     ],
   });
-  const postLayout = device.createBindGroupLayout({
+  const postLayout = owner.createBindGroupLayout({
     label: 'studio post',
     entries: [uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false)],
   });
-  const presentLayout = device.createBindGroupLayout({
+  const presentLayout = owner.createBindGroupLayout({
     label: 'studio present',
     entries: [uniform(0, S.FRAGMENT), storage(1, true, S.FRAGMENT), storage(2, true, S.FRAGMENT)],
   });
-  const trace = device.createShaderModule({ label: 'trace.wgsl', code: traceSource });
-  const post = device.createShaderModule({ label: 'post.wgsl', code: postSource });
-  const present = device.createShaderModule({ label: 'present.wgsl', code: presentSource });
-  const compute = (module: any, layout: any, entryPoint: string) => device.createComputePipelineAsync({
-    label: entryPoint, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint },
+  const trace = owner.createShaderModule({ label: 'trace.wgsl', code: traceSource });
+  const post = owner.createShaderModule({ label: 'post.wgsl', code: postSource });
+  const present = owner.createShaderModule({ label: 'present.wgsl', code: presentSource });
+  const compute = (module: any, layout: any, entryPoint: string) => owner.createComputePipelineAsync({
+    label: entryPoint, layout: owner.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint },
   });
   const prepared = {
     trace: compute(trace, traceLayout, 'main'),
@@ -146,18 +156,20 @@ async function preparePipelines():Promise<Pipelines> {
     compose: compute(post, postLayout, 'compose'),
     temporal: compute(post, postLayout, 'temporal'),
     pack: compute(post, postLayout, 'pack'),
-    present: device.createRenderPipelineAsync({
+    present: owner.createRenderPipelineAsync({
       label: 'present',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [presentLayout] }),
+      layout: owner.createPipelineLayout({ bindGroupLayouts: [presentLayout] }),
       vertex: { module: present, entryPoint: 'vs' },
       fragment: { module: present, entryPoint: 'fs', targets: [{ format: GPU.getPreferredCanvasFormat() }] },
       primitive: { topology: 'triangle-list' },
     }),
     traceLayout, postLayout, presentLayout,
-    sampler: device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' }),
+    sampler: owner.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' }),
   };
-  pipelines=Object.fromEntries(await Promise.all(Object.entries(prepared).map(async([key,value])=>[key,await value]))) as Pipelines;
-  return pipelines;
+  const result=Object.fromEntries(await Promise.all(Object.entries(prepared).map(async([key,value])=>[key,await value]))) as Pipelines;
+  if (device !== owner) throw new Error('Studio GPU changed during shader preparation');
+  pipelines=result;
+  return result;
 }
 
 type DenoisePipelines = { dataPass:any; aovs: any; demod: any; step: any; finish: any; aovLayout: any; layout: any };
@@ -165,10 +177,10 @@ let denoisePipelines: DenoisePipelines | null = null;
 
 /** Final's denoiser (built the first time a Final or still frame needs it). */
 function buildDenoise():DenoisePipelines {if(!denoisePipelines)throw new Error('Studio denoiser is still preparing');return denoisePipelines;}
-async function prepareDenoise():Promise<DenoisePipelines> {
+async function prepareDenoise(owner = device):Promise<DenoisePipelines> {
   if(denoisePipelines)return denoisePipelines;
   // The denoiser's guides read only the scene (a pipeline may bind 10 storage buffers; the trace uses all of them).
-  const aovLayout = device.createBindGroupLayout({
+  const aovLayout = owner.createBindGroupLayout({
     label: 'studio aov',
     entries: [
       uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true),
@@ -177,21 +189,23 @@ async function prepareDenoise():Promise<DenoisePipelines> {
       storage(11, true), storage(13, false),
     ],
   });
-  const layout = device.createBindGroupLayout({
+  const layout = owner.createBindGroupLayout({
     label: 'studio denoise',
     entries: [uniform(0), storage(2, true), storage(3, true), storage(4, false), storage(5, true), storage(6, false), storage(7, true), storage(8, true), storage(9, true)],
   });
-  const aov = device.createShaderModule({ label: 'aov.wgsl', code: `${traceSource}\n@group(0) @binding(13) var<storage, read_write> aov: array<vec4f>;\n${aovSource}\n${passesSource}` });
-  const denoise = device.createShaderModule({ label: 'denoise.wgsl', code: denoiseSource });
-  const compute = (module: any, l: any, entryPoint: string) => device.createComputePipelineAsync({
-    label: entryPoint, layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module, entryPoint },
+  const aov = owner.createShaderModule({ label: 'aov.wgsl', code: `${traceSource}\n@group(0) @binding(13) var<storage, read_write> aov: array<vec4f>;\n${aovSource}\n${passesSource}` });
+  const denoise = owner.createShaderModule({ label: 'denoise.wgsl', code: denoiseSource });
+  const compute = (module: any, l: any, entryPoint: string) => owner.createComputePipelineAsync({
+    label: entryPoint, layout: owner.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module, entryPoint },
   });
   const prepared = {
     dataPass:compute(aov,aovLayout,'data_pass'),aovs: compute(aov, aovLayout, 'aovs'), demod: compute(denoise, layout, 'demod'),
     step: compute(denoise, layout, 'atrous_step'), finish: compute(denoise, layout, 'finish'), aovLayout, layout,
   };
-  denoisePipelines=Object.fromEntries(await Promise.all(Object.entries(prepared).map(async([key,value])=>[key,await value]))) as DenoisePipelines;
-  return denoisePipelines;
+  const result=Object.fromEntries(await Promise.all(Object.entries(prepared).map(async([key,value])=>[key,await value]))) as DenoisePipelines;
+  if (device !== owner) throw new Error('Studio GPU changed during shader preparation');
+  denoisePipelines=result;
+  return result;
 }
 
 /** One render target size: the accumulation, denoise and per-layer canvases. */
@@ -221,6 +235,7 @@ export class StudioTarget {
   live = false;
 
   constructor(width: number, height: number) {
+    studioTargetBytes(width, height, studioMaxBindingBytes());
     this.width = width; this.height = height;
     const p = build();
     void p;
@@ -239,9 +254,13 @@ export class StudioTarget {
   destroy(): void {
     for (const b of [this.params, ...this.postParams, ...this.presentParams.values(), this.accum, this.bgsum, this.gbuf, this.ebuf, this.grid, ...this.display, this.packed, ...this.history, ...this.sceneBuffers, ...this.denoiseBuffers()]) b?.destroy?.();
     this.mapTexture?.destroy?.();
+    for (const { canvas, context } of this.canvases.values()) { context.unconfigure?.(); canvas.width = 0; canvas.height = 0; }
+    this.canvases.clear(); this.presentParams.clear();
   }
 
   setScene(scene: StudioScene, maps: (HTMLCanvasElement | OffscreenCanvas | Uint8Array)[]): void {
+    if (studioTargetBytes(this.width, this.height, studioMaxBindingBytes()) + studioSceneBytes(scene, maps.length, studioMaxBindingBytes()) > STUDIO_SESSION_BYTES)
+      throw new Error('Studio exceeds the 2 GiB session budget; reduce mesh detail or output size');
     const bytesOf = (data: ArrayBufferView | ArrayBuffer) => data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     const init = (label: string, data: ArrayBufferView | ArrayBuffer) => {
       const bytes = bytesOf(data);
@@ -553,6 +572,8 @@ export class StudioTarget {
     const p = build();
     let entry = this.canvases.get(key);
     if (!entry) {
+      if ((this.canvases.size + 1) * this.width * this.height * 4 > STUDIO_CANVAS_BYTES)
+        throw new Error('Studio layer images exceed the memory budget; reduce output size or visible 3D layers');
       const canvas = document.createElement('canvas');
       canvas.width = this.width; canvas.height = this.height;
       const context = (canvas as any).getContext('webgpu');

@@ -7,12 +7,13 @@ export type ViewCamera=THREE.PerspectiveCamera|THREE.OrthographicCamera;
 export type ViewPose={position:THREE.Vector3;target:THREE.Vector3;zoom:number};
 export type ViewMode='camera'|'editor';
 type ViewState={camera:ViewCamera|null;target:THREE.Vector3;mode:ViewMode;side:ViewSide|null};
-const states=new WeakMap<object,Map<string,ViewState>>();
+const states=new WeakMap<object,{project:string;comps:Map<string,ViewState>}>();
 const revisions=new WeakMap<object,number>();
 const listeners=new WeakMap<object,Set<(mode:ViewMode)=>void>>();
 const composition=(PM:any)=>PM.curComp?.()||PM.proj;
 function state(PM:any):ViewState {
-  let comps=states.get(PM);if(!comps){comps=new Map();states.set(PM,comps);}
+  let owner=states.get(PM);if(!owner || owner.project!==PM.proj.id){owner={project:PM.proj.id,comps:new Map()};states.set(PM,owner);}
+  const comps=owner.comps;
   const comp=composition(PM),key=`${PM.proj.id}:${comp.compId||comp.id}`;let entry=comps.get(key);
   if(!entry){entry={camera:null,target:new THREE.Vector3(),mode:'camera',side:null};comps.set(key,entry);}return entry;
 }

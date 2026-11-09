@@ -93,7 +93,7 @@ fn to_object(i: u32, p: vec3f, w: f32) -> vec3f {
 }
 fn normal_to_world(i: u32, n: vec3f) -> vec3f {
   let o = inst_base(i) + 3u;
-  return normalize(vec3f(dot(sdata[o].xyz, n), dot(sdata[o + 1u].xyz, n), dot(sdata[o + 2u].xyz, n)));
+  return safe_normalize(vec3f(dot(sdata[o].xyz, n), dot(sdata[o + 1u].xyz, n), dot(sdata[o + 2u].xyz, n)));
 }
 fn vector_to_world(i: u32, v: vec3f) -> vec3f {
   let o = inst_base(i) + 6u;
@@ -122,6 +122,15 @@ const GRID_CELLS: u32 = 524288u;
 const PI: f32 = 3.14159265;
 const LEGACY_EPS: f32 = 0.004;
 const BIG: f32 = 1e30;
+
+// Zero/imported/cancelling normals and half-vectors have no direction. Scale
+// first so large or tiny finite inputs cannot overflow the length calculation.
+fn safe_normalize(v: vec3f) -> vec3f {
+  let scale=max(max(abs(v.x),abs(v.y)),abs(v.z));
+  if (any(v != v) || scale == 0.0 || scale > BIG) { return vec3f(0.0); }
+  return normalize(v / scale);
+}
+
 
 var<private> seed: u32;
 // The shading tangent of the surface being lit (anisotropic highlights follow it).
@@ -570,7 +579,7 @@ fn sample_environment_direction()->vec3f {
 
 // ── Lights ──────────────────────────────────────────────
 fn light_kind(l: Light) -> u32 { return u32(l.pos.w); }
-fn rect_normal(l: Light) -> vec3f { return normalize(cross(l.u.xyz, l.v.xyz)); }
+fn rect_normal(l: Light) -> vec3f { return safe_normalize(cross(l.u.xyz, l.v.xyz)); }
 
 // 1 − cos θ of a cone whose half-angle has sin² = s2, accurate when tiny.
 fn one_minus_cos(s2: f32) -> f32 {
@@ -679,7 +688,7 @@ fn sample_light(l: Light, p: vec3f) -> LightSample {
   }
   if (kind == 3u) {
     let omc = one_minus_cos(1.0 - l.u.x * l.u.x);
-    let dir = cone_dir(normalize(l.pos.xyz), omc, u);
+    let dir = cone_dir(safe_normalize(l.pos.xyz), omc, u);
     return LightSample(dir, BIG, l.radiance.xyz, 1.0 / (2.0 * PI * omc));
   }
   let d = l.pos.xyz - p;
@@ -736,12 +745,12 @@ fn basis(n: vec3f) -> mat3x3f {
 
 // Visible-normal sampling (spherical caps), local frame z = normal.
 fn sample_vndf(v: vec3f, a: f32, u: vec2f) -> vec3f {
-  let vs = normalize(vec3f(v.x * a, v.y * a, v.z));
+  let vs = safe_normalize(vec3f(v.x * a, v.y * a, v.z));
   let phi = 2.0 * PI * u.x;
   let z = (1.0 - u.y) * (1.0 + vs.z) - vs.z;
   let st = sqrt(clamp(1.0 - z * z, 0.0, 1.0));
   let h = vec3f(st * cos(phi), st * sin(phi), z) + vs;
-  return normalize(vec3f(h.x * a, h.y * a, max(h.z, 1e-6)));
+  return safe_normalize(vec3f(h.x * a, h.y * a, max(h.z, 1e-6)));
 }
 
 fn spec_pdf(nv: f32, nh: f32, a: f32) -> f32 { return smith_g1(nv, a) * ggx_d(nh, a) / (4.0 * nv); }
@@ -910,7 +919,7 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let nl = dot(n, l);
   let nv = dot(n, v);
   if (nl <= 0.0 || nv <= 0.0) { return vec3f(0.0); }
-  let h = normalize(v + l);
+  let h = safe_normalize(v + l);
   let nh = max(dot(n, h), 0.0);
   let vh = max(dot(v, h), 0.0);
   let metallic = m.base.w;
@@ -1044,7 +1053,7 @@ fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
   let nl = dot(n, l);
   let nv = dot(n, v);
   if (nl <= 0.0 || nv <= 0.0) { return 0.0; }
-  let h = normalize(v + l);
+  let h = safe_normalize(v + l);
   let nh = max(dot(n, h), 0.0);
   let a = m.spec.x * m.spec.x;
   let ca = m.spec.z * m.spec.z;
@@ -1094,7 +1103,7 @@ fn random_walk(start: vec3f, dir0: vec3f, m: Material) -> vec4f {
 fn aniso_frame(n: vec3f) -> mat3x3f {
   var t = shading.tangent - n * dot(n, shading.tangent);
   if (dot(t, t) < 1e-8) { return basis(n); }
-  t = normalize(t);
+  t = safe_normalize(t);
   return mat3x3f(t, cross(n, t), n);
 }
 fn aniso_alpha(a: f32, k: f32) -> vec2f {
@@ -1117,12 +1126,12 @@ fn aniso_dg(fr: mat3x3f, v: vec3f, l: vec3f, h: vec3f, a: f32, k: f32) -> f32 {
   return aniso_d(hl, ax) / (1.0 + aniso_lambda(vl, ax) + aniso_lambda(ll, ax));
 }
 fn sample_vndf2(v: vec3f, ax: vec2f, u: vec2f) -> vec3f {
-  let vs = normalize(vec3f(v.x * ax.x, v.y * ax.y, v.z));
+  let vs = safe_normalize(vec3f(v.x * ax.x, v.y * ax.y, v.z));
   let phi = 2.0 * PI * u.x;
   let z = (1.0 - u.y) * (1.0 + vs.z) - vs.z;
   let st = sqrt(clamp(1.0 - z * z, 0.0, 1.0));
   let h = vec3f(st * cos(phi), st * sin(phi), z) + vs;
-  return normalize(vec3f(h.x * ax.x, h.y * ax.y, max(h.z, 1e-6)));
+  return safe_normalize(vec3f(h.x * ax.x, h.y * ax.y, max(h.z, 1e-6)));
 }
 
 fn cosine_dir(n: vec3f, u: vec2f) -> vec3f {
@@ -1245,15 +1254,15 @@ fn imported_normal(material:u32,slot:u32,uv0:vec2f,uv1:vec2f,n:vec3f,ng:vec3f,in
   let raw=select(t.tangent,t.tangent_secondary,map.info.y>0.5);
   let tangent=vector_to_world(instance,raw.xyz);
   if(dot(tangent,tangent)<1e-10){return n;}
-  let tg=normalize(tangent-n*dot(n,tangent));let bt=cross(n,tg)*raw.w;
+  let tg=safe_normalize(tangent-n*dot(n,tangent));let bt=cross(n,tg)*raw.w;
   let determinant=map.u.x*map.v.y-map.u.y*map.v.x;
   if(abs(determinant)<1e-10){return n;}
-  let transformed=normalize(tg*map.v.y-bt*map.v.x)*sign(determinant);
+  let transformed=safe_normalize(tg*map.v.y-bt*map.v.x)*sign(determinant);
   let bitangent=cross(n,transformed)*raw.w*sign(determinant);
   let pixel=imported_texel(material,slot,uv0,uv1).xyz*2.-1.;
   let normal=transformed*pixel.x*scale.x+bitangent*pixel.y*scale.y+n*pixel.z;
   if(dot(normal,normal)<1e-10){return n;}
-  let mapped=normalize(normal);return select(n,mapped,dot(mapped,ng)>0.);
+  let mapped=safe_normalize(normal);return select(n,mapped,dot(mapped,ng)>0.);
 }
 
 // Layer overrides share a word with the instance-color flag. Decode in integer
@@ -1276,6 +1285,7 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   // Geometry is stored in its model's space; normals go to world space.
   let ng = normal_to_world(h.inst, cross(pos[3u * i + 1u].xyz - p0, pos[3u * i + 2u].xyz - p0));
   var n = normal_to_world(h.inst, t.n0.xyz * w + t.n1.xyz * h.b.x + t.n2.xyz * h.b.y);
+  if (dot(n,n) < 0.5) { n=ng; }
   if (dot(n, ng) < 0.0) { n = -n; } // normals and winding may disagree
   let uv = t.uv01.xy * w + t.uv01.zw * h.b.x + t.uv2m.xy * h.b.y;
   var m=materials[u32(t.uv2m.z)].base;
@@ -1338,17 +1348,17 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     if(anisotropy.info.y>0.5){tangent=vector_to_world(h.inst,t.tangent_secondary.xyz);}
     if(dot(tangent,tangent)>1e-10){
       let raw=select(t.tangent,t.tangent_secondary,anisotropy.info.y>0.5);
-      tangent=normalize(tangent-n*dot(n,tangent));var handed=raw.w;
+      tangent=safe_normalize(tangent-n*dot(n,tangent));var handed=raw.w;
       if(anisotropy.info.x>=0.){
         let determinant=anisotropy.u.x*anisotropy.v.y-anisotropy.u.y*anisotropy.v.x;
-        if(abs(determinant)>1e-10){tangent=normalize(tangent*anisotropy.v.y-cross(n,tangent)*raw.w*anisotropy.v.x)*sign(determinant);handed*=sign(determinant);}
+        if(abs(determinant)>1e-10){tangent=safe_normalize(tangent*anisotropy.v.y-cross(n,tangent)*raw.w*anisotropy.v.x)*sign(determinant);handed*=sign(determinant);}
       }
       tangent=tangent*cos(imported.physical.y)+cross(n,tangent)*handed*sin(imported.physical.y);
     }
   }else if(m.maps.w>=0. && dot(tangent,tangent)>0.){
     let texnormal=map_texel(m.maps.w,uv).xyz*2.-1.;let tn=vec3f(texnormal.xy*m.maps2.w,texnormal.z);
-    let tg=normalize(tangent-n*dot(n,tangent));let bt=cross(n,tg)*t.tangent.w;
-    let mapped=normalize(tg*tn.x+bt*tn.y+n*tn.z);if(dot(mapped,ng)>0.){n=mapped;}
+    let tg=safe_normalize(tangent-n*dot(n,tangent));let bt=cross(n,tg)*t.tangent.w;
+    let mapped=safe_normalize(tg*tn.x+bt*tn.y+n*tn.z);if(dot(mapped,ng)>0.){n=mapped;}
   }
   if(m.policy.w>0.){
     let local=to_object(h.inst,p,1.);let kind=u32(m.policy.w);
@@ -1362,7 +1372,7 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
       if(fade>0. && P.opts.x==0u){
         let q=local*38.;let h0=nature_noise(q);
         let grad=vec3f(nature_noise(q+vec3f(.08,0.,0.))-h0,nature_noise(q+vec3f(0.,.08,0.))-h0,nature_noise(q+vec3f(0.,0.,.08))-h0);
-        let o=inst_base(h.inst)+3u;let bump=vec3f(dot(sdata[o].xyz,grad),dot(sdata[o+1u].xyz,grad),dot(sdata[o+2u].xyz,grad));let candidate=normalize(n-(bump-n*dot(n,bump))*1.8*fade);
+        let o=inst_base(h.inst)+3u;let bump=vec3f(dot(sdata[o].xyz,grad),dot(sdata[o+1u].xyz,grad),dot(sdata[o+2u].xyz,grad));let candidate=safe_normalize(n-(bump-n*dot(n,bump))*1.8*fade);
         if(dot(candidate,ng)>0.){n=candidate;}
       }
     }else if(kind==3u || kind==6u){
@@ -1421,7 +1431,7 @@ fn droplets(n: vec3f, uv: vec2f, amount: f32) -> vec3f {
   let off = best.xy;
   let h = sqrt(max(1.0 - dot(off, off), 0.02));
   let tb = basis(n);
-  return normalize(tb * vec3f(off.x * 0.9, off.y * 0.9, h));
+  return safe_normalize(tb * vec3f(off.x * 0.9, off.y * 0.9, h));
 }
 
 // Radiance arriving along a mirror direction: a light, the dome, the floor
@@ -1453,7 +1463,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
 // sampling cannot reach, such as mirror reflections).
 fn sun_contribution(i:u32,p:vec3f,d:vec3f,bsdf_pdf:f32)->vec3f {
   let l=light_at(i);
-  if(light_kind(l)!=3u || dot(d,normalize(l.pos.xyz))<l.u.x){return vec3f(0.);}
+  if(light_kind(l)!=3u || dot(d,safe_normalize(l.pos.xyz))<l.u.x){return vec3f(0.);}
   var mis=1.;if(bsdf_pdf>0.){let pl=light_pdf(l,p,d,BIG)*light_selection_pdf(i,p);mis=bsdf_pdf*bsdf_pdf/(bsdf_pdf*bsdf_pdf+pl*pl);}
   return l.radiance.xyz*mis;
 }
@@ -1474,7 +1484,7 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   let dims = vec2f(f32(P.dims.x), f32(P.dims.y));
   let ndc = (px / dims) * 2.0 - 1.0;
   let fwd = P.cam_fwd.xyz;
-  let d = normalize(fwd + P.cam_right.xyz * ndc.x * P.cam_right.w - P.cam_up.xyz * ndc.y * P.cam_up.w);
+  let d = safe_normalize(fwd + P.cam_right.xyz * ndc.x * P.cam_right.w - P.cam_up.xyz * ndc.y * P.cam_up.w);
   var ro = P.cam_pos.xyz;
   var rd = d;
   if ((P.opts.w & 1u) != 0u) {
@@ -1502,7 +1512,7 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
     aperture=vec2f(cr*aperture.x-sr*aperture.y,sr*aperture.x+cr*aperture.y);
     aperture.x*=max(P.iris.w,0.1);
     ro = ro + P.cam_pos.w*(P.cam_right.xyz*aperture.x+P.cam_up.xyz*aperture.y);
-    rd = normalize(focus - ro);
+    rd = safe_normalize(focus - ro);
   }
   if (camera_clip_on()) { ro += rd * max(0.0, camera_near() - dot(ro - P.cam_pos.xyz, fwd)) / max(dot(rd, fwd), 1e-6); }
   return array<vec3f, 2>(ro, rd);
@@ -1784,6 +1794,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }
     if(any(smp.emit!=smp.emit) || any(abs(smp.emit)>vec3f(1e20))){smp.emit=vec3f(0.);}
+    if(any(smp.bg!=smp.bg) || any(abs(smp.bg)>vec3f(1e20))){smp.bg=vec3f(0.);}
+    if(any(smp.normal!=smp.normal) || any(abs(smp.normal)>vec3f(1e20))){smp.normal=vec3f(0.);}
     // Clamp fireflies from tiny bright paths (Live clamps harder).
     let lum = dot(smp.radiance, vec3f(0.2126, 0.7152, 0.0722));
     rad += smp.radiance * min(1.0, f32(P.counts.w) / max(lum, 1e-6));
@@ -1925,7 +1937,7 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
     rd = cosine_dir(rect_normal(l), rnd2());
     flux = light_emit(l, ro, -rd) * abs(l.u.w) * PI;
   } else if (kind == 3u) {
-    let dir = normalize(l.pos.xyz);
+    let dir = safe_normalize(l.pos.xyz);
     let tb = basis(dir);
     let r = sqrt(u.x) * P.bounds.w;
     let a = 2.0 * PI * u.y;

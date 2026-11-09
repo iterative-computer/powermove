@@ -100,7 +100,7 @@ export function studioCommands(PM: any, args: StudioEdit, edit3d: Edit3D): { com
     case 'apply_material': {
       const preset = MATERIAL_PRESETS.find(m => m.id === args.preset);
       if (!preset && !args.p) throw new Error(`Unknown material preset: ${args.preset}. Presets: ${MATERIAL_PRESETS.map(m => m.id).join(', ')}`);
-      return edit3d({ operation: 'update_object', target: args.target, patch: { material: { p: { ...(preset?.p || {}), ...(args.p || {}) } } } });
+      return edit3d({ operation: 'update_object', target: args.target, patch: { useSourceMaterials: false, material: { p: { ...(preset?.p || {}), ...(args.p || {}) } } } });
     }
     case 'light_highlight': {
       if (!args.at || !args.normal) throw new Error('light_highlight needs at [x,y,z] and normal [x,y,z] on the product');

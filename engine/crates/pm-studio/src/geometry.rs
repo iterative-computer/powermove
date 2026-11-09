@@ -40,6 +40,7 @@ impl Scene {
     /// Resolve terrain meshes and scatter once, before keeping a resident scene.
     /// Explicit instances replace the implicit identity placement of each object.
     pub fn expanded(&self) -> Result<Self, String> {
+        self.validate()?;
         let mut s = self.clone();
         let mut displaced_triangles = 0usize;
         for d in &self.displacements {
@@ -121,6 +122,7 @@ impl Scene {
         for i in &s.instances {
             i.validate(s.objects.len())?;
         }
+        s.validate()?;
         Ok(s)
     }
 }

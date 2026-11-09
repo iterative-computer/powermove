@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 import * as THREE from 'three';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-const fallback = vi.hoisted(()=>({renders:0,disposals:0}));
-vi.mock('./gpu',()=>({initStudioGpu:async()=>true,studioGpuReady:()=>true,studioGpuFailure:()=>null,studioMaxBindingBytes:()=>1e9,studioOptions:{denoise:true,caustics:true}}));
+const fallback = vi.hoisted(()=>({renders:0,disposals:0,generation:1,ready:true,initializations:0}));
+vi.mock('./gpu',()=>({initStudioGpu:async()=>{fallback.initializations++;fallback.ready=true;return true;},studioGpuReady:()=>fallback.ready,studioGpuGeneration:()=>fallback.generation,studioGpuFailure:()=>null,studioMaxBindingBytes:()=>1e9,studioOptions:{denoise:true,caustics:true}}));
 vi.mock('./webgpu-backend',()=>({WebGpuStudioBackend:class{
  id='webgpu';async initialize(){}setPreparedScene(){}setView(){}setTime(){}
  render(r:any){fallback.renders++;return {source:document.createElement('canvas'),width:r.size.width,height:r.size.height,samples:r.samples,version:'fallback'};}
@@ -16,6 +16,16 @@ import { beginStudioCapture,beginStudioCapturePass,studioIdle, studioLayer, stud
 function fixture(){const PM:any={time:0,_studioFinal:true,invalidate:vi.fn(),store:{get:()=> 'quality'}};const runtime=new SceneRuntime();const scene=createScene();scene.objects=[createObject('model')];runtime.sync(scene);return {PM,runtime,draw:(time=0)=>studioLayer(PM,runtime,64,64,'model',new Set(['model']),true,runtime.camera,undefined,time)};}
 afterEach(()=>{registerStudioBackend(null);vi.unstubAllGlobals();});
 describe('Studio backend lifecycle',()=>{
+ it('restarts a lost portable device and replaces stale completed frames',async()=>{
+  registerStudioBackend(null);
+  const {PM,draw}=fixture();draw();await studioIdle(PM);draw();await studioIdle(PM);expect(draw()).toBeTruthy();
+  const before=fallback.disposals,frames=fallback.renders;
+  fallback.generation++;fallback.ready=false;
+  draw();await Promise.resolve();await Promise.resolve();
+  draw();await studioIdle(PM);draw();await studioIdle(PM);
+  expect(fallback.disposals).toBeGreaterThan(before);expect(fallback.renders).toBeGreaterThan(frames);
+  disposeSceneRuntimes(PM);
+ });
  it('waits for native initialization and async per-layer frames, then reuses the completed frame',async()=>{
   const requests:any[]=[],dispose=vi.fn(),source=document.createElement('canvas');
   registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:async()=>{},setView:async()=>{},setTime:async()=>{},render:async(r:any)=>{requests.push(r);return {source,width:64,height:64,samples:r.samples,version:'native'};},dispose} as unknown as StudioBackend));

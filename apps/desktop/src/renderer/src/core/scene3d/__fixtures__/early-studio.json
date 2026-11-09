@@ -1,0 +1,14 @@
+{
+  "switch3DVersion": 2,
+  "scene3dDefaultsVersion": 2,
+  "layers": [
+    { "id": "group", "type": "group", "name": "Explicit 3D group", "threeD": true },
+    { "id": "artwork", "type": "solid", "name": "Explicit flat artwork", "group": "group", "threeD": false }
+  ],
+  "scene": {
+    "version": 1,
+    "objects": [{ "id": "model", "source": { "primitive": "box" }, "material": { "p": { "transmission": 0.8, "ior": 1.45, "clearcoat": 0.3 } } }],
+    "camera": { "p": { "x": 0, "y": 0, "z": 6, "fStop": 2.8, "focusDistance": 5 } },
+    "environment": { "shadowCatcher": true, "samples": 64 }
+  }
+}
