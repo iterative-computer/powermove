@@ -1,7 +1,7 @@
 //! Reuse the existing presenter policy without its bridge transport.
+use crate::clock::TransportClock;
 use pm_node::present::{
     audio::{AudioCtl, AudioLink},
-    clock::TransportClock,
     document::MediaMap,
 };
 use pm_protocol::{
@@ -9,7 +9,7 @@ use pm_protocol::{
     common::PlaybackRate,
 };
 
-pub use pm_node::present::clock::PREROLL_US;
+pub use crate::clock::PREROLL_US;
 #[derive(Clone, Copy, Debug)]
 pub enum ShuttleKey {
     J,
@@ -148,7 +148,7 @@ impl Transport {
                     });
                     self.clock.hold(from, now);
                     self.awaiting = Some((
-                        now + pm_node::present::render::AUDIO_START_TIMEOUT_US,
+                        now + crate::clock::AUDIO_START_TIMEOUT_US,
                         before,
                         rate,
                     ));
@@ -167,7 +167,7 @@ impl Transport {
                     });
                     self.clock.hold(here, now);
                     self.awaiting = Some((
-                        now + pm_node::present::render::AUDIO_START_TIMEOUT_US,
+                        now + crate::clock::AUDIO_START_TIMEOUT_US,
                         before,
                         PlaybackRate::NORMAL,
                     ));
@@ -183,7 +183,7 @@ impl Transport {
                         a.send(AudioCtl::Seek(time.get()));
                         self.clock.hold(time.get(), now);
                         self.awaiting = Some((
-                            now + pm_node::present::render::AUDIO_START_TIMEOUT_US,
+                            now + crate::clock::AUDIO_START_TIMEOUT_US,
                             before,
                             rate,
                         ));

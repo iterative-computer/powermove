@@ -1,5 +1,6 @@
 //! In-process native rendering. No Node, napi entrypoints, bridge or GPUI.
 //! Callers own below-slot placement and pump native layers on the main thread.
+pub mod clock;
 pub mod color;
 pub mod compat;
 pub mod frame_codec;
