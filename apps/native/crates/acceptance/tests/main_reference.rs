@@ -136,20 +136,20 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         .collect::<Vec<_>>();
     assert_eq!(grouped.len(), blocked.len());
     assert_eq!(grouped.into_iter().collect::<BTreeSet<_>>(), blocked);
-    // The tracked census is configured with the actual file-backed source
-    // worker; this kernel-only run must keep that one worker-dependent body
-    // blocked. Every other row remains identical.
-    let rows = |text: &str| {
-        pm_acceptance::catalog::csv_rows(text)
-            .unwrap()
-            .into_iter()
-            .filter(|row| row[0] != "MAIN.MCP.fork_builtin_extension.behavior")
-            .collect::<Vec<_>>()
-    };
+    let rows = pm_acceptance::catalog::csv_rows(&r.blockers_csv()).unwrap();
     assert_eq!(
-        rows(&r.blockers_csv()),
-        rows(include_str!("../data/remaining-blockers.csv"))
+        rows.iter()
+            .skip(1)
+            .map(|row| row[0].as_str())
+            .collect::<BTreeSet<_>>(),
+        blocked
     );
+    assert!(
+        rows.iter()
+            .skip(1)
+            .all(|row| row.len() == 6 && !row[4].is_empty() && !row[5].is_empty())
+    );
+    // This kernel-only run has no file-backed source worker.
     assert_eq!(
         r.cases
             .iter()

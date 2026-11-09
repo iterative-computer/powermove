@@ -22,10 +22,10 @@ def fixture():
 
 class MainRefreshTests(unittest.TestCase):
     def test_pinned_reference_and_union_rosters_are_rendered(self):
-        outputs,status=module.render(fixture())
-        self.assertIn(module.REFERENCE,outputs["e2e-map.csv"])
+        tracked,derived,status=module.render(fixture())
+        self.assertIn(module.REFERENCE,tracked["e2e-map.csv"])
         self.assertIn("719 blocked",status)
-        self.assertEqual(len(outputs["remaining-blockers.csv"].splitlines()),720)
+        self.assertEqual(len(derived["remaining-blockers.csv"].splitlines()),720)
         self.assertIn("main reference",status)
 
     def test_old_reference_and_filtered_inputs_are_refused(self):

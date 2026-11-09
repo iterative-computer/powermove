@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Publish pinned-main evidence in owned snapshots; append shared W1 status."""
+"""Write pinned-main evidence: tracked failure/coverage maps in data/, derived
+blocker lists next to the report; append shared W1 status."""
 import collections
 import csv
 import io
@@ -69,21 +70,24 @@ def render(report):
                         "P rows route to delta-data, E rows to delta-fx, U rows to the later UI lane; retaining their source requirements does not claim implementation.",
                         "A511/A512's old discrepancy is superseded: main explicitly requires project memory and indexing.",
                         "The native tool/list and missing index now fail against that source; no additional catalog-change approval is inferred.",
-                        "See [acceptance.md](acceptance.md#main-reference-change--2026-11-04), the current blockers/failures CSVs and the archived legacy snapshots.",
+                        "See [acceptance.md](acceptance.md#main-reference-change--2026-11-04), the current failures CSV and the archived legacy snapshots.",
                         "", f"<!-- {MARKER}:end -->", ""])
-    return {"remaining-blockers.csv": blockers, "failures.csv": failures, "e2e-map.csv": mapping, "blocker-groups.csv": groups}, status
+    return {"failures.csv": failures, "e2e-map.csv": mapping}, {"remaining-blockers.csv": blockers, "blocker-groups.csv": groups}, status
 
 
 def main():
     root = Path(__file__).resolve().parents[5]
-    report = json.loads(Path(sys.argv[1]).read_text())
-    outputs, status = render(report)
+    report_path = Path(sys.argv[1])
+    report = json.loads(report_path.read_text())
+    tracked, derived, status = render(report)
     path = root / "docs/native/w1-workflows.md"
     previous = path.read_text()
     if f"<!-- {MARKER}:start -->" in previous and status.rstrip() not in previous:
         raise ValueError("append a new evidence section instead of rewriting shared history")
-    for name, value in outputs.items():
+    for name, value in tracked.items():
         (root / "apps/native/crates/acceptance/data" / name).write_text(value)
+    for name, value in derived.items():
+        report_path.with_name(name).write_text(value)
     if f"<!-- {MARKER}:start -->" not in previous:
         path.write_text(previous.rstrip() + "\n\n" + status)
 
