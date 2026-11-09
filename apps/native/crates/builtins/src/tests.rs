@@ -1549,6 +1549,27 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     let mut panels = Builtins::new(kernel.clone(), "P", || {}).unwrap();
     finish(panels.mount("settings").unwrap());
     finish(panels.show("settings").unwrap());
+    // Settings shows one section per page: open Memory from the sidebar.
+    let first = panels.take_publications().pop().unwrap();
+    let nav = first
+        .surface
+        .nodes()
+        .values()
+        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("settings.nav.memory"))
+        .unwrap()
+        .id;
+    finish(
+        panels
+            .event(
+                "settings",
+                first.generation,
+                first.surface.revision(),
+                nav,
+                "click",
+                EventDetail::default(),
+            )
+            .unwrap(),
+    );
     let publication = panels.take_publications().pop().unwrap();
     assert!(
         publication
