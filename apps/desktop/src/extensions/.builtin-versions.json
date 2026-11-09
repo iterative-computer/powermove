@@ -12,8 +12,8 @@
     "treeSha": "13e9463deeffa872159a6f7d42a4566890712eda"
   },
   "layers-3d": {
-    "version": "1.8.0",
-    "treeSha": "f178e0bdcaab02a936baacaaff9c32741b720e65"
+    "version": "1.8.1",
+    "treeSha": "58213fd8184062512d55613ccc58fc240dcc9258"
   },
   "mods": {
     "version": "1.0.1",
@@ -36,7 +36,7 @@
     "treeSha": "5c9bb6ea0faddf0d8c66006789c120adebb18802"
   },
   "viewer": {
-    "version": "1.4.0",
-    "treeSha": "452ded8f855fc62b99d3467da3ef290f2b83cd9f"
+    "version": "1.4.1",
+    "treeSha": "3d0dff499c141d2934184e8ec1eb0e076fb5d356"
   }
 }

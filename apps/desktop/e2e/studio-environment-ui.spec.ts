@@ -87,6 +87,9 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   expect(rows).toContain('Terrain');
   const scatter = (await objects(page)).find((l: any) => l.object?.scatter);
   expect(scatter.object.scatter).toMatchObject({ model: ids.cube, surface: terrain.id });
+  // The copied model becomes the pattern: hidden in the same Undo, copies still drawn.
+  const shown = (id: string) => page.evaluate((layerId: string) => { const on = (window as any).PM.L(layerId).on; return typeof on === 'object' && on ? on.v : on; }, id);
+  expect(await shown(ids.cube)).toBe(false);
   await expect(page.getByLabel('Copies of', { exact: true }).first()).toBeAttached();
   const seed = scatter.object.scatter.p.seed.v;
   await page.getByRole('button', { name: 'New variation' }).click();
