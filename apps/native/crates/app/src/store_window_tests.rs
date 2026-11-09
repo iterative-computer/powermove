@@ -201,6 +201,8 @@ impl Account {
         self.sessions.clear();
     }
 }
+/// The model server's API key.
+pub const MODEL_KEY: &str = "fixture-model-key";
 /// The emailed code the fixture accepts.
 pub const CODE: &str = "424242";
 fn cloud(
@@ -233,7 +235,22 @@ fn cloud(
         "publisher":a.handle.as_ref().map(|h| json!({"id":"5a1c0000-0000-4000-8000-0000000000ee","handle":h,"tombstoned":false,"verified":false})),
         "settings":{"rememberInstalls":a.remember}})
     };
+    // An OpenAI-compatible model server: any key but a wrong one.
+    let wrong_key = bearer
+        .as_deref()
+        .is_some_and(|k| k != MODEL_KEY && !a.sessions.contains(k));
     match (method, path) {
+        ("GET", "/v1/models") if wrong_key => fail(401, "unauthorized"),
+        ("GET", "/v1/models") => json(json!({"data":[{"id":"fixture-chat"},
+            {"id":"fixture-vision","architecture":{"input_modalities":["text","image"]}},
+            {"id":"no-tools","supported_parameters":["temperature"]}]})),
+        ("POST", "/v1/chat/completions") if wrong_key => fail(401, "unauthorized"),
+        ("POST", "/v1/chat/completions") => match request["model"].as_str() {
+            Some("fixture-chat" | "fixture-vision") => {
+                json(json!({"choices":[{"message":{"role":"assistant","content":"OK"}}]}))
+            }
+            _ => fail(404, "not_found"),
+        },
         ("GET", p) if p.starts_with("/v1/store/x/") => {
             let coordinate = p.strip_prefix("/v1/store/x/")?;
             let releases = a.releases.get(coordinate)?;

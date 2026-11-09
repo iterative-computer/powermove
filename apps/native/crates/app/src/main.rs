@@ -43,6 +43,7 @@ mod playback;
 mod playhead;
 mod pro_media;
 mod project_library;
+mod providers;
 mod publish;
 mod raster_overrides;
 mod render_frames;
@@ -319,6 +320,7 @@ fn main() -> Result<()> {
                 entity.update(cx, |v, cx| v.initialize(opening, cx));
                 entry::register(&entity, window.window_handle(), cx);
                 cloud::init(profile.clone(), cx);
+                providers::init(profile.clone(), cx);
                 if let Some(ns) = platform::ns_window(window) {
                     updates::after_launch(profile.clone(), ns, cx);
                 }

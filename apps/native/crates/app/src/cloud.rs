@@ -38,16 +38,21 @@ pub trait Vault: Send {
 /// release and each development bundle keep their own session.
 pub struct Keychain {
     service: String,
+    account: String,
 }
 impl Keychain {
     pub fn for_app() -> Self {
+        Self::named("Powermove Cloud", "session")
+    }
+    /// `<bundle id> <name>` / `account`.
+    pub fn named(name: &str, account: &str) -> Self {
         let id = crate::platform::bundle_id().unwrap_or_else(|| "com.powermove.native.dev".into());
         Self {
-            service: format!("{id} Powermove Cloud"),
+            service: format!("{id} {name}"),
+            account: account.into(),
         }
     }
 }
-const ACCOUNT: &str = "session";
 #[cfg(target_os = "macos")]
 mod keychain {
     use std::{ffi::c_void, ptr};
@@ -148,8 +153,11 @@ mod keychain {
 #[cfg(target_os = "macos")]
 impl Vault for Keychain {
     fn read(&self) -> Result<Option<Vec<u8>>, String> {
-        if let Some(bytes) = keychain::read(&self.service, ACCOUNT)? {
+        if let Some(bytes) = keychain::read(&self.service, &self.account)? {
             return Ok(Some(bytes));
+        }
+        if self.account != "session" {
+            return Ok(None);
         }
         // A session the first launch brought from the shipped app (Settings ›
         // Accounts › Sign-Ins from the Original App). Release builds only: a
@@ -162,10 +170,10 @@ impl Vault for Keychain {
         keychain::read(&migrated, &account)
     }
     fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-        keychain::write(&self.service, ACCOUNT, bytes)
+        keychain::write(&self.service, &self.account, bytes)
     }
     fn delete(&mut self) -> Result<(), String> {
-        keychain::delete(&self.service, ACCOUNT)
+        keychain::delete(&self.service, &self.account)
     }
 }
 

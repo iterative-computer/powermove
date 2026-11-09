@@ -45,6 +45,11 @@ impl Controller {
                 crate::cloud::open_sign_in(window, cx)
             }
             "cloudSignOut" => crate::cloud::sign_out(cx),
+            "providerSetUp" => {
+                let window = self.account_window(cx);
+                crate::providers::open(window, cx)
+            }
+            "providerDisconnect" => crate::providers::disconnect(cx),
             "cloudRememberOn" => crate::cloud::set_remember(true, cx),
             "cloudRememberOff" => crate::cloud::set_remember(false, cx),
             "cloudDeleteAccount" => {

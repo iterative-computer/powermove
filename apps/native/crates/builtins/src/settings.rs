@@ -101,6 +101,7 @@ impl Backend {
             remember["binding"] = fields["account.remember"].clone();
         }
         rows.extend(self.subscription_rows());
+        rows.extend(provider_rows(&self.native.facts["provider"]));
         rows
     }
     fn subscription_rows(&self) -> Vec<Value> {
@@ -462,6 +463,22 @@ impl Backend {
                     .push(("media.settings".into(), json!({"action":action["action"]})));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            Some("row")
+                if matches!(
+                    action["action"].as_str(),
+                    Some("provider.setup" | "provider.disconnect")
+                ) =>
+            {
+                let name = if action["action"] == "provider.setup" {
+                    "providerSetUp"
+                } else {
+                    "providerDisconnect"
+                };
+                self.native
+                    .platform
+                    .push(("command".into(), json!({ "name": name })));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             Some("write") if action["id"] == "account.remember" => {
                 let on = action["value"]
                     .as_bool()
@@ -712,6 +729,74 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
     delete["detail"] = json!("Your published extensions stay on the Store under your handle.");
     vec![account, remember, delete]
 }
+/// Settings › Accounts › API or Local Model, from the app's `provider` fact:
+/// what is connected (never the key), then Set Up… / Change… and Disconnect.
+/// The address, key and model are entered in the app's connection sheet.
+pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
+    if !provider.is_object() {
+        return Vec::new();
+    }
+    let status = |id: &str, label: &str, value: Value| {
+        json!({"id":format!("account.{id}"),"section":"accounts","group":"API or Local Model",
+            "label":label,"control":"status","value":value})
+    };
+    let connected = provider["connected"] == true;
+    let text = |key: &str| provider[key].as_str().unwrap_or("").to_owned();
+    let dash = || "—".to_owned();
+    let mut rows = vec![
+        status(
+            "provider",
+            "Connection Type",
+            json!(if connected {
+                text("type")
+            } else {
+                "Not set up".into()
+            }),
+        ),
+        status(
+            "url",
+            "API Base URL",
+            json!(if connected { text("url") } else { dash() }),
+        ),
+        status(
+            "key",
+            "API Key",
+            json!(match (connected, provider["hasKey"] == true) {
+                (true, true) => "Saved in Keychain",
+                (true, false) => "None",
+                _ => "—",
+            }),
+        ),
+        status(
+            "model",
+            "Model Name",
+            json!(if connected { text("model") } else { dash() }),
+        ),
+        status(
+            "vision",
+            "This Model Supports Images",
+            json!(match (connected, provider["vision"] == true) {
+                (true, true) => "Yes",
+                (true, false) => "No",
+                _ => "—",
+            }),
+        ),
+    ];
+    let mut action = json!({"id":"account.status","section":"accounts","group":"API or Local Model",
+        "label":"Status","control":"action","action":"provider.setup",
+        "actionLabel":if connected { "Change…" } else { "Set Up…" },"disabled":provider["busy"] == true});
+    action["detail"] = json!(if connected {
+        "Tested and saved. The agent can’t run on API or local models in this build yet."
+    } else {
+        "Use an API, Ollama, or LM Studio."
+    });
+    rows.push(action);
+    if connected {
+        rows.push(json!({"id":"account.disconnect","section":"accounts","group":"API or Local Model",
+            "label":"Disconnect","control":"action","action":"provider.disconnect","actionLabel":"Disconnect"}));
+    }
+    rows
+}
 fn number(value: &Value, min: f64, max: f64) -> Result<f64, String> {
     value
         .as_f64()
@@ -871,5 +956,22 @@ mod cloud_tests {
         assert_eq!(out[1]["value"], true);
         assert_eq!(out[1]["disabled"], false);
         assert_eq!(out[2]["action"], "account.delete");
+    }
+}
+#[cfg(test)]
+mod provider_tests {
+    use super::provider_rows;
+    use serde_json::json;
+    #[test]
+    fn model_rows_show_the_connection_never_the_key() {
+        let out = provider_rows(&json!({"revision":1,"connected":false}));
+        assert_eq!(out[0]["value"], "Not set up");
+        assert_eq!(out.last().unwrap()["actionLabel"], "Set Up…");
+        let out = provider_rows(&json!({"revision":2,"connected":true,"type":"Ollama",
+            "url":"http://localhost:11434/v1","model":"llama","vision":false,"hasKey":true}));
+        assert_eq!(out[2]["value"], "Saved in Keychain");
+        assert_eq!(out[5]["actionLabel"], "Change…");
+        assert_eq!(out[6]["action"], "provider.disconnect");
+        assert!(!out.iter().any(|r| r.to_string().contains("secret")));
     }
 }

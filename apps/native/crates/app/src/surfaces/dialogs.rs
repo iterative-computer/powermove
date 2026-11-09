@@ -66,6 +66,8 @@ pub struct Field {
     pub description: Option<String>,
     pub tooltip: Option<&'static str>,
     pub error: Option<&'static str>,
+    /// A secure text field (`NSSecureTextField`): what is typed never shows.
+    pub secure: bool,
 }
 impl Field {
     pub fn new(id: &str, label: &str, piece: NativePiece, values: Vec<String>) -> Self {
@@ -81,6 +83,7 @@ impl Field {
             description: None,
             tooltip: None,
             error: None,
+            secure: false,
         }
     }
     pub fn number(id: &str, label: &str, values: Vec<String>, unit: &str) -> Self {

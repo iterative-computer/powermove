@@ -367,3 +367,89 @@ fn publish_refuses_secrets_undeclared_permissions_store_installs_and_a_signed_ou
         Some("Sign in to publish.")
     );
 }
+
+#[test]
+fn a_model_provider_is_discovered_tested_and_saved_with_its_key_in_the_vault() {
+    use crate::providers::Host;
+    use crate::store_window_tests::MODEL_KEY;
+    use pm_services::surfaces::{
+        agent_auth::ProviderInput,
+        providers::{ConfigureWork, DiscoveryWork},
+    };
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let origin = serve_with(0, fixture);
+    let endpoint = format!("{origin}v1");
+    let profile = tempfile::tempdir().unwrap();
+    let vault = Memory::default();
+    let keys = vault.clone();
+    let mut host = Host {
+        profile: profile.path().to_owned(),
+        keys: Box::new(move |_| Box::new(keys.clone())),
+    };
+    let ticket = || Flight::default().start();
+    // Discovery lists models that can call tools, with what they read.
+    let found = DiscoveryWork {
+        ticket: ticket(),
+        endpoint: endpoint.clone(),
+        key: None,
+        has_saved_key: false,
+    }
+    .run(&mut host)
+    .result
+    .unwrap();
+    let ids: Vec<_> = found.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["fixture-chat", "fixture-vision"]);
+    assert_eq!(found.hidden, 1);
+    assert_eq!(found.models[1].vision, Some(true));
+    // A wrong key is refused and nothing is saved.
+    let input = ProviderInput::prepare(&endpoint, "fixture-chat", false, "wrong", None).unwrap();
+    let refused = ConfigureWork {
+        ticket: ticket(),
+        input,
+    }
+    .run(&mut host)
+    .result;
+    assert_eq!(
+        refused.unwrap_err().code,
+        pm_services::ServiceErrorCode::PermissionDenied
+    );
+    assert!(host.saved().is_none());
+    // The right one connects after a real chat completion.
+    let input = ProviderInput::prepare(&endpoint, "fixture-vision", true, MODEL_KEY, None).unwrap();
+    let config = ConfigureWork {
+        ticket: ticket(),
+        input,
+    }
+    .run(&mut host)
+    .result
+    .unwrap();
+    assert!(config.has_key);
+    let saved = host.saved().unwrap();
+    assert_eq!(saved["model"], "fixture-vision");
+    assert_eq!(saved["vision"], true);
+    // The key is in the vault, never in the saved connection.
+    assert_eq!(host.saved_key(&endpoint).as_deref(), Some(MODEL_KEY));
+    let file = std::fs::read_to_string(profile.path().join("agent-provider.json")).unwrap();
+    assert!(!file.contains(MODEL_KEY));
+    // Keeping the saved key: a blank entry reuses it for the same address only.
+    let input = ProviderInput::prepare(
+        &endpoint,
+        "fixture-chat",
+        false,
+        "",
+        Some((&endpoint, MODEL_KEY)),
+    )
+    .unwrap();
+    assert!(
+        ConfigureWork {
+            ticket: ticket(),
+            input
+        }
+        .run(&mut host)
+        .result
+        .is_ok()
+    );
+    host.disconnect().unwrap();
+    assert!(host.saved().is_none());
+    assert_eq!(host.saved_key(&endpoint).as_deref(), Some(MODEL_KEY));
+}

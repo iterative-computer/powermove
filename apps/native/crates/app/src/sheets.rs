@@ -219,7 +219,7 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
                 popup.setEnabled(field.enabled);
                 sheet.control(&field.id, &field.label, popup.into_super().into_super());
             }
-            _ => sheet.text(&field.id, &field.label, value, false, field.enabled),
+            _ => sheet.text(&field.id, &field.label, value, field.secure, field.enabled),
         }
         if let (Some(placeholder), Some(control)) = (field.placeholder, sheet.fields.get(&field.id))
         {
