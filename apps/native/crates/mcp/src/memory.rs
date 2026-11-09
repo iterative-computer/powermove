@@ -34,38 +34,6 @@ fn cut(text: &str, max: usize) -> String {
         })
         .collect()
 }
-fn timestamp(value: Option<&Value>, fallback: f64) -> Value {
-    json!(value.and_then(Value::as_f64).unwrap_or(fallback))
-}
-pub fn sanitize(raw: &Value, now: f64) -> Vec<Value> {
-    let mut seen = std::collections::HashSet::new();
-    let mut entries = Vec::new();
-    for item in raw.as_array().into_iter().flatten() {
-        let text = clip(item.get("text"), 600);
-        let id = cut(item["id"].as_str().unwrap_or(""), 80);
-        if text.is_empty()
-            || id.is_empty()
-            || !item["kind"].as_str().is_some_and(|s| KINDS.contains(&s))
-            || !seen.insert(id.clone())
-        {
-            continue;
-        }
-        let created = timestamp(item.get("createdAt"), now);
-        let why = clip(item.get("why"), 600);
-        let mut entry = json!({"id":id,"kind":item["kind"],"text":text,"author":if item["author"]=="user"{"user"}else{"agent"},"createdAt":created,"updatedAt":timestamp(item.get("updatedAt"),created.as_f64().unwrap())});
-        if !why.is_empty() {
-            entry["why"] = json!(why)
-        }
-        if item["resolved"] == true {
-            entry["resolved"] = json!(true)
-        }
-        entries.push(entry);
-    }
-    if entries.len() > 100 {
-        entries.drain(..entries.len() - 100);
-    }
-    entries
-}
 pub fn index(raw: &Value) -> Value {
     let entries = raw.as_array().cloned().unwrap_or_default();
     let mut recent = entries
@@ -84,28 +52,6 @@ fn sort_recent(entries: &mut [Value]) {
             .unwrap_or(0.0)
             .total_cmp(&a["updatedAt"].as_f64().unwrap_or(0.0))
     });
-}
-pub fn list(project: &Value, args: &Value) -> Result<Value> {
-    if !enabled(project) {
-        return Err(Error::invalid(DISABLED));
-    }
-    let entries = project["memory"].as_array().cloned().unwrap_or_default();
-    let mut selected = entries
-        .iter()
-        .filter(|e| {
-            args.get("kind")
-                .is_none_or(|k| k.is_null() || k == "" || e["kind"] == *k)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    sort_recent(&mut selected);
-    let limit = args["limit"]
-        .as_f64()
-        .unwrap_or(100.0)
-        .trunc()
-        .clamp(1.0, 100.0) as usize;
-    selected.truncate(limit);
-    Ok(json!({"memory":selected,"total":entries.len()}))
 }
 pub struct Plan {
     pub entries: Vec<Value>,

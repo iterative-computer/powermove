@@ -38,11 +38,11 @@ fn entry(id: &str, kind: &str, updated: u32) -> Value {
     json!({"id":id,"kind":kind,"text":format!("Synthetic {kind}"),"author":"agent","createdAt":0,"updatedAt":updated})
 }
 #[test]
-fn native_memory_sanitization_index_and_list_match_current_main() {
+fn native_memory_index_and_list_match_current_main() {
     let entries = json!([entry("goal","goal",1),entry("rule","constraint",2),entry("open","open",3),entry("decision","decision",4),{"id":"empty","kind":"goal","text":" "},{"id":"bad","kind":"unknown","text":"Invalid"},null,entry("goal","decision",6)]);
-    let expected = oracle(json!({"operation":"sanitize","entries":entries,"now":1000}));
-    let sanitized = normalized(json!(memory::sanitize(&entries, 1000.0)));
-    assert_eq!(sanitized, expected["result"]);
+    let sanitized =
+        oracle(json!({"operation":"sanitize","entries":entries,"now":1000}))["result"].clone();
+    let notes = pm_model::json::parse(&sanitized.to_string()).unwrap();
     assert_eq!(
         memory::index(&sanitized),
         oracle(json!({"operation":"index","entries":sanitized}))["result"]
@@ -55,8 +55,11 @@ fn native_memory_sanitization_index_and_list_match_current_main() {
         json!({"kind":"decision","limit":1000}),
     ] {
         let expected = oracle(json!({"operation":"list","entries":sanitized,"arguments":args}));
+        let listed = pm_mcp::memory_admission::list(Some(&notes), &args);
         assert_eq!(
-            memory::list(&json!({"memory":sanitized}), &args).unwrap()["memory"],
+            normalized(
+                serde_json::from_str(&pm_model::json::to_canonical_string(&listed)).unwrap()
+            )["memory"],
             expected["result"]
         );
     }
