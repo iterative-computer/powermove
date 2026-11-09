@@ -46,6 +46,11 @@ pub struct View {
     pub environment: Environment,
     pub bounds: [f32; 4],
 }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceIdentity {
+    pub part: Option<String>,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
@@ -59,6 +64,8 @@ pub struct Upload {
     pub instance_count: usize,
     pub light_count: usize,
     pub objects: Vec<Identity>,
+    #[serde(default)]
+    pub instance_policies: Vec<InstanceIdentity>,
     pub view: View,
 }
 #[derive(Deserialize)]
@@ -69,6 +76,7 @@ pub struct Patch {
     pub sdata: Range,
     pub materials: Range,
     pub view: View,
+    pub instance_policies: Option<Vec<InstanceIdentity>>,
 }
 
 pub struct PackedScene {
@@ -79,6 +87,8 @@ pub struct PackedScene {
     pub top_nodes: usize,
     pub view: View,
     pub objects: Vec<Identity>,
+    pub parts: Vec<Option<String>>,
+    local_bounds: Vec<(Vec3, Vec3)>,
 }
 fn v(a: [f32; 3]) -> V {
     v3(a[0], a[1], a[2])
@@ -195,6 +205,27 @@ impl PackedScene {
             sdata,
         };
         let (geometries, placements) = placements(&prepared, u.instance_count)?;
+        let parts = if u.instance_policies.is_empty() {
+            vec![None; u.instance_count]
+        } else {
+            if u.instance_policies.len() != u.instance_count {
+                return Err("instance identities do not match instances".into());
+            }
+            u.instance_policies.into_iter().map(|p| p.part).collect()
+        };
+        let local_bounds = geometries
+            .iter()
+            .map(|g| {
+                prepared.positions
+                    [g.first_vertex as usize..(g.first_vertex + g.vertex_count) as usize]
+                    .iter()
+                    .map(|p| Vec3::from_slice(p))
+                    .fold(
+                        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                        |(a, b), p| (a.min(p), b.max(p)),
+                    )
+            })
+            .collect();
         Ok(Self {
             key: u.key,
             prepared,
@@ -203,6 +234,8 @@ impl PackedScene {
             top_nodes: u.top_nodes,
             view: u.view,
             objects: u.objects,
+            parts,
+            local_bounds,
         })
     }
     pub fn patch(&mut self, p: Patch, binary: &[u8]) -> Result<bool, String> {
@@ -210,6 +243,12 @@ impl PackedScene {
             return Err("native geometry key is stale; upload scene again".into());
         }
         p.view.validate()?;
+        if p.instance_policies
+            .as_ref()
+            .is_some_and(|policies| policies.len() != self.placements.len())
+        {
+            return Err("instance identities do not match instances".into());
+        }
         let nodes = p.top.typed::<WideNode>(binary)?;
         let sdata = p.sdata.typed::<[f32; 4]>(binary)?;
         let materials = p.materials.typed::<GpuMaterial>(binary)?;
@@ -247,6 +286,9 @@ impl PackedScene {
         self.prepared.nodes[..self.top_nodes].copy_from_slice(&nodes);
         self.prepared.materials = materials;
         self.view = p.view;
+        if let Some(policies) = p.instance_policies {
+            self.parts = policies.into_iter().map(|p| p.part).collect();
+        }
         for (i, l) in self.prepared.lights.iter_mut().enumerate() {
             let s = &self.prepared.sdata[i * 4..i * 4 + 4];
             l.pos = s[0];
@@ -255,6 +297,33 @@ impl PackedScene {
             l.radiance = s[3];
         }
         Ok(content_changed)
+    }
+    pub fn bounds(&self, layer: Option<&str>) -> Option<(Vec3, Vec3)> {
+        let mut bounds: Option<(Vec3, Vec3)> = None;
+        for p in &self.placements {
+            let oi = self.prepared.tris[p.triangle_offset as usize].uv2m[3] as usize;
+            if layer.is_some_and(|l| self.objects[oi].layer != l) {
+                continue;
+            }
+            let (a, b) = self.local_bounds[p.geometry];
+            let t = p.transform;
+            let world = Mat4::from_cols_array(&[
+                t[0], t[4], t[8], 0., t[1], t[5], t[9], 0., t[2], t[6], t[10], 0., t[3], t[7],
+                t[11], 1.,
+            ]);
+            for k in 0..8 {
+                let p = world.transform_point3(Vec3::new(
+                    if k & 1 == 0 { a.x } else { b.x },
+                    if k & 2 == 0 { a.y } else { b.y },
+                    if k & 4 == 0 { a.z } else { b.z },
+                ));
+                bounds = Some(match bounds {
+                    None => (p, p),
+                    Some((a, b)) => (a.min(p), b.max(p)),
+                });
+            }
+        }
+        bounds
     }
     pub fn pick(&self, x: f32, y: f32, w: u32, h: u32) -> Option<serde_json::Value> {
         let c = &self.view.camera;
@@ -272,7 +341,7 @@ impl PackedScene {
         };
         let mut best = f32::MAX;
         let mut found = None;
-        for placement in &self.placements {
+        for (instance, placement) in self.placements.iter().enumerate() {
             let a = placement.transform;
             let world = Mat4::from_cols_array(&[
                 a[0], a[4], a[8], 0., a[1], a[5], a[9], 0., a[2], a[6], a[10], 0., a[3], a[7],
@@ -317,7 +386,7 @@ impl PackedScene {
                 let oi = tri.uv2m[3] as usize;
                 let identity = &self.objects[oi];
                 found = Some(
-                    serde_json::json!({"layer":identity.layer,"part":identity.part,"object":oi,"point":(eye+direction*d).to_array(),"normal":n.to_array(),"distance":d}),
+                    serde_json::json!({"layer":identity.layer,"part":self.parts[instance].as_deref().unwrap_or(&identity.part),"object":oi,"point":(eye+direction*d).to_array(),"normal":n.to_array(),"distance":d}),
                 );
             }
         }

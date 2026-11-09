@@ -220,6 +220,21 @@ fn tri_material(tri: i32) -> Material { return materials[u32(tris[u32(tri)].uv2m
 
 // How much light gets from `ro` to a point `dist` along `rd`: opaque surfaces
 // block it; glass and partly transparent surfaces tint and dim it.
+// Separate layer effects/opacity/masks are composited by the host. Other
+// such layers remain visible to shadow and reflection rays, while a layer's
+// own primary image includes the geometry that will show behind those masks.
+fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
+  var origin=ro;var offset=0.0;var left=tmax;
+  for(var i=0;i<1024;i++){
+    var hit=intersect(origin,rd,left,false);
+    if(hit.tri<0){return Hit(tmax,-1,vec2f(0.0),0u);}
+    if(sdata[P.counts.x*4u+hit.inst*9u+5u].w<0.5){hit.t+=offset;return hit;}
+    let step=hit.t+EPS;origin+=rd*step;offset+=step;left-=step;
+    if(left<=0.0){return Hit(tmax,-1,vec2f(0.0),0u);}
+  }
+  return Hit(tmax,-1,vec2f(0.0),0u);
+}
+
 fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   var o = ro;
   var left = dist - 2.0 * EPS;
@@ -248,6 +263,20 @@ fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
     if (left <= 0.0) { return t; }
   }
   return t;
+}
+
+// Contact occlusion measures coverage, while the direct-light estimate above
+// follows transmission. Glass still occludes the dome: focused transmitted
+// light is supplied by photons, rather than an unbent ambient shortcut.
+fn ambient_visibility(ro:vec3f,rd:vec3f,dist:f32) -> f32 {
+  var origin=ro;var left=dist;var visible=1.0;
+  for(var k=0;k<8;k++){
+    let hit=intersect(origin,rd,left,false);if(hit.tri<0){return visible;}
+    let sf=surface(origin,rd,hit);
+    if((u32(sf.m.policy.y)&1u)!=0u){visible*=1.0-sf.m.extra.z;if(visible<0.001){return 0.0;}}
+    origin+=rd*(hit.t+EPS);left-=hit.t+EPS;if(left<=0.0){return visible;}
+  }
+  return visible;
 }
 
 fn floor_t(ro: vec3f, rd: vec3f) -> f32 {
@@ -643,7 +672,7 @@ fn catcher_ratio(p: vec3f) -> f32 {
     let dir = cosine_dir(n, rnd2());
     let e = 2.4 / f32(dome);
     free += e;
-    lit += e * select(1.0, dot(transmittance(p, dir, 4000.0), vec3f(0.333)), P.opts.y == 0u);
+    lit += e * select(1.0, ambient_visibility(p, dir, 4000.0), P.opts.y == 0u);
   }
   if (free <= 0.0) { return 1.0; }
   // Focused light on the studio floor brightens it past the backdrop.
@@ -691,6 +720,13 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   if ((u32(m.policy.y) & 16u) != 0u) {
     let c = unpack4x8unorm(bitcast<u32>(t.n0.w)) * w + unpack4x8unorm(bitcast<u32>(t.n1.w)) * h.b.x + unpack4x8unorm(bitcast<u32>(t.n2.w)) * h.b.y;
     m.base = vec4f(m.base.xyz * c.rgb, m.base.w); m.extra.z *= c.a;
+    if ((u32(m.policy.y) & 8u) != 0u) { m.emit = vec4f(m.emit.xyz*c.rgb,m.emit.w); }
+  }
+  let instance_base=P.counts.x*4u+h.inst*9u;
+  if(sdata[instance_base+4u].w>0.5){
+    let color=vec3f(sdata[instance_base+6u].w,sdata[instance_base+7u].w,sdata[instance_base+8u].w);
+    m.base=vec4f(m.base.xyz*color,m.base.w);
+    if((u32(m.policy.y)&8u)!=0u){m.emit=vec4f(m.emit.xyz*color,m.emit.w);}
   }
   if (m.extra.z < m.policy.z) { m.extra.z = 0.0; }
   let tangent = vector_to_world(h.inst, t.tangent.xyz);
@@ -821,7 +857,8 @@ fn path(px: vec2f) -> Sample {
   let max_b = P.counts.y;
   for (var b = 0u; b <= max_b + 2u; b++) {
     if (b > max_b && !primary) { break; }
-    let h = intersect(ro, rd, select(BIG, camera_limit(ro, rd), primary), false);
+    var h:Hit;
+    if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}else{h=intersect(ro,rd,BIG,false);}
     let tf = floor_t(ro, rd);
     // Lights: invisible to the camera, visible in reflections.
     if (!primary) {

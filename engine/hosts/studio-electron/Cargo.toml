@@ -13,6 +13,9 @@ serde_json.workspace = true
 glam = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["metalfx"]
 oidn = ["pm-studio/oidn"]

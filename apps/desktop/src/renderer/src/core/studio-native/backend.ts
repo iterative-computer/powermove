@@ -115,7 +115,7 @@ export class NativeStudioBackend implements StudioBackend {
       const nativeKey=geometryKey(scene);
       const small = { key: nativeKey, sdata: writer.append(scene.sdata), materials: writer.append(scene.materials), view: this.packedView() };
       if (this.geometryKey === nativeKey) {
-        await this.send({ op: 'preparedPatch', ...small, top: writer.append(scene.tlasNodes) }, writer.finish());
+        await this.send({ op: 'preparedPatch', ...small, top: writer.append(scene.tlasNodes), instancePolicies:scene.instancePolicies }, writer.finish());
       } else {
         const nodes = new Uint8Array(scene.tlasNodes.byteLength + scene.blasNodes.byteLength);
         nodes.set(new Uint8Array(scene.tlasNodes)); nodes.set(new Uint8Array(scene.blasNodes), scene.tlasNodes.byteLength);
@@ -194,16 +194,8 @@ export class NativeStudioBackend implements StudioBackend {
       return p ? { layer: p.layer, part: p.part || null, point: vec(p.point), normal: vec(p.normal) } : null;
     });
   }
-  bounds(layer?: string): StudioBounds | null {
-    if (!layer && this.prepared && !this.prepared.bounds.isEmpty()) return { min: vec(this.prepared.bounds.min.toArray()), max: vec(this.prepared.bounds.max.toArray()) };
-    const document = this.document ?? this.description?.(); if (!document) return null;
-    let count = 0;
-    const min = { x: Infinity, y: Infinity, z: Infinity }, max = { x: -Infinity, y: -Infinity, z: -Infinity };
-    document.scene.objects.forEach((o, i) => {
-      if (layer && document.object_ids[i]?.layer !== layer) return;
-      for (const p of o.mesh.positions) { count++; min.x = Math.min(min.x, p.x); min.y = Math.min(min.y, p.y); min.z = Math.min(min.z, p.z); max.x = Math.max(max.x, p.x); max.y = Math.max(max.y, p.y); max.z = Math.max(max.z, p.z); }
-    });
-    return count ? { min, max } : null;
+  bounds(layer?: string): Promise<StudioBounds | null> {
+    return this.serial(async()=>{await this.upload();const reply=await this.send({op:'bounds',layer});return reply.result?{min:vec(reply.result.min),max:vec(reply.result.max)}:null;});
   }
   private disposeGraph(): void {
     this.graph?.traverse((o: any) => { o.geometry?.dispose(); for (const m of Array.isArray(o.material) ? o.material : [o.material]) m?.dispose(); });

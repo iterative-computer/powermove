@@ -5,6 +5,8 @@ use crate::scene::{Prepared, Scene};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 mod resampling;
+mod query;
+pub use query::SurfacePick;
 #[cfg(all(feature="metalfx",target_os="macos"))]
 mod metalfx;
 
@@ -173,6 +175,7 @@ pub struct Renderer {
     pub hardware_rt: bool,
     rt: Option<Rt>,
     resampling:Option<resampling::Resampling>,
+    query:Option<query::Query>,
     #[cfg(all(feature="metalfx",target_os="macos"))]
     metalfx:Option<metalfx::MetalFX>,
     pub metalfx_enabled:bool,
@@ -423,6 +426,7 @@ impl Renderer {
             #[cfg(all(feature="metalfx",target_os="macos"))] metalfx:None,
             last_surface:None,
             metalfx_enabled:metalfx_ok&&cfg!(all(feature="metalfx",target_os="macos"))&&std::env::var_os("STUDIO_NO_METALFX").is_none(),
+            query:None,
             resampling, resampled_lighting: std::env::var_os("STUDIO_NO_RIS").is_none(),
             photons_emitted: 0.0,
             present: None,
@@ -1014,6 +1018,7 @@ impl Renderer {
         let slice=self.readback.slice(..);slice.map_async(wgpu::MapMode::Read,|_|{});self.wait();let bytes=slice.get_mapped_range().expect("mapped native frame").to_vec();self.readback.unmap();
         (bytes,start.elapsed().as_secs_f64()*1000.)
     }
+    pub fn set_scene_bounds(&mut self,bounds:[f32;4]){self.bounds=bounds;self.base.bounds=bounds;}
     pub fn set_projection(&mut self, orthographic:bool) {self.base.opts[3]=u32::from(orthographic);}
     pub fn set_clip_planes(&mut self,near:Option<f32>,far:Option<f32>) {
         if let (Some(near),Some(far))=(near,far) {

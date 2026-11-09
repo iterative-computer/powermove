@@ -97,7 +97,9 @@ enum Command {
         width: u32,
         height: u32,
     },
-    Bounds,
+    Bounds {
+        layer: Option<String>,
+    },
     Shutdown,
 }
 fn blue() -> String {
@@ -226,7 +228,7 @@ impl Host {
                 json!({"released":frame})
             }
             Command::Hello => {
-                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries"],"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
+                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
             }
             Command::Scene {
                 scene,
@@ -357,10 +359,23 @@ impl Host {
                 self.revision += 1;
                 json!({"revision":self.revision})
             }
-            Command::Bounds => {
-                let r = self.resident.as_ref().ok_or("no scene")?;
-                let (lo, hi) = r.bounds();
-                json!({"min":lo.to_array(),"max":hi.to_array(),"objects":(0..r.transforms.len()).map(|i|{let(a,b)=r.object_bounds(i);json!({"layer":r.identities[i].layer,"part":r.identities[i].part,"min":a.to_array(),"max":b.to_array()})}).collect::<Vec<_>>()})
+            Command::Bounds { layer } => {
+                if let Some(r) = &self.resident {
+                    let bounds = (0..r.transforms.len())
+                        .filter(|&i| layer.as_ref().is_none_or(|l| &r.identities[i].layer == l))
+                        .map(|i| r.object_bounds(i))
+                        .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
+                    bounds
+                        .map(|(a, b)| json!({"min":a.to_array(),"max":b.to_array()}))
+                        .unwrap_or(Value::Null)
+                } else {
+                    self.packed
+                        .as_ref()
+                        .ok_or("no scene")?
+                        .bounds(layer.as_deref())
+                        .map(|(a, b)| json!({"min":a.to_array(),"max":b.to_array()}))
+                        .unwrap_or(Value::Null)
+                }
             }
             Command::Pick {
                 x,
@@ -378,16 +393,54 @@ impl Host {
                 {
                     return Err("pick outside frame".into());
                 }
-                if let Some(r) = &self.resident {
-                    r.pick(x, y, width, height)
+                if let Some(target) = self.live.as_mut().or(self.full.as_mut()) {
+                    let edited = target.revision != self.revision;
+                    sync_target(
+                        target,
+                        self.resident.as_ref(),
+                        self.packed.as_ref(),
+                        self.revision,
+                        self.geometry,
+                    );
+                    if edited {
+                        target.time = f64::NAN;
+                    }
+                    if let Some(hit) = target
+                        .renderer
+                        .pick_surface((x + 0.5) / width as f32, (y + 0.5) / height as f32)
+                    {
+                        let (layer, part) = if let Some(p) = &self.packed {
+                            let id = &p.objects[hit.layer as usize];
+                            (
+                                id.layer.clone(),
+                                p.parts
+                                    .get(hit.instance as usize)
+                                    .and_then(|p| p.clone())
+                                    .unwrap_or_else(|| id.part.clone()),
+                            )
+                        } else {
+                            let r = self.resident.as_ref().unwrap();
+                            let object = r.placements[hit.instance as usize].geometry;
+                            let id = &r.identities[object];
+                            (id.layer.clone(), id.part.clone())
+                        };
+                        json!({"layer":layer,"part":part,"point":hit.point,"normal":hit.normal})
+                    } else {
+                        Value::Null
+                    }
                 } else {
-                    self.packed
-                        .as_ref()
-                        .ok_or("no scene")?
-                        .pick(x, y, width, height)
+                    if let Some(r) = &self.resident {
+                        r.pick(x, y, width, height)
+                    } else {
+                        self.packed
+                            .as_ref()
+                            .ok_or("no scene")?
+                            .pick(x, y, width, height)
+                    }
+                    .unwrap_or(Value::Null)
                 }
-                .unwrap_or(Value::Null)
             }
+
             Command::Render {
                 width,
                 height,
@@ -454,44 +507,13 @@ impl Host {
                     || target.time != time
                     || target.tier != tier
                     || target.quality_denoise != denoise;
-                if changed {
-                    if let Some(r) = &self.resident {
-                        target.renderer.set_instanced_scene(
-                            &r.scene,
-                            &r.prepared,
-                            &r.geometries,
-                            &r.placements,
-                            r.top_nodes,
-                            target.geometry != self.geometry,
-                        );
-                    } else if let Some(p) = &self.packed {
-                        target.renderer.set_instanced_scene(
-                            &p.view.scene(),
-                            &p.prepared,
-                            &p.geometries,
-                            &p.placements,
-                            p.top_nodes,
-                            target.geometry != self.geometry,
-                        );
-                        target.renderer.set_view(
-                            p.view.basis(),
-                            p.view.ground(),
-                            p.view.shadows,
-                            p.view.bounds,
-                        );
-                        target.renderer.set_projection(p.view.camera.orthographic);
-                        target
-                            .renderer
-                            .set_clip_planes(p.view.camera.near, p.view.camera.far);
-                        target.renderer.set_void(if p.view.backdrop_opaque {
-                            Some(p.view.backdrop)
-                        } else {
-                            None
-                        });
-                    }
-                    target.revision = self.revision;
-                    target.geometry = self.geometry;
-                }
+                sync_target(
+                    target,
+                    self.resident.as_ref(),
+                    self.packed.as_ref(),
+                    self.revision,
+                    self.geometry,
+                );
                 let renderer = &mut target.renderer;
                 renderer.live = target.live;
                 if target.history_revision != self.history_revision {
@@ -584,6 +606,79 @@ impl Host {
         Ok((value, vec![]))
     }
 }
+fn sync_target(
+    target: &mut Target,
+    resident: Option<&ResidentScene>,
+    packed: Option<&packed::PackedScene>,
+    revision: u64,
+    geometry: u64,
+) {
+    if target.revision == revision {
+        return;
+    }
+    if let Some(r) = resident {
+        target.renderer.set_instanced_scene(
+            &r.scene,
+            &r.prepared,
+            &r.geometries,
+            &r.placements,
+            r.top_nodes,
+            target.geometry != geometry,
+        );
+        let (lo, hi) = r.bounds();
+        let center = (lo + hi) * 0.5;
+        target.renderer.set_scene_bounds([
+            center.x,
+            center.y,
+            center.z,
+            (hi - lo).length().max(1e-3) * 0.5,
+        ]);
+    } else if let Some(p) = packed {
+        target.renderer.set_instanced_scene(
+            &p.view.scene(),
+            &p.prepared,
+            &p.geometries,
+            &p.placements,
+            p.top_nodes,
+            target.geometry != geometry,
+        );
+        target.renderer.set_view(
+            p.view.basis(),
+            p.view.ground(),
+            p.view.shadows,
+            p.view.bounds,
+        );
+        target.renderer.set_projection(p.view.camera.orthographic);
+        target
+            .renderer
+            .set_clip_planes(p.view.camera.near, p.view.camera.far);
+        target.renderer.set_void(if p.view.backdrop_opaque {
+            Some(p.view.backdrop)
+        } else {
+            None
+        });
+    }
+    target.revision = revision;
+    target.geometry = geometry;
+}
+fn peak_memory_mib() -> Option<f64> {
+    #[cfg(unix)]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: getrusage initializes the caller-owned rusage on success.
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let usage = unsafe { usage.assume_init() };
+        let unit = if cfg!(target_os = "macos") { 1. } else { 1024. };
+        Some(usage.ru_maxrss as f64 * unit / (1024. * 1024.))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 fn dimensions(w: u32, h: u32) -> Result<(), String> {
     if w == 0 || h == 0 || w > 4096 || h > 4096 || w as u64 * h as u64 > 8_847_360 {
         Err("frame dimensions exceed native memory budget".into())
@@ -658,7 +753,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(h.handle(Command::Bounds, &[]).is_ok());
+        assert!(h.handle(Command::Bounds { layer: None }, &[]).is_ok());
     }
     #[test]
     fn metal_instances_keep_the_glass_sphere() {
@@ -680,6 +775,46 @@ mod tests {
         );
         assert!((hit[0] - hit[4]).abs() < 0.001);
         assert_eq!(hit[11], 1.0, "the frontmost material is glass");
+        let pick = gpu
+            .pick_surface(635. / 960., 320. / 540.)
+            .expect("glass is pickable");
+        assert!(pick.point.iter().all(|v| v.is_finite()));
+        assert!((glam::Vec3::from(pick.normal).length() - 1.).abs() < 1e-4);
+        assert_eq!(pick.instance, hit[2] as u32);
+    }
+
+    #[test]
+    fn prepared_bounds_and_identity_survive_binary_upload() {
+        let mut h = Host::new();
+        h.handle(
+            Command::Preset {
+                name: "chrome".into(),
+                finish: blue(),
+                time: 0.,
+            },
+            &[],
+        )
+        .unwrap();
+        let (mut value, binary) = h.snapshot().unwrap();
+        value["key"] = json!("test");
+        let count = value["instanceCount"].as_u64().unwrap() as usize;
+        value["instancePolicies"] = json!(
+            (0..count)
+                .map(|i| json!({"part":format!("part-{i}")}))
+                .collect::<Vec<_>>()
+        );
+        let u: packed::Upload = serde_json::from_value(value).unwrap();
+        let packed = packed::PackedScene::new(u, &binary).unwrap();
+        let expected = h.resident.as_ref().unwrap().bounds();
+        let actual = packed.bounds(None).unwrap();
+        assert!((glam::Vec3::from(expected.0.to_array()) - actual.0).length() < 1e-3);
+        assert!((glam::Vec3::from(expected.1.to_array()) - actual.1).length() < 1e-3);
+        assert!(packed.bounds(Some("missing-layer")).is_none());
+        let hit = packed.pick(635., 320., 960, 540).unwrap();
+        assert!(hit["part"].as_str().unwrap().starts_with("part-"));
+        let layer = hit["layer"].as_str().unwrap();
+        let subset = packed.bounds(Some(layer)).unwrap();
+        assert!(subset.0.cmpge(actual.0).all() && subset.1.cmple(actual.1).all());
     }
 
     #[test]
