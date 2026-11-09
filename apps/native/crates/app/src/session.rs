@@ -270,6 +270,8 @@ impl Controller {
             let _ = this.update(cx, |v, cx| v.refresh_waiting_folders(cx));
         })
         .detach();
+        cx.observe_global::<crate::pro_media::MediaPassDone>(|v, cx| v.refresh_waiting_folders(cx))
+            .detach();
         crate::render_frames::install(engine.render_cache());
         sync_render_storage(&pro_media, &engine);
         let pro_events = pro_media.event_receiver.clone();
@@ -1163,7 +1165,7 @@ impl Controller {
             return;
         };
         if key == self.window_key {
-            self.host.borrow().window.makeKeyAndOrderFront(None);
+            gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
             return;
         }
         if let Some(window) = cx

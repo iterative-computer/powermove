@@ -1616,25 +1616,26 @@ impl crate::session::Controller {
         })
         .detach();
     }
-    /// Settings › Media › Allow Access…: explains macOS's prompt first, then
-    /// opens the folders macOS can still ask about and brings their originals in.
+    /// Settings › Media › Allow Access… / Check Again…: explains macOS's prompt
+    /// (or, for folders macOS refused, where to allow them) first, then opens
+    /// the folders and brings their originals in. A folder allowed in System
+    /// Settings since opens now; one still refused stays refused, unasked.
     fn allow_waiting_folders(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(config) = self.first_launch_config() else {
             return;
         };
-        let folders: Vec<_> = self
-            .waiting_folders
-            .iter()
-            .filter(|f| f.outcome != pm_first_launch::source_access::Outcome::Denied)
-            .cloned()
-            .collect();
+        let folders = self.waiting_folders.clone();
         if folders.is_empty() {
             return;
         }
         let window = self.host.borrow().window.clone();
         let rx = crate::platform::choice(
             &window,
-            "Allow Access to Your Media",
+            if crate::panels::askable(&folders) {
+                "Allow Access to Your Media"
+            } else {
+                "Check Folder Access Again"
+            },
             &crate::panels::folder_access_prompt(&folders),
             &["Continue", "Not Now"],
         );
@@ -2375,5 +2376,16 @@ mod tests {
         }
         assert!(prefs.creates_on_import(3840, 2160, 8));
         assert!(!prefs.creates_on_import(1920, 1080, 10));
+    }
+}
+
+/// Counts finished media passes; editors read the protected folders again.
+#[derive(Default)]
+pub(crate) struct MediaPassDone(u64);
+impl gpui::Global for MediaPassDone {}
+impl MediaPassDone {
+    pub(crate) fn bump(cx: &mut gpui::App) {
+        let n = cx.try_global::<Self>().map_or(0, |d| d.0) + 1;
+        cx.set_global(Self(n));
     }
 }

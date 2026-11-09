@@ -686,6 +686,10 @@ impl Controller {
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.start_builtins(cx);
+        if id == "settings" {
+            // Settings › Media shows the protected folders as they are now.
+            self.refresh_waiting_folders(cx);
+        }
         if self.builtins.opening_windows.contains(id) {
             return;
         }
@@ -1042,7 +1046,7 @@ impl Controller {
                     if let Some(handle) = self.builtins.windows.remove("agent") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
                     }
-                    self.host.borrow().window.makeKeyAndOrderFront(None);
+                    gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
                     Ok(Value::Null)
                 }
                 "settings.present" => {
@@ -1053,7 +1057,7 @@ impl Controller {
                     if let Some(handle) = self.builtins.windows.remove("settings") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
                     }
-                    self.host.borrow().window.makeKeyAndOrderFront(None);
+                    gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
                     Ok(Value::Null)
                 }
                 "settings.title" => {

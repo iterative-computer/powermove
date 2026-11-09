@@ -206,16 +206,39 @@ pub fn file_count(count: usize) -> String {
         format!("{count} files")
     }
 }
-/// The explanation before macOS asks about each folder (Settings › Media).
+fn refused(f: &pm_first_launch::WaitingFolder) -> bool {
+    f.outcome == pm_first_launch::source_access::Outcome::Denied
+}
+/// Whether macOS can still ask about any of `folders` (one it refused it
+/// won't ask about again).
+pub fn askable(folders: &[pm_first_launch::WaitingFolder]) -> bool {
+    folders.iter().any(|f| !refused(f))
+}
+/// The explanation before Powermove opens the folders (Settings › Media).
 pub fn folder_access_prompt(folders: &[pm_first_launch::WaitingFolder]) -> String {
-    let named: Vec<String> = folders
-        .iter()
-        .map(|f| format!("{} ({})", f.name, file_count(f.files)))
-        .collect();
-    format!(
-        "Some originals are in folders macOS protects: {}. When you continue, macOS asks once for each folder; allow it so Powermove can bring the files in. Your original app and files stay unchanged.",
-        named.join(", ")
-    )
+    let named = |refused_ones: bool| {
+        folders
+            .iter()
+            .filter(|f| refused(f) == refused_ones)
+            .map(|f| format!("{} ({})", f.name, file_count(f.files)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut text = Vec::new();
+    if askable(folders) {
+        text.push(format!(
+            "Some originals are in folders macOS protects: {}. When you continue, macOS asks once for each folder; allow it so Powermove can bring the files in.",
+            named(false)
+        ));
+    }
+    if folders.iter().any(refused) {
+        text.push(format!(
+            "macOS refused {}. If you've since allowed Powermove in System Settings › Privacy & Security › Files and Folders, continuing checks again; otherwise those files stay offline.",
+            named(true)
+        ));
+    }
+    text.push("Your original app and files stay unchanged.".into());
+    text.join(" ")
 }
 /// The status line's offline files, as a person counts them; empty for none.
 pub fn offline_summary(count: usize) -> String {

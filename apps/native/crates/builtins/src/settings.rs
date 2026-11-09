@@ -732,14 +732,20 @@ fn protected_folders_row(folders: &Value) -> Option<Value> {
     }
     if let Some(names) = &refused {
         detail.push(format!(
-            "macOS refused {names}: allow Powermove in System Settings › Privacy & Security › Files and Folders, then quit and reopen it."
+            "macOS refused {names}: allow Powermove in System Settings › Privacy & Security › Files and Folders, then check again."
         ));
     }
+    // macOS won't ask about a folder it refused again, but access granted in
+    // System Settings since is checked again.
+    let action = if askable.is_some() {
+        "Allow Access…"
+    } else {
+        "Check Again…"
+    };
     Some(
         json!({"id":"media.folders","section":"media","group":"Original Media",
         "label":"Media in Protected Folders","control":"action","action":"media.folders",
-        "actionLabel":"Allow Access…","disabled":askable.is_none(),
-        "detail":detail.join(" ")}),
+        "actionLabel":action,"disabled":false,"detail":detail.join(" ")}),
     )
 }
 #[cfg(test)]
@@ -768,9 +774,11 @@ mod protected_folders_tests {
             detail.contains("macOS refused Documents (2 files)"),
             "{detail}"
         );
-        // Only refused folders: nothing macOS can ask about, so no action.
+        // Only refused folders: Check Again, for access granted in System
+        // Settings since.
         let row =
             protected_folders_row(&json!([{"name":"Desktop","files":1,"refused":true}])).unwrap();
-        assert_eq!(row["disabled"], true);
+        assert_eq!(row["disabled"], false);
+        assert_eq!(row["actionLabel"], "Check Again…");
     }
 }

@@ -468,6 +468,17 @@ fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
             outcome: source_access::Outcome::Skipped,
         }]
     );
+    // macOS refused it later (persisted Denied), then the person allowed
+    // Powermove in System Settings: Check Again reads it now.
+    let state_path = config.native_profile.join("migration.json");
+    let mut state: Value = read(&state_path);
+    let key = downloads.to_string_lossy().into_owned();
+    state["folder_outcomes"][&key] = json!("denied");
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(
+        pm_first_launch::waiting_folders(&config).unwrap()[0].outcome,
+        source_access::Outcome::Denied
+    );
     let mut events = vec![];
     let outcome = pm_first_launch::allow_folders(&config, std::slice::from_ref(&downloads), |e| {
         events.push(e);
