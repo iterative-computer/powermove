@@ -360,7 +360,8 @@ impl MediaPanel {
         let mut rows = vec![];
         self.selection_cache.take();
         // N2: search descendants, without changing authored folders or ordering.
-        let descendants = !needle.is_empty();
+        // Missing files are listed flat as a search is, whatever folder holds them.
+        let descendants = self.searching();
         if self.filter.kind.is_none() && !self.filter.missing_only && self.filter.proxy.is_none() {
             rows.extend(
                 c.search_folders(self.folder.as_deref(), descendants)
@@ -486,6 +487,10 @@ impl MediaPanel {
         }
         effects
     }
+    /// A search or the missing-files listing: descendants, flat, with paths.
+    fn searching(&self) -> bool {
+        !self.filter.query.is_empty() || self.filter.missing_only
+    }
     pub fn page(
         &self,
         c: &Catalog,
@@ -530,7 +535,7 @@ impl MediaPanel {
                     selected,
                     focused: self.focused.as_ref() == Some(id),
                     tab_stop,
-                    folder_path: if self.filter.query.is_empty() {
+                    folder_path: if !self.searching() {
                         vec![]
                     } else {
                         let folder = match id {

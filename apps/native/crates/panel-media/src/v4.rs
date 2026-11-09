@@ -34,6 +34,8 @@ pub struct Projection {
     pub composition_count: usize,
     /// Only missing files are listed (the status line's offline count).
     pub missing_only: bool,
+    /// The search the model applies, so the field shows what the host set.
+    pub query: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DropTarget {
@@ -86,6 +88,7 @@ impl ProjectBridge {
             external_drag: self.panel.file_drop_active(),
             composition_count: c.compositions.len(),
             missing_only: self.panel.filter.missing_only,
+            query: self.panel.filter.query.clone(),
         })
     }
     pub fn request(

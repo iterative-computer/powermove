@@ -473,23 +473,27 @@ impl Backend {
             .project
             .refresh(&catalog, &self.native.media_runtime);
         if std::mem::take(&mut self.native.show_missing) {
+            // Project-wide: from the top folder, every missing file, flat.
             let filter = pm_panel_media::Filter {
                 missing_only: true,
                 ..Default::default()
             };
-            self.native
-                .project
-                .request(
-                    &catalog,
-                    &self.native.media_runtime,
-                    pm_panel_media::v4::Request {
-                        owner: catalog.stamp.clone(),
-                        action: pm_panel_media::v4::Action::Input(pm_panel_media::Input::Filter(
-                            filter,
-                        )),
-                    },
-                )
-                .map_err(|e| format!("{e:?}"))?;
+            for input in [
+                pm_panel_media::Input::OpenFolder(None),
+                pm_panel_media::Input::Filter(filter),
+            ] {
+                self.native
+                    .project
+                    .request(
+                        &catalog,
+                        &self.native.media_runtime,
+                        pm_panel_media::v4::Request {
+                            owner: catalog.stamp.clone(),
+                            action: pm_panel_media::v4::Action::Input(input),
+                        },
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+            }
         }
         let mut reply = self
             .native

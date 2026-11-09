@@ -482,11 +482,20 @@ impl SurfaceView {
         let unit = view.unit.clone();
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
+            // A text field that reports each keystroke (a search) echoes
+            // the typing; anything else it's given came from its panel.
+            let follows = view.number.is_none()
+                && node.r#type != "textarea"
+                && node.listeners.contains_key("input");
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
-                f.set_value(&value, cx);
+                if follows {
+                    f.set_value_following(&value, cx);
+                } else {
+                    f.set_value(&value, cx);
+                }
             });
             return;
         }

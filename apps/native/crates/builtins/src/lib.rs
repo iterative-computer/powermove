@@ -992,7 +992,8 @@ impl Builtins {
         }
     }
     /// The Project panel lists only missing files from its next request; the
-    /// media sequence moves so it asks again at the next publication.
+    /// media sequence moves so it asks again at the next publication. Takes
+    /// every panel's locks: call it on a worker, as `update_media` is.
     pub fn show_missing_media(&self) {
         for entry in self.broker.all_entries() {
             let backend = entry.lock().unwrap().backend.clone();

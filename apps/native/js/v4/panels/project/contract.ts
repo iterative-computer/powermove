@@ -209,6 +209,8 @@ export interface Projection {
   composition_count: number;
   /** Only missing files are listed (opened from the status line). */
   missing_only: boolean;
+  /** The search the model applies; the field follows it. */
+  query: string;
 }
 export type Action =
   | { Page: { offset: number; limit: number } }

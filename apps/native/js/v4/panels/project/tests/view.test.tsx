@@ -501,3 +501,38 @@ test("missing-only listing says so; Show All and search keep or clear it", async
   });
   await root.dispose();
 });
+test("the search field follows a query the host set, not late answers to typing", async () => {
+  const { root } = recorder();
+  const inputs: Input[] = [];
+  let view = projection([asset()]);
+  const render = () =>
+    root.render(
+      <ProjectView
+        view={view}
+        input={(i) => inputs.push(i)}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={layout}
+      />,
+    );
+  await render();
+  await event(root, find(root, "Search Media").id, "click");
+  for (const value of ["c", "cl"])
+    await event(root, find(root, "Search media").id, "input", {
+      value,
+      composing: false,
+    });
+  // The model answers the first keystroke after the second was typed.
+  view = { ...view, query: "c" };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("cl");
+  view = { ...view, query: "cl" };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("cl");
+  // The status line's missing files clear the search on the host.
+  view = { ...view, query: "", missing_only: true };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("");
+  await root.dispose();
+});

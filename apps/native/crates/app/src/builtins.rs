@@ -49,6 +49,9 @@ pub struct Host {
     media_probe_serial: u64,
     updating: bool,
     again: bool,
+    /// The status line asked for the missing files; the next update hands it
+    /// to the panels' workers (never their locks on the main thread).
+    pub(crate) show_missing: bool,
     /// The application Agent panel's runs while a project is open.
     agent_carry: Option<pm_builtins::AgentCarry>,
 }
@@ -408,6 +411,7 @@ impl Controller {
         let facts = self.facts();
         let originals = self.media.originals.clone();
         let observed = self.rendition_runtime();
+        let show_missing = std::mem::take(&mut self.builtins.show_missing);
         self.builtins.updating = true;
         let check = runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -416,6 +420,9 @@ impl Controller {
                 .spawn(async move {
                     runtime.update_facts(facts);
                     runtime.update_media(originals, observed);
+                    if show_missing {
+                        runtime.show_missing_media();
+                    }
                     runtime.publish()
                 })
                 .await;

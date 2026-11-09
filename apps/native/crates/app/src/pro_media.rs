@@ -1531,9 +1531,7 @@ impl crate::session::Controller {
     /// missing files.
     pub(crate) fn show_offline_media(&mut self, cx: &mut gpui::Context<Self>) {
         self.host.borrow().send_command("panel:show:assets", vec![]);
-        if let Some(runtime) = &self.builtins.runtime {
-            runtime.show_missing_media();
-        }
+        self.builtins.show_missing = true;
         self.update_builtins(cx);
     }
     pub(crate) fn project_assets(&self) -> Vec<String> {

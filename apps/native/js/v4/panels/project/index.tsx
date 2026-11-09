@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "preact/hooks";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
   EmptyState,
   List,
@@ -146,6 +146,19 @@ export function ProjectView(props: ProjectViewProps) {
     throw new RangeError("Invalid native media grid layout");
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  // Queries this field sent and the model hasn't answered yet, oldest first.
+  // An answer carrying another query came from the host (the status line's
+  // missing files clear the search): the field follows it.
+  const sent = useRef<string[]>([]);
+  useLayoutEffect(() => {
+    if (!view) return;
+    const at = sent.current.indexOf(view.query);
+    if (at >= 0) sent.current = sent.current.slice(at + 1);
+    else if (view.query !== query) {
+      sent.current = [];
+      setQuery(view.query);
+    }
+  }, [view?.query]);
   const [hovered, setHovered] = useState<string | null>(null);
   const [rename, setRename] = useState("");
   const [crumbFocus, setCrumbFocus] = useState(0);
@@ -165,6 +178,7 @@ export function ProjectView(props: ProjectViewProps) {
   }, [view?.renaming]);
   const filter = (value: string, missingOnly = !!view?.missing_only) => {
     setQuery(value);
+    sent.current.push(value);
     input({
       Filter: {
         query: value,

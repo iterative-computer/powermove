@@ -67,6 +67,7 @@ export function projection(rows: Row[] = []): Projection {
     external_drag: false,
     composition_count: 1,
     missing_only: false,
+    query: "",
   };
 }
 export const project = {
