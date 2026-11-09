@@ -11,6 +11,8 @@ export interface Parameter {
   label: string;
   binding: string;
   value: Json;
+  /** Without a definition: the stored value at rest, or "Animated" when keyed. */
+  display?: Json;
   control: "number" | "text" | "toggle" | "color" | "choice" | "opaque";
   animated: boolean;
   keyAtPlayhead: boolean;

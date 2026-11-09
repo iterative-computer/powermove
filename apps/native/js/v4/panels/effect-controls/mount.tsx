@@ -2,14 +2,7 @@ import { mountEffectControls } from "./index";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 
 export async function mount(env: BuiltinEnv): Promise<Mounted> {
-  const {
-    native,
-    platform,
-    host,
-    transport,
-    rootOptions,
-    report,
-  } = env;
+  const { native, platform, host, transport, rootOptions, report } = env;
   const p = await mountEffectControls({
     transport,
     host,

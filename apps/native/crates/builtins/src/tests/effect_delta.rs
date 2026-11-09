@@ -732,8 +732,10 @@ fn a_missing_effect_names_its_parameters_in_words_and_shows_their_values_at_rest
             .unwrap_or_else(|| panic!("{label}: {projection:#}"))["parameter"]
             .clone()
     };
-    assert_eq!(parameter("Background Color")["value"], "#112233");
-    assert_eq!(parameter("Dot Grid")["value"], 4.);
-    assert_eq!(parameter("Amount")["value"], "Animated");
+    assert_eq!(parameter("Background Color")["display"], "#112233");
+    assert_eq!(parameter("Dot Grid")["display"], 4.);
+    assert_eq!(parameter("Amount")["display"], "Animated");
+    // The stored data itself travels whole.
+    assert_eq!(parameter("Dot Grid")["value"]["v"], 4.);
     assert_eq!(parameter("Amount")["readonly"], true);
 }

@@ -585,7 +585,7 @@ function ParameterView({
           fontSize: t("typography.body"),
         }}
       >
-        {scalar(p.value) ?? "Custom value"}
+        {scalar(p.display ?? p.value) ?? "Custom value"}
       </text>
     );
   const state = p.keyAtPlayhead
