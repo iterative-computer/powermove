@@ -34,23 +34,87 @@ pub trait Vault: Send {
     fn write(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn delete(&mut self) -> Result<(), String>;
 }
+/// Generic-password items by service and account (the macOS Keychain; a
+/// memory map in tests).
+pub trait Items: Send {
+    fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String>;
+    fn write(&mut self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String>;
+    fn delete(&mut self, service: &str, account: &str) -> Result<(), String>;
+}
 /// A generic password named after this app's bundle id, so a beta, a
-/// release and each development bundle keep their own session.
+/// release and each development bundle keep their own session. A release
+/// build's session also reads the item the first launch migrated from the
+/// shipped app; delete removes both, so a signed-out Mac stays signed out.
 pub struct Keychain {
     service: String,
     account: String,
+    migrated: Option<(String, String)>,
+    items: Box<dyn Items>,
 }
 impl Keychain {
+    #[cfg(target_os = "macos")]
     pub fn for_app() -> Self {
-        Self::named("Powermove Cloud", "session")
+        let mut keychain = Self::named("Powermove Cloud", "session");
+        // Settings › Accounts › Sign-Ins from the Original App. Release builds
+        // only: a development build never reads or touches a real account.
+        if !cfg!(debug_assertions) {
+            keychain.migrated = Some(migrated_session());
+        }
+        keychain
     }
     /// `<bundle id> <name>` / `account`.
+    #[cfg(target_os = "macos")]
     pub fn named(name: &str, account: &str) -> Self {
         let id = crate::platform::bundle_id().unwrap_or_else(|| "com.powermove.native.dev".into());
+        Self::with_items(
+            format!("{id} {name}"),
+            account.into(),
+            None,
+            Box::new(keychain::Mac),
+        )
+    }
+    pub fn with_items(
+        service: String,
+        account: String,
+        migrated: Option<(String, String)>,
+        items: Box<dyn Items>,
+    ) -> Self {
         Self {
-            service: format!("{id} {name}"),
-            account: account.into(),
+            service,
+            account,
+            migrated,
+            items,
         }
+    }
+}
+/// Where the first launch put the shipped app's Cloud session.
+pub fn migrated_session() -> (String, String) {
+    (
+        format!("{} migration secrets", pm_first_launch::BETA_BUNDLE_ID),
+        blake3::hash(b"cloud/session").to_hex().to_string(),
+    )
+}
+impl Vault for Keychain {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        if let Some(bytes) = self.items.read(&self.service, &self.account)? {
+            return Ok(Some(bytes));
+        }
+        match &self.migrated {
+            Some((service, account)) => self.items.read(service, account),
+            None => Ok(None),
+        }
+    }
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.items.write(&self.service, &self.account, bytes)
+    }
+    /// Every item `read` could return; each is tried, the first failure reported.
+    fn delete(&mut self) -> Result<(), String> {
+        let native = self.items.delete(&self.service, &self.account);
+        let migrated = match &self.migrated {
+            Some((service, account)) => self.items.delete(service, account),
+            None => Ok(()),
+        };
+        native.and(migrated)
     }
 }
 #[cfg(target_os = "macos")]
@@ -149,34 +213,19 @@ mod keychain {
         }
         Ok(())
     }
-}
-#[cfg(target_os = "macos")]
-impl Vault for Keychain {
-    fn read(&self) -> Result<Option<Vec<u8>>, String> {
-        if let Some(bytes) = keychain::read(&self.service, &self.account)? {
-            return Ok(Some(bytes));
+    pub struct Mac;
+    impl super::Items for Mac {
+        fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+            read(service, account)
         }
-        if self.account != "session" {
-            return Ok(None);
+        fn write(&mut self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+            write(service, account, bytes)
         }
-        // A session the first launch brought from the shipped app (Settings ›
-        // Accounts › Sign-Ins from the Original App). Release builds only: a
-        // development build never reads a real account.
-        if cfg!(debug_assertions) {
-            return Ok(None);
+        fn delete(&mut self, service: &str, account: &str) -> Result<(), String> {
+            delete(service, account)
         }
-        let migrated = format!("{} migration secrets", pm_first_launch::BETA_BUNDLE_ID);
-        let account = blake3::hash(b"cloud/session").to_hex().to_string();
-        keychain::read(&migrated, &account)
-    }
-    fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-        keychain::write(&self.service, &self.account, bytes)
-    }
-    fn delete(&mut self) -> Result<(), String> {
-        keychain::delete(&self.service, &self.account)
     }
 }
-
 /// `{origin, token, expiresAt}`, as the shipped app sealed it.
 fn stored_token(vault: &dyn Vault, origin: &str) -> Option<Secret> {
     let bytes = vault.read().ok()??;
@@ -311,9 +360,13 @@ impl Http {
     fn cache_path(&self) -> PathBuf {
         self.profile.join("cloud/account.json")
     }
-    fn forget(&mut self) {
-        let _ = self.vault.delete();
+    /// Forgets the session on this Mac; a Keychain item that stays is an
+    /// error (`keychain`), never a quiet sign-in on the next launch.
+    fn forget(&mut self) -> pm_services::Result<()> {
         let _ = std::fs::remove_file(self.cache_path());
+        self.vault
+            .delete()
+            .map_err(|_| ServiceError::message(ServiceErrorCode::Unavailable, "keychain"))
     }
     pub fn signed_in(&self) -> bool {
         stored_token(self.vault.as_ref(), self.origin).is_some()
@@ -321,8 +374,7 @@ impl Http {
     /// `DELETE /v1/me`, then the session is forgotten.
     pub fn delete_account(&mut self) -> pm_services::Result<()> {
         self.call("DELETE", "/v1/me", None, true)?;
-        self.forget();
-        Ok(())
+        self.forget()
     }
     /// Remember Installs: what the Store installed or removed on this Mac.
     pub fn record_install(&mut self, repo: &str, release: Option<&str>) -> pm_services::Result<()> {
@@ -389,7 +441,7 @@ impl CloudHost for Http {
             Ok(me) => me,
             // The registry ended the session.
             Err(error) if error.to_string() == "api:unauthorized" => {
-                self.forget();
+                self.forget()?;
                 return Ok(None);
             }
             Err(error) => return Err(error),
@@ -431,8 +483,7 @@ impl CloudHost for Http {
     fn sign_out(&mut self) -> pm_services::Result<()> {
         // Best effort at the registry; this Mac forgets the session either way.
         let _ = self.call("POST", "/v1/auth/sign-out", None, true);
-        self.forget();
-        Ok(())
+        self.forget()
     }
 }
 /// The account cached for offline display, when it belongs to `origin`.
@@ -909,6 +960,8 @@ fn explain(code: &str, flow: &Flow) -> String {
 fn explain_settings(code: &str) -> String {
     if code == "network" {
         "Can’t reach Powermove Cloud. Check your connection and try again.".into()
+    } else if code == "keychain" {
+        "Powermove couldn’t remove your sign-in from the Keychain. Try again.".into()
     } else {
         "Your account couldn’t be updated. Try again.".into()
     }

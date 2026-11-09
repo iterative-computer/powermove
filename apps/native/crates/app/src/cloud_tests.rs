@@ -202,6 +202,78 @@ fn an_ended_session_reads_as_signed_out_and_is_forgotten() {
     assert!(s.vault.read().unwrap().is_none());
 }
 
+/// Keychain items in memory; `refuse` makes deletes fail as a locked or
+/// denied Keychain does.
+#[derive(Clone, Default)]
+struct Items {
+    map: Arc<Mutex<std::collections::BTreeMap<(String, String), Vec<u8>>>>,
+    refuse: Arc<Mutex<bool>>,
+}
+impl crate::cloud::Items for Items {
+    fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        let key = (service.to_owned(), account.to_owned());
+        Ok(self.map.lock().unwrap().get(&key).cloned())
+    }
+    fn write(&mut self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+        let key = (service.to_owned(), account.to_owned());
+        self.map.lock().unwrap().insert(key, bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&mut self, service: &str, account: &str) -> Result<(), String> {
+        if *self.refuse.lock().unwrap() {
+            return Err("Keychain delete failed (-25293)".into());
+        }
+        let key = (service.to_owned(), account.to_owned());
+        self.map.lock().unwrap().remove(&key);
+        Ok(())
+    }
+}
+
+#[test]
+fn offline_sign_out_forgets_the_native_and_migrated_sessions_and_reports_a_keychain_failure() {
+    // No registry answers here: the sign-out call fails as it does offline.
+    let origin = "http://127.0.0.1:9/";
+    let sealed = serde_json::json!({"origin":"http://127.0.0.1:9","token":"t",
+        "expiresAt":"2999-01-01T00:00:00Z"})
+    .to_string();
+    let items = Items::default();
+    let migrated = crate::cloud::migrated_session();
+    let native = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    for key in [native.clone(), migrated.clone()] {
+        items
+            .map
+            .lock()
+            .unwrap()
+            .insert(key, sealed.clone().into_bytes());
+    }
+    let profile = tempfile::tempdir().unwrap();
+    let vault = || {
+        Box::new(crate::cloud::Keychain::with_items(
+            native.0.clone(),
+            native.1.clone(),
+            Some(migrated.clone()),
+            Box::new(items.clone()),
+        ))
+    };
+    let mut host = Http::new(origin, vault(), profile.path().to_owned());
+    assert!(host.signed_in());
+    let sign_out = |host: &mut Http| {
+        let task = CloudTask::new(Flight::default().start(), origin, CloudWork::SignOut).unwrap();
+        task.run(host).result
+    };
+    // A Keychain that refuses the delete is an error the person sees, and
+    // the session is still there to sign out again.
+    *items.refuse.lock().unwrap() = true;
+    assert_eq!(sign_out(&mut host).unwrap_err().to_string(), "keychain");
+    assert!(host.signed_in());
+    *items.refuse.lock().unwrap() = false;
+    assert!(matches!(sign_out(&mut host), Ok(CloudReply::SignedOut)));
+    assert!(items.map.lock().unwrap().is_empty());
+    // Relaunch: a new vault over the same Keychain finds nothing.
+    let relaunched = Http::new(origin, vault(), profile.path().to_owned());
+    assert!(!relaunched.signed_in());
+}
+
 /// A signed-in maker with a handle, and an extension made on this Mac.
 fn maker() -> (Setup, std::path::PathBuf) {
     let mut s = setup();
@@ -319,6 +391,95 @@ fn publish_uploads_verified_objects_then_an_update_follows_its_commit() {
         std::fs::read_to_string(profile.join("extensions/my-glow/manifest.json")).unwrap();
     assert!(manifest.contains("\"version\": \"0.9.1\""));
     assert!(manifest.find("\"id\"").unwrap() < manifest.find("\"version\"").unwrap());
+}
+
+/// Publishes `prepared` as `version` the way the sheet and confirmation do.
+fn finish(
+    s: &mut Setup,
+    profile: &std::path::Path,
+    prepared: &crate::publish::Prepared,
+    version: &str,
+) -> Result<String, String> {
+    use pm_services::surfaces::publishing::Draft;
+    let mut draft = Draft::for_plan(&prepared.plan);
+    draft.version = version.into();
+    draft.name = "My Glow".into();
+    draft.category = "effects".into();
+    crate::publish::draft_reasons(prepared, &mut draft);
+    let form = draft.form(&prepared.plan).unwrap();
+    let frozen = crate::publish::freeze(prepared, &form, 1_800_000_000)?;
+    assert!(frozen.confirmation().1.contains("2 files"));
+    crate::publish::upload(&mut s.host, profile, prepared, frozen)
+}
+fn uploaded(s: &Setup, needle: &[u8]) -> bool {
+    s.fixture
+        .lock()
+        .unwrap()
+        .objects
+        .values()
+        .any(|o| o.windows(needle.len()).any(|w| w == needle))
+}
+
+#[test]
+fn publish_uploads_the_files_it_checked_not_ones_added_while_the_sheet_was_open() {
+    let (mut s, profile) = maker();
+    let folder = profile.join("extensions/my-glow");
+    let prepared = crate::publish::prepare(&mut s.host, &profile, "my-glow", true).unwrap();
+    assert_eq!(crate::publish::plan_problem(&prepared.plan), None);
+    // While the sheet is open, a credential lands in a new file and an old one.
+    let key = format!("AKIA{}", "B".repeat(16));
+    std::fs::write(folder.join("src/key.ts"), format!("const k = \"{key}\";\n")).unwrap();
+    std::fs::write(folder.join("src/index.ts"), format!("// {key}\n")).unwrap();
+    assert_eq!(
+        finish(&mut s, &profile, &prepared, "0.9.0").unwrap(),
+        "Published maker/my-glow 0.9.0."
+    );
+    assert!(!uploaded(&s, key.as_bytes()));
+    assert!(uploaded(&s, b"export default function () {}"));
+}
+
+#[test]
+fn publish_refuses_a_linked_folder_and_never_follows_a_swapped_one() {
+    let (mut s, profile) = maker();
+    let folder = profile.join("extensions/my-glow");
+    let outside = profile.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+        outside.join("manifest.json"),
+        "{\"id\":\"my-glow\",\"name\":\"Elsewhere\",\"version\":\"0.1.0\",\"permissions\":[]}",
+    )
+    .unwrap();
+    std::fs::write(outside.join("private.txt"), "outside the extension").unwrap();
+    // The folder itself a link: refused before anything is read.
+    let real = profile.join("extensions/real-glow");
+    std::fs::rename(&folder, &real).unwrap();
+    std::os::unix::fs::symlink(&outside, &folder).unwrap();
+    assert_eq!(
+        crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+            .err()
+            .as_deref(),
+        Some("This extension’s folder is a link. Only a real folder can be published.")
+    );
+    // Swapped for a link after the sheet opened: the held folder publishes,
+    // and the version goes back into it, not into what the link names.
+    std::fs::remove_file(&folder).unwrap();
+    std::fs::rename(&real, &folder).unwrap();
+    let prepared = crate::publish::prepare(&mut s.host, &profile, "my-glow", true).unwrap();
+    std::fs::rename(&folder, &real).unwrap();
+    std::os::unix::fs::symlink(&outside, &folder).unwrap();
+    assert!(finish(&mut s, &profile, &prepared, "1.0.0").is_ok());
+    assert!(!uploaded(&s, b"outside the extension"));
+    assert!(!uploaded(&s, b"Elsewhere"));
+    assert!(
+        std::fs::read_to_string(outside.join("manifest.json"))
+            .unwrap()
+            .contains("0.1.0")
+    );
+    assert!(
+        std::fs::read_to_string(real.join("manifest.json"))
+            .unwrap()
+            .contains("\"version\": \"1.0.0\"")
+    );
 }
 
 #[test]
