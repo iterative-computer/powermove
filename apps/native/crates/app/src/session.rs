@@ -72,6 +72,7 @@ pub struct Controller {
     pub project_hdr: bool,
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
+    pub mixer: crate::mixer_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -172,6 +173,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| v.extension_panel(id, bounds, cx))
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
+                .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -398,6 +400,7 @@ impl Controller {
             project_hdr: false,
             scopes: Default::default(),
             perf: Default::default(),
+            mixer: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
