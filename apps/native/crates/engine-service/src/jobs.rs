@@ -181,8 +181,8 @@ pub fn set_compat_answerer(
 /// The generation of override wrappers drawing document `doc_id` now (none:
 /// no override).
 pub fn compat_epoch(doc_id: u64) -> Option<u64> {
-    let all = COMPAT.lock().unwrap();
-    (all.as_ref()?.get(&doc_id)?.state)()
+    let state = COMPAT.lock().unwrap().as_ref()?.get(&doc_id)?.state.clone();
+    state()
 }
 /// A compat need's reply on the child's stdin. Pixels go through a private
 /// file the child reads and removes, never through the pipe; its name is the
@@ -370,12 +370,15 @@ impl ExportHandle {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         // Pinned now: the frozen project and the wrappers registered at start.
-        let answerer = COMPAT.lock().unwrap().as_ref().and_then(|all| {
+        let producer = COMPAT.lock().unwrap().as_ref().and_then(|all| {
             let c = all.get(&session?)?;
-            let epoch = (c.state)()?;
+            Some((c.state.clone(), c.answer.clone(), c.begin.clone()))
+        });
+        let answerer = producer.and_then(|(state, answer, begin)| {
+            let epoch = state()?;
             Some((
-                c.answer.clone(),
-                c.begin.clone(),
+                answer,
+                begin,
                 CompatPin {
                     job: request.job.as_str().to_owned(),
                     revision: request.revision,
