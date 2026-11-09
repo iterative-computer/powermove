@@ -4763,6 +4763,7 @@ dependencies = [
  "pm-runtime-v8",
  "pm-store-host",
  "png",
+ "regex",
  "resvg",
  "serde_json",
  "sha2",

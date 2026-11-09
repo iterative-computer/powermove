@@ -31,6 +31,7 @@ tempfile = "3"
 libc = "=0.2.186"
 tar = "0.4"
 flate2 = "1"
+regex = "1"
 
 [[bin]]
 name = "pm-compat-runner"
