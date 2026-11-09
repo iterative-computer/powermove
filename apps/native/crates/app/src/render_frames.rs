@@ -96,24 +96,60 @@ impl Controller {
             .and_then(crate::node_string)
             .map_or("Render".to_owned(), |name| format!("Render {name}"));
         // Spawning the child serializes the document: off the main thread.
+        let fill = disk.clone();
         let started = cx.background_executor().spawn(async move {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let queued = disk.start_fill(from, to, &exe, activity)?;
+            let queued = fill.start_fill(from, to, &exe, activity)?;
             if queued > 0 {
-                follow(disk, tasks, p.project.clone(), title, queued);
+                follow(fill, tasks, p.project.clone(), title, queued);
             }
             Ok::<u64, String>(queued)
         });
         cx.spawn(async move |this, cx| {
-            let message = match started.await {
-                Ok(0) => "Already rendered".to_owned(),
-                Ok(n) => format!("Rendering {n} frames"),
-                Err(e) => e,
+            let queued = match started.await {
+                Ok(0) => Err("Already rendered".to_owned()),
+                Ok(n) => Ok(n),
+                Err(e) => Err(e),
             };
-            let _ = this.update(cx, |v, cx| {
-                v.message = message;
-                cx.notify();
-            });
+            let total = match queued {
+                Ok(total) => total,
+                Err(message) => {
+                    let _ = this.update(cx, |v, cx| {
+                        v.message = message;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            // The status line counts the frames as they render and clears when
+            // the render ends (finished, cancelled or failed; Background Tasks
+            // keeps the outcome), unless something else has spoken since.
+            let mut shown = String::new();
+            loop {
+                let bars = disk.bars();
+                let next = if bars.running {
+                    format!("Rendering {} of {total} frames", bars.done.min(total))
+                } else {
+                    String::new()
+                };
+                let ours = this
+                    .update(cx, |v, cx| {
+                        let ours = shown.is_empty() || v.message == shown;
+                        if ours && v.message != next {
+                            v.message = next.clone();
+                            cx.notify();
+                        }
+                        ours
+                    })
+                    .unwrap_or(false);
+                if !ours || !bars.running {
+                    return;
+                }
+                shown = next;
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+            }
         })
         .detach();
     }
