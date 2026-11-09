@@ -228,3 +228,5 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - `Integration::status_trailing` (default empty) gives the status line its format facts; the shell stays free of document state.
 - New tokens: `metrics.titlebar` (28, plain panel windows' title band) and `metrics.popover_radius` (16).
 - Clip selection is the accent ring and row selection fills the layer column only (owner's demo), replacing language §11's `text` ring.
+- Review overrides are development-build only; a release build treats `--appearance`/`--accessibility` as unknown arguments and ignores `PM_NATIVE_ACCESSIBILITY`.
+- A workspace `gutterWidth` of 224 (v1's written default) takes the native timeline column default; other widths are kept as authored.

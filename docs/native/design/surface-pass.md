@@ -132,3 +132,26 @@ uses. The governing rules stay in [language.md](language.md).
   (`blurred_view_update_layer`, a non-unwinding panic that aborts the app).
   The Library uses a transparent window over the shell's behind-window blur
   (`pm_shell::window_backdrop`) instead; nothing should use `Blurred`.
+
+## Review fixes (Sol review, 2026-11-08)
+
+- `role="status"` is live in every v4 panel: a status that appears or changes
+  after the first frame is posted as an NSAccessibility announcement and maps
+  to the status role. Timeline refusals (key collision, outside the
+  composition, locked layer) also stay visible as a `floating` capsule at the
+  bottom-left of the tracks; confirmations are spoken only.
+- The timeline's `ground` op is the track material: the timeline tokens'
+  `colors.panel` (a theme's track colour, swapped by reversed surfaces) at
+  `translucency.panel`, opaque under Reduce Transparency. The shell fills only
+  the header of a panel that paints its own ground.
+- Narrow docks: the header's own tools (one hit, or two hits and a gap for a
+  panel's actions) and More Panels keep their room; the More Panels chevron
+  sits outside the clipped tab strip; only an active tab wider than the room
+  truncates (`TabTrack::active_limit`).
+- Selected rows use `colors.selected_secondary` and `colors.selected_danger`
+  (≥ 4.5:1 on `selected_fill`, spec-tested in every variant).
+- Ruler ticks and grid read `translucency.tick_minor`, `tick_major`, `grid`.
+- Layer column: native default `metrics.layer_column` 320 with an edge
+  hairline (drag it; double-click resets). v1 wrote its default `gutterWidth`
+  224 into every workspace, so 224 means "default"; any other width is kept.
+  Unset switches show on hover or focus only.
