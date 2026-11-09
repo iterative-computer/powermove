@@ -17,7 +17,7 @@ const argument = process.argv[2];
 if (!argument) throw new Error('Supply an output directory outside the repository');
 const out = path.resolve(argument);
 if (out === repoRoot || out.startsWith(repoRoot + path.sep)) throw new Error('Output must be outside the repository');
-const fixture = path.join(repoRoot, 'apps/desktop/e2e/fixtures/h264-aac.mp4');
+const fixture = path.join(repoRoot, 'engine/fixtures/h264-aac.mp4');
 if (!existsSync(fixture)) throw new Error(`Missing repository video fixture: ${fixture}`);
 mkdirSync(out, { recursive: true });
 const detailFixture = path.join(out, 'detail.mp4');

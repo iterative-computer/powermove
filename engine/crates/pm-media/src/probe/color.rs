@@ -579,7 +579,7 @@ mod interpret_tests {
     /// values: 2 is unspecified).
     fn info(codec: &str, w: i32, h: i32, tags: [i32; 3]) -> CodecInfo {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+            .join("../../fixtures/h264-aac.mp4");
         let input = crate::ff::Input::open(&path).unwrap();
         let mut info = input.codec_info(input.best_video().unwrap());
         info.codec = codec.into();

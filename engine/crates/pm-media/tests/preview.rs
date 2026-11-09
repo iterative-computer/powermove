@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 fn fixtures(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures")
+        .join("../../fixtures")
         .join(name)
 }
 

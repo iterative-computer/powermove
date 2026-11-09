@@ -2,7 +2,7 @@
  * Media the corpus documents reference. Documents never embed asset ids: a
  * layer names its source as `media:<file>`, and the capture tool imports that
  * file through the app's real import path and rewrites the reference to the
- * asset id the app assigned. Fixture media comes from apps/desktop/e2e/fixtures;
+ * asset id the app assigned. Fixture media comes from engine/fixtures;
  * generated media is synthesized deterministically by the generator.
  */
 import { createHash } from 'node:crypto';

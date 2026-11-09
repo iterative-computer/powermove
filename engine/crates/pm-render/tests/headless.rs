@@ -138,7 +138,7 @@ fn everything() -> (Value, MapResolver) {
     );
     asset(&mut doc, "still", "image", "png", 160, 90, 0.0);
     asset(&mut doc, "clip", "video", "mp4", 320, 180, 2.0);
-    let fixtures = repo_root().join("apps/desktop/e2e/fixtures");
+    let fixtures = repo_root().join("engine/fixtures");
     let mut resolver = MapResolver::default();
     resolver
         .paths
@@ -646,7 +646,7 @@ fn requests_are_validated() {
 
 #[test]
 fn pass_through_candidates() {
-    let fixtures = repo_root().join("apps/desktop/e2e/fixtures");
+    let fixtures = repo_root().join("engine/fixtures");
     let clip = |rotation: f64, extra: bool| {
         let mut v = layer(
             "v",

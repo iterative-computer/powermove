@@ -766,7 +766,7 @@ mod tests {
     #[test]
     fn a_worker_that_exited_idle_takes_no_requests() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+            .join("../../fixtures/h264-aac.mp4");
         let src = MediaSource::open(&path).unwrap();
         let service = Arc::new(DecodeService::new(Default::default()));
         let viewer = ViewerDecode::new(service).with_idle_exit(Duration::ZERO);
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn playback_past_its_allowance_shows_a_stand_in_and_the_exact_frame_lands() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+            .join("../../fixtures/h264-aac.mp4");
         let src = MediaSource::open(&path).unwrap();
         let service = Arc::new(DecodeService::new(Default::default()));
         let viewer = ViewerDecode::new(service);

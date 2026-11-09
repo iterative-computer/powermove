@@ -15,7 +15,7 @@ def main():
     p.add_argument('--case',action='append',default=[])
     p.add_argument('--store',action='store_true')
     p.add_argument('--owner-root',type=Path,default=Path.home()/'Library/Application Support/Powermove/extensions')
-    p.add_argument('--corpus-root',type=Path,default=run.ROOT/'apps/desktop/e2e/fixtures/compat-corpus')
+    p.add_argument('--corpus-root',type=Path,default=run.ROOT/'engine/fixtures/compat-corpus')
     p.add_argument('--scripts',type=Path,help='Private reviewed per-case scripts; same selection as run.py')
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--keep-sample',action='store_true',help='Retain only one case’s small screenshots/traces for diagnosis')

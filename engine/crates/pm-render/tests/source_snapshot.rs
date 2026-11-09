@@ -65,7 +65,7 @@ fn add_test_clean_aperture(path: &std::path::Path, width: u32, height: u32) {
 #[test]
 fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+        .join("../../fixtures/h264-aac.mp4");
     let mut renderer = Renderer::headless().unwrap();
     let (size, bytes, tags) = renderer
         .source_video_planes(&fixture, Ticks::ZERO, false)
@@ -95,7 +95,7 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     let still = dir.path().join("still.png");
     std::fs::write(
         &still,
-        include_bytes!("../../../../apps/desktop/e2e/fixtures/still-red.png"),
+        include_bytes!("../../../fixtures/still-red.png"),
     )
     .unwrap();
     assert!(
@@ -108,7 +108,7 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
 #[test]
 fn original_prores_uses_native_conversion_when_the_presenter_cannot_import_it() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/prores422.mov");
+        .join("../../fixtures/prores422.mov");
     let mut renderer = Renderer::headless().unwrap();
     assert!(
         renderer
@@ -638,7 +638,7 @@ fn native_source_heif_rejects_pq_and_hlg_container_transfers() {
     // Mutate only the transfer code of a valid HEIF: item data, offsets,
     // property associations and dimensions remain intact. ImageIO's SDR
     // sample label must not erase the file's declared HDR transfer.
-    let original = include_bytes!("../../../../apps/desktop/e2e/fixtures/still.heic");
+    let original = include_bytes!("../../../fixtures/still.heic");
     let nclx = original
         .windows(4)
         .position(|bytes| bytes == b"nclx")
@@ -846,7 +846,7 @@ fn untagged_vp9_rendition_uses_native_composition_colour() {
     // Use the same converter flags as import.
     let dir = tempfile::tempdir().unwrap();
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/prores422.mov");
+        .join("../../fixtures/prores422.mov");
     let proxy = dir.path().join("browser.webm");
     let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
         .map(std::path::PathBuf::from)
@@ -1222,7 +1222,7 @@ fn minified_source_draws_reuse_one_pyramid() {
 #[test]
 fn monitor_reads_interpret_footage_as_composition_does() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+        .join("../../fixtures/h264-aac.mp4");
     let (w, h) = (160u32, 90u32);
     let interpret = json!({ "matrix": "bt709", "range": "full" });
     let (interpretation, issues) = pm_media::interpret::Interpretation::from_json(&interpret);

@@ -426,7 +426,7 @@ fn decoded_orientation_and_ignored_late_exif_match_blink() {
     }
 
     // Opaque lossy WebP.
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     let webp = std::fs::read(fixtures.join("still.webp")).expect("e2e fixture still.webp");
     assert_eq!(
         probe_image(&write("exif1.webp", &webp_with_exif(&webp, 1))),
@@ -624,7 +624,7 @@ fn avif_container_transforms_follow_blink() {
     );
     // Limited range (the app fixture) is in the class.
     let limited = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/still-limited-range.avif");
+        .join("../../fixtures/still-limited-range.avif");
     assert_eq!(probe_image(&limited), Ok(()));
     std::fs::remove_dir_all(&d).ok();
 }

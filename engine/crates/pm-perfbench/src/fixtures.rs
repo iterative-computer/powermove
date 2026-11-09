@@ -663,7 +663,7 @@ pub fn pyramid_video_doc() -> Value {
 
 /// The public H.264 fixture the scrub bench seeks in.
 pub fn video_fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4")
 }
 
 /// An unindexed glTF binary of `vertices` positions (a multiple of 6): a

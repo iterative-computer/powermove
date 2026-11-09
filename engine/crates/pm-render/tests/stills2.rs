@@ -7,7 +7,7 @@
 //! Today is Chromium 152's upload of each fixture through the shipped
 //! importer: `fixtures/stills2/chromium.json` holds the SHA-256 of each
 //! premultiplied RGBA8 upload and `fixtures/stills2/today/<sha256>.png`
-//! the bytes it hashes (`e2e/…` rows are `apps/desktop/e2e/fixtures`).
+//! the bytes it hashes (`e2e/…` rows are `engine/fixtures`, the old e2e fixtures).
 //! `incomplete-texture` rows are the deep and arithmetic JPEGs whose RGBA8
 //! upload fails: today draws an opaque black sampler.
 mod support;
@@ -26,7 +26,7 @@ fn fixture(name: &str) -> PathBuf {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stills2");
     match name.strip_prefix("e2e/") {
         Some(e2e) => Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/desktop/e2e/fixtures")
+            .join("../../fixtures")
             .join(e2e),
         None => tests.join(name),
     }

@@ -670,7 +670,7 @@ fn corpus_plans_with_reused_draws_match() {
 /// the viewer's regions of interest.
 #[test]
 fn frames_drawn_with_reuse_are_identical() {
-    let fixtures = support::repo_root().join("apps/desktop/e2e/fixtures");
+    let fixtures = support::repo_root().join("engine/fixtures");
     let files = vec![
         fixtures.join("still-alpha.png"),
         fixtures.join("still-red.png"),
@@ -762,7 +762,7 @@ fn frames_drawn_with_reuse_are_identical() {
 /// again as it is now, as a fresh frame draws it.
 #[test]
 fn a_still_changed_on_disk_is_not_kept() {
-    let fixtures = support::repo_root().join("apps/desktop/e2e/fixtures");
+    let fixtures = support::repo_root().join("engine/fixtures");
     let dir = std::env::temp_dir().join(format!("pm-draw-reuse-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let still = dir.join("a.png");

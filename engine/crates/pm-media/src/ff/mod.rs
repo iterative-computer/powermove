@@ -872,7 +872,7 @@ mod tests {
     fn h264_headers_say_what_the_decoded_probe_says() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut files: Vec<_> = [
-            "../apps/desktop/e2e/fixtures",
+            "fixtures",
             "crates/pm-render/tests/fixtures/video",
         ]
         .iter()

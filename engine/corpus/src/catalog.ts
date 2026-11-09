@@ -12,7 +12,7 @@ export const repoRoot = path.resolve(import.meta.dir, '../../..');
 export const desktopRoot = path.join(repoRoot, 'apps/desktop');
 export const desktopSrc = path.join(desktopRoot, 'src');
 export const rendererSrc = path.join(desktopSrc, 'renderer/src');
-export const fixturesDir = path.join(desktopRoot, 'e2e/fixtures');
+export const fixturesDir = path.join(repoRoot, 'engine/fixtures');
 
 // The inspector's text-animator module imports pure text-animation helpers
 // through the `powermove` alias that Vite maps to the editor helpers. Load a
@@ -128,7 +128,7 @@ export function shaderPresets(): Record<string, string> {
 }
 
 /**
- * Extension effects from e2e fixture extensions (apps/desktop/e2e/fixtures/<extension>).
+ * Extension effects from e2e fixture extensions (engine/fixtures/<extension>).
  * The capture installs the extension into the isolated profile before launch and
  * checks these parameter keys against the definition the running app registered.
  */

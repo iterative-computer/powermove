@@ -46,7 +46,7 @@ fn repo() -> PathBuf {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    repo().join("apps/desktop/e2e/fixtures").join(name)
+    repo().join("engine/fixtures").join(name)
 }
 
 fn ch(v: Value) -> Value {

@@ -63,7 +63,7 @@ decision (the profile is disposable) and kills Electron if it has not exited aft
 
 **Opening a project.** The generator writes documents with media named `media:<file>`.
 The capture opens the document with the app's `pm-open-project` event, imports each
-referenced file through `PM.assets.add` (fixture media from `apps/desktop/e2e/fixtures`,
+referenced file through `PM.assets.add` (fixture media from `engine/fixtures`,
 generated media from the capture's `generated/media`), rewrites the references to the
 asset ids the app assigned, reopens the rewritten document, and waits for media to load
 and for three consecutive identical renders (`settle`). `loaded.json` is the project as

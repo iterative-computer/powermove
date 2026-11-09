@@ -13,7 +13,7 @@ use std::{
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../desktop/e2e/fixtures")
+        .join("../../../../engine/fixtures")
         .join(name)
 }
 fn snapshot(project: &str) -> Snapshot {

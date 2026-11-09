@@ -10,7 +10,7 @@ use support::doc::*;
 
 #[test]
 fn persisted_sequence_renditions_use_the_video_path() {
-    let path = support::repo_root().join("apps/desktop/e2e/fixtures/vp9-opus.webm");
+    let path = support::repo_root().join("engine/fixtures/vp9-opus.webm");
     let mut doc = project(
         160,
         90,
@@ -333,7 +333,7 @@ fn rendition_or_reencode(dir: &std::path::Path, name: &str) -> std::path::PathBu
     } else {
         let path = dir.join(format!("{name}.webm"));
         let input = support::repo_root()
-            .join("apps/desktop/e2e/fixtures")
+            .join("engine/fixtures")
             .join(name);
         let out = Command::new(&bin)
             .args(["-v", "error", "-y", "-i"])

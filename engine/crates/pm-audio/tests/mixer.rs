@@ -628,7 +628,7 @@ fn monitor_solo_and_meters() {
 #[test]
 fn a_silent_video_is_not_a_problem() {
     let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures");
+        .join("../../fixtures");
     let v = layer(
         "V",
         "video",

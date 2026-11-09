@@ -24,7 +24,7 @@ pub fn manifest() -> PathBuf {
 }
 
 pub fn fixtures_dir() -> PathBuf {
-    manifest().join("../../../apps/desktop/e2e/fixtures")
+    manifest().join("../../fixtures")
 }
 
 /// The generated corpus (tests/corpus/gen.sh): `PM_MEDIA_CORPUS` or the
