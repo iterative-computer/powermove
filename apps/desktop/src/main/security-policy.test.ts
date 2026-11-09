@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { sandboxDocumentUrl, sandboxHost } from '../shared/sandbox-origin';
-import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSandboxCsp, sandboxFrameNavigationAllowed, sandboxHostOwner, sandboxProcessesToKill } from './security-policy';
+import { CAD_WORKER_CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, isCadWorkerScript, extensionSandboxCsp, sandboxFrameNavigationAllowed, sandboxHostOwner, sandboxProcessesToKill } from './security-policy';
 
 describe('renderer security policy', () => {
   it('allows registry images in the editor while keeping generated scripts isolated', () => {
@@ -14,6 +14,15 @@ describe('renderer security policy', () => {
       .find(value => value.startsWith('connect-src '))?.split(/\s+/).slice(1);
     expect(connect).toEqual(["'self'", 'blob:', 'http:', 'https:', 'ws:', 'wss:']);
     expect(SANDBOX_CONTENT_SECURITY_POLICY).toContain("connect-src 'none'");
+  });
+
+  it('confines WebAssembly and eval to the CAD worker, which has no network', () => {
+    expect(directive(CAD_WORKER_CONTENT_SECURITY_POLICY, 'script-src')).toEqual(["'self'", "'unsafe-eval'", "'wasm-unsafe-eval'"]);
+    expect(directive(CAD_WORKER_CONTENT_SECURITY_POLICY, 'connect-src')).toEqual(["'self'"]);
+    expect(CONTENT_SECURITY_POLICY).not.toContain('wasm-unsafe-eval');
+    expect(isCadWorkerScript('assets/cad.worker-sP2-XfP1.js')).toBe(true);
+    expect(isCadWorkerScript('assets/index-sP2-XfP1.js')).toBe(false);
+    expect(isCadWorkerScript('assets/cad.worker-x.js/../index.js')).toBe(false);
   });
 
   it('forbids eval in the privileged editor and confines it to the generated-script sandbox', () => {

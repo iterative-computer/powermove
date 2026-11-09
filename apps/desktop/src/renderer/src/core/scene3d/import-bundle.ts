@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { MTLLoader as MaterialLoader } from 'three/addons/loaders/MTLLoader.js';
 import { parseObj } from '../../kernel/obj';
+import { CAD_FILE, cadToGlb } from './import-cad';
 import { disposeModel } from './import-model';
 
 const leaf=(path:string)=>decodeURIComponent(path).replaceAll('\\','/').split('/').pop()!.toLowerCase();
@@ -9,10 +10,13 @@ const leaf=(path:string)=>decodeURIComponent(path).replaceAll('\\','/').split('/
  * No sibling file is read implicitly and no URL from model source is fetched. */
 export async function prepareModelImport(files:File[]):Promise<File> {
   if(!files.length||files.length>128)throw new Error('Choose a model and its material/texture files');
-  if(files.some(f=>!(f instanceof File))||files.reduce((s,f)=>s+f.size,0)>128*1024*1024)throw new Error('Model files must be smaller than 128 MB in total');
-  const models=files.filter(f=>/\.(obj|glb|gltf)$/i.test(f.name));
+  if(files.some(f=>!(f instanceof File))||files.reduce((s,f)=>s+f.size,0)>512*1024*1024)throw new Error('Model files must be smaller than 512 MB in total');
+  const models=files.filter(f=>/\.(obj|glb|gltf|ply|splat)$/i.test(f.name)||CAD_FILE.test(f.name));
   if(models.length!==1)throw new Error('Choose one model at a time with its material and texture files');
   const model=models[0]!;
+  // STEP, IGES and BREP: tessellated by OpenCascade into a GLB with the same parts.
+  if(CAD_FILE.test(model.name))return cadToGlb(model);
+  // GLB, glTF and splats are already self-contained.
   if(!/\.obj$/i.test(model.name)||files.length===1)return model;
   const source=await model.text();parseObj(source); // Validate geometry before Three allocates it.
   const materials=files.filter(f=>/\.mtl$/i.test(f.name));

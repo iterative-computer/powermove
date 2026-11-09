@@ -8,6 +8,18 @@ import { isSandboxHost, sandboxDocumentId, sandboxHost } from '../shared/sandbox
 export const CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: http: https:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob: http: https: ws: wss:; worker-src 'self' blob:; frame-src 'self' about: blob: app:";
 
+/**
+ * The CAD import worker runs OpenCascade compiled to WebAssembly, whose
+ * emscripten bindings build their call wrappers with `Function` from the
+ * module's own type signatures (never from file contents). Only that worker's
+ * script gets eval and WebAssembly (a dedicated worker takes its policy from
+ * its own response), and it has no network: it can load the app's own files
+ * and post results back, nothing else.
+ */
+export const CAD_WORKER_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; connect-src 'self'";
+export const isCadWorkerScript = (relativePath: string): boolean => /^assets\/cad\.worker-[\w-]+\.js$/.test(relativePath.replaceAll('\\', '/'));
+
 /** Generated scripts retain eval only inside the opaque, no-network sandbox. */
 export const SANDBOX_CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src app://powermove/host/sandbox.js 'unsafe-eval'; worker-src blob:; connect-src 'none'";

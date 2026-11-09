@@ -4,6 +4,11 @@ import type { ExtrusionMeshSample } from './extrusion-render';
 import { applyMaterialProperties } from './material-properties';
 import { applyParts, captureRestPose, restoreParts } from './model-parts';
 import * as THREE from 'three';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+let rectAreaReady=false;
+const rectArea=()=>{if(!rectAreaReady){RectAreaLightUniformsLib.init();rectAreaReady=true;}};
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { type MaterialMap } from './material-maps';
 import type { CompositionTextureFrame } from './composition-textures';
@@ -14,6 +19,30 @@ export type SceneCompositionGetter = (objectId:string,map:MaterialMap)=>Composit
 export type SceneAssetGetter = (id: string) => any;
 const radians = THREE.MathUtils.degToRad;
 let outputRenderer:THREE.WebGLRenderer|null=null;
+/*
+ * The studio set in the real-time renderer (the viewer's Fast preview, and
+ * machines without WebGPU): Studio's backdrop color, a neutral studio room to
+ * reflect (metal is otherwise black), and a soft contact shadow under the
+ * models on the set's floor (area lights cast no real-time shadows). None of
+ * it carries a scene id, so picking and Studio's own trace never see it.
+ */
+const STUDIO_SET_BACKDROP='#F6F5F8';
+let studioRoom:THREE.Texture|null=null;
+const studioRoomFor=(renderer:THREE.WebGLRenderer)=>{
+  if(!studioRoom){const pmrem=new THREE.PMREMGenerator(renderer);studioRoom=pmrem.fromScene(new RoomEnvironment(),.04).texture;pmrem.dispose();}
+  return studioRoom;
+};
+let contactTexture:THREE.Texture|null=null;
+const contactShadowTexture=()=>{
+  if(!contactTexture){
+    const c=document.createElement('canvas');c.width=c.height=256;const g=c.getContext('2d')!;
+    const r=g.createRadialGradient(128,128,0,128,128,128);
+    r.addColorStop(0,'rgba(0,0,0,.42)');r.addColorStop(.45,'rgba(0,0,0,.2)');r.addColorStop(1,'rgba(0,0,0,0)');
+    g.fillStyle=r;g.fillRect(0,0,256,256);
+    contactTexture=new THREE.CanvasTexture(c);contactTexture.colorSpace=THREE.SRGBColorSpace;
+  }
+  return contactTexture;
+};
 let outputDepth:{owner:SceneRuntime;key:string}|null=null;
 const outputOwners=new Set<SceneRuntime>();
 const sourceSignatures=new WeakMap<object,string>();
@@ -37,6 +66,11 @@ export function primitiveGeometry(source: SceneSource): THREE.BufferGeometry {
   const p = source.parameters || {},s=p.segments || 48;
   switch (source.primitive) {
     case 'box': return new THREE.BoxGeometry(p.width || 1,p.height || 1,p.depth || 1);
+    // Devices and product shells: a box with rounded edges (radius ≤ half the thinnest side).
+    case 'roundedBox': {
+      const w=p.width || 1,h=p.height || 1,d=p.depth || 1;
+      return new RoundedBoxGeometry(w,h,d,Math.min(16,p.segments ?? 6),Math.min(p.radius ?? .05,Math.min(w,h,d)/2-1e-4));
+    }
     case 'sphere': return new THREE.SphereGeometry(p.radius || .5,s,Math.max(3,Math.floor(s/2)));
     case 'plane': return new THREE.PlaneGeometry(p.width || 4,p.height || 4);
     case 'cone': return new THREE.ConeGeometry(p.radius || .5,p.height || 1,s);
@@ -82,6 +116,8 @@ export class SceneRuntime {
   /** Loading captures must be retried even when project/time are unchanged. */
   materialsPending = false;
 
+  /** The studio set's contact shadow (see STUDIO_SET_BACKDROP). */
+  private floor:THREE.Mesh|null=null;
   constructor() { this.scene.add(this.ambient); }
 
   private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null,nativeArtwork=false): THREE.Texture|null {
@@ -135,7 +171,8 @@ export class SceneRuntime {
       if (asset?.object3d) {
         const object = cloneSkinned(asset.object3d);
         // Clones own geometry/material lifetime, never the asset store's resources.
-        object.traverse((c:any)=> { if (c.geometry) c.geometry=c.geometry.clone();
+        // Splat clones already share their data and own their sort order.
+        object.traverse((c:any)=> { if (c.userData.splat) return; if (c.geometry) c.geometry=c.geometry.clone();
           if (c.material) c.material=Array.isArray(c.material) ? c.material.map((m:any)=>m.clone()) : c.material.clone(); });
         captureRestPose(object);
         if (asset.animations?.length) {
@@ -156,7 +193,7 @@ export class SceneRuntime {
       const placeholder = new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshBasicMaterial({color:0xff6600,wireframe:true}));
       placeholder.userData.missing = true; return placeholder;
     }
-    return new THREE.Mesh(primitiveGeometry(node.source),new THREE.MeshStandardMaterial());
+    return new THREE.Mesh(primitiveGeometry(node.source),new THREE.MeshPhysicalMaterial());
   }
 
   sync(raw: Scene3D,assets: SceneAssetGetter = this.getter,evaluate: SceneEvaluator = this.evaluation,time = 0,alreadyValidated=false,animationTime?:(id:string)=>number,compositionGetter:SceneCompositionGetter=()=>null,extrusions:ExtrusionMeshSample[]=[]): void {
@@ -174,7 +211,8 @@ export class SceneRuntime {
     }));
     let importedVertices=0;
     for(const node of data.objects)if('assetId' in node.source)importedVertices+=assets(node.source.assetId)?.vertices || 0;
-    if(importedVertices>2_000_000)throw new Error('Imported scene exceeds two million vertices; simplify or split the models');
+    // CAD assemblies and splat captures run to tens of millions; Studio prepares large models in the background.
+    if(importedVertices>30_000_000)throw new Error('Imported scene exceeds 30 million vertices; simplify or split the models');
     for (const node of data.objects) {
       const source = signature(node.source)+':'+node.useSourceMaterials,asset='assetId' in node.source ? assets(node.source.assetId) : null;
       let object = this.objects.get(node.id);
@@ -194,6 +232,7 @@ export class SceneRuntime {
         c.userData.sceneId=node.id;
         if (!c.isMesh) return;
         c.castShadow=node.castShadow;c.receiveShadow=node.receiveShadow;
+        if (c.userData.splat) { c.castShadow=c.receiveShadow=false; return; }
         if (c.userData.missing) return;
         if(node.useSourceMaterials){
           for(const material of Array.isArray(c.material)?c.material:[c.material]){
@@ -230,13 +269,20 @@ export class SceneRuntime {
           }
           return;
         }
-        if (!(c.material instanceof THREE.MeshStandardMaterial) || Array.isArray(c.material)) {
+        if (!(c.material instanceof THREE.MeshPhysicalMaterial) || Array.isArray(c.material)) {
           for (const material of Array.isArray(c.material)?c.material:[c.material]) material.dispose();
-          c.material=new THREE.MeshStandardMaterial();
+          c.material=new THREE.MeshPhysicalMaterial();
         }
-        const material=c.material as THREE.MeshStandardMaterial;
+        const material=c.material as THREE.MeshPhysicalMaterial;
         material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
         material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
+        material.clearcoat=m.clearcoat ?? 0;material.clearcoatRoughness=m.clearcoatRoughness ?? .03;
+        material.transmission=m.transmission ?? 0;material.ior=m.ior ?? 1.5;material.specularIntensity=m.specular ?? 1;
+        material.sheen=m.sheen ?? 0;material.sheenColor.set('#FFFFFF');material.sheenRoughness=Math.max(.2,m.roughness);
+        material.iridescence=(m.iridescence ?? 0)>0?1:0;material.iridescenceThicknessRange=[100,Math.max(100,m.iridescence ?? 0)];
+        material.dispersion=(m.dispersion ?? 0)*5;material.userData.studioDispersion=m.dispersion ?? 0;material.userData.droplets=m.droplets ?? 0;
+        material.anisotropy=Math.abs(m.anisotropy ?? 0);material.userData.anisotropy=m.anisotropy ?? 0;material.userData.subsurface=m.subsurface ?? 0;
+        material.userData.screen=node.material.screen ?? null;
         const transparent=m.opacity<1,side=node.material.doubleSided?THREE.DoubleSide:THREE.FrontSide;
         if (transparent!==material.transparent || side!==material.side) material.needsUpdate=true;
         material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
@@ -268,7 +314,8 @@ export class SceneRuntime {
       let object=this.objects.get(node.id) as THREE.Light|undefined;
       if (!object || object.userData.lightType!==node.type) {
         if (object) this.remove(node.id,object);
-        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():new THREE.PointLight();
+        if(node.type==='area')rectArea();
+        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():node.type==='area'?new THREE.RectAreaLight():new THREE.PointLight();
         object.userData.lightType=node.type;object.userData.sceneId=node.id;this.objects.set(node.id,object);this.scene.add(object);
         if ('target' in object) this.scene.add((object as THREE.DirectionalLight).target);
       }
@@ -276,8 +323,10 @@ export class SceneRuntime {
       object.name=node.name;object.position.set(v.x,v.y,v.z);object.color.set(v.color);object.intensity=v.intensity;
       object.visible=v.visible!==false;
       const light=object as any;
-      light.castShadow=node.castShadow && data.environment.shadows && shadowLights++<4;
+      // Softboxes (area lights) cast no real-time shadows.
+      light.castShadow=!!light.shadow && node.castShadow && data.environment.shadows && shadowLights++<4;
       if (light.target) light.target.position.set(v.targetX,v.targetY,v.targetZ);
+      if (light.isRectAreaLight) { light.width=v.width;light.height=v.height;light.lookAt(v.targetX,v.targetY,v.targetZ); }
       if ('distance' in light) { light.distance=v.distance;light.decay=v.decay; }
       if ('angle' in light) { light.angle=radians(v.angle);light.penumbra=v.penumbra; }
       if (light.shadow) {
@@ -296,7 +345,8 @@ export class SceneRuntime {
     const environment=values(data.environment.p,'environment');
     this.ambient.color.set(environment.ambientColor);this.ambient.groundColor.set(environment.ambientColor).multiplyScalar(.35);
     this.ambient.intensity=environment.ambient;
-    this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
+    const studioSet=!!data.environment.shadowCatcher;
+    this.scene.background=data.environment.background?new THREE.Color(data.environment.background):studioSet?new THREE.Color(STUDIO_SET_BACKDROP):null;
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
     for(const [key,entry] of this.textures)if(!this.usedTextures.has(key)){entry.texture.dispose();this.textures.delete(key);}
@@ -357,6 +407,24 @@ export class SceneRuntime {
     });
   }
 
+  /** Room reflections and the contact shadow while the studio set is on. */
+  private updateStudioSet(): void {
+    const on=!!this.raw?.environment?.shadowCatcher && !!this.renderer;
+    this.scene.environment=on?studioRoomFor(this.renderer!):null;
+    this.scene.environmentIntensity=.45;
+    const box=on?this.worldBounds():new THREE.Box3();
+    if(!on || box.isEmpty()){if(this.floor)this.floor.visible=false;return;}
+    if(!this.floor){
+      this.floor=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({map:contactShadowTexture(),transparent:true,depthWrite:false,toneMapped:false}));
+      this.floor.rotation.x=-Math.PI/2;this.floor.renderOrder=-1;this.scene.add(this.floor);
+    }
+    const size=box.getSize(new THREE.Vector3()),centre=box.getCenter(new THREE.Vector3());
+    this.floor.visible=true;
+    this.floor.position.set(centre.x,box.min.y+1e-3,centre.z);
+    this.floor.scale.set(size.x*1.7+size.y*.6,size.z*1.7+size.y*.6,1);
+    this.floor.updateMatrixWorld(true);
+  }
+
   resizeCamera(w:number,h:number,camera=this.camera): void {
     const aspect=w/Math.max(1,h);
     if (camera instanceof THREE.PerspectiveCamera) camera.aspect=aspect;
@@ -380,6 +448,7 @@ export class SceneRuntime {
     this.renderer.toneMappingExposure=e?this.evaluation(e.p.exposure,'environment.exposure'):1;
     this.renderer.shadowMap.enabled=e?.shadows!==false;
     this.renderer.setClearColor(0,0);
+    this.updateStudioSet();
     if(!objectId){outputDepth=null;this.renderer.render(this.scene,camera);}
     else {
       // A shared depth prepass lets ordinary timeline layers keep their own effects,
@@ -391,6 +460,8 @@ export class SceneRuntime {
       const visit=(phase:'depth'|'color')=>{
         this.scene.traverse((child:any)=>{
           if(!child.isMesh)return;
+          // The set's contact shadow belongs to the layer that owns the backdrop.
+          if(child===this.floor){child.visible=phase==='color' && background;return;}
           const id=child.userData.sceneId;
           for(const material of Array.isArray(child.material)?child.material:[child.material]){
             if(!saved.has(material))saved.set(material,{colorWrite:material.colorWrite,depthWrite:material.depthWrite,visible:material.visible,alphaTest:material.alphaTest});

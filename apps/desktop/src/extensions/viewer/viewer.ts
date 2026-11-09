@@ -1,5 +1,6 @@
 import {mount,unmount} from 'svelte';
 import GizmoToolbar from './GizmoToolbar.svelte';
+import { mountLightPanel } from './light-panel';
 import type { EditCommand, InspectorService, PowermoveAPI, Space3DAPI, ToolService, ViewerService } from 'powermove';
 import { layerIsLocked } from './layer-locks';
 
@@ -865,6 +866,7 @@ let layoutFrame = 0;
 
 let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
 let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
+let lightPanelOff:(()=>void)|null=null,lightPanelHost:HTMLElement|null=null;
 let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null,gizmoView:any=null,gizmoViewHost:HTMLElement|null=null;
 const freeView=()=>api.scene3d?.getView?.()==='editor';
 const isExtrudedArtwork=(layer:any)=>(layer?.type==='text'||layer?.type==='shape')&&layer.d?.extrusion?.enabled===true&&layer.threeD===true;
@@ -873,6 +875,7 @@ const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
   window.cancelAnimationFrame(layoutFrame); layoutFrame = 0;
+  lightPanelOff?.();lightPanelOff=null;lightPanelHost?.remove();
   sceneGizmo?.dispose();sceneGizmo=null;if(gizmoToolbar)void unmount(gizmoToolbar);gizmoToolbarHost?.remove();if(gizmoView)void unmount(gizmoView);gizmoViewHost?.remove();
   sceneNavigation?.dispose();sceneNavigation=null;
   activeDrag?.cancel(); activeDrag = null;
@@ -972,6 +975,9 @@ V.attach = (stage: HTMLElement) => {
       gizmoViewHost.style.cssText='display:none;align-items:center;gap:6px';
       zoomHost.append(gizmoViewHost);gizmoView=mount(GizmoToolbar,{target:gizmoViewHost,props:{api,part:'view'}});
       V.transform3dControls=gizmoToolbarHost;V.view3dControls=gizmoViewHost;
+      lightPanelHost=document.createElement("div");lightPanelHost.id="light-panel";
+      lightPanelHost.style.cssText="position:absolute;right:8px;top:42px;z-index:6";
+      zoomHost.append(lightPanelHost);lightPanelOff=mountLightPanel(api,lightPanelHost);
     }
 
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
@@ -990,6 +996,28 @@ V.attach = (stage: HTMLElement) => {
     V.qualityControl=quality;
     preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;
+
+    // Studio's refine indicator: shows while a 3D view is still sharpening.
+    if(api.scene3d?.studio && !V.studioPill){
+      const pill=document.createElement('div');pill.id='studio-refine';pill.setAttribute('role','status');
+      pill.style.cssText='position:absolute;right:10px;bottom:10px;z-index:6;display:none;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:var(--r-pill);background:var(--bg-float);box-shadow:var(--shadow-float);color:var(--tx-2);font-size:var(--fs-sm);pointer-events:none';
+      const ring=document.createElementNS('http://www.w3.org/2000/svg','svg');ring.setAttribute('width','14');ring.setAttribute('height','14');ring.setAttribute('viewBox','0 0 14 14');
+      ring.innerHTML='<circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--ink-3)" stroke-width="2"/><circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" transform="rotate(-90 7 7)" stroke-dasharray="0 35"/>';
+      const label=document.createElement('span');pill.append(ring,label);V.stage.append(pill);V.studioPill=pill;
+      let shown='';
+      const tick=()=>{
+        const p=api.scene3d!.studio.progress();
+        // A large model's BVH builds in the background before Studio takes over.
+        const prep=p?.preparing,done=prep?prep.total-prep.pending:0;
+        const text=prep?`Preparing ${prep.total>=1e6?`${(prep.total/1e6).toFixed(1)}M`:`${Math.round(prep.total/1e3)}K`} triangles`:p?(p.samples>=p.goal?'Clean':p.refining||p.samples>0?`Refining · ${Math.round(100*p.samples/p.goal)}%`:'Live'):'';
+        if(text!==shown){
+          shown=text;label.textContent=text;pill.style.display=text?'flex':'none';
+          const arc=ring.lastElementChild as SVGCircleElement;arc.setAttribute('stroke-dasharray',`${prep?34.6*done/Math.max(1,prep.total):p?34.6*Math.min(1,p.samples/p.goal):0} 35`);
+        }
+      };
+      const timer=window.setInterval(tick,200);
+      V.studioPillOff=()=>{window.clearInterval(timer);pill.remove();V.studioPill=undefined;};
+    }
 
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
 
@@ -1721,7 +1749,7 @@ function bindStage(stage: any, inner: any): () => void {
     listeners.push([target, type, handler, options]);
   };
   const guarded = (handler: (event: any) => void) => ((event: any) => {
-    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, [contenteditable]')) return;
+    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, #light-panel, [contenteditable]')) return;
     handler(event);
   }) as EventListener;
   const capture = undefined;
@@ -1754,7 +1782,79 @@ function bindStage(stage: any, inner: any): () => void {
     const point = pointerComp({ clientX, clientY });
     return api.render.gl.pick(point.x, point.y, api.transport.time());
   };
+  // The light tool: point at a model to put light there (values are in the light panel).
+  const lightHud=document.createElement('div');lightHud.id='light-tool-hud';
+  lightHud.style.cssText='position:absolute;z-index:7;pointer-events:none;display:none;padding:6px 9px;border-radius:8px;background:color-mix(in srgb,var(--bg-float) 92%,transparent);box-shadow:var(--ctl-edge),0 4px 14px rgba(0,0,0,.18);color:var(--tx);font-size:11px;line-height:1.45;white-space:nowrap;font-variant-numeric:tabular-nums';
+  stage.append(lightHud);
+  const KIND_LABEL:Record<string,string>={area:'softbox',spot:'spotlight',point:'bulb',sun:'sun'};
+  const showLightHud=(e:{clientX:number;clientY:number}|null)=>{
+    const lights=api.scene3d?.lights,tool=lights?.getTool();
+    if(!lights || !tool?.on || !e){lightHud.style.display='none';return;}
+    const info=lights.info(),rect=stage.getBoundingClientRect();
+    // One line: what a click does here.
+    const text=tool.adding||!info
+      ?(tool.aim==='orbit'?'Select a light to orbit it':`Click a model to add a ${KIND_LABEL[tool.kind]} there`)
+      :tool.aim==='orbit'?`Drag to circle ${info.name} around what it lights`
+      :tool.aim==='direct'?`Click a model to point ${info.name} straight at it`
+      :`Click a model to put ${info.name}’s highlight there`;
+    lightHud.textContent=text;
+    lightHud.style.display='block';
+    const x=e.clientX-rect.left+16,y=e.clientY-rect.top+18;
+    lightHud.style.left=`${Math.min(x,rect.width-lightHud.offsetWidth-6)}px`;lightHud.style.top=`${Math.min(y,rect.height-lightHud.offsetHeight-6)}px`;
+  };
+  let lightPointer:{clientX:number;clientY:number}|null=null;
+  const lightToolOn=()=>!!api.scene3d?.lights?.getTool().on;
   listen(stage,'pointerdown',guarded((event:any)=>{
+    if(!lightToolOn() || event.button!==0)return;
+    const lights=api.scene3d.lights,comp=api.model.curComp(),point=pointerComp(event);
+    event.preventDefault();event.stopImmediatePropagation();
+    const light=lights.begin(point.x/comp.w,point.y/comp.h);
+    showLightHud(event);
+    if(!light)return;
+    const move=(e:PointerEvent)=>{const q=pointerComp(e);lights.move(q.x/comp.w,q.y/comp.h);showLightHud(e);};
+    const up=(e:PointerEvent)=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);lights.end();showLightHud(e);};
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+  }),true);
+  listen(stage,'pointermove',guarded((event:any)=>{
+    if(!lightToolOn()){if(lightHud.style.display!=='none')showLightHud(null);return;}
+    lightPointer={clientX:event.clientX,clientY:event.clientY};
+    if(!api.scene3d.lights.active()){
+      const comp=api.model.curComp(),point=pointerComp(event),tool=api.scene3d.lights.getTool();
+      setStageCursor(tool.aim==='orbit'?(api.scene3d.lights.selected()?'grab':'not-allowed'):api.scene3d.lights.surface(point.x/comp.w,point.y/comp.h)?'crosshair':'default');
+    }
+    showLightHud(event);
+  }),true);
+  listen(stage,'pointerleave',()=>showLightHud(null));
+  listen(window,'keydown',guarded((event:any)=>{
+    if(event.key!=='Escape' || !lightToolOn())return;
+    event.preventDefault();event.stopImmediatePropagation();
+    api.scene3d.lights.cancel();api.scene3d.lights.setTool({on:false});showLightHud(null);
+  }),true);
+  const lightToolWatch=api.scene3d?.lights?.onToolChange(()=>showLightHud(lightPointer));
+  // Alt+Shift+scroll over the viewer: the selected softbox grows (softer) or shrinks (crisper).
+  listen(stage,'wheel',guarded((event:any)=>{
+    if(!event.altKey || !event.shiftKey || !api.scene3d?.studio)return;
+    const id=api.selection.get().layers[0];
+    const light:any=id?api.model.layer(id):null;
+    if(light?.d?.data?.light?.type!=='area')return;
+    event.preventDefault();event.stopPropagation();
+    const result=api.scene3d.edit({operation:'soften',target:id,amount:event.deltaY<0?1.12:1/1.12},{label:'Softbox size',origin:'canvas'});
+    if(!result.ok)api.ui.toast(result.message,{error:true});
+  }),{capture:true,passive:false});
+  listen(stage,'pointerdown',guarded((event:any)=>{
+    // Light by pointing: Alt+Shift+click a model to put a softbox's highlight there.
+    if(event.altKey && event.shiftKey && event.button===0 && api.scene3d?.studio){
+      const studio=api.scene3d.studio,comp=api.model.curComp(),point=pointerComp(event);
+      const light=studio.highlightAt(point.x/comp.w,point.y/comp.h);
+      if(light){
+        event.preventDefault();event.stopPropagation();
+        // Keep dragging to slide the highlight across the surface; release commits it.
+        const move=(e:PointerEvent)=>{const q=pointerComp(e);studio.slideHighlight(light,q.x/comp.w,q.y/comp.h);};
+        const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);studio.commitHighlight(light);};
+        window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+        return;
+      }
+    }
     if(sceneGizmo?.active())return;
     /* Orbit, pan and dolly move only the Free View. In the Active Camera
        view a middle-drag pans and the wheel scrolls exactly as in a 2D
@@ -1939,6 +2039,7 @@ function bindStage(stage: any, inner: any): () => void {
   });
   return () => {
     for (const [target, type, handler, options] of listeners) target.removeEventListener(type, handler, options);
+    lightToolWatch?.dispose();lightHud.remove();
     if (V._boundStage === stage) V._boundStage = null;
   };
 }

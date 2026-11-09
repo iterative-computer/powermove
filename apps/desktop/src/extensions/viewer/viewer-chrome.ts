@@ -80,10 +80,11 @@ export const VIEWER_CHROME_STYLES = `
   #viewer-head > #composition-3d-controls{position:static!important;flex:none;margin-left:auto}
   /* The strip's controls sit 6px in, the panel's corner radius minus theirs,
      so their corners run parallel to the panel's. */
-  #viewer-foot{flex:none;height:var(--hdr-h);display:flex;align-items:center;gap:6px;padding:0 6px;border-top:1px solid var(--line)}
+  #viewer-foot{container:viewer-foot/inline-size;flex:none;height:var(--hdr-h);display:flex;align-items:center;gap:6px;padding:0 6px;border-top:1px solid var(--line)}
   #viewer-foot > :not(select){position:relative!important;inset:auto!important}
   #viewer-foot > .pm-select{width:auto!important;height:24px!important;gap:6px;padding:0 8px!important;border-radius:calc(var(--r-lg) - 6px)!important;background:var(--bg-field)!important;color:var(--tx-value)!important;font:11px/14px var(--f-ui)!important}
   #viewer-foot > #composition-zoom-trigger{font-family:var(--f-mono)!important}
+  #viewer-foot > #composition-3d-controls{margin-left:auto}
   #viewer-foot > .pm-select .pm-select-chevron{position:static;width:8px;height:8px;margin:0;color:var(--tx-3)}
   #viewer-foot > #composition-3d-view{margin-left:auto}
   /* Segmented controls and menus in the strips match the zoom menu: 24px tall,

@@ -1,4 +1,11 @@
 <script lang="ts">
+  /* The 3D viewer's toolbar, left to right:
+     - what you look through: the shot's camera, or a free view that never changes the shot;
+     - one row of tools, each saying what a drag does: move, rotate or scale the selection;
+       orbit, pan or zoom the view; or point light at a model;
+     - for move, rotate and scale: which way the handles face (the light tool's options are in its panel);
+     - frame the selection;
+     - how the viewer draws 3D: fast (real time) or quality (Studio's path tracer). */
   import {onDestroy,untrack} from 'svelte';
   import type {PowermoveAPI} from 'powermove';
   /* `transform`: the 3D Move / Rotate / Scale tools and their axes, in the
@@ -13,6 +20,11 @@
   let view=$state(untrack(()=>api.scene3d.getView()));
   const viewSubscription=untrack(()=>api.scene3d.onViewChange(next=>view=next));
   /* Two views a newcomer can tell apart. The internal ids stay camera/editor. */
+  let light=$state(untrack(()=>api.scene3d.lights.getTool()));
+  let preview=$state(untrack(()=>api.scene3d.studio.getPreview()));
+  const lightSubscription=untrack(()=>api.scene3d.lights.onToolChange(next=>light=next));
+  const previewSubscription=untrack(()=>api.scene3d.studio.onPreviewChange(next=>preview=next));
+  onDestroy(()=>{lightSubscription.dispose();previewSubscription.dispose();});
   const views=[
     {id:'camera',label:'Active Camera',title:'Active Camera — See the shot exactly as it renders and exports'},
     {id:'editor',label:'Free View',title:'Free View — Look around the 3D scene without moving the camera. Middle-drag or Option-drag to orbit; your render doesn’t change'},
@@ -31,9 +43,10 @@
   onDestroy(()=>viewSubscription.dispose());
 </script>
 {#if part==='transform'}
-<Segmented label="3D transform" options={[{id:'translate',label:'Move'},{id:'rotate',label:'Rotate'},{id:'scale',label:'Scale'}]} value={mode} onChange={next=>{api.scene3d.setNavigationMode('select');api.scene3d.setMode(next as typeof mode);}} />
+<Segmented label="3D transform" options={[{id:'translate',label:'Move'},{id:'rotate',label:'Rotate'},{id:'scale',label:'Scale'},{id:'light',label:'Light',title:'Click a surface to place a light'}]} value={light.on?'light':mode} onChange={next=>{if(next==='light'){api.scene3d.lights.setTool({on:!light.on});return;}api.scene3d.lights.setTool({on:false});api.scene3d.setNavigationMode('select');api.scene3d.setMode(next as typeof mode);}} />
 <Segmented label="3D axes" options={[{id:'world',label:'Global'},{id:'local',label:'Local'}]} value={space} onChange={next=>api.scene3d.setSpace(next as typeof space)} />
 {:else}
+<Segmented label="3D preview" options={[{id:"fast",label:"Fast"},{id:"quality",label:"Quality"}]} value={preview} onChange={next=>api.scene3d.studio.setPreview(next as typeof preview)} />
 <Segmented label="3D view" options={views} value={view} onChange={next=>api.scene3d.setView(next as typeof view)} />
 <div style="width:96px" title="3D navigation — Orbit, pan or dolly the Free View, or frame the scene. F frames the selection, Home frames everything. Your camera and render don’t change">
   <SelectField {api} label="3D navigation" get={()=>navigation} edit={{mode:'local',label:'3D navigation',set:(next:unknown)=>api.scene3d.setNavigationMode(next as typeof navigation)}} options={viewOptions}

@@ -158,6 +158,12 @@ PM.ICONS = {
   return: '<path d="M216,48a8,8,0,0,0-8,8v56a24,24,0,0,1-24,24H67.31l34.35-34.34a8,8,0,0,0-11.32-11.32l-48,48a8,8,0,0,0,0,11.32l48,48a8,8,0,0,0,11.32-11.32L67.31,152H184a40,40,0,0,0,40-40V56A8,8,0,0,0,216,48Z"/>',
   /* Menu glyphs, stroked in the same weight as music/film. */
   copy: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="88" y="88" width="136" height="136" rx="12"/><path d="M168 88V44a12 12 0 0 0-12-12H44a12 12 0 0 0-12 12v112a12 12 0 0 0 12 12h44"/></g>',
+  // 3D toolbar: move (arrows out), orbit (a path around a body), light, fast, world axes.
+  move: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M128 32v192M32 128h192M100 60l28-28 28 28M100 196l28 28 28-28M60 100l-28 28 28 28M196 100l28 28-28 28"/></g>',
+  orbit: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><circle cx="128" cy="128" r="34"/><ellipse cx="128" cy="128" rx="104" ry="42" transform="rotate(-24 128 128)"/></g>',
+  lightbulb: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M96 232h64M100 196h56"/><path d="M100 196c0-26-44-42-44-96a72 72 0 0 1 144 0c0 54-44 70-44 96z"/></g>',
+  lightning: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M148 24 52 144h68l-12 88 96-120h-68z"/></g>',
+  globe: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><circle cx="128" cy="128" r="96"/><path d="M32 128h192M128 32c-30 28-30 164 0 192M128 32c30 28 30 164 0 192"/></g>',
   cube: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M128 24 40 72v112l88 48 88-48V72z"/><path d="M40 72l88 48 88-48M128 120v112"/></g>',
   stack: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M128 40 32 88l96 48 96-48z"/><path d="M32 136l96 48 96-48M32 184l96 48 96-48"/></g>',
   mask: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M40 64h96a24 24 0 0 1 24 24v96a24 24 0 0 1-24 24H40a24 24 0 0 1-24-24V88a24 24 0 0 1 24-24Z"/><path d="M88 40h96a24 24 0 0 1 24 24v96a24 24 0 0 1-24 24h-24"/></g>',

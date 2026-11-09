@@ -8,12 +8,16 @@ import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
 import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
+import { studioCommands, type StudioEdit } from '../studio/operations';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part';
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part'|StudioEdit['operation'];
   target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
   /** set_part: the part's key from listParts; patch null removes its offsets. */
   part?:string;
+  preset?: string; p?: Record<string, unknown>; at?: [number, number, number]; normal?: [number, number, number];
+  size?: number; intensity?: number; distance?: number; color?: string; shot?: StudioEdit['shot'];
+  start?: number; duration?: number; degrees?: number; amount?: number; from?: number; to?: number; on?: boolean; on_target?: string;
 }
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const badKeys = new Set(['__proto__','prototype','constructor']);
@@ -32,6 +36,7 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 /** Models, lights and cameras are ordinary layers. Commands cross the normal guarded edit boundary. */
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
+  if (['apply_material','light_highlight','shot','set_studio','explode','drop_to_floor','place_on','auto_studio','soften'].includes(args.operation)) return studioCommands(PM, args as unknown as StudioEdit, (a, m) => sceneCommands(PM, a, m ?? meta));
   const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface','part']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');

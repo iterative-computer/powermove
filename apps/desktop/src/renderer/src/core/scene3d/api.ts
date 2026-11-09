@@ -4,6 +4,13 @@ import { createMaterialThumbnails } from './material-thumbnails';
 import { readMaterialProperties } from './material-properties';
 import {lightViewerState,lightPositionFromViewer,lightViewerGuides} from './light-view';
 import {canAssignMaterialMap,listModelMaterials,listValidMaterialCompositions,listEligibleMaterialLayers,materialLayerLinks} from './material-maps';
+import * as THREE from 'three';
+import { MATERIAL_PRESETS, SHOT_TYPES, surfaceAt, highlightPlacement } from '../studio/operations';
+
+/** Softboxes being dragged by light by pointing, with where each started. */
+const highlightDrags = new Map<string,{x:number;y:number;z:number;tx:number;ty:number;tz:number}>();
+import { studioProgress, studioPreview, setStudioPreview, onStudioPreview } from '../studio';
+import { studioSwatch } from '../studio/swatch';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
@@ -15,6 +22,7 @@ import { editScene } from './operations';
 import { viewportCamera } from './viewport';
 import { PART_DEFAULTS, PART_FIELDS, getActivePart, listLayerParts, onActivePartChange, partKeyOf, partPath, partsRoot, pruneActiveParts, setActivePart, type PartValues } from './model-parts';
 import type { Scene3DAPI } from '../../kernel/api';
+import { getLightTool, setLightTool, onLightTool, lightToolOf, lightInfo } from './light-tool';
 import {navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMode,onNavigationMode,frameComposition,type SceneNavigation} from './navigation';
 
 export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:materials',payload:any)=>void):Scene3DAPI {
@@ -70,7 +78,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     lightViewerGuides:(layerId,time,rect,view)=>lightViewerGuides(PM,layerId,time,rect,view),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
-    getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>setNavigationMode(PM,mode),
+    getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>{if(mode!=='select')setLightTool(PM,{on:false});setNavigationMode(PM,mode);},
     onNavigationChange:listener=>({dispose:onNavigationMode(PM,listener)}),
     createNavigation:element=>(navigation=createSceneNavigation(PM,element)),
     frame:selected=>{try{navigation?navigation.frame(selected):frameComposition(PM,selected);}catch(error){PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});}},
@@ -95,5 +103,57 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
       const current=getActivePart(PM,layerId),at=current?chain.indexOf(current):-1;
       return chain[at>=0?Math.min(chain.length-1,at+1):start] ?? null;
     },
+    lights:(()=>{
+      const tool=()=>lightToolOf(PM),selected=()=>(PM.sel?.layers || []).find((id:string)=>PM.L?.(id)?.d?.data?.light) ?? null;
+      return {
+        getTool:()=>getLightTool(PM),setTool:patch=>{if(patch.on)setNavigationMode(PM,'select');setLightTool(PM,patch);},onToolChange:listener=>({dispose:onLightTool(PM,listener)}),
+        selected,info:()=>lightInfo(PM,selected()),surface:(u,v)=>tool().surface(u,v),
+        begin:(u,v)=>{
+          const s=getLightTool(PM),id=tool().begin(selected(),u,v,s.aim,s.kind,s.adding);
+          if(id && s.adding)setLightTool(PM,{adding:false});
+          return id;
+        },
+        move:(u,v)=>tool().move(u,v),end:()=>tool().end(),cancel:()=>tool().cancel(),active:()=>tool().active(),
+        set:(what,value)=>{const id=selected();return id?tool().set(id,what,value):null;},commit:()=>tool().commit(),
+      };
+    })(),
+    studio:{materials:MATERIAL_PRESETS,shots:SHOT_TYPES,progress:()=>studioProgress(PM),
+      getPreview:()=>studioPreview(PM),setPreview:q=>setStudioPreview(PM,q),onPreviewChange:listener=>({dispose:onStudioPreview(PM,listener)}),
+      swatch:(id)=>{const preset=MATERIAL_PRESETS.find(m=>m.id===id);return preset?studioSwatch(id,preset.p):Promise.resolve(null);},
+      highlightAt:(u,v)=>{
+        const runtime=compositionRuntime(PM,PM.time),camera=PM._renderCamera3D || runtime.camera;
+        const hit=surfaceAt(runtime.scene,camera,u,v);
+        if(!hit)return null;
+        const result:any=editScene(PM,{operation:'light_highlight',at:hit.point,normal:hit.normal},{origin:'canvas',label:'Light by pointing'});
+        if(!result.ok){PM.toast?.(result.message,{error:true});return null;}
+        return PM.proj.layers.filter((l:any)=>l.d?.data?.light?.type==='area').at(-1)?.id ?? null;
+      },
+      slideHighlight:(lightId,u,v)=>{
+        const light=PM.L(lightId),data=light?.d?.data?.light;
+        if(data?.type!=='area')return;
+        const runtime=compositionRuntime(PM,PM.time),camera=PM._renderCamera3D || runtime.camera;
+        const hit=surfaceAt(runtime.scene,camera,u,v);
+        if(!hit)return;
+        // Keep the softbox's distance from the surface; remember the start for the commit.
+        const p=light.p,start=highlightDrags.get(lightId) ?? {x:p['position.x'].v,y:p['position.y'].v,z:p['position.z'].v,tx:data.p.targetX.v,ty:data.p.targetY.v,tz:data.p.targetZ.v};
+        highlightDrags.set(lightId,start);
+        const at=new THREE.Vector3(...hit.point),distance=new THREE.Vector3(p['position.x'].v,p['position.y'].v,p['position.z'].v).distanceTo(new THREE.Vector3(data.p.targetX.v,data.p.targetY.v,data.p.targetZ.v));
+        const eye=new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+        const place=highlightPlacement(at,new THREE.Vector3(...hit.normal),eye,distance);
+        p['position.x'].v=place.x;p['position.y'].v=place.y;p['position.z'].v=place.z;
+        data.p.targetX.v=at.x;data.p.targetY.v=at.y;data.p.targetZ.v=at.z;
+        PM.touch?.();PM.invalidate?.();
+      },
+      commitHighlight:(lightId)=>{
+        const start=highlightDrags.get(lightId);highlightDrags.delete(lightId);
+        const light=PM.L(lightId),data=light?.d?.data?.light;
+        if(!start || !light || !data)return;
+        const p=light.p,end={x:p['position.x'].v,y:p['position.y'].v,z:p['position.z'].v,targetX:data.p.targetX.v,targetY:data.p.targetY.v,targetZ:data.p.targetZ.v};
+        // Restore, then apply the whole move as one edit.
+        p['position.x'].v=start.x;p['position.y'].v=start.y;p['position.z'].v=start.z;
+        data.p.targetX.v=start.tx;data.p.targetY.v=start.ty;data.p.targetZ.v=start.tz;
+        const result=editScene(PM,{operation:'update_light',target:lightId,patch:{p:end}},{origin:'canvas',label:'Move highlight'});
+        if(!result.ok)PM.toast?.(result.message,{error:true});
+      }},
     selection,select};
 }

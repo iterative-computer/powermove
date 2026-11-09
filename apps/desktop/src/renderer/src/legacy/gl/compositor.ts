@@ -29,6 +29,11 @@ import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
+import { studioLayer, studioPreviewKey, studioUnsettled } from '../../core/studio';
+import { MAP_SIZE as STUDIO_MAP_SIZE } from '../../core/studio/extract';
+
+/* Live screens being rendered right now (a screen showing its own 3D layer would never end). */
+const renderingScreens = new Set<string>();
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
 /* Ported from js/gl/compositor.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -241,9 +246,9 @@ for (const event of ['project', 'layers', 'assets', 'quality', 'fonts']) PM.bus?
   previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
 });
 const previewStateKey = () => JSON.stringify([PM.animVersion?.(), sourceGeneration, GL.canvas?.width, GL.canvas?.height,
-  GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM), normalizeColorDepth(PM.proj.colorDepth)]);
+  GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM), normalizeColorDepth(PM.proj.colorDepth), studioPreviewKey(PM)]);
 const canCachePreview = (opt: any) => !hasLayerInputs(PM.proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type)) && opt.previewReuse !== false && !opt.exporting && !PM.Export?.busy && !PM.agentFrameCapture
-  && !PM.Preview?.preparing && !PM.Preview?.active && !PM.preparedVideoFrames && !PM.assets?.loading?.size;
+  && !PM.Preview?.preparing && !PM.Preview?.active && !PM.preparedVideoFrames && !PM.assets?.loading?.size && !studioUnsettled(PM);
 GL.previewPreparationKey = previewStateKey;
 GL.reservePreviewPreparation = (bytes: number) => {
   const budget = Math.max(0, (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) - (PM.Preview?.bytes || 0));
@@ -1316,6 +1321,36 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
       try {
         const runtime=compositionRuntime(PM,T),depthIds=compositionDepthIds(PM,L,T);
         const bottom=(PM._renderComposition3DPass || compositionOrderedLayers(PM,(PM._renderComposition3D || PM.proj).layers.filter((l:any)=>l.type!=='group'),T)).filter((l:any)=>depthIds.has(l.id)).at(-1)?.id;
+        // Studio traces the depth set once and hands this layer its pixels;
+        // the classic renderer covers machines without WebGPU.
+        // A live screen: render its composition at this frame's time, read back
+        // for Studio's texture array (bottom row first, as three's UVs expect).
+        const renderScreen=(compId:string):Uint8Array|null=>{
+          const sub=PM.proj.comps?.[compId];
+          if(!sub || !Array.isArray(sub.layers) || renderingScreens.has(compId))return null;
+          const target=boundFbo,size=STUDIO_MAP_SIZE;
+          renderingScreens.add(compId);pmScopePush(sub);
+          try{
+            const inner=GL.renderProject(sub,T,size,size,{transparent:true,mblur:false});
+            bind(inner);
+            const pixels=new Uint8Array(size*size*4);
+            // Working buffers are 8-bit or float by the project's color depth.
+            if(inner.colorDepth===8 || !inner.colorDepth)GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,pixels);
+            else{
+              const floats=new Float32Array(size*size*4);
+              GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.FLOAT,floats);
+              for(let i=0;i<pixels.length;i++)pixels[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
+            }
+            free(inner);
+            return pixels;
+          }finally{pmScopePop();renderingScreens.delete(compId);bind(target);}
+        };
+        const studio=studioLayer(PM,runtime,W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera,renderScreen,T);
+        if(studio){
+          const tex=texFor(`studio:${L.id}`,studio.canvas,{version:studio.version});
+          PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
+          return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
+        }
         const canvas=runtime.render(W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera);
         const tex=texFor(`layer3d:${L.id}`,canvas,{version:`${runtime.revision}:${W}:${H}:${PM._renderCamera3D?.matrixWorld.elements}:${PM._renderCamera3D?.projectionMatrix.elements}`});
         PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
@@ -2165,6 +2200,14 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     const frame=renderInputSource(proj,layer,T,'effects',{...opt,materialSource:true});completed=true;return frame;
   }
   if(opt.rawOwner){const layer=proj.layers.find((l:any)=>l.id===opt.rawOwner);if(!layer||layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new EffectInputError('Source owner processing requires a 2D content layer');const frame=renderInputSource(proj,layer,T,'effects',{...opt,ownerGrow:true});completed=true;return frame;}
+  // Exports and agent frames render 3D at Studio's Final quality.
+  PM._studioFinal=!!(opt.exporting||PM.agentFrameCapture);
+  // Offscreen renders that are neither the viewer nor final output (stills,
+  // captures, thumbnails) get a fixed, repeatable Studio frame.
+  // An explicit fresh frame (previewReuse: false) is a still too, even through the editor's camera.
+  PM._studioStill=!PM._studioFinal&&(!opt.editorViewport||opt.previewReuse===false);
+  // Motion blur renders each frame at several shutter times; Studio splits its samples across them.
+  PM._studioShutterSamples=opt.mblur!==false&&opt.mbSamples>1?opt.mbSamples:1;
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
   const gl = GL.gl;
   const orderedLayers = proj.layers;

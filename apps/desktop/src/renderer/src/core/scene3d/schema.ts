@@ -32,7 +32,7 @@ const primitiveParams = z.object({
   detail: z.number().int().min(0).max(5).optional()
 }).strict();
 export const sourceSchema = z.union([
-  z.object({ primitive: z.enum(['box','sphere','plane','cylinder','cone','torus','capsule','icosahedron']), parameters: primitiveParams.optional() }).strict(),
+  z.object({ primitive: z.enum(['box','roundedBox','sphere','plane','cylinder','cone','torus','capsule','icosahedron']), parameters: primitiveParams.optional() }).strict(),
   z.object({ assetId: z.string().min(1).max(160) }).strict(),
   z.object({ mesh: z.object({
     positions: z.array(num()).min(9).max(300_000),
@@ -55,9 +55,22 @@ const mapsSchema=z.object(Object.fromEntries(MATERIAL_SLOTS.map(k=>[k,materialMa
 });
 export const materialSchema = z.object({
   p: p({ color: [color,'#C7C4FF'], roughness: [num(.02,1),.4], metalness: [num(0,1),.1],
-    emissive: [color,'#000000'], emissiveIntensity: [num(0,100),1], opacity: [num(0,1),1] }).default({} as any),
+    emissive: [color,'#000000'], emissiveIntensity: [num(0,100),1], opacity: [num(0,1),1],
+    // Layers Studio renders: a clear coat (lacquer, cover glass), transmission
+    // (glass, liquid) with its index of refraction, and dielectric reflection.
+    clearcoat: [num(0,1),0], clearcoatRoughness: [num(.002,1),.03], transmission: [num(0,1),0],
+    ior: [num(1,2.6),1.5], specular: [num(0,1),1],
+    // Fabric sheen, an iridescent thin film (thickness in nm), glass dispersion
+    // and water droplets beading on the surface.
+    sheen: [num(0,1),0], iridescence: [num(0,1200),0], dispersion: [num(0,1),0], droplets: [num(0,1),0],
+    // Brushed metal (highlight stretch along the UV direction) and subsurface
+    // scattering (how far light travels inside, in scene units; 0: opaque).
+    anisotropy: [num(-1,1),0], subsurface: [num(0,1000),0] }).default({} as any),
   maps: mapsSchema.default({}),
-  doubleSided: z.boolean().default(true)
+  doubleSided: z.boolean().default(true),
+  // A live screen: this composition plays on the surface as its glow (its
+  // UVs span the composition), like a device's display.
+  screen: z.string().min(1).max(160).nullable().default(null)
 }).strict();
 /** Sparse overrides preserve imported material values and all old documents. */
 export const intrinsicPropertiesSchema = z.object({
@@ -80,20 +93,30 @@ export const objectSchema = z.object({
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
-  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot']).default('sun'),
+  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot','area']).default('sun'),
   p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
     color:[color,'#FFFFFF'], intensity:[num(0,10000),3], distance:[num(0,100000),0], decay:[num(0,4),2],
-    angle:[num(1,89),45], penumbra:[num(0,1),.4], visible:[z.boolean(),true] }).default({} as any),
+    angle:[num(1,89),45], penumbra:[num(0,1),.4], visible:[z.boolean(),true],
+    // Area lights are softboxes: width × height facing their target. Larger is softer.
+    width:[num(.001,100000),2], height:[num(.001,100000),1.2] }).default({} as any),
   castShadow: z.boolean().default(true)
 }).strict();
 export const cameraSchema = z.object({
   projection: z.enum(['perspective','orthographic']).default('perspective'),
   p: p({ x:[num(),3], y:[num(),2], z:[num(),6], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
-    fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000] }).default({} as any)
+    fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000],
+    // A physical lens for Studio: f-number (0: everything sharp) and the
+    // distance in focus (0: the aim point).
+    fStop:[num(0,64),0], focusDistance:[num(0,100000),0] }).default({} as any)
 }).strict();
 export const environmentSchema = z.object({
   p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1] }).default({} as any),
-  background: color.nullable().default(null), shadows: z.boolean().default(true)
+  background: color.nullable().default(null), shadows: z.boolean().default(true),
+  // A seamless studio set: the background color everywhere, with a floor at
+  // the lowest model that shows only the shadows models cast on it.
+  shadowCatcher: z.boolean().default(false),
+  // Studio's Final quality: samples per pixel for each exported frame.
+  samples: z.number().int().min(4).max(4096).default(64)
 }).strict();
 const schema = z.object({
   version: z.literal(1).default(1), objects: z.array(objectSchema).max(512).default([]),
@@ -135,7 +158,7 @@ export function parseScene(raw: unknown): Scene3D {
     }
     if ('primitive' in object.source) {
       const source=object.source,s=source.parameters?.segments || 48;
-      vertices+=source.primitive==='box'?24:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)
+      vertices+=source.primitive==='box'?24:source.primitive==='roundedBox'?6*(2*(source.parameters?.segments ?? 6)+1)**2:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)
         :source.primitive==='sphere'||source.primitive==='torus'?(s+1)*(Math.max(8,Math.floor(s/2))+1):(s+1)*12;
     }
     if ('extrude' in object.source) vertices+=object.source.extrude.length*(object.source.bevel?60:12);

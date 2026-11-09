@@ -30,8 +30,9 @@ describe('on-demand model decoder', () => {
     expect(decoder.loads).toBe(0);
     await expect(loadGltf(new Blob(['invalid JSON']))).rejects.toThrow();
     await expect(loadGltf(new Blob([JSON.stringify({ buffers: [{ uri: 'https://example.com/model.bin' }] })]))).rejects.toThrow('self-contained GLB');
-    await expect(loadGltf(new Blob([JSON.stringify({ accessors: [{ count: 1_500_001 }] })]))).rejects.toThrow('oversized glTF');
-    await expect(loadGltf(new Blob([JSON.stringify({ nodes: Array.from({ length: 4097 }, () => ({})) })]))).rejects.toThrow('complexity budget');
+    // CAD budgets: 10 million triangles in up to 65,536 parts.
+    await expect(loadGltf(new Blob([JSON.stringify({ accessors: [{ count: 30_000_001 }] })]))).rejects.toThrow('oversized glTF');
+    await expect(loadGltf(new Blob([JSON.stringify({ nodes: Array.from({ length: 65_537 }, () => ({})) })]))).rejects.toThrow('complexity budget');
     expect(decoder.loads).toBe(0);
   });
 
