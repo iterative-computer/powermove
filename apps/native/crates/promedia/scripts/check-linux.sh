@@ -7,8 +7,6 @@ validation_root=$(mktemp -d "$repo/work/pm-promedia.XXXXXXXX")
 mkdir -p "$validation_root/apps/native/crates" "$validation_root/engine/crates"
 cp -R "$repo/apps/native/crates/promedia" "$validation_root/apps/native/crates/"
 cp -R "$repo/engine/crates/pm-color" "$repo/engine/crates/pm-protocol" "$validation_root/engine/crates/"
-mkdir -p "$validation_root/engine/crates/pm-media/src"
-cp "$repo/engine/crates/pm-media/src/cache_frame.rs" "$repo/engine/crates/pm-media/src/proxy.rs" "$validation_root/engine/crates/pm-media/src/"
 # Reuse the exact engine time sources without importing the platform workspace.
 mkdir -p "$validation_root/engine/crates/pm-time"
 cp -R "$repo/engine/crates/pm-time/src" "$validation_root/engine/crates/pm-time/"

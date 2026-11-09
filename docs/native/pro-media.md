@@ -1,7 +1,7 @@
 # P5 pro media and colour (package 21)
 
-Worker implementation: `apps/native/crates/promedia` (`pm-promedia`), portable
-`engine/crates/pm-media/src/proxy.rs` and `cache_frame.rs`, and the existing
+Worker implementation: `apps/native/crates/promedia` (`pm-promedia`), including
+the portable `proxy.rs` and `cache_frame.rs` worker ports, and the existing
 `engine/crates/pm-color/src/lut.rs` / `scopes.rs` sources. Real Linux software
 encodes and exact source frames drive the job/cache/LUT/scopes paths. Native
 composition-renderer wiring, VideoToolbox, UI, platform performance and cutover
@@ -314,7 +314,7 @@ and the review, with Opus review before treating any visual result as final.
 
 ## Pro media integration, slice 2: real worker encodes
 
-`pm-media/src/proxy.rs` adds the portable `RenditionEncoder` worker port and a
+`pm-promedia/src/proxy.rs` adds the portable `RenditionEncoder` worker port and a
 Linux `SoftwareEncoder` using explicit FFmpeg/ffprobe executables, never a shell.
 The existing engine's encode sinks live in `pm-export`, not `pm-media`; its
 native build requires macOS dylibs/frameworks. This slice introduces the allowed
@@ -367,7 +367,7 @@ or new UI copy is introduced.
 
 ## Pro media integration, slice 2: engine frame render path
 
-`pm-media/src/cache_frame.rs` defines worker `FrameSource`, `GraphIdentity`,
+`pm-promedia/src/cache_frame.rs` defines worker `FrameSource`, `GraphIdentity`,
 `FrameRequest` and validated `EngineFrame` readback. The port carries exact
 engine ticks, complete graph/media digests, renderer version and an explicit
 colour encoding. Pixels are straight float RGBA at that declared stage. The

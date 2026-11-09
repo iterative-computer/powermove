@@ -1,22 +1,17 @@
 //! Worker-side pro media contracts. The host kernel owns and publishes models.
 //! Filesystem operations and codecs must run on workers, never on the UI thread.
 pub mod cache;
-#[path = "../../../../../engine/crates/pm-media/src/cache_frame.rs"]
 pub mod cache_frame;
 pub mod codec;
 pub mod export_panel;
 pub mod media;
+pub mod proxy;
 pub mod render;
 pub mod render_job;
 pub mod source_frames;
 pub mod storage;
 pub mod tasks;
 pub mod worker;
-
-// Compile the actual portable engine modules until the pm-media owner adds
-// exports and a Linux feature boundary around its Apple-only native build.
-#[path = "../../../../../engine/crates/pm-media/src/proxy.rs"]
-pub mod proxy;
 
 // Process-local lifetimes fence late work after a catalog/queue is replaced.
 pub(crate) fn next_epoch() -> u64 {
