@@ -250,7 +250,6 @@ provide primitives, not every end-to-end MCP guarantee:
 * `kernel/src/commands/captions.rs` and `scene3d.rs` still return
   `CommandError::NotImplemented`. `pm-captions` supplies normalization, editing
   and subtitle codecs, not a speech model/service or kernel command admission.
-* `services/src/media.rs::ImportQueue` requires a host `MediaHook::probe/admit`.
   `promedia/src/media.rs::MediaCatalog` retains original/proxy relationships;
   `promedia/src/codec.rs::{Decoder,Encoder}` are injected traits. These do not
   yet copy/admit durable imported bytes and media Undo together.

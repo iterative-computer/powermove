@@ -43,12 +43,6 @@ fn installed() -> store::InstalledRelease {
 fn version_response() -> Value {
     json!({"items":[{"repoId":REPO,"state":"ok","current":{"yanked":false},"ownerPublisherId":REPO,"handle":"synthetic","slug":"synthetic-extension","latest":{"releaseId":NEW,"version":"1.2.3","treeSha":"a".repeat(40),"tarSha256":"b".repeat(64),"apiVersion":3}}]})
 }
-fn release_response() -> Value {
-    json!({"id":NEW,"repoId":REPO,"version":"1.2.3","treeSha":"a".repeat(40),"tarSha256":"b".repeat(64),"apiVersion":3,"fileCount":1,"sizeBytes":7,"yankedAt":null,"manifest":{"id":"synthetic-extension","version":"1.2.3","apiVersion":3,"permissions":["network"]},"notes":"synthetic notes"})
-}
-fn tree_response() -> Value {
-    json!({"treeSha":"a".repeat(40),"files":[{"path":"src/main.ts","sha":"c".repeat(40),"size":7}]})
-}
 fn store_client(responses: Vec<Value>) -> store::StoreClient<TransportDouble> {
     store::StoreClient::new("https://registry.invalid", TransportDouble::json(responses)).unwrap()
 }
@@ -178,175 +172,6 @@ fn versions_validate_batch_membership_and_preserve_removed_state() {
     );
 }
 #[test]
-fn install_plan_refreshes_latest_and_preserves_permissions_and_source_metadata() {
-    let mut client = store_client(vec![
-        version_response(),
-        release_response(),
-        tree_response(),
-    ]);
-    let plan = client.install_plan(installed()).unwrap();
-    assert_eq!(plan.release.id, NEW);
-    assert_eq!(plan.release.api_version, 3);
-    assert_eq!(plan.release.manifest["permissions"], json!(["network"]));
-    assert_eq!(plan.release.extra["notes"], "synthetic notes");
-    assert_eq!(plan.tree.files[0].path, "src/main.ts");
-    assert_eq!(
-        client
-            .transport
-            .requests
-            .iter()
-            .map(|req| req.url.path())
-            .collect::<Vec<_>>(),
-        [
-            "/v1/store/versions",
-            &format!("/v1/store/releases/{NEW}"),
-            &format!("/v1/store/releases/{NEW}/tree")
-        ]
-    );
-    // Only metadata read routes; no tar, account mutation or publication request exists.
-    assert_eq!(client.transport.requests.len(), 3);
-}
-#[test]
-fn unavailable_or_yanked_store_release_is_refused() {
-    for state in ["hidden", "removed", "tombstoned"] {
-        let mut response = version_response();
-        response["items"][0]["state"] = json!(state);
-        let mut client = store_client(vec![response]);
-        assert!(client.install_plan(installed()).is_err());
-        assert_eq!(client.transport.requests.len(), 1);
-    }
-    let mut release = release_response();
-    release["yankedAt"] = json!("2026-01-01T00:00:00Z");
-    assert!(
-        store_client(vec![version_response(), release])
-            .install_plan(installed())
-            .is_err()
-    );
-}
-#[test]
-fn release_identity_digest_and_manifest_mismatches_are_refused() {
-    for (field, value) in [
-        ("repoId", json!(OLD)),
-        ("id", json!(OLD)),
-        ("tarSha256", json!("c".repeat(64))),
-        ("apiVersion", json!(2)),
-        ("version", json!("9.9.9")),
-    ] {
-        let mut release = release_response();
-        release[field] = value;
-        assert!(
-            store_client(vec![version_response(), release])
-                .install_plan(installed())
-                .is_err()
-        );
-    }
-    let mut release = release_response();
-    release["manifest"]["apiVersion"] = json!(2);
-    assert!(
-        store_client(vec![version_response(), release])
-            .install_plan(installed())
-            .is_err()
-    );
-}
-#[test]
-fn tree_traversal_case_collisions_and_size_mismatches_are_refused() {
-    for path in [
-        "../main.ts",
-        "/absolute",
-        "src//main.ts",
-        "src/./main.ts",
-        "src\\main.ts",
-        "src/main.ts.",
-        "disk:main",
-    ] {
-        assert!(store::safe_release_path(path).is_err());
-        let mut tree = tree_response();
-        tree["files"][0]["path"] = json!(path);
-        assert!(
-            store_client(vec![version_response(), release_response(), tree])
-                .install_plan(installed())
-                .is_err()
-        );
-    }
-    let mut tree = tree_response();
-    tree["files"][0]["size"] = json!(8);
-    assert!(
-        store_client(vec![version_response(), release_response(), tree])
-            .install_plan(installed())
-            .is_err()
-    );
-    let mut release = release_response();
-    release["fileCount"] = json!(2);
-    release["sizeBytes"] = json!(14);
-    let mut tree = tree_response();
-    let mut second = tree["files"][0].clone();
-    second["path"] = json!("SRC/MAIN.TS");
-    tree["files"].as_array_mut().unwrap().push(second);
-    assert!(
-        store_client(vec![version_response(), release, tree])
-            .install_plan(installed())
-            .is_err()
-    );
-}
-#[test]
-fn update_plan_refuses_id_changes_and_same_release() {
-    assert!(
-        store_client(vec![
-            version_response(),
-            release_response(),
-            tree_response()
-        ])
-        .update_plan(installed(), "other-extension")
-        .is_err()
-    );
-    let same = store::InstalledRelease {
-        repo_id: REPO.into(),
-        release_id: NEW.into(),
-    };
-    assert!(
-        store_client(vec![
-            version_response(),
-            release_response(),
-            tree_response()
-        ])
-        .update_plan(same, "synthetic-extension")
-        .is_err()
-    );
-    assert!(
-        store_client(vec![
-            version_response(),
-            release_response(),
-            tree_response()
-        ])
-        .update_plan(installed(), "synthetic-extension")
-        .is_ok()
-    );
-}
-
-#[test]
-fn nullable_store_fields_are_required_in_wire_metadata() {
-    let mut client = store_client(vec![json!({"items":[]})]);
-    assert!(client.search(store::Search::default()).is_err());
-    let mut response = version_response();
-    response["items"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("latest");
-    assert!(
-        store_client(vec![response])
-            .versions(&[installed()])
-            .is_err()
-    );
-    let mut release = release_response();
-    release.as_object_mut().unwrap().remove("yankedAt");
-    assert!(
-        store_client(vec![version_response(), release])
-            .install_plan(installed())
-            .is_err()
-    );
-}
-
-#[test]
 fn store_errors_have_typed_codes_without_server_body_copy() {
     use crate::ServiceErrorCode as Code;
     assert_eq!(
@@ -395,4 +220,19 @@ fn store_errors_have_typed_codes_without_server_body_copy() {
             code
         );
     }
+}
+#[test]
+fn nullable_store_fields_are_required_in_wire_metadata() {
+    let mut client = store_client(vec![json!({"items":[]})]);
+    assert!(client.search(store::Search::default()).is_err());
+    let mut response = version_response();
+    response["items"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("latest");
+    assert!(
+        store_client(vec![response])
+            .versions(&[installed()])
+            .is_err()
+    );
 }

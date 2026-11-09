@@ -8,10 +8,8 @@ pub mod generated;
 pub mod generated_points;
 pub mod maintenance;
 pub mod mixer;
-pub mod native;
 pub mod onboarding;
 pub mod projects;
-pub mod scene;
 pub mod workspaces;
 
 use crate::{Result, ServiceError, ServiceErrorCode};

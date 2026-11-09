@@ -3,7 +3,6 @@
 //! onboarding,updates,diagnostics,migration,colour,tasks-storage,os-authorization}.md.
 use super::{authorization::Authorization, maintenance::UpdateState, projects::NoteDraft};
 use crate::ServiceErrorCode;
-use pm_promedia::tasks::{TaskFailureCode, TaskKind, TaskState};
 
 pub fn workspace_json_error(parser: &str) -> String {
     format!("This isn’t valid JSON. {parser}")
@@ -93,35 +92,6 @@ pub const PERFORMANCE_LABELS: &[(&str, &str)] = &[
 ];
 pub const PROXY_EXPORT_WARNING: &str =
     "This uses proxy-only media, so quality may be lower. Relink the originals for full quality.";
-pub fn task_failure(code: TaskFailureCode) -> Option<&'static str> {
-    match code {
-        TaskFailureCode::SourceOffline => Some("The source is offline. Relink it and try again."),
-        TaskFailureCode::DiskFull => Some("Not enough disk space. Free some space and try again."),
-        TaskFailureCode::CodecUnsupported => Some("This format isn’t supported."),
-        TaskFailureCode::Cancelled => None,
-        TaskFailureCode::Unknown => {
-            Some("Something went wrong. Details are in Window ▸ Error Log.")
-        }
-    }
-}
-pub fn task_detail(state: TaskState, kind: &TaskKind) -> &'static str {
-    match state {
-        TaskState::Queued => "Waiting…",
-        TaskState::Running => "Working…",
-        TaskState::PauseRequested => "Pausing…",
-        TaskState::Paused => "Paused",
-        TaskState::CancelRequested => "Cancelling…",
-        TaskState::Cancelled => "Cancelled",
-        TaskState::Failed => "",
-        TaskState::Completed => match kind {
-            TaskKind::Export => "Exported · Show in Finder",
-            TaskKind::Render => "Rendered",
-            TaskKind::Import => "Imported",
-            TaskKind::Proxy | TaskKind::Optimized => "Created",
-            TaskKind::Purge => "Freed",
-        },
-    }
-}
 pub const LOCAL_NETWORK_DENIED: &str = "Allow Local Network for Powermove in System Settings.";
 pub fn notification_detail(status: Authorization) -> &'static str {
     if status == Authorization::Denied {

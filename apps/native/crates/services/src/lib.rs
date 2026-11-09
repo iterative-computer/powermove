@@ -5,8 +5,6 @@ pub mod error;
 pub use error::{Result, ServiceError, ServiceErrorCode};
 pub mod diagnostics;
 pub mod entrypoints;
-pub mod fonts;
-pub mod media;
 pub mod media_adapter;
 pub mod storage;
 pub mod store;

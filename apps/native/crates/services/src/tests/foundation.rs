@@ -1,13 +1,7 @@
 use super::test_storage;
-use crate::error::Result;
-use crate::service_bail as bail;
-use crate::{
-    fonts,
-    storage::{self, ServiceStorage},
-};
+use crate::storage::{self, ServiceStorage};
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
     fs,
     io::{self, Read},
 };
@@ -184,87 +178,4 @@ fn valid_json_corruption_is_not_accepted_as_a_new_setting_value() {
     fs::write(&entries[0].1, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(store.setting("key").is_err());
     assert!(store.set("key", json!("next")).is_err());
-}
-
-struct FontDouble {
-    versions: VecDeque<Option<u64>>,
-    reads: usize,
-    families: Option<Vec<String>>,
-    fail: bool,
-}
-impl fonts::FontHook for FontDouble {
-    fn faces(&mut self, _: &str) -> Result<Vec<fonts::Face>> {
-        Ok(vec![])
-    }
-    fn version(&mut self) -> Result<Option<u64>> {
-        Ok(self.versions.pop_front().unwrap_or(Some(1)))
-    }
-    fn families(&mut self) -> Result<Option<Vec<String>>> {
-        self.reads += 1;
-        if self.fail {
-            bail!("font broker unavailable")
-        }
-        Ok(self.families.clone())
-    }
-}
-fn font_catalog(
-    versions: &[Option<u64>],
-    families: Option<Vec<String>>,
-) -> fonts::FontCatalog<FontDouble> {
-    fonts::FontCatalog::new(FontDouble {
-        versions: versions.iter().copied().collect(),
-        families,
-        reads: 0,
-        fail: false,
-    })
-}
-#[test]
-fn stable_font_registry_caches_owned_copies() {
-    let mut fonts = font_catalog(
-        &[Some(1), Some(1), Some(1)],
-        Some(vec!["Synthetic Family".into()]),
-    );
-    let mut result = fonts.families().unwrap().unwrap();
-    result.clear();
-    assert_eq!(fonts.families().unwrap().unwrap().len(), 1);
-    assert_eq!(fonts.hook.reads, 1);
-}
-#[test]
-fn registry_change_during_font_read_prevents_cache() {
-    let mut fonts = font_catalog(
-        &[Some(1), Some(2), Some(2), Some(2)],
-        Some(vec!["Synthetic".into()]),
-    );
-    fonts.families().unwrap();
-    fonts.families().unwrap();
-    assert_eq!(fonts.hook.reads, 2);
-}
-#[test]
-fn empty_unknown_and_failed_fonts_can_recover() {
-    for families in [None, Some(vec![])] {
-        let mut fonts = font_catalog(&[], families);
-        fonts.families().unwrap();
-        fonts.families().unwrap();
-        assert_eq!(fonts.hook.reads, 2);
-    }
-    let mut fonts = font_catalog(&[None, None], Some(vec!["Synthetic".into()]));
-    fonts.families().unwrap();
-    fonts.families().unwrap();
-    assert_eq!(fonts.hook.reads, 2);
-    fonts.hook.fail = true;
-    assert!(fonts.families().is_err());
-    fonts.hook.fail = false;
-    assert!(fonts.families().is_ok());
-}
-
-#[test]
-fn font_registry_change_invalidates_previously_cached_family_list() {
-    let mut fonts = font_catalog(
-        &[Some(1), Some(1), Some(2), Some(2)],
-        Some(vec!["Old Family".into()]),
-    );
-    assert_eq!(fonts.families().unwrap(), Some(vec!["Old Family".into()]));
-    fonts.hook.families = Some(vec!["New Family".into()]);
-    assert_eq!(fonts.families().unwrap(), Some(vec!["New Family".into()]));
-    assert_eq!(fonts.hook.reads, 2);
 }

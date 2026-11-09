@@ -64,10 +64,6 @@ fn service_validations_expose_codes_for_reviewed_developer_messages() {
             .code,
         Code::InvalidInput
     );
-    assert_eq!(
-        crate::media::ArtifactCache::new(0).err().unwrap().code,
-        Code::InvalidInput
-    );
 }
 #[test]
 fn worker_returns_the_original_initialization_and_task_codes() {
