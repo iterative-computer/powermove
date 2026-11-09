@@ -92,7 +92,7 @@ fn child_export_starts_reports_progress_and_completes() {
 fn child_export_cancel_does_not_publish_partial_output() {
     let dir = tempfile::tempdir().unwrap();
     let destination = dir.path().join("cancelled");
-    let mut child = ExportHandle::start(
+    let child = ExportHandle::start(
         Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
         request(destination.clone(), 600),
     )
@@ -104,7 +104,7 @@ fn child_export_cancel_does_not_publish_partial_output() {
         assert!(start.elapsed() < Duration::from_secs(30));
         std::thread::sleep(Duration::from_millis(5));
     }
-    child.cancel().unwrap();
+    child.cancel();
     let status = child.wait().unwrap();
     assert_eq!(status.state, JobState::Cancelled, "{status:?}");
     assert!(!destination.exists());
@@ -148,7 +148,7 @@ fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
         assert!(start.elapsed() < Duration::from_secs(30), "no GPU request");
         std::thread::sleep(Duration::from_millis(1));
     }
-    child.cancel().unwrap();
+    child.cancel();
     assert_eq!(child.wait().unwrap().state, JobState::Cancelled);
     assert!(!dir.path().join("cancel-deferred").exists());
     assert!(cancellation.load(std::sync::atomic::Ordering::Acquire));
@@ -588,12 +588,12 @@ fn cancelling_while_an_extension_draws_stops_the_export_and_lets_go_of_its_pin()
         }
         Err("cancelled".into())
     }));
-    let mut child =
+    let child =
         ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), session).unwrap();
     asked
         .recv_timeout(Duration::from_secs(30))
         .expect("the export asked for its override layer");
-    child.cancel().unwrap();
+    child.cancel();
     let status = child.wait().unwrap();
     assert_eq!(status.state, JobState::Cancelled, "{status:?}");
     assert!(cancellation.load(Ordering::Acquire));

@@ -359,10 +359,9 @@ async fn execute(
     };
     // Always release/reap on this worker before publishing a terminal task/run.
     let cleanup = job.handle.lock().unwrap().take();
-    if let Some(mut handle) = cleanup {
-        let cancelled = handle.cancel().map_err(|e| e.to_string());
-        let reaped = handle.wait().map_err(|e| e.to_string());
-        if let Err(error) = cancelled.and(reaped.map(|_| ())) {
+    if let Some(handle) = cleanup {
+        handle.cancel();
+        if let Err(error) = handle.wait() {
             result = Err(format!(
                 "{}; export cleanup failed: {error}",
                 result.err().unwrap_or_default()
@@ -475,12 +474,12 @@ async fn execute_inner(
     loop {
         if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
             cancellation_sent = true;
-            let mut guard = job.handle.lock().unwrap();
-            guard
-                .as_mut()
+            job.handle
+                .lock()
+                .unwrap()
+                .as_ref()
                 .ok_or("Export worker lost")?
-                .cancel()
-                .map_err(|e| e.to_string())?;
+                .cancel();
         }
         let status = job
             .handle

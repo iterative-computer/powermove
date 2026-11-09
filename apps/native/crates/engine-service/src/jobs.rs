@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -65,6 +65,8 @@ pub struct ExportRequest {
 pub struct Activity {
     busy: Arc<AtomicBool>,
     epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Wakes the jobs waiting for the viewer to go quiet or to be cancelled.
+    quiet: Arc<(Mutex<()>, Condvar)>,
 }
 impl Activity {
     pub fn set(&self, busy: bool) {
@@ -72,6 +74,24 @@ impl Activity {
             self.epoch.fetch_add(1, Ordering::AcqRel);
         }
         self.busy.store(busy, Ordering::Release);
+        if !busy {
+            self.wake();
+        }
+    }
+    fn wake(&self) {
+        let _quiet = self.quiet.0.lock().unwrap();
+        self.quiet.1.notify_all();
+    }
+    /// Waits while the viewer is busy, unless `cancel` is set (whoever sets
+    /// it wakes the wait). Whether it waited.
+    fn wait_quiet(&self, cancel: &AtomicBool) -> bool {
+        let mut quiet = self.quiet.0.lock().unwrap();
+        let mut waited = false;
+        while self.busy() && !cancel.load(Ordering::Acquire) {
+            waited = true;
+            quiet = self.quiet.1.wait(quiet).unwrap();
+        }
+        waited
     }
     pub fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
@@ -385,11 +405,37 @@ pub const OFFLINE_ADVICE: &str = "Relink the originals, or export without them."
 pub fn is_offline_refusal(message: &str) -> bool {
     message.ends_with(OFFLINE_ADVICE)
 }
+/// Stops a running job from any thread: its cancellation is set, a wait for
+/// the viewer wakes, and the child is told.
+#[derive(Clone)]
+pub struct JobControl {
+    cancel: Arc<AtomicBool>,
+    input: Arc<Mutex<ChildStdin>>,
+    interactive: Activity,
+}
+impl JobControl {
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
+        self.interactive.wake();
+        // A child that no longer reads its stdin has stopped already.
+        let _ = send(&mut *self.input.lock().unwrap(), &ParentMessage::Cancel);
+    }
+}
+/// A job's latest status; waiters wake when it changes.
+struct Reported {
+    now: Mutex<JobStatus>,
+    changed: Condvar,
+}
+impl Reported {
+    fn set(&self, status: JobStatus) {
+        *self.now.lock().unwrap() = status;
+        self.changed.notify_all();
+    }
+}
 pub struct ExportHandle {
     child: Option<Child>,
-    input: Arc<Mutex<ChildStdin>>,
-    cancel: Cancel,
-    status: Arc<Mutex<JobStatus>>,
+    control: JobControl,
+    status: Arc<Reported>,
     /// Ends with the child's output; true if it stopped at a line it could
     /// not use, with the child still running.
     reader: Option<std::thread::JoinHandle<bool>>,
@@ -415,7 +461,7 @@ impl ExportHandle {
         let JobSession {
             request,
             overrides,
-            cancel,
+            cancel: release,
         } = session.into();
         request.resources.validate()?;
         ensure!(
@@ -435,17 +481,26 @@ impl ExportHandle {
             let _ = child.wait();
             return Err(e.into());
         }
-        let input = Arc::new(Mutex::new(input));
-        let child_input = input.clone();
-        let gate_cancel = cancel.0.clone();
+        let control = JobControl {
+            cancel: release.0.clone(),
+            input: Arc::new(Mutex::new(input)),
+            interactive: interactive.clone(),
+        };
+        let (child_input, cancel) = (control.input.clone(), control.cancel.clone());
         let output = child.stdout.take().unwrap();
-        let state = Arc::new(Mutex::new(status(&id, JobState::Queued, 0., None, None)));
-        let events = state.clone();
+        let reported = Arc::new(Reported {
+            now: Mutex::new(status(&id, JobState::Queued, 0., None, None)),
+            changed: Condvar::new(),
+        });
+        let events = reported.clone();
         let submissions = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let granted = submissions.clone();
         let asks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let asked = asks.clone();
         let reader = std::thread::spawn(move || {
+            // Dropped with the reader: the job is over, and what its
+            // overrides pinned goes.
+            let _release = release;
             // The viewer's activity epoch at the last grant, and when it was
             // last seen to move (an epoch moved since counts as now).
             let mut seen = interactive.epoch();
@@ -472,7 +527,7 @@ impl ExportHandle {
                             s.job.as_str()
                         ));
                     }
-                    Ok(ChildMessage::Status(s)) => *events.lock().unwrap() = *s,
+                    Ok(ChildMessage::Status(s)) => events.set(*s),
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
                         let answered = match &overrides {
                             Some(answer) => answer(&needs),
@@ -483,11 +538,10 @@ impl ExportHandle {
                     }
                     Ok(ChildMessage::Gpu) => {
                         asked.fetch_add(1, Ordering::Release);
-                        while interactive.busy() && !gate_cancel.load(Ordering::Acquire) {
+                        if interactive.wait_quiet(&cancel) {
                             active_at = Some(std::time::Instant::now());
-                            std::thread::sleep(std::time::Duration::from_millis(2));
                         }
-                        if !gate_cancel.load(Ordering::Acquire) {
+                        if !cancel.load(Ordering::Acquire) {
                             let epoch = interactive.epoch();
                             if epoch != seen {
                                 seen = epoch;
@@ -500,29 +554,40 @@ impl ExportHandle {
                     }
                 }
             };
-            let mut last = events.lock().unwrap();
+            let last = events.now.lock().unwrap().clone();
             if !last.state.is_terminal() {
                 let error = broken
                     .clone()
                     .unwrap_or_else(|| "engine job child exited without a terminal status".into());
-                *last = status(&id, JobState::Failed, last.progress, None, Some(error));
+                events.set(status(
+                    &id,
+                    JobState::Failed,
+                    last.progress,
+                    None,
+                    Some(error),
+                ));
             }
-            // The job is over: what its overrides pinned goes.
-            gate_cancel.store(true, Ordering::Release);
             broken.is_some()
         });
         Ok(Self {
             child: Some(child),
-            input,
-            cancel,
-            status: state,
+            control,
+            status: reported,
             reader: Some(reader),
             submissions,
             asks,
         })
     }
     pub fn status(&self) -> JobStatus {
-        self.status.lock().unwrap().clone()
+        self.status.now.lock().unwrap().clone()
+    }
+    /// The first status that differs from `seen`, waited for.
+    pub fn next_status(&self, seen: &JobStatus) -> JobStatus {
+        let mut now = self.status.now.lock().unwrap();
+        while *now == *seen {
+            now = self.status.changed.wait(now).unwrap();
+        }
+        now.clone()
     }
     /// GPU submissions granted so far: one per frame while the viewer is
     /// quiet, one per band of a frame after viewer activity.
@@ -533,10 +598,12 @@ impl ExportHandle {
     pub fn gpu_requests(&self) -> u64 {
         self.asks.load(Ordering::Acquire)
     }
-    pub fn cancel(&mut self) -> Result<()> {
-        self.cancel.0.store(true, Ordering::Release);
-        send(&mut *self.input.lock().unwrap(), &ParentMessage::Cancel)?;
-        Ok(())
+    pub fn cancel(&self) {
+        self.control.cancel();
+    }
+    /// Cancels this job from another thread.
+    pub fn control(&self) -> JobControl {
+        self.control.clone()
     }
     /// Worker-only wait. Drop also reaps the child (never a detached export).
     pub fn wait(mut self) -> Result<JobStatus> {
@@ -557,7 +624,7 @@ impl ExportHandle {
 }
 impl Drop for ExportHandle {
     fn drop(&mut self) {
-        self.cancel.0.store(true, Ordering::Release);
+        self.control.cancel();
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -624,9 +691,14 @@ pub fn run_child() -> Result<()> {
     // broker, never on GPUI or a Node event loop.
     let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
     let broker = pm_text::host::FontBroker::new();
-    // This windowless host pumps the broker below. A registered wake admits
-    // requests; without it layout fails immediately and can lose text glyphs.
-    broker.set_wake(Arc::new(|| {}));
+    // This windowless host serves the broker below when an ask wakes it. A
+    // registered wake admits requests; without it layout fails immediately
+    // and can lose text glyphs.
+    let (wake, woken) = std::sync::mpsc::sync_channel(1);
+    let asked = wake.clone();
+    broker.set_wake(Arc::new(move || {
+        let _ = asked.try_send(());
+    }));
     broker.set_generation(font_service.generation());
     let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();
@@ -659,7 +731,9 @@ pub fn run_child() -> Result<()> {
         });
     }
     let worker_cancel = cancel.clone();
+    let done = Finished(finished.clone(), wake);
     let worker = std::thread::spawn(move || -> Result<PathBuf> {
+        let _done = done;
         let cancel = worker_cancel;
         let gate = ChildGate::new(permits);
         let fill = request.cache;
@@ -820,14 +894,12 @@ pub fn run_child() -> Result<()> {
         )?;
         Ok(delivered.path)
     });
-    while !worker.is_finished() {
+    while !finished.load(Ordering::Acquire) && woken.recv().is_ok() {
         pm_text::host::serve(&mut font_service, broker.take_asks());
-        std::thread::sleep(std::time::Duration::from_millis(2));
     }
     let result = worker
         .join()
         .unwrap_or_else(|_| Err(anyhow::anyhow!("export worker panicked")));
-    finished.store(true, Ordering::Release);
     match result {
         // The worker's output was dropped unpublished: its temporary is gone.
         Err(_) if low_disk.load(Ordering::Acquire) => emit(status(
@@ -866,6 +938,15 @@ pub fn run_child() -> Result<()> {
     Ok(())
 }
 
+/// Set when the export worker ends, however it ends: the disk watch stops,
+/// and the font service's thread wakes to see it.
+struct Finished(Arc<AtomicBool>, std::sync::mpsc::SyncSender<()>);
+impl Drop for Finished {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+        let _ = self.1.try_send(());
+    }
+}
 /// An export's raster override layers, asked of the parent (which asks the
 /// window's extensions) as the frame reaches each one; the frame waits (an
 /// export has no per-frame deadline). A need with no answer fails the frame.
@@ -1234,6 +1315,29 @@ mod tests {
         };
         cheap.record(12, 1_200.);
         assert_eq!(cheap.bounded(12), 12, "a cheap frame fits whole");
+    }
+    /// A job waiting for the viewer wakes when it goes quiet, or when the job
+    /// is cancelled while it is still busy.
+    #[test]
+    fn a_waiting_job_wakes_when_the_viewer_goes_quiet_or_it_is_cancelled() {
+        let activity = Activity::default();
+        activity.set(true);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiting = |activity: &Activity, cancel: &Arc<AtomicBool>| {
+            let (activity, cancel) = (activity.clone(), cancel.clone());
+            std::thread::spawn(move || activity.wait_quiet(&cancel))
+        };
+        let quiet = waiting(&activity, &cancel);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        activity.set(false);
+        assert!(quiet.join().unwrap(), "it waited for the viewer");
+        activity.set(true);
+        let cancelled = waiting(&activity, &cancel);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cancel.store(true, Ordering::Release);
+        activity.wake();
+        assert!(cancelled.join().unwrap());
+        assert!(activity.busy());
     }
     /// A disk that fills during an export stops it; a finished export is
     /// left alone.

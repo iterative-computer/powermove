@@ -317,7 +317,7 @@ impl ExportChild for EngineJobs {
         let task =
             crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
                 .map_err(failed)?;
-        let mut handle = match self.start(&published, settings, destination, false, false) {
+        let handle = match self.start(&published, settings, destination, false, false) {
             Ok(handle) => handle,
             Err(error) => {
                 task.finish(Err(error.to_string()));
@@ -330,7 +330,7 @@ impl ExportChild for EngineJobs {
             JobState::Done | JobState::Failed | JobState::Cancelled
         ) {
             if task.cancelled() {
-                let _ = handle.cancel();
+                handle.cancel();
                 break;
             }
             let frames = (handle.status().progress * plan.frames as f64).round() as u64;
@@ -510,7 +510,7 @@ fn frame(
         draft_from_proxies: true,
         delivery: Default::default(),
     };
-    let mut handle = jobs.start(
+    let handle = jobs.start(
         published,
         settings,
         destination,
@@ -522,7 +522,7 @@ fn frame(
         JobState::Queued | JobState::Running | JobState::WaitingForMedia
     ) {
         if stop() {
-            let _ = handle.cancel();
+            handle.cancel();
             let _ = handle.wait();
             anyhow::bail!("The frame capture was stopped");
         }
