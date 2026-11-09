@@ -14,9 +14,22 @@ struct FX { previous_pos:vec4f, previous_fwd:vec4f, previous_right:vec4f, previo
 fn fx_guides(@builtin(global_invocation_id) g:vec3u) {
   if(g.x>=P.dims.x||g.y>=P.dims.y){return;}
   let i=g.y*P.dims.x+g.x;let pixel=vec2i(g.xy);let px=vec2f(g.xy)+F.misc.zw+.5;
-  seed=pcg(i^P.dims.z);let ray=camera_ray(px);let hit=primary_intersect(ray[0],ray[1],camera_limit(ray[0],ray[1]));let tf=floor_t(ray[0],ray[1]);
-  var normal=vec3f(0.,1.,0.);var diffuse=vec3f(.82);var specular=vec3f(.04);var roughness=.8;var depth=1.;var point=ray[0]+ray[1]*1e5;
-  if(hit.tri>=0&&hit.t<tf){let sf=surface(ray[0],ray[1],hit);point=sf.p;normal=sf.n;diffuse=sf.m.base.xyz*(1.-sf.m.base.w)*(1.-sf.m.spec.w);specular=fresnel_base(sf.m,1.);roughness=sf.m.spec.x;}
+  // Match the color path's RNG consumption before camera_ray (including DOF).
+  seed=pcg(i^pcg(P.dims.z*9781u+1u));let unused_jitter=rnd2();let ray=camera_ray(px);let hit=primary_intersect(ray[0],ray[1],camera_limit(ray[0],ray[1]));let tf=floor_t(ray[0],ray[1]);
+  var normal=vec3f(0.,1.,0.);var diffuse=vec3f(.82);var specular=vec3f(.04);var roughness=.8;var depth=1.;var specular_distance=0.;var point=ray[0]+ray[1]*1e5;
+  if(hit.tri>=0&&hit.t<tf){let sf=surface(ray[0],ray[1],hit);point=sf.p;normal=sf.n;diffuse=sf.m.base.xyz*(1.-sf.m.base.w)*(1.-sf.m.spec.w);specular=fresnel_base(sf.m,1.);roughness=sf.m.spec.x;
+    let n=select(sf.n,-sf.n,dot(sf.n,ray[1])>0.);
+    var direction=reflect(ray[1],n);
+    if(sf.m.spec.w*(1.-sf.m.base.w)>.5){
+      let eta=select(sf.m.extra.x,1./sf.m.extra.x,dot(sf.ng,ray[1])<0.);
+      let transmitted=refract(ray[1],n,eta);
+      if(dot(transmitted,transmitted)>.5){direction=transmitted;}
+    }
+    let origin=point+direction*ray_epsilon();
+    let secondary=secondary_intersect(origin,direction,BIG);
+    let secondary_distance=min(secondary.t,floor_t(origin,direction));
+    if(secondary_distance<BIG){specular_distance=min(secondary_distance,60000.);}
+  }
   else if(tf<BIG){point=ray[0]+ray[1]*tf;}
   if(dot(normal,ray[1])>0.){normal=-normal;}
   let viewz=dot(point-P.cam_pos.xyz,P.cam_fwd.xyz);let near=F.misc.x;let far=F.misc.y;
@@ -30,6 +43,6 @@ fn fx_guides(@builtin(global_invocation_id) g:vec3u) {
   let color=(a.xyz+ebuf[i].xyz)/n*P.env_zenith.w+decode_srgb(P.backdrop.xyz*shade)*(1.-coverage);
   textureStore(fx_color,pixel,vec4f(min(color,vec3f(60000.)),1.));textureStore(fx_depth,pixel,vec4f(depth));textureStore(fx_motion,pixel,vec4f(motion,0.,0.));
   textureStore(fx_diffuse,pixel,vec4f(diffuse,1.));textureStore(fx_specular,pixel,vec4f(specular,1.));
-  textureStore(fx_normal,pixel,vec4f(dot(normal,P.cam_right.xyz),dot(normal,P.cam_up.xyz),dot(normal,P.cam_fwd.xyz),0.));textureStore(fx_roughness,pixel,vec4f(roughness));
+  textureStore(fx_normal,pixel,vec4f(normal,specular_distance));textureStore(fx_roughness,pixel,vec4f(roughness));
   textureStore(fx_mask,pixel,vec4f(coverage,1.-coverage,gbuf[i].z,shade));
 }

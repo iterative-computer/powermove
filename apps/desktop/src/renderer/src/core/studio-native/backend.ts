@@ -219,7 +219,7 @@ export class NativeStudioBackend implements StudioBackend {
       // optional backdrop, without treating their pixels as the whole scene.
       const layer = index === -1 ? objects.length : index;
       const renderKey=`${this.revision}:${this.time}:${this.width}:${this.height}:${request.tier}:${request.samples}:${request.denoise!==false}`;
-      const reply = await this.send({ op: 'render', width: this.width, height: this.height, tier: request.tier, samples: request.samples, reset: request.accumulate === false && this.rendered!==renderKey, goal: true, denoise: request.denoise !== false, layer, background: request.background === true, sharedTexture: !!this.textureUnsubscribe, time: this.time });
+      const reply = await this.send({ op: 'render', width: this.width, height: this.height, tier: request.tier, samples: request.samples, reset: request.accumulate === false && this.rendered!==renderKey, goal: true, denoise: request.denoise !== false, layer, background: request.background === true, sharedTexture: !!this.textureUnsubscribe, adaptive: request.adaptive === true, timeBudgetMs: request.timeBudgetMs ?? 0, temporal: request.temporal === true, time: this.time });
       if (request.signal?.aborted) throw new Error('Studio frame cancelled');
       cancelled();
       const meta = reply.result;

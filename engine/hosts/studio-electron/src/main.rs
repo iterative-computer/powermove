@@ -87,6 +87,12 @@ enum Command {
         #[serde(default = "one")]
         samples: u32,
         #[serde(default)]
+        adaptive: bool,
+        #[serde(rename="timeBudgetMs", default)]
+        time_budget_ms: u64,
+        #[serde(default)]
+        temporal: bool,
+        #[serde(default)]
         reset: bool,
         #[serde(default)]
         goal: bool,
@@ -132,6 +138,10 @@ struct Target {
     live: bool,
     denoiser: &'static str,
     quality_denoise: bool,
+    quality_samples: u32,
+    quality_adaptive: bool,
+    quality_temporal: bool,
+    quality_budget_ms: u64,
     tier: String,
     time: f64,
 }
@@ -506,6 +516,9 @@ impl Host {
                 height,
                 tier,
                 samples,
+                adaptive,
+                time_budget_ms,
+                temporal,
                 reset,
                 goal,
                 denoise,
@@ -588,6 +601,10 @@ impl Host {
                         live: is_live,
                         denoiser: "none",
                         quality_denoise: false,
+                        quality_samples: 0,
+                        quality_adaptive: false,
+                        quality_temporal: false,
+                        quality_budget_ms: 0,
                         tier: String::new(),
                         time: f64::NAN,
                     });
@@ -597,7 +614,11 @@ impl Host {
                 let changed = target.revision != self.revision
                     || target.time != time
                     || target.tier != tier
-                    || target.quality_denoise != denoise;
+                    || target.quality_denoise != denoise
+                    || target.quality_adaptive != adaptive
+                    || target.quality_temporal != temporal
+                    || target.quality_budget_ms != time_budget_ms
+                    || tier == "final" && target.quality_samples != samples;
                 sync_target(
                     target,
                     self.resident.as_ref(),
@@ -608,6 +629,11 @@ impl Host {
                 );
                 let renderer = &mut target.renderer;
                 renderer.live = target.live;
+                renderer.quality_temporal = temporal && tier == "final" && denoise;
+                // Cuts, seeks and switching quality modes must not reuse history.
+                if !target.time.is_finite() || time < target.time || time - target.time > 0.1 || target.quality_temporal != temporal {
+                    renderer.invalidate_history();
+                }
                 if target.history_revision != self.history_revision {
                     renderer.invalidate_history();
                     target.history_revision = self.history_revision;
@@ -615,7 +641,15 @@ impl Host {
                 renderer.set_output_mask(layer, background);
                 renderer.set_straight_output(true);
                 renderer.set_time_seed((time * 9600.).round() as u32);
-                let spp = if goal && !changed && !reset {
+                let adaptive = adaptive && !is_live;
+                renderer.set_adaptive_sampling(pm_studio::environment::AdaptiveSampling {
+                    enabled: adaptive, min_samples: 64, relative_error: 0.015, absolute_error: 0.0005,
+                });
+                let spp = if goal && !changed && !reset && adaptive && tier == "final" {
+                    // The first request already completed its bounded quality
+                    // render. Layer masks must reuse that same finished trace.
+                    0
+                } else if goal && !changed && !reset {
                     samples.saturating_sub(renderer.samples)
                 } else if is_live {
                     1
@@ -625,11 +659,13 @@ impl Host {
                 let trace_ms = if spp == 0 {
                     0.
                 } else {
-                    renderer.trace_interruptible(
+                    renderer.trace_budgeted_interruptible(
                         spp,
                         if is_live { 3 } else { 8 },
                         reset || changed || is_live,
                         if is_live { 12 } else { 64 },
+                        if adaptive { 128.min(samples) } else { 0 },
+                        if adaptive { time_budget_ms.min(120_000) } else { 0 },
                         &cancelled,
                     )
                 };
@@ -674,7 +710,7 @@ impl Host {
                     }
                     denoiser = "oidn";
                     let d = self.oidn.as_ref().unwrap();
-                    renderer.finish_with(&|c, a, n| d.run_interruptible(c,a,n,4,w as usize,h as usize,if tier=="refine"{Some((&cancellation,generation))}else{None}))
+                    renderer.finish_with_layers(&|c, shade, a, n| d.run_layers_interruptible(&mut [c,shade],a,n,4,w as usize,h as usize,if tier=="refine"{Some((&cancellation,generation))}else{None}))
                 } else {
                     denoiser = if is_live && denoise { "atrous" } else { "none" };
                     renderer.finish(if is_live && denoise { 3 } else { 0 })
@@ -694,6 +730,10 @@ impl Host {
                 }
                 target.denoiser = denoiser;
                 target.quality_denoise = denoise;
+                target.quality_samples = samples;
+                target.quality_adaptive = adaptive;
+                target.quality_temporal = temporal;
+                target.quality_budget_ms = time_budget_ms;
                 target.time = time;
                 target.tier = tier.clone();
                 let gpu_bytes=renderer.allocated_gpu_bytes();self.peak_gpu_bytes=self.peak_gpu_bytes.max(gpu_bytes.unwrap_or(0));
@@ -1045,6 +1085,27 @@ mod tests {
         assert!(dimensions(0, 10).is_err());
         assert!(dimensions(99999, 10).is_err());
         assert!(dimensions(1920, 1080).is_ok());
+    }
+
+    #[cfg(feature = "oidn")]
+    #[test]
+    fn bounded_final_keeps_its_sample_floor_and_reuses_it_for_layer_masks() {
+        let mut host = Host::new();
+        host.handle(Command::Preset { name: "chrome".into(), finish: blue(), time: 0. }, &[]).unwrap();
+        let request = json!({"op":"render","width":48,"height":32,"tier":"final","samples":1024,"adaptive":true,"timeBudgetMs":1,"goal":true,"denoise":true});
+        let (first, _) = host.handle(serde_json::from_value(request.clone()).unwrap(), &[]).unwrap();
+        let samples = first["samples"].as_u64().unwrap();
+        assert!(samples >= 128 && samples < 1024, "bounded Final must sample before its budget: {first}");
+        let mut masked = request; masked["layer"] = json!(0);
+        let (second, _) = host.handle(serde_json::from_value(masked).unwrap(), &[]).unwrap();
+        assert_eq!(second["samples"], first["samples"], "a layer mask cannot multiply the Final budget");
+        assert_eq!(second["timings"]["traceMs"], 0.);
+        // A raw reference after an adaptive image must restart without stopping.
+        let raw = json!({"op":"render","width":48,"height":32,"tier":"final","samples":256,"adaptive":false,"denoise":false,"goal":true});
+        let (reference, _) = host.handle(serde_json::from_value(raw).unwrap(), &[]).unwrap();
+        assert_eq!(reference["samples"], 256);
+        assert_eq!(reference["denoiser"], "none");
+        assert!(host.full.as_ref().unwrap().renderer.sample_counts().iter().all(|n| *n == 256.));
     }
 
     #[cfg(feature = "oidn")]

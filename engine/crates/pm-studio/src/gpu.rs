@@ -87,6 +87,7 @@ struct Present {
 
 /// Pipelines and acceleration structures for hardware ray tracing.
 struct Rt {
+    aovs: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     trace: wgpu::ComputePipeline,
     resampled: wgpu::ComputePipeline,
@@ -169,6 +170,8 @@ pub struct Renderer {
     frame: u32,
     /// Live tier: cheaper floor shadows and primary-only mirror coats.
     pub live: bool,
+    /// Conservative post-OIDN history for sequential Final export frames.
+    pub quality_temporal: bool,
     /// Trace photons for caustics (glass or polished metal in the scene; not Live).
     pub caustics: bool,
     /// Use hardware ray tracing when the GPU has it (Apple M3 and later
@@ -293,7 +296,7 @@ impl Renderer {
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("studio post"),
-            entries: &[uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false)],
+            entries: &[uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false), storage(10, true)],
         });
         let pipeline = |module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str| {
             let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(entry), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
@@ -316,6 +319,7 @@ impl Renderer {
         let temporal = pipeline(&post_src, &post_layout, "temporal");
         let photons = pipeline(&trace_src, &trace_layout, "photons");
         let resampling=rt_ok.then(||resampling::Resampling::new(&device,width,height));
+        let aov_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("studio aov"), entries: &[storage(0, false)] });
         let rt = rt_ok.then(|| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("studio rt"),
@@ -342,9 +346,19 @@ impl Renderer {
             let ris_module=device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("trace reservoirs"),source:wgpu::ShaderSource::Wgsl(ris_src.into())});
             let ris_layout=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("trace reservoirs"),bind_group_layouts:&[Some(&trace_layout),Some(&layout),Some(&resampling.as_ref().unwrap().layout)],immediate_size:0});
             let resampled=device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor{label:Some("trace reservoirs"),layout:Some(&ris_layout),module:&ris_module,entry_point:Some("main"),compilation_options:Default::default(),cache:None});
-            Rt { trace: make("main"), resampled, photons: make("photons"), layout, group: None, tlas: None, blas: Vec::new() }
+            let guide_source = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("aovs rt"),
+                source: wgpu::ShaderSource::Wgsl(format!("{}\n{}", rt_source(), AOV_WGSL.replacen("@group(1)", "@group(2)", 1)).into()),
+            });
+            let guide_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("aovs rt"), bind_group_layouts: &[Some(&trace_layout), Some(&layout), Some(&aov_layout)], immediate_size: 0,
+            });
+            let aovs = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("aovs rt"), layout: Some(&guide_layout), module: &guide_source,
+                entry_point: Some("aovs"), compilation_options: Default::default(), cache: None,
+            });
+            Rt { aovs, trace: make("main"), resampled, photons: make("photons"), layout, group: None, tlas: None, blas: Vec::new() }
         });
-        let aov_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("studio aov"), entries: &[storage(0, false)] });
         let aov_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("aov"),
             source: wgpu::ShaderSource::Wgsl(format!("{}\n{}", include_str!("shaders/trace.wgsl"), AOV_WGSL).into()),
@@ -425,6 +439,7 @@ impl Renderer {
             samples: 0,
             frame: 0,
             live: false,
+            quality_temporal: false,
             caustics: false,
             hardware_rt: true,
             rt,
@@ -692,6 +707,16 @@ impl Renderer {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
 
+    /// Override the packed world's adaptive policy for a quality request. This
+    /// also covers the Electron binary upload path, which bypasses Scene.world.
+    pub fn set_adaptive_sampling(&mut self, settings: crate::environment::AdaptiveSampling) {
+        let row = 4 * self.light_count as u64 + 9 * self.instance_count as u64 + 5;
+        if self.scene_buffers[3].size() >= (row + 1) * 16 {
+            let values = [u32::from(settings.enabled) as f32, settings.min_samples as f32, settings.relative_error, settings.absolute_error];
+            self.queue.write_buffer(&self.scene_buffers[3], row * 16, bytemuck::cast_slice(&values));
+        }
+    }
+
     /// Trace `spp` samples per pixel with up to `bounces` bounces; `reset`
     /// starts a new accumulation. Returns GPU wall time in ms.
     pub fn trace(&mut self, spp: u32, bounces: u32, reset: bool, clamp: u32) -> f64 {
@@ -700,6 +725,11 @@ impl Renderer {
     /// Refine may yield to new input between the existing four-sample GPU
     /// submissions. Uninterrupted sampling order and Final output are identical.
     pub fn trace_interruptible(&mut self,spp:u32,bounces:u32,reset:bool,clamp:u32,cancelled:&dyn Fn()->bool)->f64 {
+        self.trace_budgeted_interruptible(spp, bounces, reset, clamp, 0, 0, cancelled)
+    }
+    /// A budget is checked between submissions, after the minimum sample floor.
+    /// No extra image buffers or GPU allocations are needed for adaptive work.
+    pub fn trace_budgeted_interruptible(&mut self, spp:u32, bounces:u32, reset:bool, clamp:u32, min_samples:u32, budget_ms:u64, cancelled:&dyn Fn()->bool)->f64 {
         let (w, h) = (self.width, self.height);
         // Several dispatches of at most 4 samples keep each submission short.
         let start = Instant::now();
@@ -713,6 +743,7 @@ impl Renderer {
         let mut first = true;
         while left > 0 {
             if cancelled(){break;}
+            if !first && budget_ms > 0 && self.samples >= min_samples && start.elapsed().as_millis() >= budget_ms as u128 { break; }
             let n = left.min(4);
             self.frame = self.frame.wrapping_add(1);
             let mut p = self.base;
@@ -726,7 +757,10 @@ impl Renderer {
                 if reset && first {
                     enc.clear_buffer(&self.grid, 0, None);
                 }
-                p.caustic = [self.bounds[3] / 160.0, self.photons_emitted, 1.0, PHOTONS_PER_PASS as f32];
+                // Bootstrap the map before the first camera sample. Sparse
+                // first maps otherwise survive in every accumulated estimate.
+                let photon_count = if reset && first { PHOTONS_PER_PASS * 4 } else { PHOTONS_PER_PASS };
+                p.caustic = [self.bounds[3] / 160.0, self.photons_emitted, 1.0, photon_count as f32];
                 self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
                 {
                     let mut pass = enc.begin_compute_pass(&Default::default());
@@ -738,11 +772,11 @@ impl Renderer {
                         _ => pass.set_pipeline(&self.photons),
                     }
                     pass.set_bind_group(0, &group, &[]);
-                    pass.dispatch_workgroups(PHOTONS_PER_PASS.div_ceil(64), 1, 1);
+                    pass.dispatch_workgroups(photon_count.div_ceil(64), 1, 1);
                 }
                 self.queue.submit([enc.finish()]);
                 enc = self.device.create_command_encoder(&Default::default());
-                self.photons_emitted += PHOTONS_PER_PASS as f32;
+                self.photons_emitted += photon_count as f32;
                 p.caustic[1] = self.photons_emitted;
             }
             self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
@@ -788,6 +822,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 7, resource: self.ebuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.history[self.history_index].as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 9, resource: self.history[1-self.history_index].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: self.aov.as_entire_binding() },
             ],
         })
     }
@@ -850,11 +885,19 @@ impl Renderer {
         present.pipelines.insert(format, pipeline);
     }
 
-    /// Final with a learned denoiser: the resolved image, guided by first-hit
+    /// Final with a learned denoiser: the resolved image, guided by path-following
     /// albedo and normals, goes through `denoise` (color, albedo, normal; RGBA
     /// f32, RGB read) before it is composed. The backdrop's shadow-catcher
     /// shading is denoised the same way. Returns (pixels, ms).
     pub fn finish_with(&mut self, denoise: &dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>) -> (Vec<u8>, f64) {
+        self.finish_with_layers(&|color, shade, albedo, normal| {
+            denoise(color, albedo, normal)?;
+            denoise(shade, albedo, normal)
+        })
+    }
+
+    /// Denoise both noisy layers together so auxiliary prefiltering is shared.
+    pub fn finish_with_layers(&mut self, denoise: &dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>) -> (Vec<u8>, f64) {
         self.post(0, true, Some(denoise), None)
     }
 
@@ -887,7 +930,7 @@ impl Renderer {
     /// Linear scene radiance before exposure and tone mapping.
     pub fn radiance(&mut self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
-        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2) | (u32::from(self.quality_temporal)<<3) | (u32::from(self.base.backdrop[3]>0.)<<4)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
         self.queue.write_buffer(&self.post_params[0], 0, bytemuck::bytes_of(&params));
         let group = self.post_group(0, 1, 0);
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -921,17 +964,17 @@ impl Renderer {
     }
 
     #[allow(clippy::type_complexity)]
-    fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
+    fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
         let (w, h) = (self.width, self.height);
-        if self.live && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
+        if (self.live || self.quality_temporal) && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
             self.history=std::array::from_fn(|_|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("live history"),size:u64::from(w)*u64::from(h)*32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));self.history_valid=false;
         }
         let groups = (w.div_ceil(8), h.div_ceil(8));
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut slot = 0;
         let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, src: usize, dst: usize, step: u32, slot: &mut usize| {
-            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2)) as f32], backdrop: self.backdrop, cameras: [self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]] };
+            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2) | (u32::from(self.quality_temporal)<<3) | (u32::from(self.base.backdrop[3]>0.)<<4)) as f32], backdrop: self.backdrop, cameras: [[self.base.cam_pos[0],self.base.cam_pos[1],self.base.cam_pos[2],self.base.ground[3]],self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]] };
             self.queue.write_buffer(&self.post_params[*slot], 0, bytemuck::bytes_of(&params));
             let group = self.post_group(*slot, src, dst);
             *slot += 1;
@@ -957,9 +1000,16 @@ impl Renderer {
             let trace_group = self.trace_group.clone().expect("traced before finishing");
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.aovs);
                 pass.set_bind_group(0, &trace_group, &[]);
-                pass.set_bind_group(1, &group, &[]);
+                if self.uses_hardware_rt() {
+                    let rt = self.rt.as_ref().unwrap();
+                    pass.set_pipeline(&rt.aovs);
+                    pass.set_bind_group(1, rt.group.as_ref(), &[]);
+                    pass.set_bind_group(2, &group, &[]);
+                } else {
+                    pass.set_pipeline(&self.aovs);
+                    pass.set_bind_group(1, &group, &[]);
+                }
                 pass.dispatch_workgroups(groups.0, groups.1, 1);
             }
             self.queue.submit([std::mem::replace(&mut enc, self.device.create_command_encoder(&Default::default())).finish()]);
@@ -973,10 +1023,16 @@ impl Renderer {
                 for c in 0..3 {
                     albedo[i * 4 + c] = aov[i * 8 + c] * aov[i * 8 + 3];
                 }
+                // The catcher is a diffuse receiver too. A black auxiliary
+                // albedo falsely tells OIDN that its caustic/shadow shading is
+                // detail on a black surface, leaving speckled light behind.
+                if self.base.backdrop[3] > 0. && aov[i * 8 + 3] == 0. && aov[i * 8 + 5] > 0.9 {
+                    albedo[i * 4..i * 4 + 3].fill(self.base.env_horizon[3]);
+                }
                 normal[i * 4..i * 4 + 4].copy_from_slice(&aov[i * 8 + 4..i * 8 + 8]);
                 shade[i * 4..i * 4 + 3].fill(color[i * 4 + 3]);
             }
-            if let Err(e) = denoise(&mut color, &albedo, &normal).and_then(|_| denoise(&mut shade, &albedo, &normal)) {
+            if let Err(e) = denoise(&mut color, &mut shade, &albedo, &normal) {
                 eprintln!("denoise failed, keeping the noisy frame: {e}");
             } else {
                 for i in 0..pixels {
@@ -986,7 +1042,7 @@ impl Renderer {
             }
         }
         let mut cur = 0;
-        if self.live {
+        if self.live || self.quality_temporal {
             run(&mut enc, &self.temporal, cur, 1-cur, 1, &mut slot);
             cur = 1-cur;
         }
@@ -1076,7 +1132,7 @@ impl Renderer {
     pub fn set_straight_output(&mut self, on:bool) {self.straight_output=on;}
 
     fn advance_history(&mut self) {
-        if self.live { self.history_index=1-self.history_index; self.history_valid=true;
+        if self.live || self.quality_temporal { self.history_index=1-self.history_index; self.history_valid=true;
             self.previous_camera=[self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up]; }
         else { self.history_valid=false; }
     }

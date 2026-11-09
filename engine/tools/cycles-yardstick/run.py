@@ -289,8 +289,12 @@ def main():
         out = args.out/name
         out.mkdir(exist_ok=True)
         if not args.score_only:
-            if shutil.disk_usage(args.out).free < 8_000_000_000:
-                raise RuntimeError('less than 8 GB free; stopping before further renders')
+            # The tiny regression writes bounded frames, not a full image corpus.
+            # Retain the larger reserve for diagnostic/high-resolution runs.
+            width, height = map(int, args.size.split('x'))
+            reserve = 5_500_000_000 if args.regression and width * height <= 128 * 72 else 8_000_000_000
+            if shutil.disk_usage(args.out).free < reserve:
+                raise RuntimeError(f'less than {reserve / 1e9:g} GB free; stopping before further renders')
             if not args.cycles_only:
                 run_logged([studio,'--scene',name,'--out',out,'--size',args.size,'--spp',studio_samples],out/'studio.log',175)
             if args.reuse_cycles:

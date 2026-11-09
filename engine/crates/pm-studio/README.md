@@ -29,7 +29,7 @@ retain the original Phase 0 product-scene baseline.
 |---|---|
 | Live | Half resolution, 1 sample, 2 bounces, cheaper floor shadows; edge-aware à-trous denoise of the noisy part only (direct screen emission is exact) |
 | Refine | Accumulates 1-sample slices while nothing changes |
-| Final | Fixed samples per frame, 8 bounces; optionally denoised by Open Image Denoise |
+| Final | Adaptive samples with a minimum floor, maximum ceiling and time budget; 8 bounces and Open Image Denoise |
 
 ## Run
 
@@ -94,8 +94,11 @@ with the specular weight, as in OpenPBR).
 ### Final denoising (Open Image Denoise)
 
 With the `oidn` feature, `Renderer::finish_with` runs Intel Open Image
-Denoise (Apache-2.0) on Final frames, guided by first-hit albedo and normal
-images traced with the same camera. The backdrop's shadow shading is
+Denoise (Apache-2.0) on Refine/Final frames. Its 64 stratified guide rays
+follow near-specular reflection/refraction to the first rough surface, rather
+than treating front glass as the visible detail. Both auxiliary images are
+prefiltered before HDR/high-quality filtering with `cleanAux`; `inputScale`
+uses OIDN's automatic HDR scale on linear, pre-exposure radiance. The backdrop's shadow shading is
 denoised too; the screen's emission is added afterwards, so it stays exact.
 
 ```sh
@@ -103,9 +106,34 @@ brew install open-image-denoise     # or set OIDN_DIR to an OIDN 2.x install
 cargo run --release -p pm-studio --features oidn --bin studio-spike -- --out /tmp/studio --scene hero --final-spp 16
 ```
 
-This writes `<scene>-final-oidn.png` beside `<scene>-final.png`. At 960×540
-on an M5, 16 samples plus denoising (≈ 0.25 s) is cleaner than 256 samples
-without it.
+This writes `<scene>-final-oidn.png` beside `<scene>-final.png`; the CLI's
+explicit sample count is a diagnostic override. Desktop exports raise legacy
+8–16 spp settings to a 512–1024 sample budget divided among shutter images,
+with a dispatch floor of 128 samples per shutter image. Individual pixels may
+stop after 64 samples (128 for lens, caustic or fog scenes). Agent stills use a
+256-sample ceiling. Unprepared legacy synchronous preview readbacks retain
+their four-sample fast path; prepared agent/export captures use these quality
+budgets on both native and WebGPU backends.
+Quality requests enable per-pixel relative/absolute-error stopping; a time
+budget is checked between GPU submissions after the sample floor (8 seconds
+for an export shutter image, 4 seconds for an agent still). Refine remains
+interruptible. Masks reuse the completed trace instead of extending the budget.
+
+Sequential exports can reproject the denoised result, with depth/normal/object
+rejection and a local color clamp. Near-specular pixels reject first-surface
+history: reflected/refracted details do not have that surface's motion vector.
+Seeks, cuts, geometry/material changes and quality changes reset history.
+The photon map is bootstrapped before camera sampling; sparse nonzero bins
+retain their energy. The Final clamp limits indirect contributions while
+leaving direct highlights intact. No radius-shrinking photon estimator or
+unconditional glossy blur is applied.
+
+`engine/tools/denoise-quality.py` replays native inputs captured by the opt-in
+`studio-denoising.spec.ts`, renders raw high-spp references plus chrome,
+materials and room-fog corpus scenes, and records SSIM, ΔE00, timings, frozen-
+scene temporal RMS, and comparison crops outside Git. The small GPU tests in
+`tests/denoising_quality.rs` guard refracted detail against 2048 spp, guide
+transport in both traversal paths and rejection of glass temporal history.
 
 Scenes: `hero` (flat lay with stylus), `edge` (thin silhouette turning to
 face the camera), `macro` (shallow focus across the display corner), `back`

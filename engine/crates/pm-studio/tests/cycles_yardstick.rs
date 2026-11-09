@@ -39,10 +39,15 @@ fn cycles_corpus_stays_within_scene_tolerances_when_blender_is_present() {
         .arg(out)
         .arg("--blender")
         .arg(blender);
-    #[cfg(feature = "yardstick")]
-    command
-        .arg("--studio")
-        .arg(env!("CARGO_BIN_EXE_studio-yardstick"));
+    // Reuse an explicitly built matching exporter on disk-constrained Macs.
+    // This still renders and scores every scene; it only avoids a second cache.
+    if let Some(studio) = std::env::var_os("PM_STUDIO_YARDSTICK_BIN") {
+        assert!(Path::new(&studio).is_file(), "PM_STUDIO_YARDSTICK_BIN must be an existing exporter");
+        command.arg("--studio").arg(studio);
+    } else {
+        #[cfg(feature = "yardstick")]
+        command.arg("--studio").arg(env!("CARGO_BIN_EXE_studio-yardstick"));
+    }
     let status = command
         .status()
         .expect("Python 3 with NumPy/Pillow required when Blender is installed");

@@ -43,6 +43,8 @@ pub(super) struct MetalFX {
     context: *mut c_void,
     output_size: (u32, u32),
     guides: wgpu::ComputePipeline,
+    distance_pipeline: wgpu::ComputePipeline,
+    distance_group: wgpu::BindGroup,
     guide_layout: wgpu::BindGroupLayout,
     guide_params: wgpu::Buffer,
     inputs: Vec<wgpu::Texture>,
@@ -102,6 +104,7 @@ impl MetalFX {
             wgpu::TextureFormat::Rgba16Float,
             wgpu::TextureFormat::R32Float,
             wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureFormat::R32Float,
         ];
         let texture = |format, w, h| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -162,7 +165,7 @@ impl MetalFX {
         r.queue.submit([init.finish()]);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
         let mut entries: Vec<_> = input_formats
-            .iter()
+            .iter().take(8)
             .enumerate()
             .map(|(i, &format)| wgpu::BindGroupLayoutEntry {
                 binding: i as u32,
@@ -233,6 +236,38 @@ impl MetalFX {
             },
             count: None,
         };
+        // Reuse normal.w for the ray length, then unpack it in a tiny pass.
+        // This keeps the guide kernel within Metal's eight storage-texture limit.
+        let distance_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("MetalFX specular distance"),
+            entries: &[tex_entry(0), wgpu::BindGroupLayoutEntry {
+                binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::R32Float, view_dimension: wgpu::TextureViewDimension::D2 }, count: None,
+            }],
+        });
+        let distance_source = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("MetalFX specular distance"),
+            source: wgpu::ShaderSource::Wgsl(r#"
+@group(0) @binding(0) var normal:texture_2d<f32>;
+@group(0) @binding(1) var distance_out:texture_storage_2d<r32float,write>;
+@compute @workgroup_size(8,8)
+fn unpack_distance(@builtin(global_invocation_id) g:vec3u){
+  if(any(g.xy>=textureDimensions(normal))){return;}
+  textureStore(distance_out,vec2i(g.xy),vec4f(textureLoad(normal,vec2i(g.xy),0).w));
+}"#.into()),
+        });
+        let distance_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("MetalFX specular distance"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&distance_layout)], immediate_size: 0 })),
+            module: &distance_source, entry_point: Some("unpack_distance"), compilation_options: Default::default(), cache: None,
+        });
+        let distance_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("MetalFX specular distance"), layout: &distance_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&inputs[5].create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&inputs[8].create_view(&Default::default())) },
+            ],
+        });
         let pack_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("MetalFX pack"),
             entries: &[
@@ -282,6 +317,8 @@ impl MetalFX {
             context,
             output_size: (ow, oh),
             guides,
+            distance_pipeline,
+            distance_group,
             guide_layout,
             guide_params: uniform_buf(std::mem::size_of::<Guides>() as u64),
             inputs,
@@ -357,7 +394,7 @@ impl Renderer {
                 .write_buffer(&fx.guide_params, 0, bytemuck::bytes_of(&params));
             let views: Vec<_> = fx
                 .inputs
-                .iter()
+                .iter().take(8)
                 .map(|t| t.create_view(&Default::default()))
                 .collect();
             let mut entries: Vec<_> = views
@@ -395,6 +432,12 @@ impl Renderer {
                 pass.set_bind_group(2, &group, &[]);
                 pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
             }
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&fx.distance_pipeline);
+                pass.set_bind_group(0, &fx.distance_group, &[]);
+                pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+            }
             self.queue.submit([enc.finish()]);
             self.wait();
             let mut textures = Vec::new();
@@ -402,6 +445,7 @@ impl Renderer {
                 textures.push(raw_texture(input)?);
             }
             textures.push(raw_texture(&fx.output)?);
+            textures.push(raw_texture(&fx.inputs[8])?);
             let p = self.base.cam_pos;
             let f = self.base.cam_fwd;
             let r = self.base.cam_right;

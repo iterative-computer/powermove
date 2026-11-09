@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
-const gpu = vi.hoisted(() => ({ generation: 1, ready: true, allocations: 0, destroyed: 0, init: vi.fn() }));
+const gpu = vi.hoisted(() => ({ generation: 1, ready: true, allocations: 0, destroyed: 0, quality: vi.fn(), init: vi.fn() }));
 vi.mock('./gpu', () => ({
   initStudioGpu: async () => { gpu.init(); gpu.ready = true; gpu.generation++; return {}; },
   studioGpuReady: () => gpu.ready,
@@ -11,13 +11,15 @@ vi.mock('./gpu', () => ({
     samples = 0;
     constructor() { gpu.allocations++; }
     destroy() { gpu.destroyed++; }
+    setAdaptiveSampling() {} invalidateHistory() {}
+    async traceQuality() { gpu.quality(); this.samples = 128; }
     setScene() {} setView() {} trace(n: number) { this.samples += n; } resolve() {} present() { return {}; }
   }
 }));
 import { WebGpuStudioBackend } from './webgpu-backend';
 import { extractScene } from './extract';
 
-beforeEach(() => { gpu.allocations = 0; gpu.destroyed = 0; gpu.generation = 1; gpu.ready = true; gpu.init.mockClear(); });
+beforeEach(() => { gpu.allocations = 0; gpu.destroyed = 0; gpu.generation = 1; gpu.ready = true; gpu.init.mockClear(); gpu.quality.mockClear(); });
 function backend() {
   const backend = new WebGpuStudioBackend(), graph = new THREE.Scene();
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()); mesh.userData.sceneId = 'box'; graph.add(mesh);
@@ -48,4 +50,22 @@ it('evicts inactive quality targets before exceeding the session allowance', () 
   for (const tier of ['live', 'refine', 'final'] as const) b.render(request(tier, 2400, 1600));
   expect(gpu.destroyed).toBeGreaterThan(0);
   b.dispose(); expect(gpu.destroyed).toBe(gpu.allocations);
+});
+
+it('reuses a bounded Final trace for every layer instead of extending its budget', async () => {
+  const b = backend();
+  const quality = { ...request('final'), samples: 1024, adaptive: true, timeBudgetMs: 1 };
+  expect(await b.render(quality)).toMatchObject({ samples: 128 });
+  expect(await b.render({ ...quality, layer: 'box' })).toMatchObject({ samples: 128 });
+  expect(gpu.quality).toHaveBeenCalledOnce();
+  b.dispose();
+});
+
+it('keeps unprepared synchronous readback synchronous with adaptive GPU stopping', () => {
+  const b = backend();
+  const frame = b.render({ ...request('final'), samples: 256, adaptive: true, timeBudgetMs: 0 });
+  expect(frame).not.toBeInstanceOf(Promise);
+  expect(frame).toMatchObject({ samples: 256 });
+  expect(gpu.quality).not.toHaveBeenCalled();
+  b.dispose();
 });

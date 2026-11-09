@@ -11,9 +11,10 @@ import { WebGpuStudioBackend } from './webgpu-backend';
 import { describeCamera, describePreparedScene } from './scene-description';
 import { studioBackendFactory, studioBackendRevision, type StudioBackend, type StudioFrame, type StudioRenderRequest, type StudioTextureSource } from '../scene3d/studio-backend';
 
-export const STUDIO_FINAL_SAMPLES = 64;
+import { finalSampleLimit, STUDIO_STILL_SAMPLES } from './sampling';
+export { STUDIO_FINAL_SAMPLES } from './sampling';
 let emptyCombinedLayer:OffscreenCanvas|undefined;
-const STUDIO_STILL_SAMPLES = 4, REFINE_SAMPLES = 256, REFINE_DELAY_MS = 140, JOB_TTL_MS = 10_000;
+const REFINE_SAMPLES = 256, REFINE_DELAY_MS = 140, JOB_TTL_MS = 10_000;
 export type StudioPreview = 'fast' | 'quality';
 type Job = {
   runtime:any; uid:number; depthIds:Set<string>; separate:boolean;sceneKey: string; viewKey: string; scene: StudioScene; maps: StudioTextureSource[];
@@ -352,12 +353,14 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   // Reach the clean-preview budget in one OIDN pass. Tiny four-sample steps
   // repeatedly ran the full denoiser before the first 32-sample image existed.
   if(tier==='refine' && job.refineGoal===0)job.refineGoal=32;
-  const samples = PM._studioRefineCapture || (final ? Math.max(4, Math.ceil(Number(runtime.raw?.environment?.samples ?? STUDIO_FINAL_SAMPLES) / Math.max(1, PM._studioShutterSamples || 1))) : still ? STUDIO_STILL_SAMPLES : tier === 'refine' ? job.refineGoal : 1);
+  // Immediate legacy readbacks retain their small synchronous preview. Agent
+  // stills and exports prepare quality captures and consume those above.
+  const samples = PM._studioRefineCapture || (final ? finalSampleLimit(runtime.raw?.environment?.samples, PM._studioShutterSamples) : still ? (synchronous ? 4 : STUDIO_STILL_SAMPLES) : tier === 'refine' ? job.refineGoal : 1);
   // Native Live owns tracing resolution and MetalFX upscaling. Its requested
   // size is the final output size; do not halve it a second time in the page.
   const lowResolution=tier==='live' && job.backend.id==='webgpu';
   const rw = lowResolution ? Math.max(2, width >> 1) : width, rh = lowResolution ? Math.max(2, height >> 1) : height;
-  const request: StudioRenderRequest = { tier, size: { width: rw, height: rh }, samples, layer: objectId || undefined, background: bottom, accumulate: tier === 'refine', denoise: studioOptions.denoise,inputAt:job.changedAt };
+  const request: StudioRenderRequest = { tier, size: { width: rw, height: rh }, samples, layer: objectId || undefined, background: bottom, accumulate: tier === 'refine', denoise: studioOptions.denoise, adaptive: !synchronous && tier !== 'live' && studioOptions.denoise, timeBudgetMs: synchronous ? 0 : final ? 8000 : still ? 4000 : 0, temporal: final && !still, inputAt:job.changedAt };
   const key = `${objectId}:${tier}:${bottom}:${job.sceneKey}:${viewKey}:${samples}:${rw}x${rh}`;
   const frame = requestFrame(PM, job, request, key,capture,captureKey);
   if (!final && !still && !slot) schedule(PM);

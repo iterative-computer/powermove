@@ -19,7 +19,7 @@ export class WebGpuStudioBackend implements StudioBackend {
   private viewKey = '';
   private deviceGeneration = studioGpuGeneration();
   private disposed = false;
-  private targets = new Map<string, { target: StudioTarget; bytes: number; revision: number; viewKey: string; time: number; resolved: number; denoise: boolean }>();
+  private targets = new Map<string, { target: StudioTarget; bytes: number; revision: number; viewKey: string; time: number; resolved: number; denoise: boolean; adaptive: boolean; completedGoal: number }>();
   async initialize(): Promise<void> { if (!await initStudioGpu()) throw new Error('Studio could not start WebGPU'); }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription): void {
     studioSceneBytes(scene, maps.length, studioMaxBindingBytes() || Infinity);
@@ -73,22 +73,43 @@ export class WebGpuStudioBackend implements StudioBackend {
       // A tier keeps just its current resolution; resizing must not retain GPU targets.
       for (const [oldKey, old] of this.targets) if (oldKey.startsWith(`${request.tier}:`)) { old.target.destroy(); this.targets.delete(oldKey); }
       const target = new StudioTarget(width, height); target.live = request.tier === 'live';
-      entry = { target, bytes, revision: -1, viewKey: '', time: NaN, resolved: -1, denoise: false }; this.targets.set(key, entry);
+      entry = { target, bytes, revision: -1, viewKey: '', time: NaN, resolved: -1, denoise: false, adaptive: false, completedGoal: -1 }; this.targets.set(key, entry);
     }
     entry.bytes = bytes;
     this.targets.delete(key); this.targets.set(key, entry);
     const t = entry.target;
-    if (entry.revision !== this.revision) { t.setScene(this.scene, this.maps); entry.revision = this.revision; entry.viewKey = ''; entry.resolved = -1; }
-    const changed = entry.viewKey !== this.viewKey || entry.time !== this.time;
-    if (changed) { t.setView({ ...this.view, camera: { ...this.view.camera, aspect: width / height } }); entry.viewKey = this.viewKey; entry.time = this.time; entry.resolved = -1; }
+    if (entry.revision !== this.revision) { t.setScene(this.scene, this.maps); entry.revision = this.revision; entry.viewKey = ''; entry.resolved = -1; entry.completedGoal = -1; }
+    const adaptive = request.adaptive === true && request.tier !== 'live';
+    const temporal = request.temporal === true && request.tier === 'final' && request.denoise !== false;
+    if (!temporal || this.time < entry.time || this.time - entry.time > .1 || t.qualityTemporal !== temporal) t.invalidateHistory?.();
+    t.qualityTemporal = temporal;
+    const changed = entry.viewKey !== this.viewKey || entry.time !== this.time || entry.adaptive !== adaptive;
+    if (changed) { t.setView({ ...this.view, camera: { ...this.view.camera, aspect: width / height } }); entry.viewKey = this.viewKey; entry.time = this.time; entry.resolved = -1; entry.completedGoal = -1; entry.adaptive = adaptive; }
     const goal = Math.max(1, Math.min(4096, Math.ceil(request.samples)));
-    if (changed || t.samples < goal) t.trace(Math.max(0, goal - t.samples), request.tier === 'live' ? 2 : 8, changed, request.tier === 'live' ? 6 : 64, Math.round(this.time * 9600));
-    const denoise = request.denoise !== false;
-    if (entry.resolved !== t.samples || entry.denoise !== denoise) { t.resolve(request.tier === 'live' ? 4 : 0, request.tier === 'final' && denoise); entry.resolved = t.samples; entry.denoise = denoise; }
-    const found = request.layer ? this.scene.objects.indexOf(request.layer) : -1;
-    const index = request.layer && found < 0 ? this.scene.objects.length : found;
-    return { source: t.present(`${request.layer ?? '*'}:${request.background === true}`, index, request.background === true), width, height, samples: t.samples, version: `${this.revision}:${this.time}:${this.viewKey}:${key}:${t.samples}` };
+    t.setAdaptiveSampling(adaptive);
+    const finish = (): StudioFrame => {
+      const denoise = request.denoise !== false;
+      if (entry!.resolved !== t.samples || entry!.denoise !== denoise) {
+        t.resolve(request.tier === 'live' ? 4 : 0, request.tier !== 'live' && denoise);
+        entry!.resolved = t.samples; entry!.denoise = denoise;
+      }
+      const found = request.layer ? this.scene!.objects.indexOf(request.layer) : -1;
+      const index = request.layer && found < 0 ? this.scene!.objects.length : found;
+      return { source: t.present(`${request.layer ?? '*'}:${request.background === true}`, index, request.background === true), width, height, samples: t.samples, version: `${this.revision}:${this.time}:${this.viewKey}:${key}:${t.samples}` };
+    };
+    // Unprepared synchronous readback queues its bounded sample ceiling
+    // immediately. A CPU time-budget loop is only possible for async captures.
+    const bounded = adaptive && (request.timeBudgetMs ?? 0) > 0;
+    if (bounded && (changed || entry.completedGoal !== goal)) {
+      return t.traceQuality(goal, changed, Math.round(this.time * 9600), request.timeBudgetMs ?? 0, request.signal).then(() => {
+        entry!.completedGoal = goal;
+        return finish();
+      });
+    }
+    if (!bounded && (changed || t.samples < goal)) t.trace(Math.max(0, goal - t.samples), request.tier === 'live' ? 2 : 8, changed, request.tier === 'live' ? 6 : 64, Math.round(this.time * 9600));
+    return finish();
   }
+
   bounds(layer?: string): StudioBounds | null {
     if (!layer && this.scene && !this.scene.bounds.isEmpty()) return { min: {x:this.scene.bounds.min.x,y:this.scene.bounds.min.y,z:this.scene.bounds.min.z}, max: {x:this.scene.bounds.max.x,y:this.scene.bounds.max.y,z:this.scene.bounds.max.z} };
     const doc = this.document ?? this.description?.(); if (!doc) return null;

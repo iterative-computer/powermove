@@ -21,7 +21,7 @@ struct Params {
   env_zenith: vec4f,   // w: exposure
   env_horizon: vec4f,  // w: floor albedo for secondary bounces
   dims: vec4u,         // width, height, frame seed, samples this dispatch
-  counts: vec4u,       // lights, max bounces, reset (1 = overwrite), firefly clamp (luminance)
+  counts: vec4u,       // lights, max bounces, reset (1 = overwrite), indirect clamp (luminance; Live clamps the total)
   opts: vec4u,         // x: Live; y: shadows off (1); z: instance count
   ground: vec4f,       // environment radiance below the horizon; w: floor height
   caustic: vec4f,      // x: grid cell size, y: photons emitted so far, z: caustics on (1), w: photons this pass
@@ -1518,6 +1518,14 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   return array<vec3f, 2>(ro, rd);
 }
 
+// Suppress rare indirect outliers without clipping directly visible light
+// sources or first-bounce highlights. Zero disables the clamp for references.
+fn limit_indirect(value:vec3f,bounce:u32)->vec3f {
+  if(P.opts.x!=0u || bounce==0u || P.counts.w==0u){return value;}
+  let l=dot(value,vec3f(.2126,.7152,.0722));
+  return value*min(1.,f32(P.counts.w)/max(l,1e-6));
+}
+
 fn path(px: vec2f)->Sample {
   var s=Sample(vec3f(0.),vec3f(0.),vec3f(0.),-1.,0.,vec3f(0.),0u);
   let ray = camera_ray(px);
@@ -1551,14 +1559,14 @@ fn path(px: vec2f)->Sample {
           for(var step=0u;step<2u;step++){
             let point=ro+rd*((f32(step)+rnd())*dt);let med=medium_at(point);
             let tr=exp(-live_optical_depth(ro+rd*(f32(step)*dt),rd,dt));
-            s.radiance+=tp*med.albedo*(1.-tr)*medium_direct_live(point,rd,med.g);tp*=tr;
+            s.radiance+=limit_indirect(tp*med.albedo*(1.-tr)*medium_direct_live(point,rd,med.g),b);tp*=tr;
           }
         }else{tp*=exp(-live_optical_depth(ro,rd,end));}
       }else{
         let event=medium_event(ro,rd,segment);
         if(event>=0.){
           let point=ro+rd*event;let med=sample_medium(point);tp*=med.albedo;
-          s.radiance+=tp*medium_direct(point,rd,med.g);
+          s.radiance+=limit_indirect(tp*medium_direct(point,rd,med.g),b);
           // Phase-sampled direct emitters are not added again: NEE above handles
           // those, while following segments still carry indirect surface light.
           ro=point;rd=sample_hg(rd,med.g);primary=false;last_pdf=0.;chain=3;
@@ -1571,7 +1579,7 @@ fn path(px: vec2f)->Sample {
       if(chain==2 || chain==3){return s;}
       let light=light_at(seen_light);var mis=1.;
       if(last_pdf>0.){let pl=light_pdf(light,ro,rd,light_distance)*light_selection_pdf(seen_light,ro);mis=last_pdf*last_pdf/(last_pdf*last_pdf+pl*pl);}
-      s.radiance+=tp*light_emit(light,ro+rd*light_distance,rd)*mis;return s;
+      s.radiance+=limit_indirect(tp*light_emit(light,ro+rd*light_distance,rd)*mis,b);return s;
     }
     if (h.tri < 0 && tf >= BIG) {
       if (primary) {
@@ -1580,9 +1588,9 @@ fn path(px: vec2f)->Sample {
       } else {
         let pe=environment_pdf(rd);
         var mis=1.;if(last_pdf>0. && pe>0.){mis=last_pdf*last_pdf/(last_pdf*last_pdf+pe*pe);}
-        if(chain!=3){s.radiance += tp * environment(rd) * ambient_response * mis;}
+        if(chain!=3){s.radiance += limit_indirect(tp * environment(rd) * ambient_response * mis,b);}
         // The infinite-light branches avoid scanning every practical on misses.
-        if(chain!=2 && chain!=3){s.radiance+=tp*sun_radiance(ro,rd,last_pdf);}
+        if(chain!=2 && chain!=3){s.radiance+=limit_indirect(tp*sun_radiance(ro,rd,last_pdf),b);}
       }
       return s;
     }
@@ -1597,8 +1605,8 @@ fn path(px: vec2f)->Sample {
       // A matte floor in reflections: one diffuse bounce, lit by the lights.
       let n = vec3f(0.0, 1.0, 0.0);
       let dummy = floor_material();
-      s.radiance += tp * sample_lights(p + n * ray_epsilon(), n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
-      if (photons_on) { s.radiance += tp * P.env_horizon.w / PI * caustic_at(p, vec3f(0.,1.,0.)); }
+      s.radiance += limit_indirect(tp * sample_lights(p + n * ray_epsilon(), n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true),b);
+      if (photons_on) { s.radiance += limit_indirect(tp * P.env_horizon.w / PI * caustic_at(p, vec3f(0.,1.,0.)),max(b,1u)); }
       tp *= P.env_horizon.w;
       ro = p + n * ray_epsilon();
       rd = cosine_dir(n, rnd2());
@@ -1633,7 +1641,7 @@ fn path(px: vec2f)->Sample {
     if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
       let sheen_exit=clamp(m.layers.x*max(shading.sheen.x,max(shading.sheen.y,shading.sheen.z))*sheen_energy(m.maps.w,nv)/sheen_normalization(m.maps.w),0.,1.);
       let emitted = m.emit.xyz * (1.0 - m.spec.y * fresnel_dielectric(max(dot(shading.coat_normal,v),1e-4), 1.5)) * (1.-sheen_exit);
-      if (primary) { s.emit += tp * emitted; } else { s.radiance += tp * emitted; }
+      if (primary) { s.emit += tp * emitted; } else { s.radiance += limit_indirect(tp * emitted,b); }
     }
     if ((u32(m.policy.y) & 8u) != 0u) { return s; }
     let p = sf.p + ng * ray_epsilon();
@@ -1651,10 +1659,10 @@ fn path(px: vec2f)->Sample {
     let w = lobe_probs(m, nv,max(dot(shading.coat_normal,v),1e-4));
     s.radiance += tp*m.base.xyz*(1.-m.base.w)*(1.-m.spec.w)*P.ambient.xyz*m.policy.x;
     // Direct light.
-    if (w.trans < 0.999) { s.radiance += tp * (sample_lights(p, n, v, m, w, false)+sample_environment(p,n,v,m,w)); }
+    if (w.trans < 0.999) { s.radiance += limit_indirect(tp * (sample_lights(p, n, v, m, w, false)+sample_environment(p,n,v,m,w)),b); }
     // Caustics: light focused onto this surface by glass or mirrors.
     if (photons_on && w.diff > 0.0) {
-      s.radiance += tp * m.base.xyz * (1.0 - m.base.w) * (1.0 - m.spec.w) / PI * caustic_at(sf.p, n);
+      s.radiance += limit_indirect(tp * m.base.xyz * (1.0 - m.base.w) * (1.0 - m.spec.w) / PI * caustic_at(sf.p, n),max(b,1u));
     }
     // Russian roulette after the third bounce.
     if (b >= 3u) {
@@ -1762,8 +1770,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let idx = gid.y * w + gid.x;
   if(P.opts.x==0u && P.counts.z==0u && world_on()){
     let settings=world_row(5u);let a=accum[idx];
-    if(settings.x>0.5 && a.w>=settings.y){
-      let mean=dot(a.xyz+ebuf[idx].xyz,vec3f(0.2126,0.7152,0.0722))/a.w;
+    // The photon estimator evolves as the grid fills. Lens and
+    // specular/caustic scenes need a larger floor before trusting variance.
+    let hard=P.cam_pos.w>0. || P.caustic.z>.5 || medium_majorant()>0.;
+    let minimum=max(settings.y,select(0.,128.,hard));
+    if(settings.x>0.5 && a.w>=minimum){
+      let mean=dot(a.xyz+ebuf[idx].xyz+bgsum[idx].xyz,vec3f(0.2126,0.7152,0.0722))/a.w;
       let variance=max(0.,(ebuf[idx].w-a.w*mean*mean)/max(a.w-1.,1.));
       let error=sqrt(variance/a.w);let limit=max(settings.w,abs(mean)*settings.z);
       if(error<limit){return;}
@@ -1774,7 +1786,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var bg = vec3f(0.0);
   var nbg = 0.0;
   var em = vec3f(0.0);
-  // Σ luminance² (radiance + emission) of the samples: each pixel's noise, for Final's denoiser.
+  // Sampling luminance² includes backdrop shadow/coverage noise too.
   var l2 = 0.0;
   var nd = vec4f(0.0, 0.0, 0.0, -1.0);
   var object = 0u;
@@ -1798,8 +1810,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     if(any(smp.normal!=smp.normal) || any(abs(smp.normal)>vec3f(1e20))){smp.normal=vec3f(0.);}
     // Clamp fireflies from tiny bright paths (Live clamps harder).
     let lum = dot(smp.radiance, vec3f(0.2126, 0.7152, 0.0722));
-    rad += smp.radiance * min(1.0, f32(P.counts.w) / max(lum, 1e-6));
-    let x = min(lum, f32(P.counts.w)) + dot(smp.emit, vec3f(0.2126, 0.7152, 0.0722));
+    let clamped=select(lum,min(lum,f32(P.counts.w)),P.opts.x!=0u);
+    rad += smp.radiance * select(1.,min(1.,f32(P.counts.w)/max(lum,1e-6)),P.opts.x!=0u);
+    let x = clamped + dot(smp.emit+smp.bg, vec3f(0.2126, 0.7152, 0.0722));
     l2 += x * x;
     em += smp.emit;
     bg += smp.bg;
@@ -1913,7 +1926,9 @@ fn caustic_at(p: vec3f, n: vec3f) -> vec3f {
   let fine = gather(p, n, 0);
   if (fine.w >= 96.0) { return fine.xyz; }
   let coarse = gather(p, n, 1);
-  if (coarse.w < 8.0) { return vec3f(0.0); }
+  // A sparse nonzero estimate still carries energy; dropping bins with
+  // fewer than eight photons creates dark holes and temporal popping.
+  if (coarse.w <= 0.0) { return vec3f(0.0); }
   return mix(coarse.xyz, fine.xyz, fine.w / 96.0);
 }
 

@@ -85,6 +85,10 @@ export type StudioRenderRequest = {
   layer?: string; background?: boolean;
   /** Accumulate from the previous refine request; scene/camera/time edits reset it. */
   accumulate?: boolean; denoise?: boolean; signal?: AbortSignal;
+  /** Quality rendering: per-pixel error stopping, bounded after the sample floor. */
+  adaptive?: boolean; timeBudgetMs?: number;
+  /** Reproject denoised export history; arbitrary agent frames leave this off. */
+  temporal?: boolean;
   /** Renderer clock when this evaluated input first requested a new image. */
   inputAt?:number;
 };

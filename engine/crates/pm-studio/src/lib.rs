@@ -3,7 +3,7 @@
 //! Phase 0 renders every tier with one GPU path tracer:
 //! - **Live**: one sample per pixel per frame, denoised (dragging, playback).
 //! - **Refine**: keeps accumulating while nothing changes (paused).
-//! - **Final**: a fixed sample count per frame (export, agent frames).
+//! - **Final**: adaptive bounded quality rendering (export, agent frames).
 
 pub mod bvh;
 pub mod environment;

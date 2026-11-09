@@ -28,7 +28,9 @@ extern "C" void *studio_metalfx_create(void *rawDevice, unsigned iw, unsigned ih
             d.colorTextureFormat=MTLPixelFormatRGBA16Float;d.depthTextureFormat=MTLPixelFormatR32Float;
             d.motionTextureFormat=MTLPixelFormatRG32Float;d.diffuseAlbedoTextureFormat=MTLPixelFormatRGBA16Float;
             d.specularAlbedoTextureFormat=MTLPixelFormatRGBA16Float;d.normalTextureFormat=MTLPixelFormatRGBA16Float;
-            d.roughnessTextureFormat=MTLPixelFormatR32Float;d.outputTextureFormat=MTLPixelFormatRGBA16Float;
+            d.roughnessTextureFormat=MTLPixelFormatR32Float;
+            d.specularHitDistanceTextureFormat=MTLPixelFormatR32Float;d.specularHitDistanceTextureEnabled=YES;
+            d.outputTextureFormat=MTLPixelFormatRGBA16Float;
             d.autoExposureEnabled=YES;d.requiresSynchronousInitialization=YES;
             id<MTLFXTemporalDenoisedScaler> scaler=[d newTemporalDenoisedScalerWithDevice:device];
             if (!scaler) return nullptr;
@@ -46,7 +48,8 @@ extern "C" bool studio_metalfx_encode(void *context,void **textures,const float 
             s.colorTexture=(__bridge id<MTLTexture>)textures[0];s.depthTexture=(__bridge id<MTLTexture>)textures[1];
             s.motionTexture=(__bridge id<MTLTexture>)textures[2];s.diffuseAlbedoTexture=(__bridge id<MTLTexture>)textures[3];
             s.specularAlbedoTexture=(__bridge id<MTLTexture>)textures[4];s.normalTexture=(__bridge id<MTLTexture>)textures[5];
-            s.roughnessTexture=(__bridge id<MTLTexture>)textures[6];s.outputTexture=(__bridge id<MTLTexture>)textures[7];
+            s.roughnessTexture=(__bridge id<MTLTexture>)textures[6];
+            s.specularHitDistanceTexture=(__bridge id<MTLTexture>)textures[8];s.outputTexture=(__bridge id<MTLTexture>)textures[7];
             s.preExposure=1.f;s.motionVectorScaleX=1.f;s.motionVectorScaleY=1.f;
             s.jitterOffsetX=jitterX;s.jitterOffsetY=jitterY;s.shouldResetHistory=reset;s.depthReversed=NO;
             simd_float4x4 v,p;std::memcpy(&v,view,64);std::memcpy(&p,projection,64);s.worldToViewMatrix=v;s.viewToClipMatrix=p;

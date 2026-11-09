@@ -163,3 +163,8 @@ Reference reuse retains the verified replay script along with the float images.
 A result produced by reference reuse can itself be reused safely. Missing or
 stale replay proof fails with a request to rerender Cycles; tests cover chained
 reuse and stale/missing mapping rejection.
+
+The 128×72 regression keeps a 5.5 GB disk reserve; larger diagnostic runs keep
+8 GB. `PM_STUDIO_YARDSTICK_BIN=/absolute/studio-yardstick` lets the Rust test
+reuse a matching exporter built from the same checkout instead of retaining a
+second Cargo profile. All scenes and quality tolerances still run.

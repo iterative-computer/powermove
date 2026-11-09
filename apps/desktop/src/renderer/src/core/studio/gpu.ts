@@ -136,7 +136,7 @@ async function preparePipelines(owner = device):Promise<Pipelines> {
   });
   const postLayout = owner.createBindGroupLayout({
     label: 'studio post',
-    entries: [uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false)],
+    entries: [uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false), storage(10, true)],
   });
   const presentLayout = owner.createBindGroupLayout({
     label: 'studio present',
@@ -233,6 +233,8 @@ export class StudioTarget {
   private canvases = new Map<string, { canvas: HTMLCanvasElement; context: any }>();
   view: StudioView | null = null;
   live = false;
+  qualityTemporal = false;
+  invalidateHistory(): void { this.prevCamera = null; }
 
   constructor(width: number, height: number) {
     studioTargetBytes(width, height, studioMaxBindingBytes());
@@ -259,6 +261,7 @@ export class StudioTarget {
   }
 
   setScene(scene: StudioScene, maps: (HTMLCanvasElement | OffscreenCanvas | Uint8Array)[]): void {
+    this.invalidateHistory();
     if (studioTargetBytes(this.width, this.height, studioMaxBindingBytes()) + studioSceneBytes(scene, maps.length, studioMaxBindingBytes()) > STUDIO_SESSION_BYTES)
       throw new Error('Studio exceeds the 2 GiB session budget; reduce mesh detail or output size');
     const bytesOf = (data: ArrayBufferView | ArrayBuffer) => data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -348,6 +351,26 @@ export class StudioTarget {
     this.samples = 0;
   }
 
+  setAdaptiveSampling(enabled: boolean): void {
+    const row = this.lightCount * 4 + this.instanceCount * 9 + 5;
+    if (this.sceneBuffers[3]?.size >= (row + 1) * 16)
+      device.queue.writeBuffer(this.sceneBuffers[3], row * 16, new Float32Array([enabled ? 1 : 0, 64, .015, .0005]));
+  }
+
+  /** Bound quality work between batches; never stop before its sample floor. */
+  async traceQuality(goal: number, reset: boolean, salt: number, budgetMs: number, signal?: AbortSignal): Promise<void> {
+    const started = performance.now();
+    let first = true;
+    if (reset) this.samples = 0;
+    while (this.samples < goal) {
+      if (signal?.aborted) throw new Error('Studio frame cancelled');
+      this.trace(Math.min(32, goal - this.samples), 8, first && reset, 64, salt);
+      await device.queue.onSubmittedWorkDone();
+      first = false;
+      if (budgetMs > 0 && this.samples >= Math.min(128, goal) && performance.now() - started >= budgetMs) break;
+    }
+  }
+
   /**
    * Queue `spp` samples (`reset` starts over). Returns without waiting.
    * `salt` seeds Stills and Final: the same salt (a frame's time) always gives
@@ -390,15 +413,16 @@ export class StudioTarget {
         // Photons first, in their own submission, so this batch's camera paths see them.
         const pe = device.createCommandEncoder();
         if (reset && first) pe.clearBuffer(this.grid);
-        f.set([this.bounds[3] / 160, this.photonsEmitted, 1, PHOTONS_PER_PASS], 44);
+        const photonCount = reset && first ? PHOTONS_PER_PASS * 4 : PHOTONS_PER_PASS;
+        f.set([this.bounds[3] / 160, this.photonsEmitted, 1, photonCount], 44);
         device.queue.writeBuffer(this.params, 0, this.base);
         const pp = pe.beginComputePass();
         pp.setPipeline(p.photons);
         pp.setBindGroup(0, this.traceGroup);
-        pp.dispatchWorkgroups(Math.ceil(PHOTONS_PER_PASS / 64));
+        pp.dispatchWorkgroups(Math.ceil(photonCount / 64));
         pp.end();
         device.queue.submit([pe.finish()]);
-        this.photonsEmitted += PHOTONS_PER_PASS;
+        this.photonsEmitted += photonCount;
         f[45] = this.photonsEmitted;
       }
       device.queue.writeBuffer(this.params, 0, this.base);
@@ -445,14 +469,14 @@ export class StudioTarget {
     let slot = 0;
     const bd = this.view.backdrop;
     const cam = this.view.camera, prev = this.prevCamera;
-    const camera = (c: StudioCamera) => [...c.position, 0, ...c.forward, 0, ...c.right, c.tanY * c.aspect, ...c.up, c.tanY];
-    const temporalOn = this.live && !!prev && !!prev.orthographic === !!cam.orthographic;
+    const camera = (c: StudioCamera) => [...c.position, this.view!.floorY, ...c.forward, 0, ...c.right, c.tanY * c.aspect, ...c.up, c.tanY];
+    const temporalOn = (this.live || this.qualityTemporal) && !!prev && !!prev.orthographic === !!cam.orthographic;
     // Final's denoiser hands compose its own coverage (see denoise.wgsl's finish).
     let sums = [this.accum, this.bgsum, this.ebuf];
     const run = (pipe: any, src: number, dst: number, step: number) => {
       const data = new ArrayBuffer(POST_BYTES);
       new Uint32Array(data, 0, 4).set([this.width, this.height, step, temporalOn ? 1 : 0]);
-      new Float32Array(data, 16, 8).set([this.view!.exposure, 1.6, 0, cam.orthographic ? 4 : 0, bd[0], bd[1], bd[2], this.view!.backdropOpaque ? 1 : 0]);
+      new Float32Array(data, 16, 8).set([this.view!.exposure, 1.6, 0, (cam.orthographic ? 4 : 0) | (this.qualityTemporal ? 8 : 0) | (this.view!.shadowCatcher ? 16 : 0), bd[0], bd[1], bd[2], this.view!.backdropOpaque ? 1 : 0]);
       new Float32Array(data, 48, 32).set([...camera(cam), ...camera(prev ?? cam)]);
       device.queue.writeBuffer(this.postParams[slot], 0, data);
       const group = device.createBindGroup({
@@ -465,6 +489,7 @@ export class StudioTarget {
           { binding: 7, resource: { buffer: sums[2] } },
           { binding: 8, resource: { buffer: this.history[this.historyIndex] } },
           { binding: 9, resource: { buffer: this.history[1 - this.historyIndex] } },
+          { binding: 10, resource: { buffer: this.aov ?? this.gbuf } },
         ],
       });
       slot++;
@@ -481,7 +506,7 @@ export class StudioTarget {
       cur = out.display;
       sums = [this.ones, out.coverage, this.ones];
     }
-    if (this.live) {
+    if (this.live || this.qualityTemporal) {
       // Reuse the previous frame where it saw the same surface, then denoise as usual.
       run(p.temporal, cur, 1 - cur, 1); cur = 1 - cur;
       this.historyIndex = 1 - this.historyIndex;
