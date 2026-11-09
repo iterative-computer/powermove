@@ -160,14 +160,15 @@ impl Controller {
                 return;
             }
         };
-        runtime.set_agent_environment(
-            pm_agents::launch::Environment::current(
-                self.mcp.profile.clone(),
-                pm_mcp::catalog::names(),
-                pm_mcp::catalog::composition_names(),
-            ),
-            Arc::new(pm_agents::account::open_in_browser),
+        let mut environment = pm_agents::launch::Environment::current(
+            self.mcp.profile.clone(),
+            pm_mcp::catalog::names(),
+            pm_mcp::catalog::composition_names(),
         );
+        environment.compatible = Some(Arc::new(crate::providers::Chat {
+            profile: self.mcp.profile.clone(),
+        }));
+        runtime.set_agent_environment(environment, Arc::new(pm_agents::account::open_in_browser));
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
         runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
         let mut tickets = vec![];

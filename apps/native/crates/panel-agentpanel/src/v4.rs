@@ -335,6 +335,7 @@ pub fn dispatch(
             let provider = match string(action, "provider")? {
                 "chatgpt" => Provider::Chatgpt,
                 "claude" => Provider::Claude,
+                "compatible" => Provider::Compatible,
                 _ => return Err(Error::Invalid("provider")),
             };
             panel.set_provider(

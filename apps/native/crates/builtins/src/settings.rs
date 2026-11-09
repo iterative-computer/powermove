@@ -808,7 +808,7 @@ pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
         "label":"Status","control":"action","action":"provider.setup",
         "actionLabel":if connected { "Change…" } else { "Set Up…" },"disabled":provider["busy"] == true});
     action["detail"] = json!(if connected {
-        "Tested and saved. The agent can’t run on API or local models in this build yet."
+        "Tested and saved."
     } else {
         "Use an API, Ollama, or LM Studio."
     });
