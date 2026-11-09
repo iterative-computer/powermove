@@ -134,7 +134,7 @@ pub fn decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = vec![0u8; total];
-    let mut parts: Vec<(&mut [u8], (&[u8], bool, usize))> =
+    let mut parts: Vec<(&mut [u8], Span<'_>)> =
         out.chunks_mut(row * STRIPE_ROWS).zip(spans).collect();
     let per = parts.len().div_ceil(THREADS).max(1);
     let ok = std::thread::scope(|s| {
@@ -174,6 +174,10 @@ pub fn decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     });
     ok.then_some(out)
 }
+
+/// A stripe's coded bytes, whether they are compressed (else the planes as
+/// they are), and its decoded length.
+type Span<'a> = (&'a [u8], bool, usize);
 
 /// `stripe`'s rows as left-difference low-byte and high-byte planes.
 fn split(stripe: &[u8], row: usize, planes: &mut Vec<u8>) {

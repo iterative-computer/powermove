@@ -1342,11 +1342,13 @@ impl GpuGate for Overlap {
         let open = self.open.fetch_add(1, Ordering::Relaxed) + 1;
         self.most_open.fetch_max(open, Ordering::Relaxed);
         let i = self.admitted.fetch_add(1, Ordering::Relaxed) + 1;
-        Some(if self.band_every > 0 && i % self.band_every == 0 {
-            1
-        } else {
-            units
-        })
+        Some(
+            if self.band_every > 0 && i.is_multiple_of(self.band_every) {
+                1
+            } else {
+                units
+            },
+        )
     }
     fn finished(&self, _: u64, _: u32, _: f64) {
         self.open.fetch_sub(1, Ordering::Relaxed);

@@ -612,6 +612,39 @@ back through the read-ahead thread they cost p50 2.8, p95 3.3 ms against 50 to
 **Not run here:** AUDIO-2 and the `drag_500` / `blend_stack_cold` heap
 attribution need a quiet Mac; they stand as in the entries above.
 
+### Wave 19 perf lane, 2026-11-09
+
+**Export "VideoToolbox dropped a frame".** Not the band switch: a viewer
+playing through an export defers every frame, and the hardware H.264
+encoder drops the B-frames it holds once the next frame is late by 30 to
+75 s (system log: `AVE ERR ... encoding error -1004`, `DROPPING frame N
+type 4`). `an_export_held_for_a_long_playback_never_drops_a_frame` (80 s
+hold, `--ignored`) fails with the app's message without the fix and passes
+with it.
+
+**Playback, 867-layer project, 6 to 23 s** (`pm-engine-service --bench`,
+release, `--quality=half`, render thread CPU time): p50 14.9, p95 28.5 ms
+(19 to 21 s the heaviest); before the wave p50 15.3, p95 28.8 ms. The
+machine's GPU was 40 to 80% busy with other processes, so frame time from
+worker to completion (p50 35 to 50 ms) is mostly queueing behind them; the
+frame's own GPU time is p50 1.5, p95 3 ms. Section 5's headroom is not met.
+CPU left per heavy frame: text rasterised in device space under moving
+parents (about 24 misses a frame, 28%), planning 786 layers (26%), wgpu
+encode and submit (20%), and the viewer waiting on video decode (10% of the
+wall time). Changes: animated shapes no longer submit a command buffer
+each (48 a frame), effect uniforms are pooled, and effect programs build on
+the prewarm worker (42 of the project's programs build there; the bench,
+which plays right after opening, still met 2 compiles mid-play instead of 4,
+the worker not having reached them yet).
+
+**Export overlap** (`pm-cli render`, ProRes 422 HQ, 6 to 23 s, best of
+three under load): 32.9 s instead of 37.5 s; still bound by the project's
+8-pass glow on the GPU.
+
+**Render cache** (`--fill`, 19 to 22 s, 72 frames at 1080p): 3.9 MB a frame
+instead of 16.6 MB, fill 25 s, read (file, checksum, decode) p50 14, p95
+18 ms; playback from it p50 2.5, p95 3.0 ms.
+
 ### WIP owner handoff
 
 Validation was stopped at the orchestrator's request before the full engine
