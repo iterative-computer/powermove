@@ -26,6 +26,8 @@ pub struct Frozen {
     resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
     playhead: f64,
     pub destination: PathBuf,
+    /// The person chose Export Without Them: offline clips are left out.
+    without_offline: bool,
 }
 pub struct Run {
     pub handle: Mutex<Option<pm_engine_service::jobs::ExportHandle>>,
@@ -111,7 +113,15 @@ impl AgentExport {
     }
 }
 impl Controller {
-    pub fn begin_builtin_export(&mut self, options: Value, retry: bool, cx: &mut Context<Self>) {
+    /// `without`: the person chose Export Without Them after a refusal naming
+    /// offline clips; the same frozen export runs again, leaving them out.
+    pub fn begin_builtin_export(
+        &mut self,
+        options: Value,
+        retry: bool,
+        without: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
@@ -120,10 +130,14 @@ impl Controller {
             return;
         }
         let saved = if retry {
-            self.builtins.export_retry.clone()
+            self.builtins.export_retry.clone().map(|mut frozen| {
+                frozen.without_offline |= without;
+                frozen
+            })
         } else {
             None
         };
+        let without_offline = saved.as_ref().is_some_and(|f| f.without_offline);
         let (p, typed, media, playhead) = if let Some(frozen) = &saved {
             (
                 frozen.publication.clone(),
@@ -199,6 +213,7 @@ impl Controller {
                 resources,
                 playhead,
                 destination,
+                without_offline,
             };
             let current = this
                 .update(cx, |v, _| {
@@ -353,7 +368,14 @@ async fn execute(
         Err(error) if job.cancel.load(Ordering::Acquire) && error == "cancelled" => {
             observe(&runtime, json!({"phase":"cancelled"})).await
         }
-        Err(error) => observe(&runtime, json!({"phase":"failed","message":error})).await,
+        Err(error) => {
+            let offline = pm_engine_service::jobs::is_offline_refusal(error);
+            observe(
+                &runtime,
+                json!({"phase":"failed","message":error,"offline":offline}),
+            )
+            .await
+        }
         Ok(path) => observe(&runtime, json!({"phase":"done","path":path})).await,
     }
     result.map(|_| ())
@@ -404,6 +426,7 @@ async fn execute_inner(
     )
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
+    request.without_offline = frozen.without_offline;
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
         &std::env::current_exe().map_err(|e| e.to_string())?,
         request,

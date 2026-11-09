@@ -59,7 +59,8 @@ export type Run =
       preview?: string;
     }
   | { phase: "done"; path: string }
-  | { phase: "failed"; message: string }
+  /** `offline`: refused because clips are offline; Export Without Them applies. */
+  | { phase: "failed"; message: string; offline?: boolean }
   | { phase: "cancelled" };
 export interface ExportSnapshot {
   version: 1;
@@ -198,7 +199,9 @@ export function snapshot(value: unknown): ExportSnapshot {
         r.elapsed < 0 ||
         (r.eta !== undefined && (typeof r.eta !== "number" || r.eta < 0)))) ||
     (r.phase === "done" && typeof r.path !== "string") ||
-    (r.phase === "failed" && typeof r.message !== "string")
+    (r.phase === "failed" &&
+      (typeof r.message !== "string" ||
+        (r.offline !== undefined && typeof r.offline !== "boolean")))
   )
     throw new TypeError("Invalid export run");
   return structuredClone(value) as unknown as ExportSnapshot;
@@ -578,6 +581,21 @@ export class ExportModel {
     this.changed();
     try {
       this.accept((await this.command("export.retry")).value);
+    } finally {
+      this.busy = false;
+      this.changed();
+    }
+  }
+  /** The person's explicit choice after a refusal naming offline clips: the
+   * same export again, leaving them out. Never automatic. */
+  async exportWithout() {
+    const run = this.current.run;
+    if (run.phase !== "failed" || !run.offline || this.busy || this.fault)
+      return;
+    this.busy = true;
+    this.changed();
+    try {
+      this.accept((await this.command("export.without")).value);
     } finally {
       this.busy = false;
       this.changed();

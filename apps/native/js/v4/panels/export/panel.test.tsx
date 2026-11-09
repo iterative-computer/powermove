@@ -324,7 +324,11 @@ test("accessibility exposes dialog, exact control labels, units and actual progr
   ).toMatchObject({ role: "Dialog", label: "Export" });
   expect(
     row.ax.find((n: any) => n.id === named(f.root, "export.width").id),
-  ).toMatchObject({ role: "NumberInput", label: "Width", value: "1920 pixels" });
+  ).toMatchObject({
+    role: "NumberInput",
+    label: "Width",
+    value: "1920 pixels",
+  });
   expect(
     row.ax.find((n: any) => n.id === named(f.root, "export.audio").id),
   ).toMatchObject({ role: "CheckBox", label: "Include Audio" });
@@ -382,4 +386,41 @@ test("toolbar trigger has spec copy and disables without a project or during a j
     check(replay(commits));
     await root.dispose();
   }
+});
+test("offline refusal offers Export Without Them; only the person's click sends it", async () => {
+  const s = initial();
+  s.run = {
+    phase: "failed",
+    message:
+      "1 clip is offline: Interview. Relink the originals, or export without them.",
+    offline: true,
+  };
+  const f = await mounted(s);
+  const without = named(f.root, "export.without");
+  expect(without.props.label).toBe("Export Without Them");
+  // Try Again stays the default; leaving clips out is never the Return key.
+  expect(named(f.root, "export.retry").props.metadata.pmKit.buttonRole).toBe(
+    "default",
+  );
+  expect(without.props.metadata.pmKit.buttonRole).toBe("normal");
+  expect(
+    f.requests.some((r) => JSON.stringify(r).includes("export.without")),
+  ).toBe(false);
+  await event(f.root, without.id, "click");
+  await f.root.flush();
+  expect(
+    f.requests.some((r) => JSON.stringify(r).includes("export.without")),
+  ).toBe(true);
+  expect(f.model.state.run.phase).toBe("preparing");
+  await f.root.dispose();
+  // Any other failure has no such choice.
+  const plain = initial();
+  plain.run = { phase: "failed", message: "The disk is full." };
+  const g = await mounted(plain);
+  expect(
+    [...g.root.host.nodes.values()].some(
+      (n) => n.props.id === "export.without",
+    ),
+  ).toBe(false);
+  await g.root.dispose();
 });

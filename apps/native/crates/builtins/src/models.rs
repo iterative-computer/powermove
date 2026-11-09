@@ -953,7 +953,7 @@ impl Backend {
     }
     pub(crate) fn command_reply(&mut self, command: &str) -> Result<Value, String> {
         match command {
-            "export.begin" | "export.retry" => {
+            "export.begin" | "export.retry" | "export.without" => {
                 self.native.export["run"] = json!({"phase":"choosingDestination"});
                 self.native
                     .platform
@@ -994,6 +994,7 @@ impl Backend {
             command,
             "export.begin"
                 | "export.retry"
+                | "export.without"
                 | "export.plan"
                 | "export.preset.save"
                 | "export.reset"
@@ -1253,9 +1254,9 @@ impl Backend {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?
             }
-            "export.begin" | "export.retry" => {
+            "export.begin" | "export.retry" | "export.without" => {
                 self.native.export_probe_stamp.clear();
-                let options = if command == "export.retry" {
+                let options = if command != "export.begin" {
                     self.native.export["options"].clone()
                 } else {
                     args["options"].clone()

@@ -908,10 +908,11 @@ impl Controller {
                     self.media_settings(&request.input, cx);
                     Ok(Value::Null)
                 }
-                "export.begin" | "export.retry" => {
+                "export.begin" | "export.retry" | "export.without" => {
                     self.begin_builtin_export(
                         request.input.clone(),
-                        request.operation == "export.retry",
+                        request.operation != "export.begin",
+                        request.operation == "export.without",
                         cx,
                     );
                     Ok(Value::Null)

@@ -641,6 +641,7 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     for command in [
         "export.begin",
         "export.retry",
+        "export.without",
         "export.plan",
         "export.reset",
         "export.closeFailure",

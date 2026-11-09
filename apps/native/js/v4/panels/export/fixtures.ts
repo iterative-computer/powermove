@@ -110,6 +110,7 @@ export function fixture(seed = initial()) {
             state.run = { phase: "idle" };
             break;
           case "export.retry":
+          case "export.without":
             state.run = { phase: "preparing" };
             break;
           case "export.preset.save":
