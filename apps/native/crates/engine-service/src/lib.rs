@@ -1307,6 +1307,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     v.status.represented += 1;
                 }
                 v.status.layer_failures = f.submission.failures.to_vec();
+                // A captured frame's pixels stay with its stamp and time: a
+                // re-present of the same picture (no readback) keeps them.
+                let kept = v
+                    .status
+                    .frame
+                    .take()
+                    .filter(|r| r.stamp == f.stamp && r.time == f.spec.time)
+                    .and_then(|r| r.pixels);
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
                     time: f.spec.time,
@@ -1326,7 +1334,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         .submission
                         .readback
                         .as_ref()
-                        .map(|_| f.submission.pixels()),
+                        .map(|_| f.submission.pixels())
+                        .or(kept),
                 });
             }
             state.notify();
