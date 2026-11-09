@@ -2522,26 +2522,6 @@ name = "pm-perf"
 version = "0.1.0"
 
 [[package]]
-name = "pm-perfbench"
-version = "0.1.0"
-dependencies = [
- "pm-engine",
- "pm-eval",
- "pm-export",
- "pm-gpu",
- "pm-media",
- "pm-model",
- "pm-node",
- "pm-perf",
- "pm-protocol",
- "pm-render",
- "pm-text",
- "png",
- "serde_json",
- "wgpu",
-]
-
-[[package]]
 name = "pm-protocol"
 version = "0.1.0"
 dependencies = [
