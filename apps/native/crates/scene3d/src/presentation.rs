@@ -48,7 +48,6 @@ pub fn light_name(k: Kind) -> &'static str {
         Kind::Sun => "Sun",
     }
 }
-pub const UPGRADED: &str = "3D layers were upgraded, so they may look different.";
 pub const MISSING_MODEL: &str = "The model file is missing.";
 pub const ANIMATED_BACKGROUND: &str =
     "Its background is animated. Move that to a separate layer, then try again.";

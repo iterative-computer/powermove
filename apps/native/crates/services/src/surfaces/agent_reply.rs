@@ -238,7 +238,6 @@ pub fn safe_link(raw: &str) -> bool {
             && u.password().is_none()
     })
 }
-pub const INERT_MEDIA_CSP: &str = "default-src 'none'; sandbox";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
     pub start: u64,

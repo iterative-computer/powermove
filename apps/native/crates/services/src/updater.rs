@@ -4,14 +4,6 @@ use crate::service_ensure as ensure;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-/// Verbatim update-sheet copy from design review item 4; rendering belongs to shell.
-pub const UPDATE_SHEET_TITLE: &str = "A New Version of Powermove Is Available";
-pub const INSTALL_UPDATE_LABEL: &str = "Install Update";
-pub const REMIND_ME_LATER_LABEL: &str = "Remind Me Later";
-pub const SKIP_THIS_VERSION_LABEL: &str = "Skip This Version";
-
-pub const STARTUP_CHECK_MS: u64 = 30_000;
-pub const CHECK_INTERVAL_MS: u64 = 4 * 60 * 60 * 1000;
 pub use pm_update_policy::updater::{FeedRoute, TransitionGate};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedMetadata {

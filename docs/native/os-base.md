@@ -84,7 +84,7 @@ microphone or screen capture permission; extension requests fail in the host
 without opening a system prompt. Do not carry those unused Electron placeholders
 into the native bundle. The complete native usage list is Documents, Desktop,
 Downloads, Removable Volumes, Network Volumes and Local Network, with the exact
-copy in that spec and `pm-first-launch::surfaces::native::USAGE_STRINGS`.
+copy in that spec.
 
 System permission denials route to the owning failed surface; returning from
 System Settings never automatically repeats an action. Signed Mac TCC, Local
