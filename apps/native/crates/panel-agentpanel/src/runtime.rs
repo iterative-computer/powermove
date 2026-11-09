@@ -37,12 +37,33 @@ struct Running {
     /// Host events (task rows, progress) delivered before the provider's.
     injected: VecDeque<Event>,
 }
+/// What the host may tell the person outside the app (S114): a run was
+/// sent, finished, or asked a question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    Sent {
+        thread: String,
+    },
+    Finished {
+        thread: String,
+        run: String,
+        /// Stopped by the person: never notified.
+        stopped: bool,
+    },
+    Question {
+        thread: String,
+        run: String,
+        item: String,
+        text: String,
+    },
+}
 #[derive(Default)]
 pub struct ProviderRuns {
     runs: Vec<Running>,
     cursor: usize,
     ended: Vec<(String, RunResult)>,
     settled: Vec<(String, RunResult)>,
+    notices: Vec<Notice>,
 }
 impl ProviderRuns {
     pub fn len(&self) -> usize {
@@ -100,7 +121,14 @@ impl ProviderRuns {
             release: false,
             injected: VecDeque::new(),
         });
+        self.notices.push(Notice::Sent {
+            thread: effect.target.thread.clone(),
+        });
         Ok(())
+    }
+    /// Notices since the last call, oldest first.
+    pub fn take_notices(&mut self) -> Vec<Notice> {
+        std::mem::take(&mut self.notices)
     }
     fn live_mut(&mut self, run: &str) -> Option<&mut Running> {
         self.runs
@@ -402,13 +430,40 @@ impl ProviderRuns {
                 let stopped = matches!(event, Event::Stopped(_));
                 let completed = matches!(event, Event::Completed { .. });
                 let run = running.target.run.clone().ok_or(Error::Stale)?;
+                let thread = running.target.thread.clone();
                 match event {
                     Event::Completed { result, .. } if !running.finished => {
+                        self.notices.push(Notice::Finished {
+                            thread,
+                            run: run.clone(),
+                            stopped: matches!(
+                                result,
+                                RunResult::Failure {
+                                    cancelled: true,
+                                    ..
+                                }
+                            ),
+                        });
                         self.settled.push((run, result.clone()));
                     }
                     Event::Stopped(reason) if !running.finished => {
                         self.settled
                             .push((run, RunResult::failure(reason.clone(), false)));
+                    }
+                    Event::Trace { value, .. } if value["kind"] == "question" => {
+                        let text = value["questions"]
+                            .as_array()
+                            .and_then(|q| q.first())
+                            .and_then(|q| q["question"].as_str())
+                            .unwrap_or_default();
+                        if let Some(item) = value["itemId"].as_str() {
+                            self.notices.push(Notice::Question {
+                                thread,
+                                run,
+                                item: item.into(),
+                                text: text.into(),
+                            });
+                        }
                     }
                     _ => {}
                 }

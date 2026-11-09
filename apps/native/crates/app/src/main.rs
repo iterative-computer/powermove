@@ -28,6 +28,7 @@ mod media;
 mod media_import;
 mod media_refresh;
 mod migration_report;
+mod notifications;
 mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]
 mod panel_capture_tests;
@@ -256,6 +257,7 @@ fn main() -> Result<()> {
                 if !started.replace(true) {
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
+                    notifications::install(cx);
                     panel_bridge::serve(bridge_calls.clone(), bridge_windows.clone(), cx);
                     let rx = wake_rx.clone();
                     let broker = broker.clone();

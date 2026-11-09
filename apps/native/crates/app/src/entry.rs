@@ -114,6 +114,15 @@ pub fn register(controller: &Entity<Controller>, window: AnyWindowHandle, cx: &m
     }
 }
 
+/// The editor in the window with this id, if it is still open.
+pub fn editor(window: u64, cx: &App) -> Option<Entity<Controller>> {
+    cx.try_global::<Entries>()?
+        .editors
+        .iter()
+        .find(|(_, w)| w.window_id().as_u64() == window)
+        .and_then(|(e, _)| e.upgrade())
+}
+
 /// The new window's opening, taken once by the window factory.
 pub fn take_for_new_window(cx: &mut App) -> Option<Pending> {
     cx.default_global::<Entries>().next_window.pop_front()

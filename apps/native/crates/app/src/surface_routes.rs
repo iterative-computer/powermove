@@ -28,6 +28,13 @@ impl Controller {
             "bringSignIns" => self.bring_sign_ins(cx),
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
+            // Settings › General › Agent Notifications, when macOS says no.
+            "openNotificationSettings" => {
+                let id = crate::platform::bundle_id().unwrap_or_default();
+                crate::platform::open_url(&format!(
+                    "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={id}"
+                ));
+            }
             "checkForUpdates" => {
                 let window = self.host.borrow().window.clone();
                 crate::updates::check_now(self.profile.clone(), window, cx)
