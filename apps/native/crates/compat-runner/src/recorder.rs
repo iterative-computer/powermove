@@ -195,6 +195,11 @@ impl NativeHost {
             None => Err(ask),
         }
     }
+    /// While the realm waits for a capture: the document and revision it is at.
+    pub(crate) fn capturing_at(&self) -> Option<(u64, u64)> {
+        self.nested.lock().unwrap().as_ref()?;
+        self.kernel.try_lock().ok()?.sent_revision()
+    }
     fn end_capture(&self) {
         *self.nested.lock().unwrap() = None;
         if let Some(capture) = self.capture.lock().unwrap().take() {
@@ -254,7 +259,6 @@ impl NativeHost {
             seconds: number(2, self.transport.time()),
             scale: number(1, 1.).max(1e-6),
             crop,
-            job: spec["job"].as_str().map(str::to_owned),
         })
         .map_err(Error::Host)?;
         let Some(reply) = reply else {
@@ -298,6 +302,7 @@ impl NativeHost {
                 _ if item["native"] == true => crate::RasterAnswer::Native,
                 _ if item["hidden"] == true => crate::RasterAnswer::Hidden,
                 _ if item["retry"] == true => crate::RasterAnswer::Retry,
+                _ if item["moved"] == true => crate::RasterAnswer::Moved,
                 _ if item["error"].is_string() => {
                     crate::RasterAnswer::Failed(item["error"].as_str().unwrap_or_default().into())
                 }
@@ -1477,6 +1482,7 @@ impl EngineProxy for NativeHost {
                 return Ok(Value::Null);
             }
             "compat.answers" => return self.raster_answers(input),
+            "fonts.families" => return Ok(json!(crate::font_families())),
             "extension.health" => {
                 self.events
                     .health(input["id"].as_str().unwrap_or_default(), &input["health"]);

@@ -199,28 +199,19 @@ globalThis.__compat = {
       return null;
     };
     const failure = (error) => String(error?.message ?? error ?? "The override failed");
-    /** `ask`: `{revision}` for the viewer; `{job, epoch}` for an export, which
-     * reads its frozen project and the wrappers it started with. */
+    /** `ask`: `{revision}` for the viewer; `{revision, exact}` for a one-frame
+     * look (an agent's still), which only this exact revision answers; nothing
+     * for an export, whose own realm holds its frozen project (`export.rs`). */
     this.answerRasters = (batch, needs, ask = {}) => {
       const realm = this.realm;
-      // An export's overrides read the project (`PM.proj`, any record) as the
-      // export froze it: only while this realm is at the export's revision.
-      // Behind it, ask again; past it (an edit during the export), the
-      // export fails rather than mix revisions.
-      const pinned = ask.job ? realm.pinnedRevision(ask.job) : undefined;
       const answers = needs.map((need) => {
         // This realm has not seen the viewer's revision yet: ask again.
         if (ask.revision !== undefined && ask.revision > realm.revision) return { retry: true };
-        if (ask.job && pinned === undefined) return { error: "The export's project is not available to its extensions" };
-        if (ask.job && pinned > realm.revision) return { retry: true };
-        if (ask.job && pinned < realm.revision)
-          return { error: "The project changed during the export. Export it again." };
-        if (ask.epoch !== undefined && ask.epoch !== realm.rasterGeneration)
-          return { error: "The extension that draws this layer changed during the export" };
+        if (ask.exact && ask.revision < realm.revision) return { moved: true };
         try {
           const layer = layerIn(realm.PM.proj, need.composition, need.layer);
           if (!layer) return { native: true };
-          realm.rasterContext = { composition: need.composition, job: ask.job, layer };
+          realm.rasterContext = { composition: need.composition, layer };
           const result = realm.PM.raster(
             layer,
             need.scale,
@@ -255,7 +246,81 @@ globalThis.__compat = {
         call("compat.answers", { batch, answers: answers.map(() => ({ error: failure(error) })) });
       }
     };
-    this.pinProject = (job, project) => this.realm.pinProject(job, project);
+    // PM.Fonts as on main: this Mac's families, and `ensure`, which gives the
+    // page the engine's face for a family, so a hidden element an extension
+    // measures lays out as the engine draws its text. The project's own text
+    // families are ensured at boot and as it changes (`projectFonts`).
+    const NATIVE = ["SF Pro Text", "SF Pro Display", "SF Mono"];
+    const WEB_FALLBACKS = [
+      "Helvetica Neue", "Helvetica", "Arial", "Arial Black", "Arial Narrow",
+      "Avenir", "Avenir Next", "Futura", "Gill Sans", "Optima",
+      "Georgia", "Times New Roman", "Baskerville", "Didot", "American Typewriter",
+      "Courier New", "Menlo", "Monaco", "Andale Mono", "Impact",
+    ];
+    const clean = (value) => String(value || "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+    const unique = (values) => [...new Set(values.map(clean).filter(Boolean))];
+    const requested = new Set();
+    let fontWaiters = [];
+    const requestFaces = (faces) => {
+      const fresh = faces.filter((face) => {
+        const key = `${face.family}|${face.weight}|${face.italic}`;
+        if (requested.has(key)) return false;
+        requested.add(key);
+        return true;
+      });
+      if (!fresh.length) return Promise.resolve();
+      call("ui.request", { kind: "fonts", faces: fresh });
+      return new Promise((resolve) => {
+        fontWaiters.push(resolve);
+        setTimeout(resolve, 5000);
+      });
+    };
+    const fonts = {
+      bundled: [],
+      system: [],
+      families: unique([...NATIVE, ...WEB_FALLBACKS]),
+      setSystemFamilies: (values) => {
+        fonts.system = unique(Array.isArray(values) ? values : []).sort((a, b) => a.localeCompare(b));
+        fonts.families = unique([...NATIVE, ...fonts.system, ...WEB_FALLBACKS]);
+        this.realm?.PM.bus.emit("fonts", fonts.families);
+      },
+      options: (current) => unique([clean(current), ...fonts.families]),
+      ensure: async (family, weight = 400) => {
+        const name = clean(family);
+        if (!name) return;
+        await requestFaces([{ family: name, weight: Number(weight) || 400, italic: false }]);
+        this.realm.PM.rasterClear?.();
+        this.realm.PM.invalidate();
+      },
+    };
+    const value = (v) => (v && typeof v === "object" && "v" in v ? v.v : v);
+    /** The faces the project's text layers use, as the engine resolves them. */
+    this.projectFonts = () => {
+      const faces = [];
+      const scan = (layers) => {
+        for (const layer of layers ?? []) {
+          const family = layer?.type === "text" ? clean(value(layer.d?.font)) : "";
+          if (!family) continue;
+          const weight = Number(value(layer.d?.weight)) || 500;
+          faces.push({ family, weight, italic: !!value(layer.d?.italic) });
+        }
+      };
+      const project = this.realm.PM.proj;
+      scan(project?.layers);
+      for (const comp of Object.values(project?.comps ?? {})) scan(comp?.layers);
+      return requestFaces(faces);
+    };
+    /** The page loaded what it was given: layouts measured before now re-measure. */
+    this.fontsLoaded = () => {
+      const waiters = fontWaiters;
+      fontWaiters = [];
+      this.realm.task(() => {
+        for (const resolve of waiters) resolve();
+        this.realm.PM.bus.emit("fonts", fonts.families);
+        this.realm.PM.rasterClear?.();
+        this.realm.PM.invalidate();
+      });
+    };
     const capabilities = {
       rasterProducing: (on, epoch) => call("compat.producing", { on: !!on, epoch }),
       // A capture this realm waits for asks it for overrides: answered inline.
@@ -285,6 +350,7 @@ globalThis.__compat = {
         ),
       ),
       PM: {
+        Fonts: fonts,
         toast: (text, options = {}) =>
           call("ui.toast", {
             text: String(text),
@@ -650,6 +716,10 @@ globalThis.__compat = {
    * promise is never returned to it: long extension work must not hold the owner.
    * Store code runs in its helper; nothing confined ever enters this plan. */
   boot(records) {
+    this.realm.task(() => {
+      this.realm.PM.Fonts.setSystemFamilies(runtime.engine("fonts.families", {}));
+      void this.projectFonts();
+    });
     this.loader
       .boot(this.trusted(records))
       .catch((error) => this.reportFailure(error))
@@ -672,9 +742,10 @@ globalThis.__compat = {
     });
   },
   sync() {
-    this.realm.task(() =>
-      this.realm.receive(runtime.engine("kernel.publication", {})),
-    );
+    this.realm.task(() => {
+      this.realm.receive(runtime.engine("kernel.publication", {}));
+      void this.projectFonts();
+    });
   },
   moved(time, timeChanged, playingChanged) {
     this.realm.task(() => {

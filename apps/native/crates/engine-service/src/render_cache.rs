@@ -715,6 +715,7 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
+        frozen: None,
     })
 }
 

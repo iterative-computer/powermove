@@ -118,8 +118,22 @@
       call({ kind: "canvas_applied", panel, payload: {resource:event.resource, failed} });
     }
   };
+  // The engine's faces for the project's text, under the names its CSS uses,
+  // so a hidden element an extension measures lays out as the engine draws.
+  // Later batches wait for them: no read measures a fallback meanwhile.
+  const loadFonts = async (faces) => {
+    await Promise.all(faces.map(async (face) => {
+      const font = new FontFace(face.family, `url("${base}font?q=${encodeURIComponent(face.key)}")`,
+        { weight: String(face.weight), style: face.style });
+      document.fonts.add(font);
+      try { await font.load(); } catch (_) {}
+    }));
+    call({ kind: "fonts_loaded", panel: 0, payload: null });
+  };
   const apply = async (event) => {
-    if (event.kind === "create") {
+    if (event.kind === "fonts") {
+      await loadFonts(event.faces);
+    } else if (event.kind === "create") {
       if (panel !== null)
         throw Error("Dedicated remote DOM page already owns a panel");
       panel = event.panel;

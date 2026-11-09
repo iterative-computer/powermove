@@ -138,6 +138,22 @@ pub trait SyncHandler {
         Ok(())
     }
 }
+/// A face the page lays text out with: the engine's own face for what the
+/// project's text asks for, under the family name the page's CSS uses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageFace {
+    pub family: String,
+    pub weight: u16,
+    pub italic: bool,
+    /// One whole sfnt face.
+    pub bytes: std::sync::Arc<[u8]>,
+}
+impl PageFace {
+    /// The face's name in the page's `font` route.
+    pub fn key(&self) -> String {
+        format!("{}|{}|{}", self.family, self.weight, u8::from(self.italic))
+    }
+}
 #[derive(Clone, Debug)]
 pub enum HostEvent {
     Ready {
@@ -160,6 +176,8 @@ pub enum HostEvent {
         new_pid: i32,
     },
     Failure(&'static str),
+    /// The page has loaded every face it was given (`MacDomHost::add_fonts`).
+    FontsLoaded,
 }
 /// Narrow boundary for pm-remote-dom. Invoke only on the AppKit main thread.
 /// A successful send is admission, not a DOM-paint acknowledgement. The bridge

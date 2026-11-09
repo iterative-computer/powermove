@@ -134,7 +134,11 @@ pub struct KernelAdapter {
     replies: BTreeMap<u64, (Value, Value)>,
     mutations: u64,
     mirror: Option<(u64, QueryMirror)>,
+    /// An export's realm: this publication for good (see [`Self::frozen`]).
+    frozen: Option<Arc<Published>>,
 }
+/// What an export's extensions are told when they try to change the project.
+const FROZEN: &str = "An export's extensions cannot change the project or its history";
 impl KernelAdapter {
     /// `writer` is the kernel identity of this realm's run: a rebuilt realm is a
     /// new generation, so its transaction ids can never meet an old one's. The
@@ -153,9 +157,27 @@ impl KernelAdapter {
             replies: BTreeMap::new(),
             mutations: 0,
             mirror: None,
+            frozen: None,
         }
     }
+    /// An export's realm (`export.rs`): it reads `published`, the project the
+    /// export froze, whatever the window does meanwhile. Nothing reaches the
+    /// kernel: direct writes and selection are acknowledged into the realm's
+    /// own mirror only, storage writes are dropped, and history, edits and
+    /// workspace changes are refused.
+    pub fn frozen(kernel: KernelHandle, published: Arc<Published>, realm: &str) -> Self {
+        let writer = Writer {
+            realm: u32::MAX,
+            generation: 1,
+        };
+        let mut adapter = Self::new(kernel, &published.project, realm, writer);
+        adapter.frozen = Some(published);
+        adapter
+    }
     fn published(&self) -> Result<Arc<Published>> {
+        if let Some(frozen) = &self.frozen {
+            return Ok(frozen.clone());
+        }
         self.kernel
             .published(&self.project)
             .ok_or_else(|| Error::Host("project closed".into()))
@@ -177,6 +199,9 @@ impl KernelAdapter {
         Value::Object(values.collect())
     }
     pub fn store(&self, key: &str, value: &Value) -> Result<()> {
+        if self.frozen.is_some() {
+            return Ok(());
+        }
         let value = pm_model::json::parse(&value.to_string())
             .map_err(|_| Error::Invalid("storage value"))?;
         self.kernel
@@ -252,6 +277,10 @@ impl KernelAdapter {
         self.staged = Some(text);
         Ok(())
     }
+    /// The document and revision the realm was last sent.
+    pub fn sent_revision(&self) -> Option<(u64, u64)> {
+        self.sent.as_ref().map(|s| (s.document_id, s.revision))
+    }
     pub fn take_staged(&mut self) -> Option<String> {
         self.staged.take()
     }
@@ -323,6 +352,9 @@ impl KernelAdapter {
         Ok(crate::transport::TimeBase::of(&p))
     }
     fn execute(&mut self, txid: u64, call: Call) -> Result<Value> {
+        if self.frozen.is_some() {
+            return Err(Error::Host(FROZEN.into()));
+        }
         let request = Request::new(self.caller, call).with_txid(txid);
         let ack = self
             .kernel
@@ -334,6 +366,9 @@ impl KernelAdapter {
     /// per txid, so only the first step carries it; `replies` makes the whole
     /// request idempotent.
     fn step(&mut self, call: Call) -> Result<Value> {
+        if self.frozen.is_some() {
+            return Err(Error::Host(FROZEN.into()));
+        }
         let ack = self
             .kernel
             .call_blocking(&self.project, Request::new(self.caller, call))
@@ -343,6 +378,9 @@ impl KernelAdapter {
     /// This realm is gone: its open entry records whole, its later calls are
     /// refused and its external entries become undo barriers.
     pub fn seal(&self) {
+        if self.frozen.is_some() {
+            return;
+        }
         let request = Request::new(self.caller, Call::RealmFailed);
         let _ = self.kernel.call_blocking(&self.project, request);
     }
@@ -529,6 +567,15 @@ impl KernelAdapter {
         };
         if let Some(value) = read {
             return Ok(json!({"value":value,"publication":self.publication()?}));
+        }
+        if self.frozen.is_some() {
+            let publication = self.publication()?;
+            return Ok(match method {
+                "document.directWrite" | "selection.set" => json!({"publication":publication}),
+                _ => {
+                    json!({"error":{"code":"Rejected","message":FROZEN},"publication":publication})
+                }
+            });
         }
         let call: Call = match method {
             "document.directWrite" => self.direct_write(args, &p)?,

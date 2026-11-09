@@ -16,7 +16,7 @@ use pm_kernel::KernelHandle;
 use pm_protocol::common::{PixelRect, TICKS_PER_SECOND};
 use pm_protocol::snapshot::CompatNeed;
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -51,15 +51,6 @@ impl Batches {
 const STALE: Duration = Duration::from_secs(10);
 /// How long an export frame waits for the realm.
 const EXPORT_WAIT: Duration = Duration::from_secs(60);
-/// Exports whose frozen projects the realm keeps (as `PINNED_PROJECTS` there).
-const PINNED: usize = 4;
-
-/// Exports' frozen documents, for the base rasters their overrides read.
-#[derive(Default)]
-struct Pins {
-    order: VecDeque<String>,
-    documents: HashMap<String, Arc<pm_model::Document>>,
-}
 
 pub(crate) struct Overrides {
     store: Arc<CompatStore>,
@@ -70,14 +61,13 @@ pub(crate) struct Overrides {
     doc_id: u64,
     batches: Arc<Mutex<Batches>>,
     realm: Arc<Mutex<Option<RasterInbox>>>,
-    pins: Arc<Mutex<Pins>>,
 }
 
 fn answer_of(answer: RasterAnswer) -> Reply {
     match answer {
         RasterAnswer::Native => Reply::Draw(CompatAnswer::Native),
         RasterAnswer::Hidden => Reply::Draw(hidden_raster()),
-        RasterAnswer::Retry => Reply::Retry,
+        RasterAnswer::Retry | RasterAnswer::Moved => Reply::Retry,
         RasterAnswer::Failed(_) => Reply::Failed,
         RasterAnswer::Raster {
             width,
@@ -108,28 +98,17 @@ impl Overrides {
             project,
             batches: Arc::default(),
             realm: Arc::default(),
-            pins: Arc::default(),
         }
     }
     pub(crate) fn hooks(&self) -> RasterHooks {
-        let (rasters, pins) = (self.rasters.clone(), self.pins.clone());
+        let rasters = self.rasters.clone();
+        // An export realm's layers paint from its frozen document.
         let base = Arc::new(move |request: BaseRasterRequest| {
             let rasters = rasters
                 .as_ref()
                 .ok_or("This window has no layer raster worker")?;
-            // An export's layers paint from its frozen document.
-            let document = match &request.job {
-                Some(job) => pins
-                    .lock()
-                    .unwrap()
-                    .documents
-                    .get(job)
-                    .cloned()
-                    .ok_or("The export's project is not available to its extensions")?,
-                None => request.document,
-            };
             let painted = rasters.raster(BaseRequest {
-                document,
+                document: request.document,
                 composition: request.composition,
                 layer: request.layer,
                 content: request.content,
@@ -199,61 +178,44 @@ impl Overrides {
             producing,
         }
     }
-    /// An export frame's need: asked of the realm against the export's frozen
-    /// project and wrappers, and waited for on the job's reader thread (never
-    /// the main thread) until it comes, the export is cancelled, the window's
-    /// extensions stop, or a minute passes.
+    /// An export frame's needs, waited for on the job's reader thread (never
+    /// the main thread) until they come, the job is cancelled, the window's
+    /// extensions stop, or a minute passes. A delivery (an export, a render
+    /// cache fill) is answered by a realm of its own, started at its first ask
+    /// from the publication it froze, so nothing the person edits meanwhile
+    /// reaches it and the window's realm keeps serving the viewer. A one-frame
+    /// look (an agent's still) asks the window's realm while that realm is at
+    /// its exact revision, and its own realm only once the project moved on.
     fn export_answerer(&self) -> CompatAnswerer {
-        let (batches, realm, pins) = (self.batches.clone(), self.realm.clone(), self.pins.clone());
+        let (batches, realm) = (self.batches.clone(), self.realm.clone());
+        let (kernel, project, doc_id) = (self.kernel.clone(), self.project.clone(), self.doc_id);
         Arc::new(move |pin: &CompatPin, needs: &[CompatJobNeed]| {
             let realm = realm
                 .lock()
                 .unwrap()
                 .clone()
                 .ok_or("The project's window has no extensions running")?;
-            {
-                let mut pins = pins.lock().unwrap();
-                if !pins.documents.contains_key(&pin.job) {
-                    let value = pm_model::json::parse(&pin.document)
-                        .map_err(|_| "The export's project is unreadable".to_owned())?;
-                    realm.pin(&pin.job, pin.revision)?;
-                    pins.documents.insert(
-                        pin.job.clone(),
-                        Arc::new(pm_model::Document::new(Some(value), pin.revision)),
-                    );
-                    pins.order.push_back(pin.job.clone());
-                    while pins.order.len() > PINNED {
-                        if let Some(old) = pins.order.pop_front() {
-                            pins.documents.remove(&old);
-                        }
-                    }
-                }
-            }
-            let wire: Vec<Value> = needs
-                .iter()
-                .map(|n| {
-                    json!({"composition": n.composition, "layer": n.layer,
-                    "seconds": n.seconds, "scale": n.scale})
-                })
-                .collect();
+            let wire = Value::Array(
+                needs
+                    .iter()
+                    .map(|n| {
+                        json!({"composition": n.composition, "layer": n.layer,
+                        "seconds": n.seconds, "scale": n.scale})
+                    })
+                    .collect(),
+            );
             let deadline = Instant::now() + EXPORT_WAIT;
-            // A realm still behind the export's revision answers "again": it
-            // is asked again once it has caught up.
-            let answers = loop {
+            let ask = |ask: Value| -> Result<Vec<RasterAnswer>, String> {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let batch = batches.lock().unwrap().open(Asker::Export(tx));
-                realm.ask(
-                    batch,
-                    Value::Array(wire.clone()),
-                    json!({"job": pin.job, "epoch": pin.epoch}),
-                );
-                let answers = loop {
+                realm.ask(batch, wire.clone(), ask);
+                loop {
                     if pin.cancel.load(Ordering::Acquire) {
                         batches.lock().unwrap().open.remove(&batch);
                         return Err("cancelled".into());
                     }
                     match rx.recv_timeout(Duration::from_millis(50)) {
-                        Ok(answers) => break answers,
+                        Ok(answers) => return Ok(answers),
                         Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
                         Err(RecvTimeoutError::Timeout) => {
                             batches.lock().unwrap().open.remove(&batch);
@@ -263,12 +225,47 @@ impl Overrides {
                             return Err("The project's extensions stopped during the export".into());
                         }
                     }
-                };
-                let behind = answers.iter().any(|a| matches!(a, RasterAnswer::Retry));
-                if !behind || Instant::now() >= deadline {
-                    break answers;
                 }
-                std::thread::sleep(Duration::from_millis(20));
+            };
+
+            let mut answers = None;
+            if pin.look {
+                // Behind the still's revision: ask again once it caught up.
+                loop {
+                    let got = ask(json!({"revision": pin.revision, "exact": true}))?;
+                    if got.iter().any(|a| matches!(a, RasterAnswer::Moved)) {
+                        break;
+                    }
+                    if !got.iter().any(|a| matches!(a, RasterAnswer::Retry)) {
+                        answers = Some(got);
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(
+                            "The project's extensions did not reach the frame's revision".into(),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            let answers = match answers {
+                Some(answers) => answers,
+                None => {
+                    // A render cache fill carries no publication: the window's,
+                    // while it is still the one the fill froze.
+                    let frozen = pin
+                        .frozen
+                        .clone()
+                        .and_then(|f| f.downcast::<pm_kernel::Published>().ok())
+                        .or_else(|| {
+                            kernel.published(&project).filter(|p| {
+                                p.snapshot.doc_id == doc_id && p.revision() == pin.revision
+                            })
+                        })
+                        .ok_or("The project changed before its extensions could draw it")?;
+                    realm.export(&pin.job, frozen, pin.cancel.clone())?;
+                    ask(json!({"job": pin.job}))?
+                }
             };
             answers
                 .into_iter()
@@ -276,9 +273,10 @@ impl Overrides {
                     RasterAnswer::Native => Ok(CompatReply::Native),
                     RasterAnswer::Hidden => Ok(CompatReply::Hidden),
                     RasterAnswer::Failed(error) => Err(error),
-                    RasterAnswer::Retry => {
-                        Err("The project's extensions did not reach the export's revision".into())
-                    }
+                    RasterAnswer::Retry | RasterAnswer::Moved => Err(
+                        "The project's extensions could not answer for the export's revision"
+                            .into(),
+                    ),
                     RasterAnswer::Raster {
                         width,
                         height,

@@ -183,7 +183,7 @@ impl EngineJobs {
     }
     fn start(
         &self,
-        published: &Published,
+        published: &Arc<Published>,
         settings: ExportSettings,
         destination: PathBuf,
         look: bool,
@@ -208,6 +208,7 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
+        request.frozen = Some(published.clone());
         // An agent's capture draws the effects its project's window defines.
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
@@ -448,7 +449,7 @@ impl Capture {
 #[allow(clippy::too_many_arguments)]
 fn frame(
     jobs: &EngineJobs,
-    published: &Published,
+    published: &Arc<Published>,
     fps: f64,
     time: f64,
     size: Size,

@@ -55,6 +55,11 @@ pub struct ExportRequest {
     /// a file (`crate::render_cache`).
     #[serde(default)]
     pub cache: Option<crate::render_cache::CacheFill>,
+    /// The publication the request was frozen from (the app's
+    /// `pm_kernel::Published`), for the extensions that answer the export's
+    /// raster overrides. Never sent to the child.
+    #[serde(skip)]
+    pub frozen: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// The viewer's activity, as exports and cache fills see it: whether it is
@@ -110,8 +115,10 @@ pub struct CompatPin {
     pub revision: u64,
     /// The generation of `raster` wrappers the export started with.
     pub epoch: u64,
-    /// The snapshot's canonical document.
-    pub document: Arc<String>,
+    /// The publication the export froze (see [`ExportRequest::frozen`]).
+    pub frozen: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// A look at the project (an agent's still), not a delivery.
+    pub look: bool,
     /// Set when the export is cancelled or its handle dropped.
     pub cancel: Arc<AtomicBool>,
 }
@@ -277,6 +284,7 @@ impl ExportRequest {
             without_offline: false,
             preview: false,
             cache: None,
+            frozen: None,
         })
     }
 }
@@ -351,7 +359,8 @@ impl ExportHandle {
                     job: request.job.as_str().to_owned(),
                     revision: request.revision,
                     epoch,
-                    document: Arc::new(request.document.clone()),
+                    frozen: request.frozen.clone(),
+                    look: request.bypass_missing_effects,
                     cancel: cancel.clone(),
                 },
             ))

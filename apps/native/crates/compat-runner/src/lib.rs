@@ -64,6 +64,27 @@ pub fn page_bundle(dark: bool, increase_contrast: bool, reduce_transparency: boo
     )
 }
 
+/// The font families this Mac has, as `PM.Fonts.system` lists them (main's
+/// `setSystemFamilies` list): CoreText's names without the hidden `.` ones.
+#[cfg(target_os = "macos")]
+pub(crate) fn font_families() -> Vec<String> {
+    let names = unsafe { objc2_core_text::CTFontManagerCopyAvailableFontFamilyNames() };
+    let mut out: Vec<String> = (0..names.len())
+        .filter_map(|i| {
+            let name = unsafe { names.value_at_index(i as isize) }
+                as *const objc2_core_foundation::CFString;
+            unsafe { name.as_ref() }.map(ToString::to_string)
+        })
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn font_families() -> Vec<String> {
+    vec![]
+}
 /// One realm holds every trusted extension and a live mirror of the project.
 pub(crate) fn limits() -> Limits {
     Limits {
@@ -147,9 +168,6 @@ pub struct BaseRasterRequest {
     pub scale: f64,
     /// Today's preview crop window `[x, y, w, h]` in raster pixels.
     pub crop: Option<[u32; 4]>,
-    /// The export whose frozen project the layer is read from (none: the
-    /// project as it is now).
-    pub job: Option<String>,
 }
 /// A base raster's straight RGBA8 canvas and today's geometry.
 pub struct BaseRasterReply {
@@ -173,6 +191,9 @@ pub enum RasterAnswer {
     Hidden,
     /// The realm has not seen the revision asked for yet: ask again.
     Retry,
+    /// The realm is past the exact revision asked for (`{revision, exact}`):
+    /// it cannot answer for it.
+    Moved,
     /// The override threw or returned what cannot be drawn: the frame fails.
     Failed(String),
     /// The override's canvas: premultiplied RGBA8 rows (a canvas's backing
@@ -627,7 +648,7 @@ mod tests {
     type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
     type RasterRunner = (CompatRunner, Log<Value>, Log<Value>, Log<(bool, u64)>);
     /// A runner whose base rasters are 2×2 red, recording what was asked
-    /// (layer, composition, job, whether a layer object was passed) and
+    /// (layer, composition, whether a layer object was passed) and
     /// answered (as JSON), and the producing calls.
     fn raster_runner() -> RasterRunner {
         let runner = dom_runner();
@@ -640,7 +661,6 @@ mod tests {
                 p.lock().unwrap().push(json!([
                     request.layer,
                     request.composition,
-                    request.job,
                     request.content.is_some()
                 ]));
                 Ok(Some(crate::BaseRasterReply {
@@ -665,6 +685,7 @@ mod tests {
                         crate::RasterAnswer::Native => json!([batch, "native"]),
                         crate::RasterAnswer::Hidden => json!([batch, "hidden"]),
                         crate::RasterAnswer::Retry => json!([batch, "retry"]),
+                        crate::RasterAnswer::Moved => json!([batch, "moved"]),
                         crate::RasterAnswer::Failed(error) => json!([batch, "failed", error]),
                         crate::RasterAnswer::Raster {
                             width,
@@ -730,7 +751,7 @@ mod tests {
         // The pass-through layer was never painted; t1 painted in its composition.
         assert_eq!(
             *painted.lock().unwrap(),
-            vec![json!(["t1", "synthetic-comp", null, false])]
+            vec![json!(["t1", "synthetic-comp", false])]
         );
         runner.eval("dropRaster()").unwrap();
         // An extension that replaces PM.raster itself (variable-font-anchor) counts
@@ -806,71 +827,8 @@ mod tests {
         assert_eq!(answered[6][2], "broken wrapper");
         // The replacement painted as given; the nested layer in its composition.
         let painted = painted.lock().unwrap().clone();
-        assert!(painted.contains(&json!(["replaced", "synthetic-comp", null, true])));
+        assert!(painted.contains(&json!(["replaced", "synthetic-comp", true])));
         assert!(!painted.iter().any(|p| p[0] == "same" || p[0] == "nested"));
-    }
-    #[test]
-    fn exports_answer_only_at_their_revision_and_with_their_wrappers() {
-        let (runner, painted, answered, producing) = raster_runner();
-        let manifest =
-            json!({"id":"spy","name":"Spy","version":"1.0.0","apiVersion":3,"entry":"index.js"});
-        runner
-            .activate(
-                &manifest,
-                "export default function activate(api){const base=api.services.get('raster');
-                 globalThis.seen=[];const r=api.services.register('raster',(L,s,T,up,crop)=>{seen.push(L.d.text);return base(L,s,T,up,crop)});
-                 globalThis.reload=()=>{r.dispose();api.services.register('raster',(L,s,T)=>base(L,s,T))};}",
-            )
-            .unwrap();
-        let epoch = producing.lock().unwrap().last().unwrap().1;
-        runner
-            .eval("__compat.realm.PM.proj.layers.push({id:'t1',type:'text',name:'T1',d:{text:'edited'}})")
-            .unwrap();
-        // An export reads the project only at its own revision: at it, the
-        // live project is the export's; past it (an edit during the export),
-        // the frame fails rather than mix revisions; behind it, ask again.
-        let ask = |batch: u32, job: &str| {
-            format!(
-                "__compat.answerRasters({batch},[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'{job}',epoch:{epoch}}});"
-            )
-        };
-        runner
-            .eval(&format!(
-                "const r=__compat.realm.revision;__compat.pinProject('job-1',r);__compat.pinProject('job-2',r-1);__compat.pinProject('job-3',r+1);
-                 {}{}{}globalThis.out=globalThis.seen.slice()",
-                ask(1, "job-1"),
-                ask(2, "job-2"),
-                ask(3, "job-3")
-            ))
-            .unwrap();
-        assert_eq!(runner.json("out").unwrap(), json!(["edited"]));
-        let answers = answered.lock().unwrap().clone();
-        assert_eq!(answers[0], json!([1, "native"]));
-        assert_eq!(answers[1][1], "failed");
-        assert!(
-            answers[1][2]
-                .as_str()
-                .unwrap()
-                .contains("changed during the export")
-        );
-        assert_eq!(answers[2], json!([3, "retry"]));
-        // A reload mid-export: its frames fail rather than mix wrappers.
-        runner.eval("reload()").unwrap();
-        runner.eval(&ask(4, "job-1")).unwrap();
-        let second = answered.lock().unwrap()[3].clone();
-        assert_eq!(second[1], "failed");
-        assert!(
-            second[2]
-                .as_str()
-                .unwrap()
-                .contains("changed during the export")
-        );
-        assert!(painted.lock().unwrap().is_empty());
-        // The viewer asks at a revision this realm has not seen: ask again.
-        runner
-            .eval("__compat.answerRasters(5,[{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}],{revision:1e9})")
-            .unwrap();
-        assert_eq!(answered.lock().unwrap()[4], json!([5, "retry"]));
     }
     #[test]
     fn a_capture_asks_its_waiting_realm_for_overrides_inline() {

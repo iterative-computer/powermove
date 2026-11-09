@@ -68,6 +68,8 @@ struct Shared {
     geometry_dirty: Cell<bool>,
     closed: Cell<bool>,
     canvases: RefCell<crate::canvas::CanvasResources>,
+    /// Faces the page may load by key (`font` route).
+    fonts: RefCell<BTreeMap<String, std::sync::Arc<[u8]>>>,
 }
 impl Shared {
     fn send(&self, event: Value) -> Result<()> {
@@ -121,6 +123,10 @@ impl Shared {
         if kind == "failure" {
             self.handler
                 .event(HostEvent::Failure("compat_applier_stopped"));
+            return Ok(Value::Null);
+        }
+        if kind == "fonts_loaded" {
+            self.handler.event(HostEvent::FontsLoaded);
             return Ok(Value::Null);
         }
         if !self.panels.borrow().items.contains_key(&id) {
@@ -227,6 +233,10 @@ define_class!(
                 Ok((route,Some(q))) if route=="canvas"=>{
                     let resource = q.parse::<u64>().ok().and_then(|id|s.canvases.borrow().get(id).ok());
                     match resource {Some((bytes,mime))=>reply_bytes(task,&bytes,&mime),None=>fail_task(task)}
+                },
+                Ok((route,Some(q))) if route=="font"=>{
+                    let bytes=s.fonts.borrow().get(&q).cloned();
+                    match bytes {Some(bytes)=>reply_bytes(task,&bytes,"font/sfnt"),None=>fail_task(task)}
                 },
                 Ok((route,Some(q))) if route=="call"=>{
                     let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||s.handle(&q))).unwrap_or(Err(Error::InvalidRequest));
@@ -683,6 +693,7 @@ impl MacDomHost {
             geometry_dirty: Cell::new(true),
             closed: Cell::new(false),
             canvases: RefCell::new(crate::canvas::CanvasResources::default()),
+            fonts: RefCell::default(),
         });
         let bridge: Retained<Bridge> =
             unsafe { msg_send![super(Bridge::alloc(mtm).set_ivars(shared.clone())), init] };
@@ -845,6 +856,28 @@ impl MacDomHost {
         Ok(ticket)
     }
     /// Nonblocking main-thread admission. Pixels were encoded on the realm worker.
+    /// Faces for the page's text layout: each new one is served by the `font`
+    /// route and loaded as a `FontFace` before any later batch applies; the
+    /// page answers `HostEvent::FontsLoaded` once they are.
+    pub fn add_fonts(&mut self, faces: &[PageFace]) -> Result<()> {
+        let mut added = vec![];
+        for face in faces {
+            let key = face.key();
+            if self.shared.fonts.borrow().contains_key(&key) {
+                continue;
+            }
+            self.shared
+                .fonts
+                .borrow_mut()
+                .insert(key.clone(), face.bytes.clone());
+            added.push(json!({"family":face.family,"weight":face.weight,
+                "style":if face.italic {"italic"} else {"normal"},"key":key}));
+        }
+        if added.is_empty() {
+            return Ok(());
+        }
+        self.shared.send(json!({"kind":"fonts","faces":added}))
+    }
     /// Keep the caller's frame on Backpressure; the page releases resources only
     /// after decoding and replacing its bitmap. No V8 call occurs here.
     pub fn present_canvas(&mut self, panel: PanelId, frame: &CanvasFrame) -> Result<()> {
@@ -1343,6 +1376,7 @@ mod admission_tests {
                 ]),
                 channel: RefCell::new(Channel::new("synthetic-capability".into(), 3)),
                 canvases: RefCell::new(crate::canvas::CanvasResources::default()),
+                fonts: RefCell::default(),
                 panels: RefCell::new(panels),
                 pending: RefCell::new(None),
                 ready: Cell::new(true),
