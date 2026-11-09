@@ -181,14 +181,18 @@ test('an extended original product film covers every shot type', async ({ sessio
     return { shots: shots.length, layers: PM.proj.layers.length, effects, main: PM.Comps.active() === mainId };
   });
   expect(built.shots).toBe(8);
+  // The opening card is 2D; idle native jobs are correctly released there.
+  await page.evaluate(()=>{const PM=(window as any).PM;PM.pause();PM.setTime(3.5);});
   await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
 
   // Stills from every shot, then the whole film through Final.
   const stills = [1, 3.5, 5.2, 7.5, 10.5, 12.5, 15.2, 17.6, 19.8, 21.2, 23.8];
-  const frames = await page.evaluate((times: number[]) => {
+  const frames = await page.evaluate(async(times: number[]) => {
     const PM = (window as any).PM;
     PM.agentFrameCapture = true;
-    const out = times.map(t => {
+    const out = [];
+    for(const t of times){
+      await PM.prepareFrame(t,{width:640,height:360,mblur:false});
       const px = PM.GL.renderToPixels(t, 640, 360, { transparent: false, mblur: false });
       const c = document.createElement('canvas'); c.width = 640; c.height = 360;
       const flipped = new Uint8ClampedArray(px.length);
@@ -196,8 +200,8 @@ test('an extended original product film covers every shot type', async ({ sessio
       c.getContext('2d')!.putImageData(new ImageData(flipped, 640, 360), 0, 0);
       let varied = 0;
       for (let i = 0; i < px.length; i += 4) if (Math.abs(px[i]! - 246) + Math.abs(px[i + 1]! - 245) + Math.abs(px[i + 2]! - 248) > 24) varied++;
-      return { t, url: c.toDataURL(), varied };
-    });
+      out.push({ t, url: c.toDataURL(), varied });
+    }
     PM.agentFrameCapture = false;
     return out;
   }, stills);

@@ -16,6 +16,7 @@ test('agent authors a fog-lit room and a scattered golden-hour landscape',async(
     const box=async(id:string,w:number,h:number,d:number,x:number,y:number,z:number,color:string)=>edit({operation:'add_object',object:{id,name:id,source:{primitive:'box',parameters:{width:w,height:h,depth:d}},p:{x,y,z},material:{p:{color,roughness:.75,metalness:0}}}});
     if(kind==='room'){
       await box('floor',6,.16,5,0,-.08,0,'#A18461');
+      await box('ceiling',6,.12,5,0,3.06,0,'#D2C6B1');
       await box('back_wall',6,3,.15,0,1.5,-2.5,'#D2C6B1');
       await box('window_front_pier',.15,3,1.1,-3,1.5,1.95,'#D2C6B1');
       await box('window_back_pier',.15,3,1.4,-3,1.5,-1.8,'#D2C6B1');
@@ -27,7 +28,7 @@ test('agent authors a fog-lit room and a scattered golden-hour landscape',async(
       await box('table',1.5,.15,.9,-.3,.65,.2,'#50402D');
       for(const x of [-.85,.25])for(const z of [-.1,.5])await box(`leg_${x<0?'a':'b'}_${z<0?'a':'b'}`,.08,.6,.08,x,.3,z,'#50402D');
       await edit({operation:'add_object',object:{id:'vase',source:{primitive:'sphere',parameters:{radius:.23}},p:{x:-.4,y:.95,z:.15,sy:1.5},material:{p:{color:'#52654C',roughness:.35}}}});
-      await edit({operation:'add_fog',id:'fog',fog:{p:{density:.04,width:6,height:3,depth:5,anisotropy:.55,color:'#E3D5BE'}}});
+      await edit({operation:'add_fog',id:'fog',fog:{p:{density:.08,width:6,height:3,depth:5,anisotropy:.55,color:'#E3D5BE'}}});
       await edit({operation:'update_object',target:'fog',patch:{p:{y:1.5}}});
     }else{
       await edit({operation:'add_terrain',id:'terrain',terrain:{p:{width:34,depth:34,resolution:64,amplitude:3.5,frequency:.12,seed:41,octaves:5},regions:[{p:{minSlope:32,color:'#8C7D64'}},{p:{minHeight:1.4,color:'#A3A078'}},{p:{maxHeight:1.4,color:'#687348'}}]}});
