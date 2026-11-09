@@ -9,6 +9,7 @@ pub mod frame_codec;
 pub mod jobs;
 pub mod layers;
 pub mod policy;
+pub mod qos;
 mod present;
 mod render;
 pub mod render_cache;

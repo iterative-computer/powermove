@@ -239,7 +239,7 @@ impl AudioLink {
         let clock = Arc::new(Mutex::new(None));
         let status = Arc::new(Mutex::new(AudioStatus::default()));
         let (thread_clock, thread_status) = (clock.clone(), status.clone());
-        let thread = pm_engine::qos::spawn_engine_thread(
+        let thread = crate::qos::spawn_engine_thread(
             pm_protocol::error::EngineProcess::Interactive,
             "pm-viewer-audio",
             move || {

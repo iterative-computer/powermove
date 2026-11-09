@@ -4807,17 +4807,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-engine"
-version = "0.1.0"
-dependencies = [
- "libc",
- "pm-model",
- "pm-protocol",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "pm-engine-service"
 version = "0.1.0"
 dependencies = [
@@ -4828,6 +4817,7 @@ dependencies = [
  "core-graphics-types",
  "foreign-types",
  "half",
+ "libc",
  "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -4836,7 +4826,6 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "pm-audio",
  "pm-color",
- "pm-engine",
  "pm-eval",
  "pm-export",
  "pm-glsl",
