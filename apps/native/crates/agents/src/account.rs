@@ -363,7 +363,7 @@ fn trusted_auth_url(raw: &str) -> Result<String, String> {
     let trusted = ["chatgpt.com", "openai.com"]
         .iter()
         .any(|root| host == *root || host.ends_with(&format!(".{root}")));
-    if url.scheme() == "https" && trusted {
+    if url.scheme() == "https" && trusted && url.username().is_empty() && url.password().is_none() {
         Ok(url.to_string())
     } else {
         Err("Codex returned an unsafe ChatGPT sign-in URL.".into())
@@ -670,6 +670,7 @@ mod tests {
             "http://chatgpt.com/",
             "https://chatgpt.com.example.invalid/",
             "https://notopenai.com/",
+            "https://user@openai.com/",
         ] {
             assert!(trusted_auth_url(bad).is_err(), "{bad}");
         }

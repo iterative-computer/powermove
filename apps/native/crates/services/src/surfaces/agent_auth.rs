@@ -437,19 +437,6 @@ impl CompatibleConnection {
     }
 }
 
-pub fn allowed_codex_auth_url(raw: &str) -> bool {
-    let Ok(url) = Url::parse(raw) else {
-        return false;
-    };
-    let host = url.host_str().unwrap_or("");
-    url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && ["chatgpt.com", "openai.com"]
-            .iter()
-            .any(|d| host == *d || host.ends_with(&format!(".{d}")))
-}
-
 /// A runtime session payload, accessible only to the worker credential adapter.
 /// It cannot be serialized into a surface inspection or printed in diagnostics.
 pub struct SessionPayload(serde_json::Value);
@@ -717,18 +704,6 @@ mod tests {
             .is_none()
         );
         assert!(ProviderInput::prepare("https://example.com", " ", false, "", None).is_none());
-    }
-    #[test]
-    fn codex_browser_hosts_have_label_boundaries() {
-        assert!(allowed_codex_auth_url("https://auth.openai.com/login"));
-        for raw in [
-            "https://openai.com.evil.example",
-            "https://evilopenai.com",
-            "http://chatgpt.com",
-            "https://user@openai.com",
-        ] {
-            assert!(!allowed_codex_auth_url(raw));
-        }
     }
     #[derive(Default)]
     struct Host {
