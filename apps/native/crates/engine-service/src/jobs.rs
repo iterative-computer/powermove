@@ -35,6 +35,11 @@ pub struct ExportRequest {
     /// destination volume has less free space than this.
     #[serde(default = "disk_reserve")]
     pub disk_reserve: u64,
+    /// A look at the project, not a delivery (agent stills): offline media
+    /// draws the Media Offline card as in the viewer instead of refusing.
+    /// Never set for an export.
+    #[serde(default)]
+    pub preview: bool,
 }
 /// An export frame's raster override answer from the window that has the
 /// document open.
@@ -226,6 +231,7 @@ impl ExportRequest {
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
             disk_reserve: DISK_RESERVE,
+            preview: false,
         })
     }
 }
@@ -561,6 +567,8 @@ pub fn run_child() -> Result<()> {
         );
         doc.set_saving_app_version(request.saving_app_version);
         ensure!(
+            // A preview draws offline media as the Media Offline card.
+            request.preview ||
             // An output without audio doesn't need an offline audio clip.
             pm_export::render::offline_media_with_audio(
                 &doc,
@@ -575,6 +583,8 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("cancelled");
         }
         let mut renderer = pm_render::Renderer::headless()?;
+        // Previews isolate failing layers, as the viewer: the card draws.
+        renderer.set_isolate_layers(request.preview);
         if overriding {
             renderer.set_compat_rasters(Some(rasters.clone()));
         }

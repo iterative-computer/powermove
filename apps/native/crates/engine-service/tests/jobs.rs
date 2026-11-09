@@ -9,7 +9,27 @@ use std::{
     time::{Duration, Instant},
 };
 fn request(destination: std::path::PathBuf, seconds: i32) -> ExportRequest {
-    let project = pm_model::json::parse(include_str!("fixtures/shapes.json")).unwrap();
+    request_for(include_str!("fixtures/shapes.json"), destination, seconds)
+}
+/// The shapes fixture plus a video layer whose original is offline.
+fn offline_request(destination: std::path::PathBuf, preview: bool) -> ExportRequest {
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    project["assets"]["gone"] = serde_json::json!({
+        "id": "gone", "name": "interview take 3.mov", "kind": "video", "format": "mp4",
+        "w": 320, "h": 180, "dur": 3, "fps": 30, "persisted": true
+    });
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Lgone".into();
+    layer["type"] = "video".into();
+    layer["d"] = serde_json::json!({"asset": "gone", "w": 320, "h": 180});
+    project["layers"].as_array_mut().unwrap().push(layer);
+    let mut r = request_for(&project.to_string(), destination, 1);
+    r.preview = preview;
+    r
+}
+fn request_for(source: &str, destination: std::path::PathBuf, seconds: i32) -> ExportRequest {
+    let project = pm_model::json::parse(source).unwrap();
     #[cfg(feature = "kernel")]
     let s = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
     #[cfg(not(feature = "kernel"))]
@@ -308,4 +328,29 @@ fn child_export_renders_extension_effects_from_its_resources() {
     let status = run(request);
     assert_eq!(status.state, JobState::Done, "{status:?}");
     assert!(destination.is_file());
+}
+
+#[test]
+fn a_preview_still_draws_offline_media_and_an_export_refuses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let refused = ExportHandle::start(exe, offline_request(dir.path().join("export"), false))
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    assert!(
+        refused
+            .error
+            .as_ref()
+            .is_some_and(|e| e.message.contains("offline")),
+        "{refused:?}"
+    );
+    let preview = dir.path().join("preview");
+    let drawn = ExportHandle::start(exe, offline_request(preview.clone(), true))
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(drawn.state, JobState::Done, "{drawn:?}");
+    assert_eq!(std::fs::read_dir(preview).unwrap().count(), 30);
 }

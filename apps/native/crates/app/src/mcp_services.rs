@@ -140,6 +140,7 @@ impl EngineJobs {
         published: &Published,
         settings: ExportSettings,
         destination: PathBuf,
+        preview: bool,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
             &published.snapshot,
@@ -159,6 +160,7 @@ impl EngineJobs {
             media,
             destination,
         )?;
+        request.preview = preview;
         // An agent's capture draws the effects its project's window defines.
         if let Some(resources) = resources_of(published.snapshot.doc_id) {
             request.resources = (*resources).clone();
@@ -238,7 +240,7 @@ impl ExportChild for EngineJobs {
             .directory
             .join(file_name(&name, options.format.extension()));
         let handle = self
-            .start(&published, settings, destination)
+            .start(&published, settings, destination, false)
             .map_err(failed)?;
         let started = Instant::now();
         while !matches!(
@@ -381,7 +383,8 @@ fn frame(
         draft_from_proxies: true,
         delivery: Default::default(),
     };
-    let mut handle = jobs.start(published, settings, destination)?;
+    // A still is a look at the project: offline media draws its card.
+    let mut handle = jobs.start(published, settings, destination, true)?;
     while matches!(
         handle.status().state,
         JobState::Queued | JobState::Running | JobState::WaitingForMedia
