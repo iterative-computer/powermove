@@ -1300,6 +1300,11 @@ fn a_run_publishes_a_visual_reply_that_opens_in_its_viewer() {
         .find(|r| r.operation == "agent.visual")
         .expect("viewer request");
     assert_eq!(request.input["title"], "Timing chart");
+    assert_eq!(
+        request.input["id"],
+        json!(id),
+        "the viewer is kept per reply"
+    );
     assert_eq!(request.input["height"], 420);
     panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
     assert!(

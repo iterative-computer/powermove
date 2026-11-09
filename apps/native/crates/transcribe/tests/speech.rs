@@ -1,7 +1,7 @@
-//! Real speech through the real runtime and a real model. Needs the runtime
-//! folder (`PM_TRANSCRIBE_RUNTIME`: libtranscribe.dylib, ggml, contract.json)
-//! and a downloaded model (`PM_TRANSCRIBE_MODEL`, a catalog GGUF); without
-//! them it says so and passes nothing off as checked.
+//! Real speech through the real runtime and a real model. Ignored by default:
+//! it needs the runtime folder (`PM_TRANSCRIBE_RUNTIME`: libtranscribe.dylib,
+//! ggml, contract.json) and a downloaded model (`PM_TRANSCRIBE_MODEL`, a
+//! catalog GGUF). Run it with `--ignored`; without those it fails.
 use pm_transcribe::runtime::Runtime;
 use std::{path::PathBuf, process::Command, sync::atomic::AtomicBool};
 
@@ -25,14 +25,13 @@ fn samples(text: &str) -> Vec<f32> {
         .collect()
 }
 #[test]
+#[ignore = "needs PM_TRANSCRIBE_RUNTIME and PM_TRANSCRIBE_MODEL (a runtime folder and a downloaded model)"]
 fn spoken_words_come_back_with_their_times() {
-    let (Some(runtime), Some(model)) = (
-        std::env::var_os("PM_TRANSCRIBE_RUNTIME").map(PathBuf::from),
-        std::env::var_os("PM_TRANSCRIBE_MODEL").map(PathBuf::from),
-    ) else {
-        eprintln!("skipped: set PM_TRANSCRIBE_RUNTIME and PM_TRANSCRIBE_MODEL to run real speech");
-        return;
-    };
+    let runtime = PathBuf::from(
+        std::env::var_os("PM_TRANSCRIBE_RUNTIME").expect("set PM_TRANSCRIBE_RUNTIME"),
+    );
+    let model =
+        PathBuf::from(std::env::var_os("PM_TRANSCRIBE_MODEL").expect("set PM_TRANSCRIBE_MODEL"));
     let runtime = Runtime::load(&runtime).unwrap();
     let mut model = runtime.model(&model, 4).unwrap();
     let audio = samples("The quick brown fox jumps over the lazy dog.");

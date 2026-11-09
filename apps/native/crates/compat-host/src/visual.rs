@@ -6,7 +6,7 @@ use block2::DynBlock;
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
-    runtime::{Bool, ProtocolObject},
+    runtime::{AnyObject, Bool, ProtocolObject},
 };
 use objc2_app_kit::*;
 use objc2_foundation::*;
@@ -44,6 +44,26 @@ define_class!(
         #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
         unsafe fn confirm(&self,_web:&WKWebView,_message:&NSString,_frame:&WKFrameInfo,done:&DynBlock<dyn Fn(Bool)>){done.call((Bool::NO,));}
     }
+    unsafe impl NSWindowDelegate for Guard {
+        /// A closed viewer gives its web view (and its WebKit process) back now.
+        #[unsafe(method(windowWillClose:))]
+        fn will_close(&self, notification: &NSNotification) {
+            let Some(window) = notification.object() else { return };
+            OPEN.with_borrow_mut(|open| {
+                if let Some(viewer) = open.iter_mut().find(|v| {
+                    std::ptr::eq(&*v.window as *const NSWindow as *const AnyObject, &*window)
+                }) && let Some(web) = viewer.web.take()
+                {
+                    unsafe {
+                        web.setNavigationDelegate(None);
+                        web.setUIDelegate(None);
+                        web.stopLoading();
+                    }
+                    viewer.window.setContentView(None);
+                }
+            });
+        }
+    }
 );
 impl Guard {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
@@ -51,17 +71,45 @@ impl Guard {
         unsafe { msg_send![super(this), init] }
     }
 }
-/// An open viewer: its window, web view and navigation guard.
-type Viewer = (Retained<NSWindow>, Retained<WKWebView>, Retained<Guard>);
+/// A viewer, by reply: its window, its web view until closed, and its guard.
+struct Viewer {
+    reply: String,
+    window: Retained<NSWindow>,
+    web: Option<Retained<WKWebView>>,
+    /// The window's and web view's delegate; they hold it weakly.
+    _guard: Retained<Guard>,
+}
 thread_local! {
-    /// Open viewers; closed ones are let go when the next one opens.
     static OPEN: RefCell<Vec<Viewer>> = const { RefCell::new(Vec::new()) };
 }
-/// Show `document` titled `title`, `height` points tall, beside `parent`.
-/// Main thread only. Returns the window number (for tests and automation).
-pub fn show(parent: Option<&NSWindow>, title: &str, document: &str, height: f64) -> isize {
+/// Show reply `reply` (`document`, titled `title`, `height` points tall)
+/// beside `parent`; a reply already showing comes forward instead of opening
+/// twice. Main thread only. Returns the window number.
+pub fn show(
+    parent: Option<&NSWindow>,
+    reply: &str,
+    title: &str,
+    document: &str,
+    height: f64,
+) -> isize {
     let mtm = MainThreadMarker::new().expect("visual replies open on the main thread");
-    OPEN.with_borrow_mut(|open| open.retain(|(w, _, _)| w.isVisible()));
+    let shown = OPEN.with_borrow_mut(|open| {
+        // Closed viewers already gave back their web views; let them go.
+        open.retain(|v| {
+            let live = v.web.is_some() && v.window.isVisible();
+            if !live {
+                v.window.setDelegate(None);
+            }
+            live
+        });
+        open.iter()
+            .find(|v| v.reply == reply)
+            .map(|v| v.window.clone())
+    });
+    if let Some(window) = shown {
+        window.makeKeyAndOrderFront(None);
+        return window.windowNumber();
+    }
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
     unsafe {
         config.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
@@ -115,9 +163,17 @@ pub fn show(parent: Option<&NSWindow>, title: &str, document: &str, height: f64)
         }
         None => window.center(),
     }
+    window.setDelegate(Some(ProtocolObject::from_ref(&*guard)));
     unsafe { web.loadHTMLString_baseURL(&NSString::from_str(document), None) };
     window.makeKeyAndOrderFront(None);
     let number = window.windowNumber();
-    OPEN.with_borrow_mut(|open| open.push((window, web, guard)));
+    OPEN.with_borrow_mut(|open| {
+        open.push(Viewer {
+            reply: reply.into(),
+            window,
+            web: Some(web),
+            _guard: guard,
+        })
+    });
     number
 }

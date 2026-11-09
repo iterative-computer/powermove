@@ -1026,6 +1026,7 @@ impl Controller {
                         .unwrap_or_else(|| self.host.borrow().window.clone());
                     pm_compat_host::visual::show(
                         Some(&parent),
+                        input["id"].as_str().unwrap_or_default(),
                         input["title"].as_str().unwrap_or("Visualization"),
                         &document,
                         input["height"].as_f64().unwrap_or(360.),

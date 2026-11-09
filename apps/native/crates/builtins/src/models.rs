@@ -1177,7 +1177,7 @@ impl Backend {
                         drop(state);
                         self.native.platform.push((
                             "agent.visual".into(),
-                            json!({"title":reply.title,"html":reply.html,"height":reply.height}),
+                            json!({"id":id,"title":reply.title,"html":reply.html,"height":reply.height}),
                         ));
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
