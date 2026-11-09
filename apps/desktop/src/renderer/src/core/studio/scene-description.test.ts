@@ -32,4 +32,12 @@ describe('Studio Rust scene contract',()=>{
   const rest=extractScene(graph,()=>true,env);mesh.morphTargetInfluences![0]=1;
   const moved=extractScene(graph,()=>true,env);expect(moved.geometryKey).not.toBe(rest.geometryKey);expect(moved.bounds.min.x-rest.bounds.min.x).toBeCloseTo(2);
  });
+ it('evaluates skinned normals and positions in the same bone pose',()=>{
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute([-1,-1,0,1,-1,0,0,1,0],3));g.setAttribute('normal',new THREE.Float32BufferAttribute([0,0,1,0,0,1,0,0,1],3));
+  g.setAttribute('skinIndex',new THREE.Uint16BufferAttribute(new Uint16Array(12),4));g.setAttribute('skinWeight',new THREE.Float32BufferAttribute([1,0,0,0,1,0,0,0,1,0,0,0],4));
+  const mesh=new THREE.SkinnedMesh(g,new THREE.MeshStandardMaterial()),bone=new THREE.Bone();mesh.add(bone);mesh.bind(new THREE.Skeleton([bone]));mesh.userData.sceneId='skin';bone.rotation.y=Math.PI/2;
+  const graph=new THREE.Scene();graph.add(mesh);const prepared=extractScene(graph,()=>true,env);
+  expect(prepared.tris[0]).toBeCloseTo(1);expect(prepared.tris[2]).toBeCloseTo(0);expect(prepared.bounds.max.x-prepared.bounds.min.x).toBeLessThan(1e-6);
+ });
+
 });

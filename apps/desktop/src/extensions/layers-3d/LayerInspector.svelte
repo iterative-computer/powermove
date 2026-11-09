@@ -27,7 +27,7 @@
 {#if layer && data}
   {#if object}
     <Section {api} title="Model" />
-    <div class="shots" role="group" aria-label="Placement"><button type="button" class="chip" onclick={()=>studioEdit({operation:'drop_to_floor'},'Drop to floor')}>Drop to floor</button></div>
+    <div class="shots" role="group" aria-label="Model actions"><button type="button" class="chip" onclick={()=>studioEdit({operation:'drop_to_floor'},'Drop to floor')}>Drop to floor</button><button type="button" class="chip" onclick={()=>studioEdit({operation:"shot",shot:"turntable",duration:4},"Turntable")}>Turntable</button></div>
     <Row {api} label="Source"><span class="k">{object.source.assetId?assetName(object.source.assetId) ?? 'Model':object.source.primitive ?? (object.source.lathe?'Lathe':object.source.extrude?'Extrusion':'Mesh')}</span></Row>
     {#if object.source.assetId}<Row {api} label="From file"><span class="from-file" title="Use the materials stored in the model file. Turn off to give the whole model one simple material."><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Use the model file’s materials" /></span></Row>{/if}
     {#if !object.useSourceMaterials}
@@ -50,7 +50,7 @@
     {#each cameraFields(camera.projection).filter(f=>!['x','y','z'].includes(f.key) && value(camera,f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`camera.${field.key}`} channel={value(camera,field.key)} />{/each}
     <Section {api} title="Shot" />
     <div class="shots" role="group" aria-label="Studio"><button type="button" class="chip" onclick={()=>studioEdit({operation:'auto_studio'},'Set up studio')}>Set up studio</button></div>
-    <div class="shots" role="group" aria-label="Shots">{#each studio.shots as shot (shot.id)}<button type="button" class="chip" onclick={()=>studioEdit({operation:'shot',shot:shot.id,duration:4},shot.label)}>{shot.label}</button>{/each}</div>
+    <div class="shots" role="group" aria-label="Shots">{#each studio.shots.filter(shot=>shot.id!=='turntable') as shot (shot.id)}<button type="button" class="chip" onclick={()=>studioEdit({operation:'shot',shot:shot.id,duration:4},shot.label)}>{shot.label}</button>{/each}</div>
     <Row {api} label="Final quality"><SelectField {api} get={()=>String(environment.samples ?? 64)} options={[{v:'16',label:'Draft · 16'},{v:'64',label:'Standard · 64'},{v:'256',label:'High · 256'},{v:'1024',label:'Best · 1024'}]} edit={{mode:'set',label:'Final quality',set:(v:unknown)=>edit('set_environment',{samples:Number(v)},'Final quality')}} label="Final quality" /></Row>
     <Row {api} label="Studio set"><ToggleField {api} get={()=>!!environment.shadowCatcher} edit={{mode:'set',label:'Studio set',set:(v:unknown)=>studioEdit({operation:'set_studio',on:!!v},'Studio set')}} label="Studio set" /></Row>
     <Section {api} title="Environment" />

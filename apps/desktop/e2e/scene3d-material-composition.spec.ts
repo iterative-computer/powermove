@@ -125,8 +125,8 @@ test('a material comp prepares video at the model source time and can switch to 
     const blue=await capture(1);
     return {red,green,blue,source,stored:PM.L(id).d.data.object.sourceMaterials[0]};
   },{video:[...await readFile(file)],model:[...screenGlb()]});
-  expect(result.red[0]).toBeGreaterThan(result.red[1]+30);
-  expect(result.green[1]).toBeGreaterThan(result.green[0]+30);
-  expect(result.blue[2]).toBeGreaterThan(result.blue[0]+30);
+  expect(result.red[0],JSON.stringify(result)).toBeGreaterThan(result.red[1]+30);
+  expect(result.green[1],JSON.stringify(result)).toBeGreaterThan(result.green[0]+30);
+  expect(result.blue[2],JSON.stringify(result)).toBeGreaterThan(result.blue[0]+30);
   expect(typeof result.stored.color).toBe('string');expect(session.diagnostics.pageErrors).toEqual([]);
 });

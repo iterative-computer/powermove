@@ -16,13 +16,18 @@ function modelGlb(): number[] {
   bytes.set(new Uint8Array(positions.buffer),28+text.length);return [...bytes];
 }
 
-test('fresh GLB centers without a camera and old/new camera defaults survive save/load', async ({session}) => {
+test('fresh GLB sets up Studio and implicit old/new camera defaults survive save/load', async ({session}) => {
   await session.openEditor();
   const result=await session.page.evaluate(async bytes=>{
     const PM=(window as any).PM,api=PM.Kernel.api('centering-proof');
     const imported=await PM.cmd('3d.import-obj',new File([new Uint8Array(bytes)],'off-origin.glb',{type:'model/gltf-binary'}));
     if(!imported.ok)throw new Error(imported.message);
     const id=imported.data.result.id;
+    const studioLayers=PM.proj.layers.filter((l:any)=>l.d?.data?.camera || l.d?.data?.light);
+    const autoStudio={cameras:studioLayers.filter((l:any)=>l.d?.data?.camera).length,lights:studioLayers.filter((l:any)=>l.d?.data?.light).length};
+    // Removing the automatic rig retains main's implicit-camera capability.
+    for(const layer of studioLayers)api.scene3d.edit({operation:'remove',target:layer.id});
+    api.scene3d.edit({operation:'update_object',target:id,patch:{p:{x:0,y:0,z:0}}});
     const capture=()=>{
       const w=640,h=360,pixels=PM.GL.renderToPixels(0,w,h,{transparent:true,mblur:false});
       const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
@@ -42,7 +47,7 @@ test('fresh GLB centers without a camera and old/new camera defaults survive sav
     api.scene3d.edit({operation:'add_camera',camera:{p:{x:3,y:2,z:6}}});const legacyExplicit=capture();
     const xs:number[]=[],ys:number[]=[];
     for(let y=0;y<360;y++)for(let x=0;x<640;x++)if(implicit.pixels[(y*640+x)*4+3]>127){xs.push(x);ys.push(y);}
-    return {png:implicit.png,explicitPng:explicit.png,movedPng:moved.png,legacyPng:legacyRestored.png,
+    return {autoStudio,png:implicit.png,explicitPng:explicit.png,movedPng:moved.png,legacyPng:legacyRestored.png,
       identical:JSON.stringify(implicit.pixels)===JSON.stringify(explicit.pixels),
       roundtrip:JSON.stringify(implicit.pixels)===JSON.stringify(restored.pixels),
       legacyRoundtrip:JSON.stringify(legacy.pixels)===JSON.stringify(legacyRestored.pixels),
@@ -55,6 +60,7 @@ test('fresh GLB centers without a camera and old/new camera defaults survive sav
   await writeFile(`${dir}/03-after-explicit-camera.png`,Buffer.from(result.explicitPng.split(',')[1],'base64'));
   await writeFile(`${dir}/04-after-position-x.png`,Buffer.from(result.movedPng.split(',')[1],'base64'));
   await writeFile(`${dir}/05-after-legacy-preserved.png`,Buffer.from(result.legacyPng.split(',')[1],'base64'));
+  expect(result.autoStudio).toEqual({cameras:1,lights:3});
   expect(result.position).toEqual([0,0,0]);expect(result.cameraCount).toBe(0);
   expect(result.camera).toEqual([0,0,6]);expect(result.identical).toBe(true);
   expect(result.roundtrip).toBe(true);expect(result.legacyRoundtrip).toBe(true);expect(result.legacyExplicit).toBe(true);

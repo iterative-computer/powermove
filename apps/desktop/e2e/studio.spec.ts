@@ -1,9 +1,9 @@
 import { expect, test } from './helpers/app';
 
 /* Studio, the path-traced 3D renderer: it draws 3D layers in the viewer and
-   in exports, splits one trace into per-layer pixels, and falls back to the
-   classic renderer when turned off. */
-test('Studio renders 3D layers, keeps each layer separate and can be turned off', async ({ session }) => {
+   in exports, splits one trace into per-layer pixels, and keeps the same
+   renderer for Fast and Quality previews. */
+test('Studio renders 3D layers and keeps each layer separate in Fast and Quality', async ({ session }) => {
   test.setTimeout(120_000);
   await session.openEditor();
   const { page } = session;
@@ -19,13 +19,12 @@ test('Studio renders 3D layers, keeps each layer separate and can be turned off'
   const result = await page.evaluate(() => {
     const PM = (window as any).PM;
     const coverage = (px: Uint8Array | number[]) => { let n = 0; for (let i = 3; i < px.length; i += 4) if (px[i]! > 8) n++; return n; };
-    const frame = () => PM.GL.renderToPixels(0, 200, 120, { transparent: true, mblur: false });
+    const frame = (live=false) => PM.GL.renderToPixels(0, 200, 120, { transparent: true, mblur: false,editorViewport:live });
     PM.agentFrameCapture = true;
     const studio = frame(), framesAfter = PM.Studio.status().frames;
-    PM.Studio.setEnabled(false);
-    const classic = frame();
-    PM.Studio.setEnabled(true);
-    PM.agentFrameCapture = false;
+    PM.Studio.setPreview('fast');PM.agentFrameCapture=false;
+    const classic = frame(true);
+    PM.Studio.setPreview('quality');
     const hide = PM.L('left'), from = hide.from; hide.from = 1000; PM.touch();
     PM.agentFrameCapture = true;
     const rightOnly = frame();
@@ -35,7 +34,7 @@ test('Studio renders 3D layers, keeps each layer separate and can be turned off'
   });
   expect(result.framesAfter).toBeGreaterThan(0);
   expect(result.studio).toBeGreaterThan(1000);
-  // Both renderers cover about the same pixels; Studio shades them differently.
+  // Live and Final cover the same scene while using different sample budgets.
   expect(Math.abs(result.studio - result.classic) / result.classic).toBeLessThan(0.15);
   expect(result.differs).toBe(true);
   expect(result.rightOnly).toBeGreaterThan(200);
@@ -174,7 +173,7 @@ test('Final denoises by its guides, keeps edges and renders the same frame the s
   console.log(`grain ${result.raw.toFixed(2)} → ${result.denoised.toFixed(2)}; corner ${result.corner}`);
 });
 
-test('a sun lights Studio as brightly as the classic renderer', async ({ session }) => {
+test('a sun keeps its brightness between Studio Live and Final', async ({ session }) => {
   test.setTimeout(120_000);
   await session.openEditor();
   const { page } = session;
@@ -191,16 +190,15 @@ test('a sun lights Studio as brightly as the classic renderer', async ({ session
     const mean = (px: Uint8Array) => { let s = 0, n = 0; for (let i = 0; i < px.length; i += 4) if (px[i + 3]! > 200) { s += px[i]! + px[i + 1]! + px[i + 2]!; n++; } return s / Math.max(1, n) / 3; };
     PM.agentFrameCapture = true;
     const studio = mean(PM.GL.renderToPixels(0, 240, 160, { transparent: true, mblur: false }));
-    PM.Studio.setEnabled(false);
-    const classic = mean(PM.GL.renderToPixels(0, 240, 160, { transparent: true, mblur: false }));
-    PM.Studio.setEnabled(true);
-    PM.agentFrameCapture = false;
+    PM.Studio.setPreview('fast');PM.agentFrameCapture=false;
+    const classic = mean(PM.GL.renderToPixels(0, 240, 160, { transparent: true, mblur: false,editorViewport:true }));
+    PM.Studio.setPreview('quality');
     return { studio, classic };
   });
   await scene(3);
   await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
   const lit = await measure();
-  // three's directional intensity is irradiance: the same box, about as bright.
+  // Both Studio tiers use the same irradiance and material model.
   expect(Math.abs(lit.studio - lit.classic) / lit.classic).toBeLessThan(0.2);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

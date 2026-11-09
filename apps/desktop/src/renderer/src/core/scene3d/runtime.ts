@@ -1,3 +1,4 @@
+import { disposeStudioSplats } from '../studio/splat-raster';
 import { buildExtrusionGeometry } from './extrusion-geometry';
 import { EXTRUSION_SURFACES } from './extrusion-data';
 import type { ExtrusionMeshSample } from './extrusion-render';
@@ -433,6 +434,7 @@ export class SceneRuntime {
     const mixer=this.mixers.get(id)?.mixer;if(mixer){mixer.stopAllAction();mixer.uncacheRoot(object);}this.mixers.delete(id);
   }
   dispose():void {
+    disposeStudioSplats(this);
     for(const [id,object] of this.objects)this.remove(id,object);
     for(const {texture} of this.textures.values())texture.dispose();this.textures.clear();
     for(const {geometry} of this.extrusionGeometries.values()){cachedExtrusionGeometries.delete(geometry);geometry.dispose();}this.extrusionGeometries.clear();this.extrusionGeometryBytes=0;

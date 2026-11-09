@@ -73,6 +73,7 @@ export class WebGpuStudioBackend implements StudioBackend {
     doc.scene.objects.forEach((o, i) => { if (!layer || doc.object_ids[i]?.layer === layer) for (const p of o.mesh.positions) box.expandByPoint(new THREE.Vector3(p.x, p.y, p.z)); });
     return box.isEmpty() ? null : { min: { x: box.min.x, y: box.min.y, z: box.min.z }, max: { x: box.max.x, y: box.max.y, z: box.max.z } };
   }
+  async liveHistory(){for(const [key,entry] of this.targets)if(key.startsWith('live:'))return entry.target.historyStats();return null;}
   private disposeGraph(): void {
     this.graph?.traverse((o: any) => { o.geometry?.dispose(); for (const m of Array.isArray(o.material) ? o.material : [o.material]) m?.dispose(); }); this.graph = null;
   }

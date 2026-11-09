@@ -1127,7 +1127,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
       const runtime=compositionRuntime(PM,T),depthIds=compositionDepthIds(PM,L,T);
       const bottom=(PM._renderComposition3DPass || compositionOrderedLayers(PM,(PM._renderComposition3D || PM.proj).layers.filter((l:any)=>l.type!=='group'),T)).filter((l:any)=>depthIds.has(l.id)).at(-1)?.id;
       const studio=studioLayer(PM,runtime,W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera,id=>renderStudioScreen(id,T),T);
-      if(!studio)return null;
+      if(!studio){frameFailed=true;return null;}
       const tex=texFor(`studio:${L.id}`,studio.canvas,{version:studio.version});
       return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
     }catch(error){frameFailed=true;PM.UIState?.setShaderMeta?.(L,{missing:true,sceneError:String(error)});return null;}
@@ -1353,7 +1353,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
           PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
           return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
         }
-        return null;
+        frameFailed=true;return null;
       }catch(error){PM.UIState?.setShaderMeta?.(L,{definition,missing:true,sceneError:String(error)});frameFailed=true;return null;}
     }
     if (definition?.renderer?.kind === 'scene3d' || definition?.renderer?.kind === 'mesh') {
@@ -1362,7 +1362,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
         if(runtime){
           const ids=new Set([...runtime.objects.keys()]);
           const studio=studioLayer(PM,runtime,targetW,targetH,'',ids,true,runtime.camera,id=>renderStudioScreen(id,T),T);
-          if(!studio)return null;
+          if(!studio){frameFailed=true;return null;}
           const tex=texFor(`studio-legacy:${L.id}`,studio.canvas,{version:studio.version});
           PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
           return {tex,w,h:hh,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false};

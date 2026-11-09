@@ -3,7 +3,7 @@ import { expect, test } from './helpers/app';
    highlight lands there; dragging slides it; the panel's sliders tune it live
    and one Undo takes a slider back; Esc leaves the tool. Fast preview draws
    with the real-time renderer and back. */
-test('the light tool adds, aims and tunes a light; Fast preview switches renderers', async ({ session }) => {
+test('the light tool adds, aims and tunes a light; Fast preview keeps Studio rendering', async ({ session }) => {
   test.setTimeout(180_000);
   await session.openEditor();
   const { page } = session;
@@ -24,7 +24,7 @@ test('the light tool adds, aims and tunes a light; Fast preview switches rendere
   };
   const values = () => page.evaluate(() => [...document.querySelectorAll('#light-panel .lp-row:not([hidden]) .lp-val')].map(e => e.textContent).join(' | '));
   await shot('after-1-default');
-  await page.locator('#composition-3d-controls button[aria-label="Light"]').click();
+  await page.getByRole('tab',{name:'Light',exact:true}).click();
   const stage = await page.evaluate(() => { const r = document.querySelector('#composition-3d-controls')!.closest('.panel')!.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
   const c = { x: stage.x + stage.w / 2, y: stage.y + stage.h / 2 - 20 };
   await page.mouse.move(c.x, c.y); await page.waitForTimeout(400);
@@ -52,13 +52,13 @@ test('the light tool adds, aims and tunes a light; Fast preview switches rendere
   await page.evaluate(() => (window as any).PM.hist.undo());
   await page.waitForTimeout(500);
   const panelUndone = await values();
-  await page.locator('#composition-3d-controls button', { hasText: 'Fast' }).click();
+  await page.getByRole('tab',{name:'Fast',exact:true}).click();
   await page.waitForTimeout(800);
   await shot('after-5-fast');
   await page.keyboard.press('Escape');
   await page.waitForTimeout(300);
   const toolOff = await page.evaluate(() => !(window as any).PM.Kernel.api('light-tool').scene3d.lights.getTool().on);
-  await page.locator('#composition-3d-controls button', { hasText: 'Quality' }).click();
+  await page.getByRole('tab',{name:'Quality',exact:true}).click();
   const preview = await page.evaluate(() => (window as any).PM.Kernel.api('light-tool').scene3d.studio.getPreview());
   expect(after).toBe(before + 1);
   expect(panelAfter).not.toBe(panelBefore);

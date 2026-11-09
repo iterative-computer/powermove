@@ -34,8 +34,8 @@ function assembly(parts: number, n: number): Buffer {
   return Buffer.concat([header, jh, j, bh, b]);
 }
 
-/* Large models: the editor keeps drawing (classic renderer) while their
-   BVHs build in workers, then Studio takes over; exports build at once. */
+/* Large models prepare their geometry/BVHs in workers while the editor stays
+   responsive. Viewer and export share the completed Studio buffers. */
 test('a 1M-triangle assembly prepares in the background, then Studio draws it', async ({ session }) => {
   test.setTimeout(180_000);
   await session.openEditor();
@@ -85,7 +85,7 @@ test('a 1M-triangle assembly prepares in the background, then Studio draws it', 
     for (let i = 3; i < px.length; i += 4) if (px[i]! > 8) covered++;
     return { covered, studioDrew: PM.Studio.status().frames > before, finalMs, declined: PM.Studio.status().declined };
   });
-  console.log(`large scene: ${first.status.preparing.total} triangles; longest main-thread task while preparing ${longest.toFixed(0)} ms; Studio ready ${readyMs} ms after the first frame; Final frame ${result.finalMs.toFixed(0)} ms`);
+  console.log(`large scene: ${first.status.preparing.total} triangles; first draw ${first.ms.toFixed(0)} ms; longest main-thread task while preparing ${longest.toFixed(0)} ms; Studio ready ${readyMs} ms after the first frame; Final frame ${result.finalMs.toFixed(0)} ms`);
   // The editor stays responsive: no frame waits for the BVH builds.
   expect(longest).toBeLessThan(400);
   expect(result.studioDrew).toBe(true);

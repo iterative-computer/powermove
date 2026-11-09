@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { finishBlas, finishBlasInWorker, WORKER_TRIANGLES, type BlasData } from './blas';
+import { finishBlas, finishBlasInWorker, finishGeometryInWorker, WORKER_TRIANGLES, type BlasData } from './blas';
 import { partKeyOf, partsRoot } from '../scene3d/model-parts';
+import { gather, geometryPayload } from './gather';
 import { buildBvh } from './bvh';
 
 /*
@@ -160,6 +161,17 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     if (!blas || blas.key !== key) {
       const building = buildingFor.get(mesh);
       if (background && building?.key === key) { pending += building.triangles; total += building.triangles; continue; }
+      const vertexCount=g.getIndex()?.count ?? posAttr.count;
+      const estimated=(Array.isArray(mesh.material) && g.groups.length ? g.groups : [{start:0,count:vertexCount,materialIndex:0}]).reduce((n,group)=>n+((mi[group.materialIndex ?? 0] ?? -1)>=0?Math.floor(Math.min(group.count,vertexCount-group.start)/3):0),0);
+      if(background && !deformation && !mesh.morphTargetInfluences?.some(v=>v!==0) && estimated>=WORKER_TRIANGLES && failedFor.get(mesh)!==key){
+        buildingFor.set(mesh,{key,triangles:estimated});pending+=estimated;total+=estimated;
+        void finishGeometryInWorker(geometryPayload(g,mi,oi)).then(data=>{
+          if(buildingFor.get(mesh)?.key!==key)return;buildingFor.delete(mesh);
+          const bounds=new THREE.Box3(new THREE.Vector3(...data.bounds.slice(0,3) as [number,number,number]),new THREE.Vector3(...data.bounds.slice(3) as [number,number,number]));
+          blasCache.set(mesh,{...data,key,bounds});background.onReady();
+        },()=>{buildingFor.delete(mesh);failedFor.set(mesh,key);background.onReady();});
+        continue;
+      }
       const { corners, shading, bounds: box } = gather(mesh, g, mi, oi);
       const triangles = corners.length / 9;
       if (background && triangles >= WORKER_TRIANGLES && failedFor.get(mesh) !== key) {
@@ -323,76 +335,3 @@ function blasKey(g: THREE.BufferGeometry, materials: number[], object: number): 
   return [g.uuid, idOf(g.getAttribute('position')), idOf(g.getAttribute('normal')), idOf(g.getAttribute('uv')), idOf(g.getAttribute('color')), idOf(g.getIndex()), materials.join(','), object, g.groups.map(x => `${x.start}:${x.count}:${x.materialIndex}`).join(';')].join('/');
 }
 
-/**
- * A mesh's triangles as flat arrays: corners (9 floats each, model space) and
- * shading (24 floats each: three normals, uvs, material, object, tangent).
- */
-function gather(mesh: THREE.Mesh, g: THREE.BufferGeometry, mi: number[], oi: number): { corners: Float32Array; shading: Float32Array; bounds: THREE.Box3 } {
-  const posAttr = g.getAttribute('position') as THREE.BufferAttribute, nrm = g.getAttribute('normal') as THREE.BufferAttribute | undefined, uvA = g.getAttribute('uv') as THREE.BufferAttribute | undefined;
-  const index = g.getIndex();
-  const vertexCount = index ? index.count : posAttr.count;
-  const groups = Array.isArray(mesh.material) && g.groups.length ? g.groups : [{ start: 0, count: vertexCount, materialIndex: 0 }];
-  let count = 0;
-  for (const group of groups) {
-    if ((mi[group.materialIndex ?? 0] ?? -1) < 0) continue;
-    const end = Math.min(group.start + group.count, vertexCount);
-    count += Math.max(0, Math.floor((end - group.start) / 3));
-  }
-  const corners = new Float32Array(count * 9), shading = new Float32Array(count * 24);
-  let lx = Infinity, ly = Infinity, lz = Infinity, hx = -Infinity, hy = -Infinity, hz = -Infinity;
-  let t = 0;
-  const p = new Float64Array(9), uv = new Float64Array(6);
-  for (const group of groups) {
-    const m = mi[group.materialIndex ?? 0] ?? -1;
-    if (m < 0) continue;
-    const end = Math.min(group.start + group.count, vertexCount);
-    for (let k = group.start; k + 2 < end; k += 3, t++) {
-      const c = t * 9, s = t * 24;
-      for (let j = 0; j < 3; j++) {
-        const v = index ? index.getX(k + j) : k + j;
-        const deformed=(mesh as THREE.SkinnedMesh).isSkinnedMesh || mesh.morphTargetInfluences?.some(v=>v!==0);
-        const point=deformed?mesh.getVertexPosition(v,new THREE.Vector3()):null;
-        const x = point?.x ?? posAttr.getX(v), y = point?.y ?? posAttr.getY(v), z = point?.z ?? posAttr.getZ(v);
-        p[j * 3] = x; p[j * 3 + 1] = y; p[j * 3 + 2] = z;
-        corners[c + j * 3] = x; corners[c + j * 3 + 1] = y; corners[c + j * 3 + 2] = z;
-        if (x < lx) lx = x; if (y < ly) ly = y; if (z < lz) lz = z;
-        if (x > hx) hx = x; if (y > hy) hy = y; if (z > hz) hz = z;
-        if (nrm) {
-          const nx = nrm.getX(v), ny = nrm.getY(v), nz = nrm.getZ(v), l = Math.hypot(nx, ny, nz) || 1;
-          shading[s + j * 4] = nx / l; shading[s + j * 4 + 1] = ny / l; shading[s + j * 4 + 2] = nz / l;
-        }
-        uv[j * 2] = uvA ? uvA.getX(v) : 0; uv[j * 2 + 1] = uvA ? uvA.getY(v) : 0;
-      }
-      const ax = p[3]! - p[0]!, ay = p[4]! - p[1]!, az = p[5]! - p[2]!, bx = p[6]! - p[0]!, by = p[7]! - p[1]!, bz = p[8]! - p[2]!;
-      if (!nrm) {
-        // Faceted normals.
-        const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx, l = Math.hypot(nx, ny, nz) || 1;
-        for (let j = 0; j < 3; j++) { shading[s + j * 4] = nx / l; shading[s + j * 4 + 1] = ny / l; shading[s + j * 4 + 2] = nz / l; }
-      }
-      const color=g.getAttribute('color');
-      if(color){const words=new Uint32Array(shading.buffer);for(let j=0;j<3;j++){
-        const v=index?index.getX(k+j):k+j;
-        const byte=(n:number)=>Math.round(Math.max(0,Math.min(1,n))*255);
-        words[s+j*4+3]=(byte(color.getX(v)) | byte(color.getY(v))<<8 | byte(color.getZ(v))<<16 | byte(color.itemSize>3?color.getW(v):1)<<24)>>>0;
-      }}
-      shading.set([uv[0]!, uv[1]!, uv[2]!, uv[3]!, uv[4]!, uv[5]!, m, oi], s + 12);
-      // Tangents drive normal maps and brushed (anisotropic) highlights.
-      if (uvA) {
-        const d1u = uv[2]! - uv[0]!, d1v = uv[3]! - uv[1]!, d2u = uv[4]! - uv[0]!, d2v = uv[5]! - uv[1]!;
-        const r = d1u * d2v - d2u * d1v;
-        if (Math.abs(r) < 1e-12) { shading[s + 23] = 1; continue; }
-        const f = 1 / r;
-        const tx = f * (d2v * ax - d1v * bx), ty = f * (d2v * ay - d1v * by), tz = f * (d2v * az - d1v * bz);
-        const qx = f * (d1u * bx - d2u * ax), qy = f * (d1u * by - d2u * ay), qz = f * (d1u * bz - d2u * az);
-        // Handedness: (e1 × e2) × t against the bitangent.
-        const ex = ay * bz - az * by, ey = az * bx - ax * bz, ez = ax * by - ay * bx;
-        const cx = ey * tz - ez * ty, cy = ez * tx - ex * tz, cz = ex * ty - ey * tx;
-        const handed = cx * qx + cy * qy + cz * qz < 0 ? -1 : 1;
-        const len = Math.hypot(tx, ty, tz) || 1;
-        shading[s + 20] = tx / len; shading[s + 21] = ty / len; shading[s + 22] = tz / len; shading[s + 23] = handed;
-      }
-    }
-  }
-  const bounds = count ? new THREE.Box3(new THREE.Vector3(lx, ly, lz), new THREE.Vector3(hx, hy, hz)) : new THREE.Box3();
-  return { corners: corners.subarray(0, t * 9), shading: shading.subarray(0, t * 24), bounds };
-}

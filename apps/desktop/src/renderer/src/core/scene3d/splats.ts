@@ -123,7 +123,7 @@ export function parsePly(buffer: ArrayBuffer): SplatData {
   return d;
 }
 
-const vertexShader = /* glsl */ `
+export const splatVertexShader = /* glsl */ `
 precision highp float;
 precision highp int;
 uniform highp sampler2D tCenter;
@@ -166,7 +166,7 @@ void main() {
   gl_Position = vec4(clip.xy / clip.w + offset, clip.z / clip.w, 1.0);
 }`;
 
-const fragmentShader = /* glsl */ `
+export const splatFragmentShader = /* glsl */ `
 precision highp float;
 in vec4 vColor;
 in vec2 vPos;
@@ -217,7 +217,7 @@ export class SplatMesh extends THREE.Mesh<THREE.InstancedBufferGeometry, THREE.R
     g.instanceCount = n;
     g.boundingSphere = new THREE.Sphere().setFromPoints([new THREE.Box3().setFromArray(data.centers).min, new THREE.Box3().setFromArray(data.centers).max]);
     this.material = new THREE.RawShaderMaterial({
-      vertexShader, fragmentShader, glslVersion: THREE.GLSL3,
+      vertexShader:splatVertexShader, fragmentShader:splatFragmentShader, glslVersion: THREE.GLSL3,
       uniforms: {
         tCenter: { value: texture(center, n, true) }, tCovA: { value: texture(covA, n, true) }, tCovB: { value: texture(covB, n, true) },
         tColor: { value: texture(color, n, false) }, viewport: { value: new THREE.Vector2(1, 1) }, width: { value: TEX_WIDTH },
@@ -246,6 +246,12 @@ export class SplatMesh extends THREE.Mesh<THREE.InstancedBufferGeometry, THREE.R
     if (view.equals(this.lastView)) return;
     this.lastView.copy(view);
     this.sort(view);
+  }
+
+  /** Studio's raster pass uses the same data/sort without a three.js renderer. */
+  orderFor(view:THREE.Matrix4):Float32Array {
+    if(!view.equals(this.lastView)){this.lastView.copy(view);this.sort(view);}
+    return this.geometry.getAttribute('splatIndex').array as Float32Array;
   }
 
   /** Back-to-front order for this view: a 16-bit counting sort on view depth. */
