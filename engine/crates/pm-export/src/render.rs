@@ -190,6 +190,8 @@ pub trait GpuGate: Send + Sync {
     /// frame's CPU work runs while this one's GPU work does. Only frames
     /// admitted whole overlap; a frame admitted in bands waits for the one
     /// before it. Overlapped frames report wall time (`gpu_timed` false).
+    /// Exports with a `frame_post` pass or compatibility sources never
+    /// overlap, whatever the gate says.
     fn overlaps(&self) -> bool {
         false
     }
@@ -1603,6 +1605,12 @@ where
         // The frame submitted whole whose pixels are still on their way
         // back (`GpuGate::overlaps`), and the readback slots it uses.
         let mut flight: Option<(u64, InFlight<'_>)> = None;
+        // A `frame:rendered` pass or a raster override may carry state from
+        // one frame into the next (an extension's handler, its canvas): such
+        // exports render each frame only after the one before is finished,
+        // as serial frames do.
+        let overlap =
+            gate.overlaps() && frame_post.is_none() && job.settings.delivery.compat.is_empty();
         let mut ring = pm_gpu::readback::ReadbackRing::default();
         let mut sent = 0u64;
         // Three frames' pixels circulate.
@@ -1656,7 +1664,7 @@ where
             // the encoder is gone).
             let step = (|| -> Result<Option<bool>, JobError> {
                 let time = timeline.tick(n);
-                if !gate.overlaps() {
+                if !overlap {
                     let read = render_frame_output(
                         renderer,
                         &document,

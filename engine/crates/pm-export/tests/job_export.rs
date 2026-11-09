@@ -1412,3 +1412,120 @@ fn overlapped_frames_equal_serial_frames_bit_for_bit() {
         "frames around a banded one differ"
     );
 }
+
+/// One extension's state across export frames: its `frame:rendered`
+/// handler counts frames, and its raster override draws the count.
+#[derive(Default)]
+struct Counter(std::sync::atomic::AtomicU32);
+
+impl FramePost for Counter {
+    fn frame(
+        &self,
+        _: u64,
+        _: Ticks,
+        _: u32,
+        _: u32,
+        _: WorkingEncoding,
+        rgba: Vec<f32>,
+    ) -> Result<Vec<f32>, JobError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(rgba)
+    }
+}
+
+struct CountRaster(Arc<Counter>);
+
+impl pm_render::compat::CompatRasters for CountRaster {
+    fn producing(&self, source: pm_render::compat::CompatSource) -> bool {
+        source == pm_render::compat::CompatSource::RasterOverride
+    }
+    fn answer(
+        &self,
+        _: &str,
+        _: &str,
+        _: f64,
+        _: f64,
+        _: pm_render::compat::CompatSource,
+        _: Option<pm_protocol::common::PixelRect>,
+    ) -> pm_render::compat::CompatAnswer {
+        let level = (self.0.0.load(Ordering::SeqCst) * 17 % 256) as u8;
+        pm_render::compat::CompatAnswer::Raster(Arc::new(pm_render::compat::CompatRaster {
+            width: 4,
+            height: 4,
+            format: pm_render::compat::CompatFormat::Rgba8Premultiplied,
+            anchor: [2.0, 2.0],
+            size: [40.0, 40.0],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            data: Arc::new([level, level, level, 255].repeat(16)),
+        }))
+    }
+}
+
+/// An export whose `frame:rendered` handler changes what the next frame's
+/// raster override draws renders every frame after the one before has been
+/// through the handler, whatever the gate allows: an overlapping gate gives
+/// the frames a serial one does, and the frames differ from each other.
+#[test]
+fn stateful_frame_handlers_keep_overlapping_exports_serial() {
+    let dur = 0.25;
+    // One still shape: only the handler's state changes from frame to frame.
+    let doc = project(
+        W,
+        H,
+        dur,
+        no_fill(),
+        vec![layer(
+            "box",
+            "shape",
+            json!({ "shape": "rect", "w": 100, "h": 60, "color": "#FFFFFF", "stroke": 0 }),
+            160.0,
+            90.0,
+            dur,
+        )],
+    );
+    let media = MediaPaths::default();
+    let mut encode = |gate: &dyn GpuGate| {
+        let counter = Arc::new(Counter::default());
+        let mut renderer = Renderer::headless().unwrap();
+        renderer.set_compat_rasters(Some(Arc::new(CountRaster(counter.clone()))));
+        let mut s = settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::P4444Xq,
+            },
+            WireAlpha::Straight,
+            dur,
+        );
+        s.audio = false;
+        s.delivery
+            .compat
+            .push(pm_protocol::snapshot::CompatSource::RasterOverride);
+        let job = job(&doc, media.clone(), s, PathBuf::from("/unused.mov"));
+        let mut plan = plan_export_for(&job, &renderer).unwrap();
+        plan.frame_post = Some(counter);
+        run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            gate,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap()
+    };
+    let serial = encode(&Overlap::new(false, 0));
+    let overlapping = encode(&Overlap::new(true, 0));
+    assert!(serial.frames.len() > 2);
+    assert!(
+        serial.frames.windows(2).all(|w| w[0] != w[1]),
+        "every frame draws the count"
+    );
+    assert!(
+        serial.frames[0] != serial.frames[1],
+        "the handler's state reaches the frames"
+    );
+    assert!(
+        serial.frames == overlapping.frames,
+        "an overlapping export reordered the handler"
+    );
+}
