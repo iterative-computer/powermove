@@ -314,6 +314,9 @@ pub(crate) fn frame_renderer(
             alpha: AlphaOutput::None,
             motion_blur: request.motion_blur,
         };
+        // An extension's snapshot (renderFrameTo, PM.Export.snapshot) is a
+        // delivery: offline media refuses, so no Media Offline card is ever
+        // cached here or saved by an extension.
         let png = frame(
             &jobs,
             &published,
@@ -322,6 +325,7 @@ pub(crate) fn frame_renderer(
             Size::new(request.width, request.height),
             look,
             request.stop,
+            Capture::ExtensionSnapshot,
         )
         .map_err(|e| e.to_string())?;
         let mut cache = cache.lock().unwrap();
@@ -347,6 +351,24 @@ fn never() -> bool {
     false
 }
 /// Renders one frame; `stop` cancels the export (a stopped task, a deadline).
+/// Who asked for a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Capture {
+    /// An agent's render_frames: a look at the project.
+    AgentStill,
+    /// An extension's renderFrameTo or PM.Export.snapshot: a delivery.
+    ExtensionSnapshot,
+    /// A composition sheet.
+    Sheet,
+}
+impl Capture {
+    /// Only an agent's still draws the Media Offline card; every other
+    /// capture refuses offline media, as an export does.
+    pub(crate) fn draws_offline_cards(self) -> bool {
+        self == Capture::AgentStill
+    }
+}
+#[allow(clippy::too_many_arguments)]
 fn frame(
     jobs: &EngineJobs,
     published: &Published,
@@ -355,6 +377,7 @@ fn frame(
     size: Size,
     look: Look,
     stop: &(dyn Fn() -> bool + Sync),
+    capture: Capture,
 ) -> AnyResult<Vec<u8>> {
     let rate = pm_time::rate_from_document(None, fps)?.rate;
     let start = pm_time::ticks_from_seconds(time)?;
@@ -383,8 +406,12 @@ fn frame(
         draft_from_proxies: true,
         delivery: Default::default(),
     };
-    // A still is a look at the project: offline media draws its card.
-    let mut handle = jobs.start(published, settings, destination, true)?;
+    let mut handle = jobs.start(
+        published,
+        settings,
+        destination,
+        capture.draws_offline_cards(),
+    )?;
     while matches!(
         handle.status().state,
         JobState::Queued | JobState::Running | JobState::WaitingForMedia
@@ -736,7 +763,10 @@ impl EngineHook for EngineJobs {
         for time in &request.times {
             let size = Size::new(width, height);
             let bytes =
-                frame(self, &published, fps, *time, size, MCP_LOOK, &never).map_err(failed)?;
+                // render_frames is a look at the project: offline media draws
+                // the Media Offline card. Nothing caches these stills.
+                frame(self, &published, fps, *time, size, MCP_LOOK, &never, Capture::AgentStill)
+                    .map_err(failed)?;
             images.push(format!("data:image/png;base64,{}", base64(&bytes)));
         }
         Ok(json!({"times":request.times,"images":images}))
@@ -831,8 +861,17 @@ impl EngineHook for EngineJobs {
             if !cells.is_empty() && started.elapsed() > Duration::from_secs(45) {
                 break;
             }
-            let bytes = frame(self, &published, fps, cell.source, size, MCP_LOOK, &never)
-                .map_err(failed)?;
+            let bytes = frame(
+                self,
+                &published,
+                fps,
+                cell.source,
+                size,
+                MCP_LOOK,
+                &never,
+                Capture::Sheet,
+            )
+            .map_err(failed)?;
             cells.push(decode_png(&bytes).map_err(failed)?);
         }
         let aspect = request.plan.cell_width as f64 / request.plan.cell_height as f64;

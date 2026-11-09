@@ -770,3 +770,11 @@ fn a_recovery_choice_in_the_window_is_named_and_library_reads_still_run() {
     c.dispatch("get_project_state", &json!({"indexOnly":true}))
         .unwrap();
 }
+
+#[::core::prelude::v1::test]
+fn only_agent_stills_draw_offline_cards() {
+    use crate::mcp_services::Capture;
+    assert!(Capture::AgentStill.draws_offline_cards());
+    assert!(!Capture::ExtensionSnapshot.draws_offline_cards());
+    assert!(!Capture::Sheet.draws_offline_cards());
+}
