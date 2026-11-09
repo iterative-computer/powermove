@@ -181,6 +181,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Pro media renditions are keyed by the original's content (media-cache object name or a once-per-stamp BLAKE3), not its path and mtime; Clear… keeps anything another original, attached record, task or the open project references (wave 16 review).
 - The direct glyph cache charges and evicts whole chunk textures, and still prefetch counts decoded bytes from the worker's decode and drops stills no frame asked for within 4 s (wave 16 review).
 - App exports submit whole frames once the viewer has been quiet for 1 s and single 16-row bands within 1 s of viewer activity (wave 18 perf): banding every frame rendered precomps and multi-pass effects once per band, 30× slower on Paper.
+- While playing, a layer whose raster override answer has not come draws its newest answer (the engine's own draw before the realm first answers) and the frame is not kept in the frame cache; paused and scrubbed frames wait for their own answers. Asks go to the realm one frame time per batch, at most 4 frame times in flight while playing (wave 18 perf: Paper froze 23 s and the realm hit its 8 s prompt).
 ## Extension backends (compat lane, wave 16)
 
 - Realm images decode natively on the realm worker: ImageIO for rasters (embedded profile to sRGB, EXIF orientation, as WebKit shows them), resvg for SVG, rasterized at the scale it is drawn (×2 for Retina) instead of stretched. An SVG's intrinsic size is usvg's (`viewBox` when width/height are missing), not Chromium's 300×150 fallback.
