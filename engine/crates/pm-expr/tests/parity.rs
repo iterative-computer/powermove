@@ -2,9 +2,9 @@
 //!
 //! `tests/fixtures/parity-*.jsonl` hold public cases (edge cases, a coercion
 //! matrix, expressions found in the repository, and seeded fuzz cases) with
-//! the results V8 15.2 (Electron 44) produced; `parity/run.ts` regenerates them
-//! and, with `PM_EXPR_PARITY_DIR` set, adds a larger fuzz run, the private
-//! corpus, and a sweep of the `Math` functions.
+//! the results V8 15.2 (Electron 44) produced. `parity/run.ts` regenerates them
+//! and runs the ignored external suites against its `PM_EXPR_PARITY_DIR`: a
+//! larger fuzz run, the private corpus, and a sweep of the `Math` functions.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -121,12 +121,16 @@ fn fixture_matches_v8() {
     check_suite(&suite, "fixture");
 }
 
+fn external_dir() -> PathBuf {
+    std::env::var_os("PM_EXPR_PARITY_DIR")
+        .expect("PM_EXPR_PARITY_DIR: run parity/run.ts")
+        .into()
+}
+
 #[test]
+#[ignore = "external evidence: parity/run.ts runs it with PM_EXPR_PARITY_DIR"]
 fn external_run_matches_v8() {
-    let Ok(dir) = std::env::var("PM_EXPR_PARITY_DIR") else {
-        return;
-    };
-    let dir = PathBuf::from(dir);
+    let dir = external_dir();
     let suite = load(&dir.join("cases.jsonl"), &dir.join("expected.jsonl"));
     check_suite(&suite, "run");
 }
@@ -134,14 +138,11 @@ fn external_run_matches_v8() {
 // ── Math sweep ──────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "external evidence: parity/run.ts runs it with PM_EXPR_PARITY_DIR"]
 fn external_math_sweep_matches_v8() {
-    let Ok(dir) = std::env::var("PM_EXPR_PARITY_DIR") else {
-        return;
-    };
-    let dir = PathBuf::from(dir);
-    let Ok(meta) = std::fs::read_to_string(dir.join("math.json")) else {
-        return;
-    };
+    let dir = external_dir();
+    let meta = std::fs::read_to_string(dir.join("math.json"))
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.join("math.json").display()));
     let meta = parse(&meta).unwrap();
     let count = meta.field("count").and_then(Json::as_f64).unwrap() as usize;
     let seed = meta.field("seed").and_then(Json::as_f64).unwrap() as u32;
