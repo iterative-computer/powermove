@@ -11,9 +11,7 @@ No FFmpeg, font, external project, account or platform asset is required.
 `engine/crates/pm-model/tests/fixtures/containers/pmv4.pmv` from integration base
 `5bcd425ddc158cbd891ee4b515cf9993fad29a66`. It includes a deliberately lone
 UTF-16 code unit. Vendoring keeps this lane's probe self-contained. The kernel
-reader accepts it; the current MCP host's model-to-serde conversion panics.
-The acceptance report preserves that **failure**, alongside the separate
-save-in-place versus unique-export contract failure. Neither fixture contains
+reader and the MCP host both accept it (`headless::utf16_ingress`). Neither fixture contains
 private/user media. Existing kernel corpus cases and original witnesses remain.
 
 `scene3d-source-{catalog,read}.json` are unchanged public source-oracle fixtures
