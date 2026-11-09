@@ -802,7 +802,12 @@ impl Controller {
             self.extensions.surfaces.insert(id.clone(), (title, hash));
             let ticket = runtime.mount_extension(&id, &surface["graph"], None);
             self.await_panel(id.clone(), id.clone(), Task::ready(ticket), cx);
-            if self.extensions.mounted_once.insert(id.clone()) && self.extensions.booted {
+            // A newly installed panel shows itself; one already in the
+            // workspace keeps its place, and the stack keeps its showing tab.
+            if self.extensions.mounted_once.insert(id.clone())
+                && self.extensions.booted
+                && !self.extensions.open_panels.contains(&id)
+            {
                 self.host
                     .borrow()
                     .send_command(&format!("panel:show:{id}"), vec![]);

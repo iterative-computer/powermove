@@ -7,14 +7,28 @@ use pm_native_migrate::{
     indexeddb::Record,
     migration::{self, Availability, ClosureInput, OwnerKind, Reference},
     snapshot::Snapshot,
+    source_access,
 };
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path};
 
+/// `progress(done, total)` after each project.
 pub(crate) fn inventory(
     cp: &Checkpoint,
     root: &Path,
     batches: &[(Snapshot, Vec<Record>)],
+    progress: &mut dyn FnMut(usize, usize) -> Result<()>,
+) -> Result<ClosureInput> {
+    DIGESTS.with(|d| d.borrow_mut().clear());
+    let found = inventory_pass(cp, root, batches, progress);
+    DIGESTS.with(|d| d.borrow_mut().clear());
+    found
+}
+fn inventory_pass(
+    cp: &Checkpoint,
+    root: &Path,
+    batches: &[(Snapshot, Vec<Record>)],
+    progress: &mut dyn FnMut(usize, usize) -> Result<()>,
 ) -> Result<ClosureInput> {
     let profile = root.join("profile");
     let disk_records = pm_native_migrate::library_media::read_index(&profile.join("Media Store"))?;
@@ -34,7 +48,9 @@ pub(crate) fn inventory(
     };
     if profile.join("store").is_dir() {
         let trash: BTreeSet<_> = store.trash()?.into_iter().map(|r| r.id).collect();
-        for id in cp.projects.keys() {
+        let total = cp.projects.len();
+        for (done, id) in cp.projects.keys().enumerate() {
+            progress(done, total)?;
             if let Some(p) = store.load(id)? {
                 let current = convert(&p.project)?;
                 add(
@@ -135,10 +151,11 @@ pub(crate) fn inventory(
                 r.source_path = disk.source_path.clone();
             }
             use pm_native_migrate::library_media::SourceStatus;
-            let available = matches!(
-                disk.source_status()?,
-                SourceStatus::Owned | SourceStatus::Verified
-            );
+            let status = disk.source_status()?;
+            if status == SourceStatus::Denied && r.before != Availability::Original {
+                r.unreached = true;
+            }
+            let available = matches!(status, SourceStatus::Owned | SourceStatus::Verified);
             if available && let Some(path) = disk.owned_path.as_ref().or(disk.source_path.as_ref())
             {
                 // Full main SHA-256 is already verified. Proxy provenance is
@@ -147,7 +164,7 @@ pub(crate) fn inventory(
                     && (matches_original(path, r)?
                         || (r.original_blake3.is_none() && r.fingerprint.is_none()))
                 {
-                    r.original_blake3 = Some(disk::hash(path)?.0);
+                    r.original_blake3 = Some(hashed(path)?);
                     r.before = Availability::Original;
                 } else {
                     r.before = Availability::ProxyOnly;
@@ -254,6 +271,7 @@ fn add(
                 .unwrap_or(0),
             poster: false,
             before: Availability::Offline,
+            unreached: false,
         };
         // A record's storage revision is NOT the project's document revision.
         // Only accept a textual identity, never synthesize one from a number.
@@ -282,26 +300,14 @@ fn add(
             candidates.len() <= 1,
             "ambiguous media identity in checkpoint"
         );
-        if let Some(path) = &r.source_path
-            && pm_native_migrate::library_media::is_resident(path)?
-            && matches_original(path, &r)?
-        {
-            r.original_blake3 = Some(disk::hash(path)?.0);
-            r.before = Availability::Original;
-        }
-        if r.before == Availability::Offline
-            && let Some((snapshot, record)) = candidates.first()
-        {
+        // The captured payload is what the original app played. Prefer it, so an
+        // original in a folder macOS guards is read only when nothing else has it.
+        if let Some((snapshot, record)) = candidates.first() {
             let path = record.payload_path(snapshot)?;
             if record.payload().size == 0 || path.is_some() {
-                let original = if !r.is_proxy() {
-                    if let Some(path) = &path {
-                        matches_original(path, &r)?
-                    } else {
-                        false
-                    }
-                } else {
-                    false
+                let original = match &path {
+                    Some(path) if !r.is_proxy() => matches_original(path, &r)?,
+                    _ => false,
                 };
                 r.before = if original {
                     Availability::Original
@@ -310,12 +316,26 @@ fn add(
                 };
             }
         }
+        if r.before != Availability::Original
+            && let Some(path) = r.source_path.clone()
+            && pm_native_migrate::library_media::is_resident(&path)?
+        {
+            match matches_original(&path, &r) {
+                Ok(true) => {
+                    r.original_blake3 = Some(hashed(&path)?);
+                    r.before = Availability::Original;
+                }
+                Ok(false) => {}
+                Err(e) if source_access::is_unreached(&e) => r.unreached = true,
+                Err(e) => return Err(e),
+            }
+        }
         if r.before == Availability::Original
             && r.original_blake3.is_none()
             && let Some((snapshot, record)) = candidates.first()
             && let Some(path) = record.payload_path(snapshot)?
         {
-            r.original_blake3 = Some(disk::hash(&path)?.0);
+            r.original_blake3 = Some(hashed(&path)?);
         }
         // Posters are disposable renditions; record their absence explicitly
         // instead of turning a missing thumbnail into a missing original.
@@ -329,18 +349,51 @@ fn add(
         poster.playback_proxy = false;
         poster.playback_proxy_version = 0;
         poster.poster = true;
+        poster.unreached = false;
         poster.before = Availability::Offline;
         out.references.push(r);
         out.references.push(poster);
     }
     Ok(())
 }
+/// One pass reads each file once: history entries repeat the same assets, and a
+/// payload can stand behind many references. Keyed by identity, so a file that
+/// changes during the pass is read again.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Digest {
+    Blake3,
+    Fingerprint,
+}
+type DigestKey = (std::path::PathBuf, Digest, u64, i64, i64);
+thread_local! {
+    static DIGESTS: std::cell::RefCell<std::collections::HashMap<DigestKey, String>> =
+        Default::default();
+}
+fn digest(path: &Path, kind: Digest, compute: impl FnOnce() -> Result<String>) -> Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path)?;
+    let key = (path.to_owned(), kind, m.len(), m.mtime(), m.mtime_nsec());
+    if let Some(hit) = DIGESTS.with(|d| d.borrow().get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let value = compute()?;
+    DIGESTS.with(|d| d.borrow_mut().insert(key, value.clone()));
+    Ok(value)
+}
+fn hashed(path: &Path) -> Result<String> {
+    digest(path, Digest::Blake3, || Ok(disk::hash(path)?.0))
+}
+fn fingerprinted(path: &Path) -> Result<String> {
+    digest(path, Digest::Fingerprint, || {
+        migration::sampled_fingerprint(path)
+    })
+}
 fn matches_original(path: &Path, r: &Reference) -> Result<bool> {
     if let Some(hash) = &r.original_blake3 {
-        return Ok(disk::hash(path)?.0 == *hash);
+        return Ok(hashed(path)? == *hash);
     }
     if let Some(fp) = &r.fingerprint {
-        return Ok(migration::sampled_fingerprint(path)? == *fp);
+        return Ok(fingerprinted(path)? == *fp);
     }
     Ok(false)
 }

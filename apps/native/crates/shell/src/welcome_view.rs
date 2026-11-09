@@ -102,27 +102,83 @@ impl WelcomeView {
         }
         element
     }
-    fn progress(&self, progress: &Progress) -> impl IntoElement + use<> {
+    /// A thin bar: filled to its fraction, or a sliding segment while the total
+    /// is unknown (still under Reduce Motion).
+    fn progress(&self, progress: &Progress, time: Option<f64>) -> impl IntoElement + use<> {
         let t = &self.tokens;
-        let fraction = match progress {
-            Progress::Determinate { done, total } => *done as f32 / (*total).max(1) as f32,
-            Progress::Indeterminate => 0.,
+        let (height, radius) = (px(t.metrics.gap / 2.), px(t.metrics.gap / 4.));
+        let fill = |w: f32| {
+            div()
+                .h_full()
+                .w(relative(w))
+                .rounded(radius)
+                .bg(rgb(t.colors.accent))
         };
         let mut bar = div()
+            .relative()
             .w_full()
-            .h(px(t.metrics.gap / 2.))
-            .rounded(px(t.metrics.gap / 4.))
+            .h(height)
+            .rounded(radius)
+            .overflow_hidden()
             .bg(rgb(t.colors.panel_secondary));
-        if matches!(progress, Progress::Determinate { .. }) {
-            bar = bar.child(
-                div()
-                    .h_full()
-                    .w(relative(fraction.clamp(0., 1.)))
-                    .rounded(px(t.metrics.gap / 4.))
-                    .bg(rgb(t.colors.accent)),
-            );
-        }
+        bar = match (progress, time) {
+            (Progress::Determinate(fraction), _) => bar.child(fill(fraction.clamp(0., 1.) as f32)),
+            (Progress::Indeterminate, Some(time)) => {
+                // A quarter-width segment crossing every 1.5 s.
+                let at = (time / 1.5).fract() as f32 * 1.25 - 0.25;
+                bar.child(fill(0.25).absolute().top_0().left(relative(at)))
+            }
+            (Progress::Indeterminate, None) => bar,
+        };
         bar
+    }
+    /// The Settings › Project card: one row per step (or folder), title left,
+    /// value right, the running step's bar under its row, inset hairlines between.
+    fn steps(&self, time: Option<f64>) -> impl IntoElement + use<> {
+        let t = &self.tokens;
+        let (c, m) = (&t.colors, &t.metrics);
+        let mut card = div()
+            .id("welcome-steps")
+            .role(Role::List)
+            .flex()
+            .flex_col()
+            .rounded(px(m.group_radius))
+            .bg(rgb(c.panel));
+        for (index, step) in self.frame.steps.iter().enumerate() {
+            let label = if step.value.is_empty() {
+                step.title.clone()
+            } else {
+                format!("{}, {}", step.title, step.value)
+            };
+            let mut row = div()
+                .id(SharedString::from(format!("welcome-step-{index}")))
+                .role(Role::ListItem)
+                .aria_label(label)
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(m.gap / 2.))
+                .min_h(px(m.form_row))
+                .px(px(m.inset))
+                .py(px(m.gap))
+                .text_size(px(t.typography.body))
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap(px(m.gap))
+                        .child(div().text_color(rgb(c.text)).child(step.title.clone()))
+                        .child(div().text_color(rgb(c.secondary)).child(step.value.clone())),
+                );
+            if let Some(progress) = &step.progress {
+                row = row.child(self.progress(progress, time));
+            }
+            if index > 0 {
+                card = card.child(div().ml(px(m.inset)).h(px(m.border)).bg(rgb(c.separator)));
+            }
+            card = card.child(row);
+        }
+        card
     }
     fn choices(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = &self.tokens;
@@ -212,7 +268,12 @@ impl Render for WelcomeView {
         let frame = self.frame.clone();
         let time = (frame.animate && !t.accessibility.reduce_motion).then(|| self.time());
         let spin = frame.spinner && !t.accessibility.reduce_motion;
-        if (spin || time.is_some_and(|time| time < welcome::ANIMATION_SECONDS))
+        let sliding = !t.accessibility.reduce_motion
+            && frame
+                .steps
+                .iter()
+                .any(|s| s.progress == Some(Progress::Indeterminate));
+        if (spin || sliding || time.is_some_and(|time| time < welcome::ANIMATION_SECONDS))
             && self.clock.is_none()
         {
             window.request_animation_frame();
@@ -268,8 +329,8 @@ impl Render for WelcomeView {
             }
             content = content.child(row.child(status.clone()));
         }
-        if let Some(progress) = &frame.progress {
-            content = content.child(self.progress(progress));
+        if !frame.steps.is_empty() {
+            content = content.child(self.steps(sliding.then(|| self.time())));
         }
         if !frame.choices.is_empty() {
             content = content.child(self.choices(cx));

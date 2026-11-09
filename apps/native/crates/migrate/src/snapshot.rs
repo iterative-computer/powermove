@@ -129,6 +129,7 @@ impl Snapshot {
                 let out = target.join("leveldb").join(relative);
                 copy_snapshot_file(&leveldb.join(relative), &out, stamp.size, policy)?;
                 hashes.insert(relative.clone(), hash_file(&out)?.0);
+                crate::source_access::add_bytes(stamp.size);
             }
             let mut copied_blobs = BTreeMap::new();
             let mut copied_bytes = 0u64;
@@ -508,10 +509,10 @@ pub(crate) fn open_regular(path: &Path) -> Result<File> {
         // Check before opening or clonefile: either can hydrate cloud data.
         require_local_flags(fs::symlink_metadata(path)?.st_flags())?;
     }
-    let f = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    let f = crate::source_access::open(
+        path,
+        OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW),
+    )?;
     ensure!(f.metadata()?.is_file(), "not a regular file");
     Ok(f)
 }
@@ -523,6 +524,13 @@ fn require_local_flags(flags: u32) -> Result<()> {
     Ok(())
 }
 pub(crate) fn hash_file(path: &Path) -> Result<(String, u64)> {
+    hash_file_with(path, |_| {})
+}
+/// Hashes the first read of a file a step moves, counting its bytes as it goes.
+pub(crate) fn hash_file_counted(path: &Path) -> Result<(String, u64)> {
+    hash_file_with(path, crate::source_access::add_bytes)
+}
+fn hash_file_with(path: &Path, mut read: impl FnMut(u64)) -> Result<(String, u64)> {
     let mut file = open_regular(path)?;
     let mut buffer = vec![0; 1024 * 1024];
     let mut hash = blake3::Hasher::new();
@@ -533,6 +541,7 @@ pub(crate) fn hash_file(path: &Path) -> Result<(String, u64)> {
             break;
         }
         hash.update(&buffer[..n]);
+        read(n as u64);
         size += n as u64;
     }
     Ok((hash.finalize().to_hex().to_string(), size))

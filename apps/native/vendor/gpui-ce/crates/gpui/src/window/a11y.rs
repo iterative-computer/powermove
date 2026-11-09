@@ -343,6 +343,10 @@ impl A11y {
 pub struct A11ySubtreeBuilder<'a> {
     parent_id: NodeId,
     nodes: &'a mut A11yNodeBuilder,
+    // Powermove P-A11Y-SYNTHETIC: window bounds of synthetic children, so the
+    // built-in Click lands on them as it does on elements.
+    node_bounds: &'a mut FxHashMap<NodeId, Bounds<Pixels>>,
+    scale: f32,
     /// Provenance of the real element whose `a11y_synthetic_children` is
     /// running.
     #[cfg(debug_assertions)]
@@ -350,10 +354,17 @@ pub struct A11ySubtreeBuilder<'a> {
 }
 
 impl<'a> A11ySubtreeBuilder<'a> {
-    pub(crate) fn new(parent_id: NodeId, nodes: &'a mut A11yNodeBuilder) -> Self {
+    pub(crate) fn new(
+        parent_id: NodeId,
+        nodes: &'a mut A11yNodeBuilder,
+        node_bounds: &'a mut FxHashMap<NodeId, Bounds<Pixels>>,
+        scale: f32,
+    ) -> Self {
         Self {
             parent_id,
             nodes,
+            node_bounds,
+            scale,
             #[cfg(debug_assertions)]
             creator: debug::NodeCreator::default(),
         }
@@ -395,6 +406,29 @@ impl<'a> A11ySubtreeBuilder<'a> {
                     source_location: self.creator.source_location,
                 },
             );
+        }
+        pushed
+    }
+
+    /// Append a synthetic leaf that occupies `bounds` in the window, in logical
+    /// pixels. Its accessibility frame is set from them, and an assistive Press
+    /// with no listener clicks its centre, as for an element.
+    pub fn push_child_at(
+        &mut self,
+        id: NodeId,
+        mut node: accesskit::Node,
+        bounds: Bounds<Pixels>,
+    ) -> bool {
+        let scale = self.scale as f64;
+        node.set_bounds(accesskit::Rect {
+            x0: bounds.origin.x.0 as f64 * scale,
+            y0: bounds.origin.y.0 as f64 * scale,
+            x1: (bounds.origin.x.0 + bounds.size.width.0) as f64 * scale,
+            y1: (bounds.origin.y.0 + bounds.size.height.0) as f64 * scale,
+        });
+        let pushed = self.push_child(id, node);
+        if pushed {
+            self.node_bounds.insert(id, bounds);
         }
         pushed
     }

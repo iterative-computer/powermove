@@ -12,7 +12,7 @@ use pm_panel_timeline::{
     graph_render::{self, Graph},
     render::{Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, Viewport},
 };
-use std::{collections::VecDeque, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc};
 
 /// Host services a gesture needs. Implemented by the Controller; tests record.
 pub trait Delegate: 'static {
@@ -1652,6 +1652,8 @@ fn build(client: &TimelineClient, tokens: &Tokens) -> Option<Built> {
         model: Arc::new(client.model.clone()),
     })
 }
+/// The frame the canvas prepared, and where, for the clips' accessible elements.
+type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
 impl Render for TimelineSurface {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity().downgrade();
@@ -1684,13 +1686,37 @@ impl Render for TimelineSurface {
                 .whitespace_nowrap()
                 .child(text)
         });
+        // The canvas prepaints before the list's children are written: it
+        // leaves the frame it prepared here for the clips' accessible elements.
+        let shown: Shown = Rc::default();
+        let prepared = shown.clone();
         div()
             .id("native-timeline")
             .relative()
             .size_full()
             .cursor(self.cursor)
-            .role(Role::Group)
+            .role(Role::List)
             .aria_label("Timeline tracks")
+            // Each clip is an element VoiceOver and agents can find and press; a
+            // Press clicks its centre, the same path as the pointer.
+            .a11y_synthetic_children(move |children| {
+                let Some((origin, frame)) = shown.borrow_mut().take() else {
+                    return;
+                };
+                for clip in frame.clip_nodes() {
+                    let mut node = gpui::accesskit::Node::new(Role::ListItem);
+                    node.set_label(clip.label());
+                    node.set_selected(clip.selected);
+                    node.add_action(gpui::AccessibleAction::Click);
+                    let b = clip.bounds;
+                    let bounds = Bounds::new(
+                        origin + point(px(b.x as f32), px(b.y as f32)),
+                        size(px(b.width as f32), px(b.height as f32)),
+                    );
+                    let id = children.synthetic_node_id(&clip.id);
+                    children.push_child_at(id, node, bounds);
+                }
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
@@ -1719,9 +1745,12 @@ impl Render for TimelineSurface {
             .child(
                 canvas(
                     move |bounds, _, cx| {
-                        weak.update(cx, |s, cx| s.prepared(bounds, cx))
+                        let frame = weak
+                            .update(cx, |s, cx| s.prepared(bounds, cx))
                             .ok()
-                            .flatten()
+                            .flatten();
+                        *prepared.borrow_mut() = frame.clone().map(|f| (bounds.origin, f));
+                        frame
                     },
                     move |bounds, frame, window, cx| {
                         if let Some(frame) = frame {
@@ -1905,9 +1934,30 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 letter_spacing: None,
             };
             let font_size = px(op.font_size as f32);
-            let line = window
-                .text_system()
-                .shape_line(text.clone().into(), font_size, &[run]);
+            let shape = |text: String, window: &mut Window| {
+                let run = TextRun {
+                    len: text.len(),
+                    ..run.clone()
+                };
+                window
+                    .text_system()
+                    .shape_line(text.into(), font_size, &[run])
+            };
+            let mut line = shape(text.clone(), window);
+            // A clip's name ends in an ellipsis inside the clip, as in every NLE,
+            // keeping the same padding on the right as on the left.
+            if op.detail["truncate"] == "tail" {
+                let room = px(
+                    (b.width - (t.metrics.inset - t.metrics.inner_radius) as f64).max(0.) as f32,
+                );
+                if line.width > room {
+                    let Some(fitted) = fit_tail(text, |s| shape(s.into(), window).width <= room)
+                    else {
+                        return;
+                    };
+                    line = shape(fitted, window);
+                }
+            }
             let height = font_size * t.typography.dense_leading;
             let y = b.y + (b.height - f32::from(height) as f64) / 2.;
             let _ = line.paint(
@@ -1931,6 +1981,22 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         ),
         None => draw(window, cx),
     }
+}
+/// The longest start of `text` that, with a trailing ellipsis, `fits`; none when
+/// not even one character does.
+pub(crate) fn fit_tail(text: &str, mut fits: impl FnMut(&str) -> bool) -> Option<String> {
+    let ends: Vec<usize> = text.char_indices().map(|(i, c)| i + c.len_utf8()).collect();
+    let candidate = |n: usize| format!("{}…", text[..ends[n - 1]].trim_end());
+    let (mut keep, mut over) = (0, ends.len());
+    while keep + 1 < over {
+        let mid = (keep + over) / 2;
+        if fits(&candidate(mid)) {
+            keep = mid;
+        } else {
+            over = mid;
+        }
+    }
+    (keep > 0).then(|| candidate(keep))
 }
 fn point_of(value: &serde_json::Value) -> Option<(f64, f64)> {
     Some((value.get(0)?.as_f64()?, value.get(1)?.as_f64()?))

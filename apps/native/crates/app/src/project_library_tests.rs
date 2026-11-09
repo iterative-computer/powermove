@@ -64,6 +64,7 @@ fn open<'a>(
             log.borrow_mut().push(match outbound {
                 Outbound::Opened { name, .. } => format!("opened {name}"),
                 Outbound::Focus => "focus".into(),
+                Outbound::FocusProject(id) => format!("focus {id}"),
                 Outbound::Message(text) => text,
             })
         })
@@ -154,6 +155,17 @@ fn a_click_selects_and_return_opens_through_the_kernel() {
     }
     assert_eq!(*log.borrow(), ["opened First Film"]);
     assert!(fixture.actor.handle().published("first").is_some());
+    // Opening it again, from this or another window's list, brings forward the
+    // window that shows it: no second open, no alert.
+    cx.simulate_keystrokes("enter");
+    let start = Instant::now();
+    while log.borrow().len() < 2 {
+        view.update(cx, |v, cx| v.pump(cx));
+        cx.run_until_parked();
+        assert!(start.elapsed() < Duration::from_secs(10), "never answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(log.borrow()[1], "focus first");
 }
 #[::core::prelude::v1::test]
 fn sections_switch_and_an_empty_trash_says_so() {

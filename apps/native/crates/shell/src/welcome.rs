@@ -3,8 +3,17 @@
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Progress {
-    Determinate { done: usize, total: usize },
+    /// 0 to 1.
+    Determinate(f64),
     Indeterminate,
+}
+/// A Settings-style row in the gate's card: title left, value right, and a
+/// progress bar under the row that is running.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepRow {
+    pub title: String,
+    pub value: String,
+    pub progress: Option<Progress>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -60,7 +69,8 @@ pub struct Frame {
     pub line: String,
     pub status: Option<String>,
     pub spinner: bool,
-    pub progress: Option<Progress>,
+    /// The card under the line: copy steps, or the folders macOS protects.
+    pub steps: Vec<StepRow>,
     pub rows: Vec<Row>,
     pub choices: Vec<Choice>,
     pub chosen: Option<String>,

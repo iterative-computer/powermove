@@ -53,6 +53,24 @@ Window ▸ Error Log and the status bar, and resumes next launch.
 5. Import localStorage, register extensions (`extensions-shared` read-only, plus an
    overlay), then secrets.
 
+**Originals in protected folders.** Media is taken from the captured payload first; an
+original at its `sourcePath` is read only when nothing captured has its bytes. Opening one
+in a folder macOS protects (Desktop, Documents, Downloads, iCloud Drive, cloud storage,
+other volumes; matched after resolving symlinked ancestors) goes through
+`pm_native_migrate::source_access`. Each folder has a persisted `Outcome` in
+`migration.json` (`folder_outcomes`): a folder without one is never opened. In the
+foreground it is named in `Allow Access to Your Media` (`Outcome::NeedsFolderAccess`, then
+`run_with_folder_access`), and Continue/Skip answer only the folders shown. An allowed
+open runs on a helper thread; an unanswered prompt shows `Waiting for macOS` with `Skip
+These Files` and is abandoned after two minutes (`Unanswered`, never retried silently).
+Later launches (`Choice::Defer`) open only `Granted` folders and leave new ones `Pending`.
+Unreached originals get `Status::NotReached`: offline with their source, listed as `Media
+Not Reached`, never blocking the project.
+
+**Progress.** The gate's card lists the steps; the running one shows counts and live bytes
+(`source_access::Activity`, polled four times a second). A capture made this run isn't
+hashed again; a resumed checkpoint is.
+
 Every step publishes durably, so a kill or `Pause` resumes where it stopped. `Pause` reads
 `Pausing…` until the worker reaches its next boundary, and only then can it be resumed:
 there is never a second worker. Quitting is always safe. Disk needs 6 GiB plus worst-case bytes; low space stops with real numbers.

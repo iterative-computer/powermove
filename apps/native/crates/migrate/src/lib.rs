@@ -10,6 +10,7 @@ pub mod library_media;
 pub mod local_storage;
 pub mod migration;
 pub mod snapshot;
+pub mod source_access;
 pub mod storage_upgrade;
 pub mod structured_clone;
 mod wire;

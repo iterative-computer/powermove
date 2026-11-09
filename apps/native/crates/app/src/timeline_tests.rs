@@ -942,3 +942,88 @@ fn clicking_a_layer_row_selects_it(cx: &mut TestAppContext) {
         .to_vec();
     assert_eq!(selected, ["l1".to_string()]);
 }
+/// Clips are accessible elements in the tracks list: named, with their times
+/// and selection, and an assistive Press selects one through the pointer path.
+#[gpui::test]
+fn clips_are_accessible_elements_that_a_press_selects(cx: &mut TestAppContext) {
+    use gpui::accesskit::{Action, Role};
+    let mut s = stage(cx, 2);
+    s.vcx.update(|window, _| window.set_a11y_forced(true));
+    s.idle(cx);
+    let items = |s: &mut Stage| {
+        s.vcx.update(|window, _| {
+            let tree = window.a11y_tree().unwrap();
+            let list = tree
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == Role::List && n.label() == Some("Timeline tracks"))
+                .map(|(_, n)| n.children().to_vec())
+                .expect("the tracks list");
+            tree.nodes
+                .iter()
+                .filter(|(id, n)| list.contains(id) && n.role() == Role::ListItem)
+                .map(|(id, n)| {
+                    let bounds = window.a11y_node_bounds(*id);
+                    (
+                        *id,
+                        n.label().unwrap_or_default().to_owned(),
+                        n.is_selected(),
+                        bounds,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let clips = items(&mut s);
+    assert_eq!(clips.len(), 2, "{clips:?}");
+    assert!(clips[0].1.starts_with("Layer 0, "), "{clips:?}");
+    assert!(clips[0].1.ends_with(" seconds"), "{clips:?}");
+    assert!(clips.iter().all(|c| c.2 != Some(true)));
+    // Each element sits on its painted clip, inside the tracks.
+    let tracks = bounds(&mut s.vcx, "timeline:surface");
+    for (_, _, _, b) in &clips {
+        let b = b.expect("bounds");
+        assert!(tracks.contains(&b.center()), "{b:?} outside {tracks:?}");
+    }
+    let target = clips[1].0;
+    s.vcx
+        .update(|window, cx| window.perform_a11y_action(target, Action::Click, None, cx));
+    s.idle(cx);
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    let layers: Vec<String> = published
+        .selection
+        .layers()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(layers, ["l1"]);
+    let clips = items(&mut s);
+    assert_eq!(clips[1].2, Some(true));
+    // A frame that redraws the panel but not the cached tracks view keeps them.
+    s.view.update(&mut s.vcx, |_, cx| cx.notify());
+    s.vcx.run_until_parked();
+    assert_eq!(
+        items(&mut s).len(),
+        2,
+        "a reused view keeps its accessible elements"
+    );
+}
+
+#[::core::prelude::v1::test]
+fn a_long_clip_name_ends_in_an_ellipsis_that_fits() {
+    let fits = |room: usize| move |s: &str| s.chars().count() <= room;
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Interview A", fits(6)).as_deref(),
+        Some("Inter…")
+    );
+    // Trailing spaces never sit before the ellipsis.
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Interview A", fits(11)).as_deref(),
+        Some("Interview…")
+    );
+    assert_eq!(
+        crate::timeline_surface::fit_tail("Ünïcödé", fits(3)).as_deref(),
+        Some("Ün…")
+    );
+    assert_eq!(crate::timeline_surface::fit_tail("Clip", fits(1)), None);
+}

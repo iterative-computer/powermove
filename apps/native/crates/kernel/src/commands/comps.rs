@@ -44,6 +44,9 @@ pub struct CompPatch {
     pub hdr: Option<bool>,
     /// The HDR mastering display peak in cd/m² (`color.masteringPeak`).
     pub mastering_peak: Option<f64>,
+    /// The project's `exportDefaults` (v1 `ExportDefaults`): what the Export
+    /// sheet opens with, edited in Settings ▸ Project.
+    pub export_defaults: Option<Value>,
 }
 
 /// How Pre-compose treats the selection (`PM.Comps.precompose`).
@@ -343,6 +346,14 @@ fn set_composition(cx: &mut Cx<'_>, p: &CompPatch) -> Result<(), CommandError> {
             }
             cx.set(color("masteringPeak"), n(peak))?;
         }
+    }
+    if let Some(defaults) = &p.export_defaults {
+        if !matches!(defaults, Value::Object(_)) {
+            return Err(CommandError::Invalid(
+                "Export defaults must be an object".into(),
+            ));
+        }
+        cx.set(vec!["exportDefaults".into()], defaults.clone())?;
     }
     if let Some(name) = &p.name {
         let t = values::js_trim(name);

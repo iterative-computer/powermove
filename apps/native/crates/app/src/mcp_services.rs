@@ -78,7 +78,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             backup_root: Some(profile.join("backups")),
             ..Default::default()
         });
-        let (host, _) = crate::mcp::Host::new(actor.handle(), profile.clone());
+        let host = crate::mcp::Host::new(actor.handle(), profile.clone());
         crate::mcp::attach(&host.kernel, &profile)?;
         if let Some(path) = launch {
             host.open(
@@ -246,18 +246,33 @@ impl ExportChild for EngineJobs {
         let destination = request
             .directory
             .join(file_name(&name, options.format.extension()));
-        let handle = self
-            .start(&published, settings, destination, false, false)
-            .map_err(failed)?;
+        // Listed in Background Tasks beside the person's exports, where it can
+        // be watched and cancelled.
+        let task =
+            crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
+                .map_err(failed)?;
+        let mut handle = match self.start(&published, settings, destination, false, false) {
+            Ok(handle) => handle,
+            Err(error) => {
+                task.finish(Err(error.to_string()));
+                return Err(failed(error));
+            }
+        };
         let started = Instant::now();
         while !matches!(
             handle.status().state,
             JobState::Done | JobState::Failed | JobState::Cancelled
         ) {
+            if task.cancelled() {
+                let _ = handle.cancel();
+                break;
+            }
+            let frames = (handle.status().progress * plan.frames as f64).round() as u64;
+            task.progress(frames, plan.frames);
             self.progress.lock().unwrap().insert(
                 frozen.document_id,
                 Progress {
-                    frames: (handle.status().progress * plan.frames as f64).round() as u64,
+                    frames,
                     total: Some(plan.frames),
                     encoder: None,
                     seconds: started.elapsed().as_secs_f64(),
@@ -266,7 +281,16 @@ impl ExportChild for EngineJobs {
             std::thread::sleep(Duration::from_millis(50));
         }
         self.progress.lock().unwrap().remove(&frozen.document_id);
-        finish(handle)
+        if task.cancelled() {
+            let _ = handle.wait();
+            task.finish(Err("cancelled".into()));
+            return Err(failed(
+                "The person cancelled this export in Background Tasks.",
+            ));
+        }
+        let result = finish(handle);
+        task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
+        result
     }
     fn video_progress(&self, frozen: &FrozenProject) -> Option<Progress> {
         self.progress

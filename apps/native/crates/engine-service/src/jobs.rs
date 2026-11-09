@@ -271,6 +271,13 @@ fn status(
         preview: None,
     }
 }
+/// Ends the refusal of an export with offline clips; the Export sheet offers
+/// Export Without Them on it.
+pub const OFFLINE_ADVICE: &str = "Relink the originals, or export without them.";
+/// An export refused because clips are offline (not silent audio, which still fails).
+pub fn is_offline_refusal(message: &str) -> bool {
+    message.ends_with(OFFLINE_ADVICE)
+}
 pub struct ExportHandle {
     child: Option<Child>,
     input: Arc<Mutex<ChildStdin>>,
@@ -616,7 +623,7 @@ pub fn run_child() -> Result<()> {
                 n => format!("{n} clips are"),
             };
             anyhow::bail!(
-                "{count} offline: {}{more}. Relink the originals, or choose Use Proxies (Draft) to export from proxies.",
+                "{count} offline: {}{more}. {OFFLINE_ADVICE}",
                 names.join(", ")
             );
         }

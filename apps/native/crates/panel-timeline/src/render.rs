@@ -1211,6 +1211,48 @@ fn paint_keys(
 fn key_identity(op: &Op) -> Option<(String, String)> {
     serde_json::from_str(op.id.strip_prefix("key:")?).ok()
 }
+fn intersection(a: Rect, b: Rect) -> Option<Rect> {
+    let (x, y) = (a.x.max(b.x), a.y.max(b.y));
+    let (right, bottom) = (
+        (a.x + a.width).min(b.x + b.width),
+        (a.y + a.height).min(b.y + b.height),
+    );
+    (right > x && bottom > y).then(|| Rect::new(x, y, right - x, bottom - y))
+}
+/// A clip as assistive technology sees it. See [`Frame::clip_nodes`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipNode {
+    pub id: String,
+    pub name: String,
+    pub from: f64,
+    pub duration: f64,
+    pub selected: bool,
+    /// Panel coordinates of its visible body.
+    pub bounds: Rect,
+}
+impl ClipNode {
+    /// "Interview, 2 to 7.5 seconds", for VoiceOver and agents.
+    pub fn label(&self) -> String {
+        let seconds = |s: f64| {
+            let s = (s * 100.).round() / 100.;
+            if s.fract() == 0. {
+                format!("{s:.0}")
+            } else {
+                format!("{s}")
+            }
+        };
+        let name = if self.name.is_empty() {
+            "Clip"
+        } else {
+            &self.name
+        };
+        format!(
+            "{name}, {} to {} seconds",
+            seconds(self.from),
+            seconds(self.from + self.duration)
+        )
+    }
+}
 fn intersects(a: Rect, b: Rect) -> bool {
     a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
 }
@@ -1363,6 +1405,44 @@ impl Frame {
             .filter(|o| o.id.starts_with("key:") && intersects(o.bounds, area))
             .filter_map(key_identity)
             .map(|(_, key)| key)
+            .collect()
+    }
+    /// One accessible element per painted clip, in paint order: its name and
+    /// times, whether it is selected, and its visible body within the tracks.
+    pub fn clip_nodes(&self) -> Vec<ClipNode> {
+        // One pass indexes each clip's name and selection ring.
+        let mut names = HashMap::new();
+        let mut rings = std::collections::HashSet::new();
+        for o in &self.ops {
+            if let Some(id) = o.id.strip_prefix("clip-content:") {
+                names.insert(id, o.text.as_deref().unwrap_or_default());
+            } else if let Some(id) = o.id.strip_prefix("clip-ring:") {
+                rings.insert(id);
+            }
+        }
+        self.ops
+            .iter()
+            .filter_map(|o| {
+                let id = o.id.strip_prefix("clip:")?;
+                let mut bounds = match o.clip {
+                    Some(c) => intersection(o.bounds, c)?,
+                    None => o.bounds,
+                };
+                let bottom = (bounds.y + bounds.height).min(self.viewport.height);
+                bounds.y = bounds.y.max(0.);
+                bounds.height = bottom - bounds.y;
+                if bounds.width <= 0. || bounds.height <= 0. {
+                    return None;
+                }
+                Some(ClipNode {
+                    id: id.to_owned(),
+                    name: names.get(id).copied().unwrap_or_default().to_owned(),
+                    from: o.detail["from"].as_f64().unwrap_or(0.),
+                    duration: o.detail["duration"].as_f64().unwrap_or(0.),
+                    selected: rings.contains(id),
+                    bounds,
+                })
+            })
             .collect()
     }
     /// Every clip whose painted body meets the rectangle.

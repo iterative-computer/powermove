@@ -223,6 +223,7 @@ fn comp_patch(v: &Value) -> Result<CompPatch> {
         hdr: None,
         mastering_peak: None,
         audio_gain: num("audioGain")?,
+        export_defaults: None,
     })
 }
 fn realized(store: &DocumentStore) -> Value {

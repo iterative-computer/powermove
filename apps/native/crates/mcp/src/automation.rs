@@ -781,7 +781,9 @@ impl Automation {
     }
     fn session(&self, id: &str) -> Result<SessionHandle> {
         match self.app() {
-            Some(host) => host.current().filter(|session| session.project == id),
+            // Whichever window shows it: an agent keeps working on its project
+            // when another window becomes key.
+            Some(host) => host.session_of(id),
             None => self.sessions.get(id).cloned(),
         }
         .ok_or_else(|| Error::invalid("No shell session"))

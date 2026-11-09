@@ -29,7 +29,7 @@ impl Fixture {
             ..Default::default()
         });
         attach(&actor.handle(), &profile).unwrap();
-        let (host, _) = Host::new(actor.handle(), profile);
+        let host = Host::new(actor.handle(), profile);
         host.open("test".into(),SessionSource::New(model(&json!({"id":"test","name":"Synthetic","compId":"c","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","layers":[],"assets":{},"comps":{}})))).unwrap();
         host.save(host.current().unwrap(), None).unwrap();
         Self {
@@ -583,7 +583,7 @@ fn app_memory_uses_durable_metadata_and_survives_agent_rollback_and_reopen() {
         .unwrap();
     let session = f.host.current().unwrap();
     f.host.shell(ShellCall::Close(session)).unwrap();
-    f.host.bind(None);
+    f.host.bind_window(0, None);
     f.host
         .open(
             "test".into(),
@@ -777,4 +777,118 @@ fn only_agent_stills_draw_offline_cards() {
     assert!(Capture::AgentStill.draws_offline_cards());
     assert!(!Capture::ExtensionSnapshot.draws_offline_cards());
     assert!(!Capture::Sheet.draws_offline_cards());
+}
+
+/// Each editor window owns its project. MCP acts in the key window, a project a
+/// window already shows stays there, and MCP never closes a window's project
+/// underneath it (the window does, once it shows the new one).
+#[test]
+fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(profile.join("journals")),
+        ..Default::default()
+    });
+    attach(&actor.handle(), &profile).unwrap();
+    let host = Host::new(actor.handle(), profile);
+    let first = host.attach_window(1);
+    let second = host.attach_window(2);
+    let woke = |rx: &async_channel::Receiver<()>| rx.try_recv().is_ok();
+    let project = |id: &str| {
+        SessionSource::New(model(
+            &json!({"id":id,"name":id,"compId":"c","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","layers":[],"assets":{},"comps":{}}),
+        ))
+    };
+    // The first window attached is key: MCP's project lands there, and only
+    // that window hears about it.
+    host.open("alpha".into(), project("alpha")).unwrap();
+    // The window takes it (follow_mcp) and shows it.
+    let alpha = host.claim_placed(1).expect("alpha in window 1");
+    assert!(woke(&first));
+    assert!(!woke(&second), "window 2 never follows window 1");
+    assert_eq!(host.window_session(2), None);
+    // Window 2 opens its own project from its UI: window 1 keeps alpha.
+    host.activate_window(2);
+    let beta = match host
+        .shell(ShellCall::PrepareOpen {
+            id: "beta".into(),
+            source: project("beta"),
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    };
+    host.bind_window(2, Some(beta.clone()));
+    assert!(
+        !woke(&first) && !woke(&second),
+        "a window's own open notifies nobody"
+    );
+    assert_eq!(host.window_session(1), Some(alpha.clone()));
+    assert_eq!(
+        host.current(),
+        Some(beta.clone()),
+        "MCP means the key window's"
+    );
+    // Tools find a project in whichever window shows it.
+    assert_eq!(host.session_of("alpha"), Some(alpha.clone()));
+    // open_project of a project window 1 shows: window 1 becomes MCP's, nothing
+    // is replaced anywhere.
+    host.open(
+        "alpha".into(),
+        SessionSource::Library {
+            profile: host.profile.clone(),
+            project: "alpha".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(host.window_session(2), Some(beta.clone()));
+    assert_eq!(host.current(), Some(alpha.clone()));
+    assert!(!woke(&first) && !woke(&second));
+    // An empty window is preferred over replacing a project.
+    let third = host.attach_window(3);
+    host.open("delta".into(), project("delta")).unwrap();
+    assert!(woke(&third) && !woke(&first) && !woke(&second));
+    assert_eq!(host.claim_placed(3).unwrap().project, "delta");
+    assert_eq!(
+        host.current().unwrap().project,
+        "delta",
+        "and becomes MCP's"
+    );
+    // Every window has a project: the key window's is replaced (v1's one
+    // window). MCP places it, the window is told, and alpha stays open until
+    // the window closes it itself.
+    host.activate_window(1);
+    host.open("gamma".into(), project("gamma")).unwrap();
+    assert!(woke(&first) && !woke(&second) && !woke(&third));
+    assert_eq!(host.window_session(1).unwrap().project, "gamma");
+    assert!(
+        host.kernel.published("alpha").unwrap().session.is_some(),
+        "MCP doesn't close a project a window still shows"
+    );
+    assert_eq!(host.window_session(2), Some(beta));
+    // A closed window's project is no longer anyone's.
+    host.detach_window(1);
+    assert_eq!(host.session_of("gamma"), None);
+    // Two opens before a window catches up: the first placement nobody took is
+    // closed (no session or lock left behind); the window takes the second.
+    let fourth = host.attach_window(4);
+    host.activate_window(4);
+    host.open("epsilon".into(), project("epsilon")).unwrap();
+    host.open("zeta".into(), project("zeta")).unwrap();
+    assert!(woke(&fourth));
+    assert!(
+        host.kernel
+            .published("epsilon")
+            .is_none_or(|p| p.session.is_none()),
+        "the displaced placement was closed"
+    );
+    assert_eq!(host.claim_placed(4).unwrap().project, "zeta");
+    // Once taken, a later open leaves it to the window to close.
+    host.open("eta".into(), project("eta")).unwrap();
+    assert!(host.kernel.published("zeta").unwrap().session.is_some());
+    assert_eq!(host.window_session(4).unwrap().project, "eta");
+    actor.shutdown();
 }

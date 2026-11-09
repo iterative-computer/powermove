@@ -186,6 +186,10 @@ pub fn service_error(code: &str, name: &str) -> (String, &'static str) {
             "There isn’t enough disk space.".into(),
             "Free some space and try again.",
         ),
+        "journal" => (
+            format!("“{name}” couldn’t be opened."),
+            "Powermove couldn’t start the recovery journal that protects unsaved work. Check free space and permissions in your library, then try again.",
+        ),
         "invalid_input" | "invalid_data" => (
             format!("“{name}” couldn’t be read."),
             "The file may be damaged.",

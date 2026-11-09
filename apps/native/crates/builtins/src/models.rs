@@ -897,8 +897,38 @@ impl Backend {
                 "preset",
                 "presetName"
             ]))?;
-            let saved = self.kernel.state().settings.get("exportOpts").map(wire);
-            let options=saved.filter(|v|crate::delivery::options(v).is_ok()).unwrap_or_else(||json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+            // As main's exporter: the project's export defaults open the sheet
+            // (every project has them, normalized); the sheet's other fields keep
+            // the last export's.
+            let base = self
+                .kernel
+                .state()
+                .settings
+                .get("exportOpts")
+                .map(wire)
+                .filter(|v| crate::delivery::options(v).is_ok())
+                .unwrap_or_else(|| json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+            let defaults = self.export_defaults(root, fps);
+            let mut options = base.clone();
+            for key in [
+                "format", "scale", "fps", "range", "quality", "mblur", "audio", "alpha",
+            ] {
+                options[key] = defaults[key].clone();
+            }
+            // main's planner exports the whole composition when "work" has no
+            // work area to use; say so in the sheet.
+            let work = comp
+                .get("work")
+                .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
+            if options["range"] == "work" && work.is_none() {
+                options["range"] = json!("all");
+            }
+            // A format this app can't export (v1 `rec`, `web`) keeps the last one.
+            if crate::delivery::options(&options).is_err() {
+                options["format"] = base["format"].clone();
+            }
+            let saved = Some(options);
+            let options=saved.filter(|v|crate::delivery::options(v).is_ok()).unwrap_or_else(||json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
             self.native.export = json!({"version":1,"sequence":1,"project":null,"options":options,"bindings":fields,"presets":[],"capabilities":{},"run":{"phase":"idle"}});
         }
         let options: pm_promedia::export_panel::Options =
@@ -953,7 +983,7 @@ impl Backend {
     }
     pub(crate) fn command_reply(&mut self, command: &str) -> Result<Value, String> {
         match command {
-            "export.begin" | "export.retry" => {
+            "export.begin" | "export.retry" | "export.without" => {
                 self.native.export["run"] = json!({"phase":"choosingDestination"});
                 self.native
                     .platform
@@ -994,6 +1024,7 @@ impl Backend {
             command,
             "export.begin"
                 | "export.retry"
+                | "export.without"
                 | "export.plan"
                 | "export.preset.save"
                 | "export.reset"
@@ -1253,9 +1284,9 @@ impl Backend {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?
             }
-            "export.begin" | "export.retry" => {
+            "export.begin" | "export.retry" | "export.without" => {
                 self.native.export_probe_stamp.clear();
-                let options = if command == "export.retry" {
+                let options = if command != "export.begin" {
                     self.native.export["options"].clone()
                 } else {
                     args["options"].clone()

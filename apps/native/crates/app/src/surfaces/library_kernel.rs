@@ -126,14 +126,23 @@ impl KernelLibrary {
                 {
                     return Ok(Outcome::Focus(id));
                 }
-                let reply = self.shell(ShellCall::PrepareOpen {
-                    id: id.clone(),
-                    source: SessionSource::Library {
-                        profile: self.profile.clone(),
-                        project: id,
-                    },
-                    electron_profile: None,
-                })?;
+                let reply = self
+                    .kernel
+                    .shell(ShellCall::PrepareOpen {
+                        id: id.clone(),
+                        source: SessionSource::Library {
+                            profile: self.profile.clone(),
+                            project: id.clone(),
+                        },
+                        electron_profile: None,
+                    })
+                    .wait()
+                    .ok_or(Failure::Service(ErrorCode::Unavailable))?;
+                // Another window opened it meanwhile: bring that window forward.
+                let reply = match reply {
+                    Err(KernelFailure::AlreadyOpen(_)) => return Ok(Outcome::Focus(id)),
+                    other => other.map_err(kernel_failure)?,
+                };
                 match reply {
                     ShellReply::Opened { .. } | ShellReply::RecoveryRequired { .. } => {
                         Ok(Outcome::Opened { reply, new_window })
@@ -381,10 +390,13 @@ fn changed(reply: ShellReply) -> Result<(), Failure> {
         Err(Failure::Stale)
     }
 }
-fn kernel_failure(_: KernelFailure) -> Failure {
+fn kernel_failure(failure: KernelFailure) -> Failure {
     // KernelFailure::Storage carries diagnostic text only. Never parse it or
     // leak it to product copy. The kernel owner must add typed IO classification.
-    Failure::Service(ErrorCode::Unavailable)
+    Failure::Service(match failure {
+        KernelFailure::NoProject(_) => ErrorCode::NotFound,
+        _ => ErrorCode::Unavailable,
+    })
 }
 fn library_failure(error: LibraryError) -> Failure {
     Failure::Service(match error {

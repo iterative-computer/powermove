@@ -12,9 +12,6 @@ use std::sync::{Arc, Mutex};
 pub struct TasksWindow {
     pro: Arc<ProMedia>,
     exports: Arc<Mutex<BackgroundTasks>>,
-    /// Cancels the running export through its own job (the export worker
-    /// settles its task; this window never moves the export queue).
-    controller: WeakEntity<crate::session::Controller>,
 }
 
 pub const TITLE: &str = "Background Tasks";
@@ -69,17 +66,14 @@ pub fn detail(task: &Task) -> String {
 }
 
 impl TasksWindow {
-    /// Media tasks act through the service. An export can only be
-    /// cancelled, through its job: it has no pause, and one runs at a time.
-    fn act(&self, media: bool, id: pm_promedia::tasks::TaskId, action: TaskAction, cx: &mut App) {
+    /// Media tasks act through the service. An export can only be cancelled,
+    /// by its task: it has no pause.
+    fn act(&self, media: bool, id: pm_promedia::tasks::TaskId, action: TaskAction) {
         if media {
             let _ = self.pro.act(id, action);
         } else if action == TaskAction::Cancel {
-            let _ = self.controller.update(cx, |v, _| {
-                if let Some(job) = &v.builtins.export_job {
-                    job.cancel.store(true, std::sync::atomic::Ordering::Release);
-                }
-            });
+            // By task id: never "whichever export this window has".
+            crate::export_coordinator::cancel_export(id);
         }
     }
 
@@ -109,7 +103,7 @@ impl TasksWindow {
                     .text_color(rgb(if enabled { c.accent_text } else { c.muted }))
                     .when(enabled, |d| {
                         d.on_click(cx.listener(move |v, _, _, cx| {
-                            v.act(media, id, action, cx);
+                            v.act(media, id, action);
                             cx.notify();
                         }))
                     })
@@ -147,7 +141,7 @@ impl TasksWindow {
                                 && let Some((_, priority)) = PRIORITIES.get(index)
                             {
                                 let _ = entity.update(cx, |v, cx| {
-                                    v.act(media, id, TaskAction::Priority(*priority), cx);
+                                    v.act(media, id, TaskAction::Priority(*priority));
                                     cx.notify();
                                 });
                             }
@@ -254,7 +248,6 @@ impl crate::session::Controller {
         let t = tokens();
         let pro = self.pro_media.clone();
         let exports = self.builtins.export_tasks.clone();
-        let controller = cx.entity().downgrade();
         let mut entity = None;
         let _ = cx.open_window(
             WindowOptions::new()
@@ -267,10 +260,27 @@ impl crate::session::Controller {
                     size(px(t.metrics.palette_width), px(t.metrics.palette_height)),
                 )))),
             |_, cx| {
-                let view = cx.new(|_| TasksWindow {
-                    pro,
-                    exports,
-                    controller,
+                let watched = exports.clone();
+                let view = cx.new(|cx| {
+                    // Exports progress on workers (the person's and agents'):
+                    // redraw when the list changes, while the window is open.
+                    cx.spawn(async move |this, cx| {
+                        let mut seen = None;
+                        loop {
+                            let now = watched.lock().unwrap().sequence();
+                            if seen != Some(now) {
+                                seen = Some(now);
+                                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                                    return;
+                                }
+                            }
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(250))
+                                .await;
+                        }
+                    })
+                    .detach();
+                    TasksWindow { pro, exports }
                 });
                 entity = Some(view.clone());
                 view

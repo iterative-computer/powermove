@@ -1232,3 +1232,159 @@ fn later_main_file_media_delta_stays_pending_and_preserves_native_edits() {
         b"\"native-authored\""
     );
 }
+
+/// Originals in a folder macOS protects, with nothing captured to stand in.
+fn protected_original(root: &std::path::Path) -> (pm_first_launch::Config, std::path::PathBuf) {
+    let config = profile(root);
+    fs::remove_dir_all(config.electron_profile.join("IndexedDB")).unwrap();
+    let downloads = root.join("Downloads");
+    fs::create_dir(&downloads).unwrap();
+    let original = downloads.join("original.mov");
+    fs::write(&original, b"synthetic original").unwrap();
+    let mut project: Value = read(&config.electron_profile.join("store/project.p.json"));
+    project["proj"]["assets"]["clip"]["sourcePath"] = original.to_str().unwrap().into();
+    write(
+        &config.electron_profile.join("store/project.p.json"),
+        &project,
+    );
+    (config, downloads)
+}
+fn guard(downloads: &std::path::Path) -> pm_first_launch::source_access::Scope {
+    use pm_first_launch::source_access::{Choice, PROMPT_TIMEOUT, install_with};
+    install_with(
+        Choice::Ask,
+        Default::default(),
+        vec![(downloads.to_owned(), "Downloads".into())],
+        PROMPT_TIMEOUT,
+    )
+}
+#[test]
+fn protected_originals_are_explained_first_and_skipped_ones_are_reported_and_kept() {
+    use pm_first_launch::{run_with_folder_access, source_access::Choice};
+    let t = tempdir().unwrap();
+    let (config, downloads) = protected_original(t.path());
+    let _guard = guard(&downloads);
+    let mut events = Vec::new();
+    let result = run(&config, |e| {
+        events.push(e);
+        Ok(())
+    })
+    .unwrap();
+    let Outcome::NeedsFolderAccess { folders } = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(folders, vec![("Downloads".to_owned(), 1)]);
+    assert!(events.contains(&Event::FolderAccessRequired));
+    assert!(events.contains(&Event::Progress {
+        step: Step::Inventory,
+        done: 0,
+        total: 1
+    }));
+    let availability = config
+        .native_profile
+        .join("first-launch-checkpoint/availability.json");
+    assert!(
+        !availability.exists(),
+        "nothing is decided before the person is"
+    );
+    // A relaunch before answering asks again; it never opens the folder.
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::NeedsFolderAccess { .. }
+    ));
+    let result = run_with_folder_access(&config, Choice::Skip, |_| Ok(())).unwrap();
+    assert!(
+        matches!(
+            result,
+            Outcome::Complete {
+                projects: 1,
+                blocked_owners: 0,
+                not_reached: 1,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    let state: State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(state.folder_access, Some(Choice::Skip));
+    let closure: Value = read(&availability);
+    let clip = closure["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["sourcePath"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("original.mov"))
+        })
+        .unwrap();
+    assert_eq!(clip["unreached"], true);
+    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
+    assert!(report.rows.iter().any(|r| r.kind
+        == pm_first_launch::surfaces::migration::ReportKind::NotReached
+        && r.display_name == "original.mov"));
+}
+#[test]
+fn allowed_protected_originals_are_copied() {
+    use pm_first_launch::{run_with_folder_access, source_access::Choice};
+    let t = tempdir().unwrap();
+    let (config, downloads) = protected_original(t.path());
+    let _guard = guard(&downloads);
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::NeedsFolderAccess { .. }
+    ));
+    let result = run_with_folder_access(&config, Choice::Allow, |_| Ok(())).unwrap();
+    // macOS's answer is kept for that folder; later runs open it directly.
+    let state: State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(
+        state.folder_outcomes.values().collect::<Vec<_>>(),
+        [&pm_first_launch::source_access::Outcome::Granted]
+    );
+    assert!(
+        matches!(
+            result,
+            Outcome::Complete {
+                blocked_owners: 0,
+                not_reached: 0,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    let state: Value = read(&config.native_profile.join("Media Store/migration.json"));
+    let pass = state["passes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    assert!(
+        pass["closure"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["status"] == "verified-original")
+    );
+}
+#[test]
+fn a_captured_payload_means_its_protected_original_is_never_opened() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    let downloads = t.path().join("Downloads");
+    fs::create_dir(&downloads).unwrap();
+    let original = downloads.join("original.mov");
+    fs::write(&original, b"anything").unwrap();
+    let mut project: Value = read(&config.electron_profile.join("store/project.p.json"));
+    project["proj"]["assets"]["clip"]["sourcePath"] = original.to_str().unwrap().into();
+    write(
+        &config.electron_profile.join("store/project.p.json"),
+        &project,
+    );
+    let _guard = guard(&downloads);
+    let result = run(&config, |_| Ok(())).unwrap();
+    assert!(
+        matches!(result, Outcome::Complete { not_reached: 0, .. }),
+        "{result:?}"
+    );
+}

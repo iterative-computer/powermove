@@ -1,6 +1,7 @@
-//! The running app's session slot. The app owns the kernel actor and rebinds the
-//! current project from the UI; `Automation` attaches to this instead of opening
-//! a second kernel. All waits here belong on MCP workers, never the main thread.
+//! The running app's windows and the project each one shows. The app owns the
+//! kernel actor; each editor window owns its project and reports it here, and
+//! the key window is where MCP acts. `Automation` attaches to this instead of
+//! opening a second kernel. All waits here belong on MCP workers, never main.
 use crate::{Error, Result};
 use pm_kernel::{
     KernelHandle, Published,
@@ -18,12 +19,66 @@ use std::{
 pub struct Host {
     pub kernel: KernelHandle,
     pub profile: PathBuf,
-    current: Mutex<Option<SessionHandle>>,
+    windows: Mutex<Windows>,
     operations: Arc<AtomicBool>,
     /// The project whose open waits on a person's recovery choice.
     deciding: Mutex<Option<String>>,
     pub closing: AtomicBool,
-    changed: Mutex<Vec<async_channel::Sender<()>>>,
+}
+/// Slot 0 is a windowless host's (the headless MCP server): its only project.
+const WINDOWLESS: u64 = 0;
+#[derive(Default)]
+struct Windows {
+    /// Each editor window's project, and how to tell that window MCP changed it.
+    slots: std::collections::BTreeMap<u64, Slot>,
+    /// The key editor window: where MCP opens and which project it means by default.
+    active: Option<u64>,
+}
+#[derive(Default)]
+struct Slot {
+    /// What the window shows (it reports it).
+    shown: Option<SessionHandle>,
+    /// What MCP placed there and the window hasn't taken yet.
+    placed: Option<SessionHandle>,
+    changed: Option<async_channel::Sender<()>>,
+}
+impl Slot {
+    /// What the window shows, or is about to.
+    fn session(&self) -> Option<&SessionHandle> {
+        self.placed.as_ref().or(self.shown.as_ref())
+    }
+}
+impl Windows {
+    fn target(&self) -> u64 {
+        self.active
+            .filter(|w| self.slots.contains_key(w))
+            .or_else(|| self.slots.keys().copied().find(|w| *w != WINDOWLESS))
+            .unwrap_or(WINDOWLESS)
+    }
+    /// Where MCP opens a project: the key window if it's empty, else an empty
+    /// window, else the key window (whose project it replaces, as v1's one
+    /// window did).
+    fn open_target(&self) -> u64 {
+        let target = self.target();
+        let empty = |w: &u64| self.slots.get(w).is_some_and(|s| s.session().is_none());
+        if empty(&target) {
+            return target;
+        }
+        self.slots
+            .keys()
+            .copied()
+            .find(|w| *w != WINDOWLESS && empty(w))
+            .unwrap_or(target)
+    }
+    fn showing(&self, project: &str) -> Option<(u64, SessionHandle)> {
+        self.slots.iter().find_map(|(w, slot)| {
+            [&slot.placed, &slot.shown]
+                .into_iter()
+                .flatten()
+                .find(|s| s.project == project)
+                .map(|s| (*w, s.clone()))
+        })
+    }
 }
 /// An owned, nonblocking fence for app session transitions. Never held by a UI gesture.
 pub struct Operation(Arc<AtomicBool>);
@@ -33,20 +88,88 @@ impl Drop for Operation {
     }
 }
 impl Host {
-    pub fn new(kernel: KernelHandle, profile: PathBuf) -> (Arc<Self>, async_channel::Receiver<()>) {
-        let (changed, rx) = async_channel::bounded(1);
-        (
-            Arc::new(Self {
-                kernel,
-                profile,
-                current: Mutex::new(None),
-                operations: Arc::new(AtomicBool::new(false)),
-                deciding: Mutex::new(None),
-                closing: AtomicBool::new(false),
-                changed: Mutex::new(vec![changed]),
-            }),
-            rx,
-        )
+    pub fn new(kernel: KernelHandle, profile: PathBuf) -> Arc<Self> {
+        let mut windows = Windows::default();
+        windows.slots.insert(WINDOWLESS, Slot::default());
+        Arc::new(Self {
+            kernel,
+            profile,
+            windows: Mutex::new(windows),
+            operations: Arc::new(AtomicBool::new(false)),
+            deciding: Mutex::new(None),
+            closing: AtomicBool::new(false),
+        })
+    }
+    /// An editor window opened. The receiver wakes when MCP changes its project.
+    pub fn attach_window(&self, window: u64) -> async_channel::Receiver<()> {
+        assert_ne!(window, WINDOWLESS, "window ids start at 1");
+        let (tx, rx) = async_channel::bounded(1);
+        let mut windows = self.windows.lock().unwrap();
+        windows.slots.insert(
+            window,
+            Slot {
+                changed: Some(tx),
+                ..Slot::default()
+            },
+        );
+        windows.active.get_or_insert(window);
+        rx
+    }
+    /// An editor window closed; its project is no longer anyone's.
+    pub fn detach_window(&self, window: u64) {
+        let mut windows = self.windows.lock().unwrap();
+        windows.slots.remove(&window);
+        if windows.active == Some(window) {
+            windows.active = None;
+        }
+    }
+    /// The key editor window changed: MCP acts there from now on.
+    pub fn activate_window(&self, window: u64) {
+        let mut windows = self.windows.lock().unwrap();
+        if windows.slots.contains_key(&window) {
+            windows.active = Some(window);
+        }
+    }
+    /// What a window shows, as it reports it. Never notifies anyone: a window's
+    /// project is its own, and other windows don't follow it.
+    pub fn bind_window(&self, window: u64, session: Option<SessionHandle>) {
+        if let Some(slot) = self.windows.lock().unwrap().slots.get_mut(&window) {
+            slot.shown = session;
+        }
+    }
+    /// What `window` shows, or MCP placed there for it to show.
+    pub fn window_session(&self, window: u64) -> Option<SessionHandle> {
+        self.windows
+            .lock()
+            .unwrap()
+            .slots
+            .get(&window)
+            .and_then(|s| s.session().cloned())
+    }
+    /// The window takes the project MCP placed for it, before showing it: from
+    /// here on it is the window's, and a later MCP open can't displace it.
+    pub fn claim_placed(&self, window: u64) -> Option<SessionHandle> {
+        let mut windows = self.windows.lock().unwrap();
+        let slot = windows.slots.get_mut(&window)?;
+        let placed = slot.placed.take()?;
+        slot.shown = Some(placed.clone());
+        Some(placed)
+    }
+    /// The window showing `project`, if one does.
+    pub fn window_of(&self, project: &str) -> Option<u64> {
+        let windows = self.windows.lock().unwrap();
+        windows
+            .showing(project)
+            .map(|(w, _)| w)
+            .filter(|w| *w != WINDOWLESS)
+    }
+    /// The session of `project` in whichever window shows it.
+    pub fn session_of(&self, project: &str) -> Option<SessionHandle> {
+        self.windows
+            .lock()
+            .unwrap()
+            .showing(project)
+            .map(|(_, s)| s)
     }
     pub fn try_operation(&self) -> Option<Operation> {
         self.operations
@@ -71,27 +194,37 @@ impl Host {
             None => Error::conflict("A project operation is in progress. Inspect and retry."),
         }
     }
+    /// The project MCP means by default: the key window's.
     pub fn current(&self) -> Option<SessionHandle> {
-        self.current.lock().unwrap().clone()
+        let windows = self.windows.lock().unwrap();
+        windows
+            .slots
+            .get(&windows.target())
+            .and_then(|s| s.session().cloned())
     }
-    pub fn bind(&self, session: Option<SessionHandle>) {
-        {
-            let mut current = self.current.lock().unwrap();
-            if *current == session {
-                return;
-            }
-            *current = session;
+    /// MCP places `session` in its window (see `open_target`), which then shows
+    /// it and becomes MCP's. Returns the session it displaces and nobody shows:
+    /// a windowless host's previous project, or a window's earlier placement it
+    /// never took (two opens before the window caught up).
+    fn place(&self, session: SessionHandle) -> (u64, Option<SessionHandle>) {
+        let mut windows = self.windows.lock().unwrap();
+        let target = windows.open_target();
+        if target != WINDOWLESS {
+            windows.active = Some(target);
         }
-        self.changed
-            .lock()
-            .unwrap()
-            .retain(|tx| !matches!(tx.try_send(()), Err(async_channel::TrySendError::Closed(_))));
-    }
-    pub fn subscribe(&self) -> async_channel::Receiver<()> {
-        let (tx, rx) = async_channel::bounded(1);
-        let _ = tx.try_send(());
-        self.changed.lock().unwrap().push(tx);
-        rx
+        let slot = windows.slots.get_mut(&target).expect("target slot");
+        let displaced = if target == WINDOWLESS {
+            slot.shown.replace(session.clone())
+        } else {
+            slot.placed.replace(session.clone())
+        };
+        if let Some(tx) = &slot.changed {
+            let _ = tx.try_send(());
+        }
+        let displaced = displaced.filter(|old| {
+            old != &session && windows.showing(&old.project).is_none_or(|(_, s)| &s != old)
+        });
+        (target, displaced)
     }
     pub fn shell(&self, call: ShellCall) -> Result<ShellReply> {
         self.kernel
@@ -100,7 +233,16 @@ impl Host {
             .ok_or_else(stopped)?
             .map_err(Error::kernel)
     }
+    /// MCP open_project/create_project. A project a window already shows stays
+    /// there and that window becomes MCP's. Otherwise it opens in an empty
+    /// window, else in the key window, which closes what it showed itself: MCP
+    /// never closes a window's project underneath it.
     pub fn open(&self, id: String, source: SessionSource) -> Result<Value> {
+        if let Some(window) = self.window_of(&id) {
+            self.activate_window(window);
+            let p = self.kernel.published(&id).ok_or_else(stopped)?;
+            return Ok(identity(&p));
+        }
         let reply = self.shell(ShellCall::PrepareOpen {
             id,
             source,
@@ -115,25 +257,29 @@ impl Host {
         else {
             return Err(Error::kernel(reply));
         };
-        if let Some(old) = self.current().filter(|s| {
-            s != &session
-                && self
-                    .kernel
-                    .published(&s.project)
-                    .is_some_and(|p| p.session.as_ref().map(|m| &m.handle) == Some(s))
+        let (target, old) = self.place(session.clone());
+        // A window closes the project it showed once it shows the new one; MCP
+        // closes only what no window shows (see `place`).
+        if let Some(old) = old.filter(|s| {
+            self.kernel
+                .published(&s.project)
+                .is_some_and(|p| p.session.as_ref().map(|m| &m.handle) == Some(s))
         }) {
-            match self.shell(ShellCall::Close(old)) {
+            match self.shell(ShellCall::Close(old.clone())) {
                 Ok(ShellReply::Closed {
                     recovery_copy: None,
                 }) => {}
-                other => {
+                other if target == WINDOWLESS => {
                     // Do not strand the newly opened project if replacing the old one fails.
+                    self.bind_window(WINDOWLESS, Some(old));
                     let _ = self.shell(ShellCall::DeferClose(session));
                     return Err(Error::kernel(other));
                 }
+                // The displaced placement keeps its recovery journal; the new
+                // project still opens in the window.
+                _ => {}
             }
         }
-        self.bind(Some(session.clone()));
         let p = self
             .kernel
             .published(&session.project)

@@ -263,6 +263,14 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   label="Close"
                   onClick={() => watch(model.closeFailure())}
                 />
+                {s.run.offline ? (
+                  <Action
+                    id="export.without"
+                    label="Export Without Them"
+                    disabled={model.pending}
+                    onClick={() => watch(model.exportWithout())}
+                  />
+                ) : null}
                 <Action
                   id="export.retry"
                   label="Try Again"
@@ -344,7 +352,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 )}
                 {shows(o, "profile") ? select("profile", profiles) : null}
                 {/* HDR MP4 is always HEVC 10-bit: H.264 carries no HDR. */}
-                {shows(o, "codec") && !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
+                {shows(o, "codec") &&
+                !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
                   ? select("codec", codecs)
                   : null}
                 {shows(o, "depth") ? select("depth", depths) : null}
@@ -403,9 +412,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       { v: "all", label: "Full composition" },
                     ])
                   : null}
-                {shows(o, "quality")
-                  ? select("quality", qualities)
-                  : null}
+                {shows(o, "quality") ? select("quality", qualities) : null}
                 {p.hdr && (o.format === "prores" || o.format === "mp4")
                   ? select("dynamicRange", dynamicRanges)
                   : null}

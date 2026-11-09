@@ -5,8 +5,8 @@ Rows N001 N002 N003. Grammar: [README](README.md) §1–5. Contract:
 Step, secrets}`. These surfaces exist only in native. Everything here is written for a
 person who is anxious about their work, so every screen says what's safe.
 
-Naming: the existing app is **the original app** or `Powermove`; the beta is `Powermove
-Native`.
+Naming: the existing app is **the original app**; this app is `Powermove` (never
+`Powermove Native` in user-facing copy).
 
 No new tokens. Reuses the Welcome window frame (S107).
 
@@ -15,34 +15,31 @@ No new tokens. Reuses the Welcome window frame (S107).
 The first-launch gate is the Welcome window frame, shown before any library opens,
 because the shell keeps the library closed until the coordinator returns. Layout: mark,
 `t.display` title, `t.reading` `c.secondary` line, status block, footer buttons trailing,
-with a leading `Quit Powermove Native` wherever waiting is possible. Closing the window
+with a leading `Quit Powermove` wherever waiting is possible. Closing the window
 quits the app. Quitting at any point is safe, and the next launch resumes.
 
 ## N001 Waiting and copying
 
 | `Event` / state | Title | Line | Status block | Buttons |
 |---|---|---|---|---|
-| `WaitingForElectron`, local | `Quit Powermove to Continue` | `Powermove Native copies your library while the original app is closed. Save your work there and quit it.` | spinner + `Waiting for Powermove to quit…` | none; continues by itself |
-| Owner unknown or on another Mac | `Powermove Might Still Be Open` | `It looks like the original app is using this library, possibly on another Mac. Close it there, then check again.` | | `Check Again` (default) |
-| Checkpoint | `Copying Your Library` | `Your original app stays unchanged, and this copy never replaces it.` | step + `ProgressRow` | `Pause` |
+| `WaitingForElectron`, local | `Quit the Original App to Continue` | `Powermove copies your library while the original app is closed. Save your work there and quit it.` | spinner + `Waiting for the original app to quit…` | none; continues by itself |
+| Owner unknown or on another Mac | `The Original App Might Still Be Open` | `It looks like the original app is using this library, possibly on another Mac. Close it there, then check again.` | | `Check Again` (default) |
+| Checkpoint | `Copying Your Library` | `Your original app stays unchanged, and this copy never replaces it.` | step status + step card | `Pause` |
+| `NeedsFolderAccess` | `Allow Access to Your Media` | `Some of your original media is in {folders}, which macOS protects. When you continue, macOS asks whether Powermove can open them. Choose Allow.` | card: folder, file count | `Skip These Files`, `Continue` (default) |
+| Folder prompt unanswered | `Waiting for macOS` | `macOS is asking whether Powermove can open your files in {folder}. Choose Allow in its dialog. If you don’t see it, it may be behind this window.` | spinner + `Waiting for your answer…` | `Skip These Files` (no default) |
 | Interrupted, resumed | same | same | `Picking up where it stopped…` then the step | `Pause` |
 | Paused | `Copying Is Paused` | `It picks up where it stopped. You can quit and come back.` | step, frozen `ProgressRow` | `Resume` (default) |
-| Low disk | `Not Enough Space` | `Powermove Native needs {needed} free to copy your library, and this Mac has {available}. Nothing was deleted.` | | `Check Again` (default) |
+| Low disk | `Not Enough Space` | `Powermove needs {needed} free to copy your library, and this Mac has {available}. Nothing was deleted.` | | `Check Again` (default) |
 | Failed | `Copying Stopped` | `Your original app and library weren’t changed. {ServiceErrorCode informative}` | `Details` disclosure | `Try Again` (default) |
-| Profile refused | `Powermove Native Can’t Start` | `Its library folder isn’t usable. Your original app wasn’t changed.` | `Details` disclosure | `Quit Powermove Native` |
+| Profile refused | `Powermove Can’t Start` | `Its library folder isn’t usable. Your original app wasn’t changed.` | `Details` disclosure | `Quit Powermove` |
 
-**Steps**, from `Event::Started` and `Progress`. Counts come straight from the event, so
-no percentage is invented, and a step with no total is indeterminate:
-
-| `Step` | Status |
-|---|---|
-| `Checkpoint` | `Taking a snapshot of your library…` |
-| `Bootstrap` | `Preparing your library…` |
-| `Library` | `Copying projects · {done} of {total}` |
-| `Media` | `Copying media · {done} of {total}` |
-| `LocalStorage` | `Copying settings…` |
-| `Extensions` | `Copying extensions…` |
-| `Secrets` | N002 |
+**Steps**, from `Event::Started`/`Progress`, as a Settings-style card (title left, value
+right, inset hairlines, the running row's bar under it): `Library snapshot` (bytes),
+`Media check` (`{done} of {total} projects`), `Projects` (counts), `Media` (counts · bytes),
+`Settings and extensions`. Earlier rows read `Done`; later rows are empty. Bytes come from
+`source_access::Activity`, never invented; a step with no total slides an indeterminate
+bar. The status line says what's happening (`Taking a snapshot of your library…`,
+`Checking your media…`, `Copying projects…`, `Copying media…`, …).
 
 Names and paths never appear here: the event carries counts only.
 
@@ -54,8 +51,8 @@ path is included. There is no editor during the gate, so its copy points at Deta
 at a menu.
 
 **The library won't open.** Title `Your Library Couldn’t Open`, line `Nothing was changed.
-If Powermove Native is open in another window or on another account, quit it, then try
-again.`, Details, `Quit Powermove Native` and `Try Again`. This also opens the window on a
+If Powermove is open in another window or on another account, quit it, then try
+again.`, Details, `Quit Powermove` and `Try Again`. This also opens the window on a
 launch that had none. The editor never opens without its library.
 
 **Normal path.** With nothing to review, `Your Library Is Ready` is skipped and the editor
@@ -65,7 +62,7 @@ has something to say.
 **Later launches.** An unchanged original costs a metadata check. Otherwise its changes
 come in before the library attaches, with no gate; if that passes one second, the Welcome
 frame shows `Updating Your Library`, `Your original app stays unchanged.`, spinner +
-`Bringing in your recent work…` and `Quit Powermove Native`. New media then lands behind
+`Bringing in your recent work…` and `Quit Powermove`. New media then lands behind
 the open library. If the original app is running, the delta waits silently for a later
 launch.
 
@@ -79,10 +76,10 @@ person chooses to.
 
 | State | Title | Line | Buttons |
 |---|---|---|---|
-| `NeedsSecretConsent{interrupted: false}` | `Keep Your Sign-Ins` | `secrets::PROMPT` verbatim: `Powermove Native can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
+| `NeedsSecretConsent{interrupted: false}` | `Keep Your Sign-Ins` | `secrets::PROMPT` verbatim: `Powermove can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
 | Waiting for the system | same | same; status `Waiting for macOS…` | disabled |
 | Denied or cancelled | `Keychain Access Wasn’t Allowed` | `Your sign-ins and extension values stay in the original app. You can sign in again here, or try again.` | `Continue Without Them` (default), `Try Again` |
-| `interrupted: true` | `The Keychain Request Didn’t Finish` | `Powermove Native stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
+| `interrupted: true` | `The Keychain Request Didn’t Finish` | `Powermove stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
 | Partly imported | no extra screen; N003 lists the rest | | |
 
 `Continue` here is deliberately the default: it opens a system prompt, which is the
@@ -116,7 +113,7 @@ are no rows. Otherwise a grouped card with one row per non-zero count, omitting 
 | `proxy_only` | `info.circle` `c.secondary` | `{n} media files came across as proxies only. Exports using them show a warning until you relink the originals.` |
 | `already_offline` | `info.circle` `c.secondary` | `{n} media files were already offline.` |
 
-Buttons: `Show Report…` (with rows), `Open Powermove Native` (default). Onboarding is
+Buttons: `Show Report…` (with rows), `Open Powermove` (default). Onboarding is
 skipped if the source completed it.
 
 **Migration Report** — `Window ▸ Migration Report`, a standard window like the Error Log
@@ -159,7 +156,7 @@ Report footer adds `About Going Back…`, an alert:
 | Part | Copy |
 |---|---|
 | Message | `Your original app still has everything from before.` |
-| Informative | `Work you do in Powermove Native doesn’t move back to it. It can open a .pmv saved here only if it can read everything in the file. If it can’t, it refuses the file, and the file isn’t changed.` |
+| Informative | `Work you do in Powermove doesn’t move back to it. It can open a .pmv saved here only if it can read everything in the file. If it can’t, it refuses the file, and the file isn’t changed.` |
 | Button | `OK` |
 
 **Refusal in the original app.** This alert belongs to the Electron transition release, not

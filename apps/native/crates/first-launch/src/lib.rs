@@ -28,6 +28,7 @@ use pm_kernel::{
     state::{ExtensionEntry, StateOp, StateTransaction},
 };
 use pm_model::json::{Value as KernelValue, parse, to_canonical_string};
+pub use pm_native_migrate::source_access;
 use pm_native_migrate::{
     indexeddb, local_storage,
     migration::{self, ClosureInput, Pass},
@@ -156,6 +157,9 @@ pub struct Config {
 #[serde(rename_all = "kebab-case")]
 pub enum Step {
     Checkpoint,
+    /// Checking which media each project uses, and that its bytes are intact.
+    /// Never recorded as completed: its result is `availability.json`.
+    Inventory,
     Bootstrap,
     Library,
     Media,
@@ -194,6 +198,13 @@ pub struct State {
     /// Snapshot id of the media pass that describes the library now.
     #[serde(default)]
     pub latest_pass: Option<String>,
+    /// The person's answer about originals in folders macOS guards.
+    #[serde(default)]
+    pub folder_access: Option<source_access::Choice>,
+    /// What became of each folder macOS guards, by its resolved path: a later
+    /// run opens only granted ones and never asks in the background.
+    #[serde(default)]
+    pub folder_outcomes: std::collections::BTreeMap<PathBuf, source_access::Outcome>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -207,6 +218,8 @@ pub enum Event {
     },
     Published(Step),
     SecretPromptRequired,
+    /// Some originals are in folders macOS guards; nothing there was opened.
+    FolderAccessRequired,
     Complete,
 }
 #[derive(Clone, Debug)]
@@ -215,6 +228,11 @@ pub enum Outcome {
     NeedsSecretConsent {
         interrupted: bool,
     },
+    /// Folders macOS guards, by Finder name, with how many originals each holds.
+    /// The host explains the system prompt, then calls `run_with_folder_access`.
+    NeedsFolderAccess {
+        folders: Vec<(String, usize)>,
+    },
     Complete {
         projects: usize,
         history_refusals: usize,
@@ -222,6 +240,8 @@ pub enum Outcome {
         blocked_owners: usize,
         proxy_only: usize,
         already_offline: usize,
+        /// Offline because folder access wasn't given; each keeps its source.
+        not_reached: usize,
     },
 }
 /// Completed bootstrap launches capture a fresh media delta, without rewriting
@@ -235,7 +255,17 @@ pub fn run(config: &Config, hook: impl FnMut(Event) -> Result<()>) -> Result<Out
             return delta::delta(config, hook);
         }
     }
-    run_inner(config, None, false, false, hook)
+    run_inner(config, None, false, false, None, hook)
+}
+/// The person's answer to the folder explanation (`NeedsFolderAccess`): `Allow`
+/// opens the originals there, which shows the macOS prompt; `Skip` leaves them
+/// offline. Recorded, so a relaunch doesn't ask again.
+pub fn run_with_folder_access(
+    config: &Config,
+    choice: source_access::Choice,
+    hook: impl FnMut(Event) -> Result<()>,
+) -> Result<Outcome> {
+    run_inner(config, None, false, false, Some(choice), hook)
 }
 /// The host must display `secrets::PROMPT` and receive a fresh user approval
 /// before each invocation of this opt-in entry point. A crash after access began
@@ -245,7 +275,7 @@ pub fn resume_with_secret_consent(
     access: &mut dyn SecretAccess,
     hook: impl FnMut(Event) -> Result<()>,
 ) -> Result<Outcome> {
-    run_inner(config, Some(access), false, false, hook)
+    run_inner(config, Some(access), false, false, None, hook)
 }
 /// N002 Not Now / Continue Without Them. Finishes the isolated beta import,
 /// retaining every encrypted input and imported locator. Never accesses Keychain.
@@ -254,7 +284,7 @@ pub fn skip_secret_consent(
     config: &Config,
     hook: impl FnMut(Event) -> Result<()>,
 ) -> Result<Outcome> {
-    run_inner(config, None, true, false, hook)
+    run_inner(config, None, true, false, None, hook)
 }
 /// Settings ▸ Accounts ▸ Bring Sign-Ins from the Original App…; call only after a
 /// fresh explicit consent. Reads current encrypted source (including deletions),
@@ -264,7 +294,7 @@ pub fn retry_secret_consent(
     access: &mut dyn SecretAccess,
     hook: impl FnMut(Event) -> Result<()>,
 ) -> Result<Outcome> {
-    run_inner(config, Some(access), false, true, hook)
+    run_inner(config, Some(access), false, true, None, hook)
 }
 fn validate(config: &Config) -> Result<(PathBuf, PathBuf)> {
     checked_paths(config).context(ProfileRefused)
@@ -355,6 +385,7 @@ fn run_inner(
     mut access: Option<&mut dyn SecretAccess>,
     skip_secrets: bool,
     retry_current_secrets: bool,
+    folder_choice: Option<source_access::Choice>,
     mut hook: impl FnMut(Event) -> Result<()>,
 ) -> Result<Outcome> {
     let (source, native) = validate(config)?;
@@ -401,23 +432,43 @@ fn run_inner(
             conflicts: BTreeSet::new(),
             source_stamp: None,
             latest_pass: None,
+            folder_access: None,
+            folder_outcomes: Default::default(),
         };
         publish(&native, &state)?;
         state
     };
+    // The person's answer covers the folders the explanation named (`Pending`),
+    // never folders found later.
+    if let Some(choice) = folder_choice {
+        state.folder_access = Some(choice);
+        source_access::answer(
+            &mut state.folder_outcomes,
+            choice == source_access::Choice::Allow,
+        );
+        publish(&native, &state)?;
+    }
+    // Only a host that installed a policy guards folders; without one, opens are direct.
+    source_access::choose(source_access::Choice::Ask);
+    source_access::remember(&state.folder_outcomes);
     ensure!(
         state.version == 1 && state.bundle_id == BETA_BUNDLE_ID && state.source == source,
         "profile migration identity mismatch"
     );
     let root = native.join("first-launch-checkpoint");
-    if !root.exists() {
+    // A capture this run hashed every file it staged; only a resumed run, whose
+    // checkpoint sat on disk, verifies it again.
+    let cp = if root.exists() {
+        Checkpoint::load(&root)?
+    } else {
+        // Totals before each Started, so the window never shows a stale step's bytes.
+        source_access::begin_bytes(checkpoint::capture_bytes(&source)?);
         hook(Event::Started(Step::Checkpoint))?;
         // Stamped before capture; capture itself proves nothing moved after.
         state.source_stamp = Some(checkpoint::source_stamp(&source)?);
         publish(&native, &state)?;
-        Checkpoint::capture(&source, &root)?;
-    }
-    let cp = Checkpoint::load(&root)?;
+        Checkpoint::capture(&source, &root)?
+    };
     require_supported_media(&cp, &root)?;
     ensure!(cp.source == source, "checkpoint belongs to another source");
     let hash = disk::hash(&root.join("checkpoint.json"))?.0;
@@ -434,7 +485,23 @@ fn run_inner(
     let closure: ClosureInput = if closure_path.exists() {
         disk::json(&closure_path)?
     } else {
-        let c = closure::inventory(&cp, &root, &batches)?;
+        source_access::begin_bytes(0);
+        hook(Event::Started(Step::Inventory))?;
+        let c = closure::inventory(&cp, &root, &batches, &mut |done, total| {
+            hook(Event::Progress {
+                step: Step::Inventory,
+                done,
+                total,
+            })
+        })?;
+        state.folder_outcomes.extend(source_access::outcomes());
+        publish(&native, &state)?;
+        // Nothing in a guarded folder was opened. Explain before macOS asks.
+        let folders = source_access::asked();
+        if !folders.is_empty() {
+            hook(Event::FolderAccessRequired)?;
+            return Ok(Outcome::NeedsFolderAccess { folders });
+        }
         disk::atomic(&closure_path, &c)?;
         c
     };
@@ -453,6 +520,7 @@ fn run_inner(
     // source immutability is already established by the sealed checkpoint.
     let writer = LibraryWriter::open(&native, DiskFormat::V1_2, None)
         .map_err(|e| anyhow::anyhow!("native library unavailable: {e:?}"))?;
+    source_access::begin_bytes(0);
     if !state.completed.contains(&Step::Bootstrap) {
         hook(Event::Started(Step::Bootstrap))?;
         bootstrap(&cp, &root, &native, &writer, &mut state, &mut hook)?;
@@ -463,8 +531,11 @@ fn run_inner(
         library(&cp, &root, &native, &writer, &mut state, &mut hook)?;
         finish(&native, &mut state, Step::Library, &mut hook)?;
     }
+    source_access::begin_bytes(0);
     hook(Event::Started(Step::Media))?;
     let pass = media(&native, &root, &batches, &closure, &mut hook)?;
+    state.folder_outcomes.extend(source_access::outcomes());
+    publish(&native, &state)?;
     if !state.completed.contains(&Step::Media) {
         state.latest_pass = Some(pass.snapshot.clone());
         finish(&native, &mut state, Step::Media, &mut hook)?;
@@ -594,23 +665,45 @@ fn media(
     closure: &ClosureInput,
     hook: &mut impl FnMut(Event) -> Result<()>,
 ) -> Result<Pass> {
+    let disk_records =
+        pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
     let mut needed = 0u64;
     for (_, records) in batches {
         for r in records {
             needed = needed.saturating_add(r.payload().size);
         }
     }
+    // Disk space is conservative; the bar counts only what will be read: every
+    // captured record, and an original only where nothing captured stands in.
+    let mut expected = disk_records.iter().map(|r| r.size).sum::<u64>();
+    for (snapshot, records) in batches {
+        for r in records {
+            if r.payload_path(snapshot)?.is_some() {
+                expected = expected.saturating_add(r.payload().size);
+            }
+        }
+    }
+    let captured = |key: &str| {
+        batches
+            .iter()
+            .any(|(_, rs)| rs.iter().any(|r| r.key == key))
+            || disk_records.iter().any(|r| r.key == key)
+    };
     for r in &closure.references {
         if let Some(p) = &r.source_path
             && p.is_file()
         {
-            needed = needed.saturating_add(fs::metadata(p)?.len());
+            let size = fs::metadata(p)?.len();
+            needed = needed.saturating_add(size);
+            let stands_in = captured(&r.key) || r.legacy_id.as_deref().is_some_and(captured);
+            if !stands_in && !r.unreached && !r.poster {
+                expected = expected.saturating_add(size);
+            }
         }
     }
     disk::space(native, needed)?;
+    source_access::begin_bytes(expected);
     let mut count = 0;
-    let disk_records =
-        pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
     // One record publication per source record, however many objects it has.
     let total = batches.iter().map(|(_, r)| r.len()).sum::<usize>() + disk_records.len();
     migration::migrate_many_with_disk(
@@ -651,6 +744,14 @@ fn summary(state: &State, pass: &Pass) -> Outcome {
             .iter()
             .filter(|e| e.status == migration::Status::AlreadyOffline)
             .count(),
+        // Files, not references: undo history repeats the same original.
+        not_reached: pass
+            .closure
+            .iter()
+            .filter(|e| e.status == migration::Status::NotReached)
+            .filter_map(|e| e.reference.source_path.as_ref())
+            .collect::<BTreeSet<_>>()
+            .len(),
     }
 }
 fn bootstrap(

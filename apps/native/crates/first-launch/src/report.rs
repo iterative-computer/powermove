@@ -90,14 +90,17 @@ pub fn load(native: &Path) -> Result<Report> {
         if let Some(closure) = pass.get("closure").and_then(|v| v.as_array()) {
             for entry in closure {
                 let status = serde_json::from_value::<Status>(entry["status"].clone());
-                if matches!(status, Ok(Status::ProxyOnly)) {
-                    let key = entry["reference"]["key"].as_str().unwrap_or("Media");
-                    let name = entry["reference"]["sourcePath"]
-                        .as_str()
-                        .and_then(|p| Path::new(p).file_name())
-                        .map_or(key.into(), |n| n.to_string_lossy());
-                    push(key.to_owned(), name.into_owned(), ReportKind::Proxies);
-                }
+                let kind = match status {
+                    Ok(Status::ProxyOnly) => ReportKind::Proxies,
+                    Ok(Status::NotReached) => ReportKind::NotReached,
+                    _ => continue,
+                };
+                let key = entry["reference"]["key"].as_str().unwrap_or("Media");
+                let name = entry["reference"]["sourcePath"]
+                    .as_str()
+                    .and_then(|p| Path::new(p).file_name())
+                    .map_or(key.into(), |n| n.to_string_lossy());
+                push(key.to_owned(), name.into_owned(), kind);
             }
         }
     }

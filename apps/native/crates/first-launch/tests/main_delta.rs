@@ -360,3 +360,99 @@ fn full_main_source_link_identity_migrates_without_a_sampled_fingerprint() {
         "main-source-link"
     );
 }
+
+/// An original from main's Media Store that only lives in a folder the person
+/// skipped is "not reached": offline with its source kept, listed in the
+/// report, and never blocking its project.
+#[test]
+fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
+    use pm_first_launch::{
+        Outcome, run_with_folder_access,
+        source_access::{self, Choice, PROMPT_TIMEOUT},
+        surfaces::migration::ReportKind,
+    };
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let config = main_profile(&root);
+    let records: Value = serde_json::from_str(include_str!("fixtures/main-media.json")).unwrap();
+    let entry = &records[0];
+    let mut record = entry["record"].clone();
+    let downloads = root.join("Downloads");
+    fs::create_dir(&downloads).unwrap();
+    let source = downloads.join("external-original.mov");
+    fs::rename(
+        config
+            .electron_profile
+            .join("Media Store")
+            .join(record["file"].as_str().unwrap()),
+        &source,
+    )
+    .unwrap();
+    record.as_object_mut().unwrap().remove("file");
+    record["sourcePath"] = json!(source);
+    write(
+        &config
+            .electron_profile
+            .join("Media Store/Index")
+            .join(entry["index"].as_str().unwrap()),
+        &record,
+    );
+    let _guard = source_access::install_with(
+        Choice::Ask,
+        Default::default(),
+        vec![(downloads.clone(), "Downloads".into())],
+        PROMPT_TIMEOUT,
+    );
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::NeedsFolderAccess { .. }
+    ));
+    let outcome = run_with_folder_access(&config, Choice::Skip, |_| Ok(())).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Complete {
+                blocked_owners: 0,
+                not_reached: 1,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let manifest: Value = read(&config.native_profile.join("Media Store/migration.json"));
+    let pass = manifest["passes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    assert!(
+        pass["closure"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["reference"]["key"] == "media:original" && e["status"] == "not-reached"),
+        "{pass:#}"
+    );
+    assert_eq!(pass["blockedOwners"], json!([]));
+    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
+    assert!(
+        report
+            .rows
+            .iter()
+            .any(|r| r.kind == ReportKind::NotReached && r.display_name == "external-original.mov"),
+        "{:?}",
+        report.rows
+    );
+    // The answer is kept per folder: a later run never asks about it again.
+    let state: pm_first_launch::State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(
+        state.folder_outcomes.get(&downloads),
+        Some(&source_access::Outcome::Skipped)
+    );
+    assert_eq!(
+        fs::read(source).unwrap(),
+        b"synthetic original",
+        "the original is untouched"
+    );
+}

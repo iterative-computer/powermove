@@ -523,9 +523,13 @@ impl<E: Element> Drawable<E> {
                             element_id: global_id.0.last().map(|id| format!("{id:?}")),
                             source_location: self.element.source_location(),
                         };
+                        let scale = window.scale_factor();
+                        let a11y = &mut window.a11y;
                         let mut builder = A11ySubtreeBuilder::new(
                             global_id.accesskit_node_id(),
-                            &mut window.a11y.nodes,
+                            &mut a11y.nodes,
+                            &mut a11y.node_bounds,
+                            scale,
                         );
                         #[cfg(debug_assertions)]
                         {

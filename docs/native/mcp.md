@@ -9,6 +9,15 @@ app's `Connection` only adds its session fence. Error strings therefore match
 between the two hosts. `ActorAutomation` remains for acceptance scenarios and has
 no production caller.
 
+**Windows.** Each editor window owns its project: `Host` keeps one slot per
+window (`attach_window`/`bind_window`), and windows never follow one another.
+The key window is MCP's default project; tools reach a project in whichever
+window shows it. `open_project` of a project a window shows makes that window
+MCP's; otherwise it opens in the key window if empty, else in an empty window,
+else replaces the key window's project (v1's one window). Only that window is
+told, and it closes its previous project itself: MCP never closes a project a
+window still shows. A windowless host uses slot 0.
+
 `app/src/mcp_services.rs` holds the production hosts:
 
 - `export_video` and `render_frames` run the same `--engine-job` child as the
