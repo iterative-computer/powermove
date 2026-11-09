@@ -29,7 +29,7 @@ import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
-import { studioLayer, studioPreviewKey, studioUnsettled } from '../../core/studio';
+import { studioLayer, studioPreviewKey, studioUnsettled, studioReady, studioIdle, studioPending } from '../../core/studio';
 import { MAP_SIZE as STUDIO_MAP_SIZE } from '../../core/studio/extract';
 
 /* Live screens being rendered right now (a screen showing its own 3D layer would never end). */
@@ -1098,15 +1098,37 @@ function viewportPathQuad(L: any, T: any, W: number, H: number, maxSourceBytes: 
   return { tex, w: W, h: H, ax: 0, ay: 0, uv: [0, 0, 1, 1], screenSpace: true };
 }
 
-function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, maxSourceBytes = Infinity) {
+const renderStudioScreen=(compId:string,T:number):Uint8Array|null=>{
+          const sub=PM.proj.comps?.[compId];
+          if(!sub || !Array.isArray(sub.layers) || renderingScreens.has(compId))return null;
+          const target=boundFbo,size=STUDIO_MAP_SIZE;
+          renderingScreens.add(compId);pmScopePush(sub);
+          try{
+            const inner=GL.renderProject(sub,T,size,size,{transparent:true,mblur:false});
+            bind(inner);
+            const pixels=new Uint8Array(size*size*4);
+            // Working buffers are 8-bit or float by the project's color depth.
+            if(inner.colorDepth===8 || !inner.colorDepth)GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,pixels);
+            else{
+              const floats=new Float32Array(size*size*4);
+              GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.FLOAT,floats);
+              for(let i=0;i<pixels.length;i++)pixels[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
+            }
+            free(inner);
+            return pixels;
+          }finally{pmScopePop();renderingScreens.delete(compId);bind(target);}
+};
+
+function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, maxSourceBytes = Infinity):any {
   /* returns {tex, w, h, ax, ay, uv:[ox,oy,sx,sy], fromFbo, solid, tmp} */
   const d = resolveContent(PM, L, T);
   if((isExtrudedLayer(L) || isShared3DPlane(PM._renderComposition3D || PM.proj,L)) && activeSourceRaster()?.layer!==L){
     try{
       const runtime=compositionRuntime(PM,T),depthIds=compositionDepthIds(PM,L,T);
       const bottom=(PM._renderComposition3DPass || compositionOrderedLayers(PM,(PM._renderComposition3D || PM.proj).layers.filter((l:any)=>l.type!=='group'),T)).filter((l:any)=>depthIds.has(l.id)).at(-1)?.id;
-      const canvas=runtime.render(W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera);
-      const tex=texFor(`layer3d:${L.id}`,canvas,{version:`${runtime.revision}:${W}:${H}:${PM._renderCamera3D?.matrixWorld.elements}:${PM._renderCamera3D?.projectionMatrix.elements}`});
+      const studio=studioLayer(PM,runtime,W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera,id=>renderStudioScreen(id,T),T);
+      if(!studio)return null;
+      const tex=texFor(`studio:${L.id}`,studio.canvas,{version:studio.version});
       return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
     }catch(error){frameFailed=true;PM.UIState?.setShaderMeta?.(L,{missing:true,sceneError:String(error)});return null;}
   }
@@ -1325,55 +1347,27 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
         // the classic renderer covers machines without WebGPU.
         // A live screen: render its composition at this frame's time, read back
         // for Studio's texture array (bottom row first, as three's UVs expect).
-        const renderScreen=(compId:string):Uint8Array|null=>{
-          const sub=PM.proj.comps?.[compId];
-          if(!sub || !Array.isArray(sub.layers) || renderingScreens.has(compId))return null;
-          const target=boundFbo,size=STUDIO_MAP_SIZE;
-          renderingScreens.add(compId);pmScopePush(sub);
-          try{
-            const inner=GL.renderProject(sub,T,size,size,{transparent:true,mblur:false});
-            bind(inner);
-            const pixels=new Uint8Array(size*size*4);
-            // Working buffers are 8-bit or float by the project's color depth.
-            if(inner.colorDepth===8 || !inner.colorDepth)GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,pixels);
-            else{
-              const floats=new Float32Array(size*size*4);
-              GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.FLOAT,floats);
-              for(let i=0;i<pixels.length;i++)pixels[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
-            }
-            free(inner);
-            return pixels;
-          }finally{pmScopePop();renderingScreens.delete(compId);bind(target);}
-        };
-        const studio=studioLayer(PM,runtime,W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera,renderScreen,T);
+        const studio=studioLayer(PM,runtime,W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera,id=>renderStudioScreen(id,T),T);
         if(studio){
           const tex=texFor(`studio:${L.id}`,studio.canvas,{version:studio.version});
           PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
           return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
         }
-        const canvas=runtime.render(W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera);
-        const tex=texFor(`layer3d:${L.id}`,canvas,{version:`${runtime.revision}:${W}:${H}:${PM._renderCamera3D?.matrixWorld.elements}:${PM._renderCamera3D?.projectionMatrix.elements}`});
-        PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
-        return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
+        return null;
       }catch(error){PM.UIState?.setShaderMeta?.(L,{definition,missing:true,sceneError:String(error)});frameFailed=true;return null;}
     }
-    if(definition?.renderer?.kind==='mesh'){
-      const mesh=meshExtensionQuad(L,T,w,hh,targetW,targetH,definition);
-      if(mesh!==undefined)return mesh;
-    }
-    if (definition?.renderer?.kind === 'scene3d') {
+    if (definition?.renderer?.kind === 'scene3d' || definition?.renderer?.kind === 'mesh') {
       try {
-        const runtime = sceneRuntime(PM,L,T);
-        if (runtime) {
-          const canvas=runtime.render(targetW,targetH);
-          const tex=texFor(`scene3d:${L.id}`,canvas,{version:runtime.revision});
+        const runtime=sceneRuntime(PM,L,T);
+        if(runtime){
+          const ids=new Set([...runtime.objects.keys()]);
+          const studio=studioLayer(PM,runtime,targetW,targetH,'',ids,true,runtime.camera,id=>renderStudioScreen(id,T),T);
+          if(!studio)return null;
+          const tex=texFor(`studio-legacy:${L.id}`,studio.canvas,{version:studio.version});
           PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
           return {tex,w,h:hh,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false};
         }
-      } catch(error) {
-        PM.UIState?.setShaderMeta?.(L,{definition,missing:true,sceneError:String(error)});
-        frameFailed=true;
-      }
+      }catch(error){PM.UIState?.setShaderMeta?.(L,{definition,missing:true,sceneError:String(error)});frameFailed=true;}
     }
     const missing = `void main(){
       vec2 q=floor(uv*24.0); float checker=mod(q.x+q.y,2.0);
@@ -2167,8 +2161,23 @@ function reportLayerFailure(layer: any, error: unknown): void {
   PM.toast?.(`${layer.name ?? 'A layer'} could not be rendered. See the console for details.`);
 }
 
+GL.prepareStudioFrame = async (project:any,time:number,options:any={}) => {
+  const has3D=(comp:any):boolean=>(comp.layers || []).some((l:any)=>layer3DRole(l) || isExtrudedLayer(l) || isShared3DPlane(comp,l) || PM.layerDefinition?.(l.d?.definition)?.renderer?.kind==='mesh');
+  if(![project,...Object.values<any>(PM.proj?.comps || {})].some(has3D))return;
+  await studioReady(PM);
+  const width=options.width || project.w,height=options.height || project.h;
+  for(let attempt=0;attempt<8;attempt++){
+    if(options.signal?.aborted)throw new Error('Studio frame cancelled');
+    const f=GL.renderProject(project,time,width,height,{...options,mblur:false,exporting:!!PM.Export?.busy || !!PM.agentFrameCapture,transparent:true});
+    free(f);await studioIdle(PM);
+    if(!studioPending(PM))return;
+  }
+  throw new Error('Studio frame did not become ready');
+};
+
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(proj===PM.proj && !opt.groupParent && !opt.mattePass)pruneSceneRuntimes(PM);
+  const previousStudio=[PM._studioFinal,PM._studioStill,PM._studioShutterSamples];
   const previous3DComposition=PM._renderComposition3D,previous3DPass=PM._renderComposition3DPass,previous3DCamera=PM._renderCamera3D;PM._renderComposition3D=proj;
   const previousInputs = layerInputs, previousInputFrameOptions = inputFrameOptions;
   if (inputFrameOptions || hasLayerInputs(proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))) inputFrameOptions = { signal:opt.signal, mblur: opt.mblur, mbSamples: opt.mbSamples, shutter: opt.shutter };
@@ -2425,7 +2434,8 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       if (ownedInputs) layerInputRendering = Math.max(0, layerInputRendering - 1);
     }
     layerInputs = previousInputs; inputFrameOptions = previousInputFrameOptions;
-    PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;}
+    PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;
+    [PM._studioFinal,PM._studioStill,PM._studioShutterSamples]=previousStudio;}
 };
 
 const requestSourceWarmup = createPreviewWarmup(

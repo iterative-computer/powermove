@@ -22,6 +22,8 @@ export type StudioCamera = {
   aspect: number;
   lensRadius: number;
   focus: number;
+  orthographic?: boolean;
+  near?: number; far?: number;
 };
 
 export type StudioView = {

@@ -32,6 +32,9 @@ export type StudioScene = {
   /** Scene object id (layer id) of each object index the tracer reports. */
   objects: string[];
   triangles: number;
+  instancePolicies?: { part: string | null; castShadow: boolean; receiveShadow: boolean }[];
+  materialPolicies?: { ambientResponse: number; doubleSided: boolean; alphaTest: number }[];
+  lightPolicies?: { castShadow: boolean; distance: number; decay: number }[];
   /** World-space bounds, for the shadow catcher and epsilon scale. */
   bounds: THREE.Box3;
 };
