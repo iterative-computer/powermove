@@ -417,6 +417,19 @@ export interface Scene3DAPI {
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
   /** After Effects' Front, Back, Left, Right, Top and Bottom views: the Free View looks along that axis. The shot's camera is unchanged. */
   lookFrom(side:'front'|'back'|'left'|'right'|'top'|'bottom'):void;
+  /** After Effects' view layouts: 1, 2 or 4 panes, each looking through the Active Camera, an axis or a Custom View. The selected pane is the interactive viewer. */
+  views:{
+    get():import('../core/scene3d/views').ViewsState;
+    setLayout(layout:import('../core/scene3d/views').ViewLayout):void;
+    setActive(index:number):void;
+    setPaneView(index:number,view:import('../core/scene3d/views').PaneView):void;
+    /** A non-selected pane's picture (Studio Live, its own session). */
+    render(index:number,width:number,height:number):{canvas:CanvasImageSource;version:string}|null;
+    /** The selection's outline in a pane, as line segments [x1,y1,x2,y2] in its pixels. */
+    selection(index:number,width:number,height:number):number[][];
+    readonly options:ReadonlyArray<{id:import('../core/scene3d/views').PaneView;label:string}>;
+    onChange(listener:()=>void):Disposable;
+  };
   getNavigationMode():'select'|'orbit'|'pan'|'dolly';
   setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
   onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;
@@ -736,6 +749,8 @@ export interface ModelAPI {
   cloneLayer(layer: Layer): Layer;
   normalizeFill(value: unknown, fallback?: string): Fill;
   layerDefinition(id: string): ExtensionLayerDefinition | undefined;
+  /** What a layer is, as the interface names it: "World", "Terrain", "Environment Light", "Text"… with its icon. */
+  layerKind?(layer: Layer | null | undefined): { label: string; icon: string } | null;
   curComp(): Comp;
   layer(id: string): Layer | null;
   byName(name: string): Layer | null;

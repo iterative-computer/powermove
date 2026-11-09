@@ -201,10 +201,33 @@ export function addScatter(api: PowermoveAPI, model: string, surface: string): s
   const terrain = (api.model.layer(surface) as any)?.d?.data?.object?.terrain;
   const area = terrain ? terrain.p.width.v * terrain.p.depth.v : 4;
   const count = Math.max(20, Math.min(600, Math.round(area * 0.5)));
-  return run(api, {
-    operation: 'add_scatter',
-    scatter: { model, surface, p: { count, density: 1, seed: 7, scaleMin: 0.7, scaleMax: 1.3, rotationMin: 0, rotationMax: 360, minSlope: 0, maxSlope: 35 } }
-  }, 'Add Scatter');
+  // The model you copy becomes the pattern: hide it in the same Undo, so the
+  // first frame shows the copies, not one big original in the middle. The
+  // copies still render from a hidden source; its eye shows it again.
+  const label = 'Add Scatter';
+  api.edit.begin(label, { origin: 'command' });
+  try {
+    const result = api.scene3d.edit({
+      operation: 'add_scatter',
+      scatter: { model, surface, p: { count, density: 1, seed: 7, scaleMin: 0.7, scaleMax: 1.3, rotationMin: 0, rotationMax: 360, minSlope: 0, maxSlope: 35 } }
+    } as any, { origin: 'command' });
+    if (!result.ok) throw new Error(result.message);
+    const source = api.model.layer(model) as any;
+    if (source && !source.lock && source.on !== false) {
+      const hidden = api.edit.dispatch({ type: 'set_layer', target: model, patch: { visible: false } } as any);
+      if (!hidden.ok) throw new Error(hidden.message);
+    }
+    const committed = api.edit.commit(label);
+    if (!committed.ok) throw new Error(committed.message);
+    const id = (result.data.result as any)?.id ?? null;
+    if (id) api.selection.select([id]);
+    api.transport.invalidate();
+    return id;
+  } catch (error) {
+    api.edit.cancel();
+    api.ui.toast(error instanceof Error ? error.message : String(error), { error: true });
+    return null;
+  }
 }
 
 export function addAmbientLight(api: PowermoveAPI): string | null {

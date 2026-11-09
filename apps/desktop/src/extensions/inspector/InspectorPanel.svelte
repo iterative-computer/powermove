@@ -34,7 +34,12 @@
   );
   const firstLayer = $derived(selectedLayers[0]);
   const meta = untrack(() => api.model.TYPE_META) as Record<string, { effects?: boolean }>;
-  const takesEffects = $derived(!!firstLayer && meta[firstLayer.type]?.effects !== false);
+  const placedIn3D = (layer: any) => layer?.threeD === true || String(layer?.d?.definition ?? '').startsWith('powermove.3d.');
+  /* A World, Ambient or Environment light surrounds the scene: no place, so no Transform. */
+  const surrounds = (layer: any) => !!layer?.d?.data?.object?.world || ['ambient', 'environment'].includes(layer?.d?.data?.light?.type);
+  /* Lights, cameras and a World draw no pixels of their own: no Effects or Masks, as in After Effects. */
+  const pixelless = (layer: any) => surrounds(layer) || ['powermove.3d.light', 'powermove.3d.camera'].includes(String(layer?.d?.definition ?? ''));
+  const takesEffects = $derived(!!firstLayer && meta[firstLayer.type]?.effects !== false && !pixelless(firstLayer));
 
   $effect(() => {
     const subscription = api.events.on('fonts', () => { fontsVersion++; });
@@ -44,7 +49,8 @@
 
 <InspectorSurface {panelId} scrollKey={JSON.stringify(selectedLayers.map(layer => layer.id))}>
   {#if firstLayer}<InspectorHeader layer={firstLayer} />{/if}
-  {#if firstLayer && selectedLayers.every((layer: any) => layer.type !== 'audio')}<AlignmentStrip layers={selectedLayers} />{/if}
+  <!-- Aligning to the frame is a 2D act: 3D layers place themselves in the scene. -->
+  {#if firstLayer && selectedLayers.every((layer: any) => layer.type !== 'audio') && !selectedLayers.every(placedIn3D)}<AlignmentStrip layers={selectedLayers} />{/if}
 
   {#if selectedLayers.length === 0}
     <CompositionSection />
@@ -67,7 +73,7 @@
         <ContentSection layer={firstLayer} {fontsVersion} />
       {/if}
       <ContributedSections {api} after="content" layerIds={selectedLayers.map(layer => layer.id)} />
-      {#if firstLayer.type !== 'audio'}<TransformSection layer={firstLayer} />{/if}
+      {#if firstLayer.type !== 'audio' && !surrounds(firstLayer)}<TransformSection layer={firstLayer} />{/if}
       <ContributedSections {api} after="transform" layerIds={selectedLayers.map(layer => layer.id)} />
       <StructuredSection layer={firstLayer} />
       {#if firstLayer.type !== 'audio'}
@@ -80,7 +86,7 @@
           {#key firstLayer.id}<EffectsSection layer={firstLayer} />{/key}
         {/if}
         <ContributedSections {api} after="effects" layerIds={selectedLayers.map(layer => layer.id)} />
-        <MasksSection layer={firstLayer} />
+        {#if !pixelless(firstLayer)}<MasksSection layer={firstLayer} />{/if}
       {/if}
       {#if firstLayer.type === 'video' || firstLayer.type === 'precomp'}<RetimingSection layer={firstLayer} />{/if}
       <LayerOptions layer={firstLayer} />

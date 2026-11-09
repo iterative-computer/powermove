@@ -21,6 +21,15 @@ The viewer's toolbar, for a composition with 3D layers, left to right:
   preview; Quality refines the image when you pause. Exports and agent
   frames use Final quality. The choice is remembered. These controls are
   in the viewer footer; navigation tools remain in the header.
+- **View layout:** 1 View, 2 Views (side by side) or 4 Views, in the
+  footer as in After Effects. Each pane chooses Active Camera, Front, Left,
+  Top, Back, Right, Bottom or Custom View from its corner label; a side
+  view opens framed on the scene. The selected pane is outlined and is the
+  viewer itself: gizmos, picking, navigation and refine work there. The
+  other panes are Studio Live pictures from their own sessions, redrawn
+  round-robin (about 20 a second in total) only when what they show
+  changes, so the selected pane keeps its frame rate. One click in another
+  pane selects that pane and the layer under the pointer.
 
 Studio has three rendering tiers:
 

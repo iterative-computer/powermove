@@ -83,7 +83,7 @@ all of them already exist in Powermove.
 | Front / Bevel / Side / Back | Yes for extruded text/shapes | Distinct materials per triangle group | Verified |
 | Camera depth of field/focus | No | Studio thin lens from source branch | Kept |
 | Camera iris controls | No | Keyframeable blade count, rotation, roundness, aspect; shared uniform aperture sampling | Verified |
-| Multiple views | Single camera/free view, no simultaneous panels | Front/Left/Top/Back/Right/Bottom angles for the Free View; simultaneous 2/4-up panels still required | Partial |
+| Multiple views | Single camera/free view, no simultaneous panels | 1/2/4 View layouts; each pane looks through the Active Camera, Front/Left/Top/Back/Right/Bottom or a Custom View; the selected pane is the interactive viewer, the others are Studio Live pictures | Done |
 | glTF embedded animation | Yes | Pose evaluation before tracing | Kept |
 | FBX with embedded animation | No | Importer required | Gap |
 | 2D layers casting shadows onto 3D | No; native-plane casts explicitly disabled | Native 3D planes cast alpha shadows and support receiving light/shadows through Material Options | Verified |
@@ -248,8 +248,9 @@ precision. Captures and captions are outside Git in
 
 Remaining implementation limits are explicit:
 
-- Simultaneous multi-view panels (AE 2-up/4-up) are not implemented; the
-  Free View has AE's six axis angles instead.
+- Multi-view panes other than the selected one are pictures: they render at
+  Studio Live quality without gizmos; one Custom View per pane, not AE's
+  three shared Custom Views.
 - Fog boxes use world axis-aligned bounding extents when rotated. Sphere
   non-uniform scale uses its largest axis.
 - Reflection visibility excludes all secondary camera paths, including

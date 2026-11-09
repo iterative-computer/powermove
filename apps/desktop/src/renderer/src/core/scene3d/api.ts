@@ -13,6 +13,7 @@ import { studioProgress, studioPreview, setStudioPreview, onStudioPreview } from
 import { studioSwatch } from '../studio/swatch';
 import { skyThumbnail } from '../studio/sky-thumbnail';
 import {getViewportMode,setViewportMode,onViewportChange,lookFrom} from './viewport';
+import {viewsState,setViewLayout,setActivePane,setPaneView,renderPane,paneSelection,onViewsChange,PANE_VIEWS} from './views';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
 import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } from './schema';
@@ -81,6 +82,16 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
     lookFrom:side=>{navigation?.cancel();lookFrom(PM,side);},
+    views:{
+      get:()=>viewsState(PM),
+      setLayout:layout=>{navigation?.cancel();setViewLayout(PM,layout);},
+      setActive:index=>{navigation?.cancel();setActivePane(PM,index);},
+      setPaneView:(index,view)=>{navigation?.cancel();setPaneView(PM,index,view);},
+      render:(index,width,height)=>renderPane(PM,index,width,height),
+      selection:(index,width,height)=>paneSelection(PM,index,width,height),
+      options:PANE_VIEWS,
+      onChange:listener=>({dispose:onViewsChange(PM,listener)}),
+    },
     getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>{if(mode!=='select')setLightTool(PM,{on:false});setNavigationMode(PM,mode);},
     onNavigationChange:listener=>({dispose:onNavigationMode(PM,listener)}),
     createNavigation:element=>(navigation=createSceneNavigation(PM,element)),

@@ -185,6 +185,8 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       if(!role||!editable(l)||(role==='camera'&&id===active))continue;
       if(PM.active&&!PM.active(l,PM.time))continue;
       const lightType=role==='light'?l.d?.data?.light?.type:undefined;
+      // A World, Ambient or Environment light surrounds the scene: there is nothing to move.
+      if(role==='object'&&l.d?.data?.object?.world||role==='light'&&(lightType==='ambient'||lightType==='environment'))continue;
       const native=role==='artwork',bridge=native?nativeSceneBridge(PM.curComp?.()||PM.proj):new THREE.Matrix4();
       const object=role==='object'||native?runtimeWorld?.objects.get(id) ?? null:null;
       if((role==='object'||native)&&!object)continue;

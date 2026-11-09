@@ -23,6 +23,8 @@
   /* Terrain regions list only the limits they use; ±100000 means "no limit". */
   const regionFields=(region:any)=>REGION_FIELDS.filter(f=>{const v=region.p[f.key]?.v;return f.key==='color' || (f.key==='minSlope'?v>0:f.key==='maxSlope'?v<90:f.key==='minHeight'?v>-100000:f.key==='maxHeight'?v<100000:false);});
   const TERRAIN_LOOKS=[{id:'hills',label:'Rolling hills',p:{amplitude:3,frequency:.12,octaves:5,ridged:false}},{id:'mountains',label:'Mountains',p:{amplitude:7,frequency:.08,octaves:7,ridged:true}},{id:'dunes',label:'Dunes',p:{amplitude:1.4,frequency:.18,octaves:3,ridged:false}},{id:'flat',label:'Nearly flat',p:{amplitude:.4,frequency:.1,octaves:3,ridged:false}}];
+  /* `_version` re-reads the terrain after edits. */
+  const terrainLook=(terrain:any,_version?:number)=>TERRAIN_LOOKS.find(look=>Object.entries(look.p).every(([k,v])=>{const c=terrain?.p?.[k];return c && !c.kf?.length && (typeof v==='number'?Math.abs(Number(c.v)-v)<1e-6:c.v===v);}))?.id ?? null;
   const heightChoices=$derived((ui.version,[{v:'noise',label:'Generated'},...(typeof object?.terrain?.heightSource==='string'?[{v:`asset:${object.terrain.heightSource}`,label:assetName(object.terrain.heightSource) ?? 'Image'}]:[]),{v:'pick',label:'Height image…'},...environmentSourceChoices(api)]));
   async function chooseHeight(next:unknown){
     if(next==='noise')return edit('update_terrain',{heightSource:null},'Terrain height');
@@ -65,7 +67,8 @@
     {#each FOG_FIELDS as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`fog.${field.key}`} channel={object.fog.p[field.key]} />{/each}
   {:else if kind==='terrain'}
     <Section {api} title="Terrain" />
-    <div class="shots" role="group" aria-label="Terrain shape">{#each TERRAIN_LOOKS as look (look.id)}<button type="button" class="chip" onclick={()=>edit('update_terrain',{p:look.p},look.label)}>{look.label}</button>{/each}</div>
+    <!-- Four shapes in an even grid; the one the terrain matches reads as chosen. -->
+    <div class="shots looks" role="group" aria-label="Terrain shape">{#each TERRAIN_LOOKS as look (look.id)}<button type="button" class="chip" aria-pressed={terrainLook(object.terrain,ui.version)===look.id} onclick={()=>edit('update_terrain',{p:look.p},look.label)}>{look.label}</button>{/each}</div>
     <Row {api} label="Shape from"><SelectField {api} get={()=>object.terrain.heightSource?sourceKey(object.terrain.heightSource):'noise'} options={heightChoices} edit={{mode:'set',label:'Terrain height',set:(v:unknown)=>void chooseHeight(v)}} label="Terrain shape source" /></Row>
     {#each TERRAIN_FIELDS.filter(f=>!object.terrain.heightSource || !['frequency','octaves','ridged','seed'].includes(f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`terrain.${field.key}`} channel={object.terrain.p[field.key]} />{/each}
     {#each object.terrain.regions as region, i (i)}
@@ -130,6 +133,9 @@
 <style>
   .shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(22px,1fr));gap:6px;padding:2px var(--panel-edge-inset,10px) 8px}
   .shots{display:flex;flex-wrap:wrap;gap:6px;padding:2px var(--panel-edge-inset,10px) 8px}
+  .looks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .looks .chip{justify-content:center;text-align:center}
+  .looks .chip[aria-pressed="true"]{background:var(--accent-dim);color:var(--tx);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent)}
   .finish{aspect-ratio:1;width:100%;padding:0;border:0;border-radius:var(--r-sm,6px);background:var(--swatch);cursor:pointer}
   .finish:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .from-file { display: contents; }

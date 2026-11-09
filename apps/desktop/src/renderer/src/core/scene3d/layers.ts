@@ -10,6 +10,24 @@ export type Layer3DRole = keyof typeof LAYER3D_DEFINITIONS;
 export function layer3DRole(layer: any): Layer3DRole|null {
   return (Object.keys(LAYER3D_DEFINITIONS) as Layer3DRole[]).find(role => layer?.d?.definition === LAYER3D_DEFINITIONS[role]) ?? null;
 }
+const LIGHT_KINDS:Record<string,{label:string;icon:string}>={
+  sun:{label:'Sun Light',icon:'sun'},point:{label:'Point Light',icon:'lightbulb'},spot:{label:'Spot Light',icon:'spotlight'},
+  area:{label:'Softbox Light',icon:'softbox'},ambient:{label:'Ambient Light',icon:'ambient'},environment:{label:'Environment Light',icon:'skyLight'}
+};
+/** What a 3D layer is, in the words and glyph the inspector, Timeline and
+ *  menus show: a World is not a "3D Model", an Environment Light not a "Light". */
+export function layer3DKind(layer:any):{label:string;icon:string}|null {
+  const role=layer3DRole(layer),data=layer?.d?.data;
+  if(role==='camera')return {label:'Camera',icon:'cam'};
+  if(role==='light')return LIGHT_KINDS[data?.light?.type] ?? {label:'Light',icon:'lightbulb'};
+  if(role!=='object')return null;
+  const object=data?.object;
+  if(object?.world)return {label:'World',icon:'globe'};
+  if(object?.terrain)return {label:'Terrain',icon:'mountains'};
+  if(object?.scatter)return {label:'Scatter',icon:'tree'};
+  if(object?.fog)return {label:'Fog Volume',icon:'fog'};
+  return {label:'3D Model',icon:'cube'};
+}
 /** Model groups use the same world coordinates as their contents. Mixed artwork
  * groups retain the composition's existing 2D interaction. */
 export function isModelGroup(PM:any,layer:any):boolean {

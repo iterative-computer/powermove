@@ -2098,7 +2098,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       /* type swatch: the clip body's colour with the type glyph in its tint */
       const pal = clipPalette(L);
       c.fillStyle = pal.body; roundRect(c, col.swatch + indent, iy - 8, 16, 16, 4); c.fill();
-      icoLayerType(c, L.type, col.swatch + 8 + indent, iy, pal.primary);
+      icoLayerType(c, L.type, col.swatch + 8 + indent, iy, pal.primary, L);
       c.font = (sel ? '600 ' : '500 ') + '12px ' + fui();
       c.fillStyle = theme.tx;
       const hasParentControl = layerSupportsTransform(L.type);
@@ -2239,8 +2239,10 @@ const LAYER_TYPE_ICONS: Record<string, string> = {
 type IconPart = { path: Path2D; fill: boolean; stroke: boolean; width: number };
 const layerIconParts = new Map<string, IconPart[]>();
 /* Draws the app-registry (Phosphor-style) glyph for a layer type, tinted to `color`. */
-function icoLayerType(c: any, type: string | null, x: number, y: number, color: string) {
-  drawIcon(c, LAYER_TYPE_ICONS[type ?? ''] ?? 'dot', x, y, 11, color);
+function icoLayerType(c: any, type: string | null, x: number, y: number, color: string, layer?: any) {
+  /* Extension layers say what they are (World, Terrain, Camera…), not "extension". */
+  const own = type === 'extension' && layer ? api.model.layerKind?.(layer)?.icon : null;
+  drawIcon(c, own || LAYER_TYPE_ICONS[type ?? ''] || 'dot', x, y, 11, color);
 }
 /* Any glyph from the app's icon registry, centred on x/y at `size` px. Every
    timeline glyph comes from the same Phosphor set the rest of the app uses. */

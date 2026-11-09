@@ -87,6 +87,9 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   expect(rows).toContain('Terrain');
   const scatter = (await objects(page)).find((l: any) => l.object?.scatter);
   expect(scatter.object.scatter).toMatchObject({ model: ids.cube, surface: terrain.id });
+  // The copied model becomes the pattern: hidden in the same Undo, copies still drawn.
+  const shown = (id: string) => page.evaluate((layerId: string) => { const on = (window as any).PM.L(layerId).on; return typeof on === 'object' && on ? on.v : on; }, id);
+  expect(await shown(ids.cube)).toBe(false);
   await expect(page.getByLabel('Copies of', { exact: true }).first()).toBeAttached();
   const seed = scatter.object.scatter.p.seed.v;
   await page.getByRole('button', { name: 'New variation' }).click();
@@ -109,6 +112,12 @@ test('Environment layers, Material Options, iris and render passes from the 3D U
   await page.getByRole('radiogroup', { name: 'Sky' }).getByRole('radio', { name: 'Overcast' }).click();
   await expect.poll(async () => (await objects(page)).find((l: any) => l.light?.type === 'environment').light.world.preset).toBe('overcast');
   await shot(page, '09-environment-light');
+  // A surrounding light has no place and no pixels: no Transform, alignment, Effects or Masks,
+  // and the Properties header names its kind.
+  const panel = page.locator('[data-inspector-layer]');
+  await expect(page.locator('[data-inspector-header]')).toContainText('Environment Light');
+  await expect(page.locator('[data-inspector-header]')).not.toContainText('3D Model');
+  for (const title of ['Transform', 'Effects', 'Masks']) await expect(panel.getByText(title, { exact: true })).toHaveCount(0);
 
   // Material Options with AE wording.
   await page.evaluate((id: string) => (window as any).PM.selectLayers([id]), ids.cube);
