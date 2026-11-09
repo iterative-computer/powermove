@@ -29,6 +29,7 @@ pm-text = { path = "../../../../engine/crates/pm-text", default-features = false
 libc = "0.2"
 # v1.3.0+ stores gzip envelopes for large values (main/storage-codec.ts).
 flate2 = "1"
+base64 = "0.22"
 
 [dev-dependencies]
 serde_json = "1"
