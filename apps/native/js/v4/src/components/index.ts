@@ -1,7 +1,8 @@
 /** Native UI kit, language.md §§3,5–9,13,16. Host resolves tokens via pm-design. */
-import { createContext, h, type ComponentChildren } from "preact";
+import { h, type ComponentChildren } from "preact";
 import { useContext, useId, useState } from "preact/hooks";
 import type { SurfaceProps } from "../jsx-runtime";
+import { Label } from "../label";
 import { json, type Json, type SurfaceEvent } from "../protocol";
 
 export const token = (name: string) => ({ token: name });
@@ -15,7 +16,6 @@ type Bound<T extends Json> = SurfaceProps & {
   binding: string;
   mixed?: boolean;
 };
-const Label = createContext<string | undefined>(undefined);
 const text: Style = {
   color: token("colors.text"),
   fontSize: token("typography.body"),

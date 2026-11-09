@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { recorder } from "./helpers";
 import * as UI from "../src/ui";
+import * as Kit from "../src/components";
 import { parseArithmetic } from "../src/arithmetic";
 import { json } from "../src/protocol";
 test("all tagged public controls and new compositional controls export native semantic trees", async () => {
@@ -123,4 +124,23 @@ test("JSON serializer rejects nonfinite, cyclic data, accessors and class instan
   cycle.self = cycle;
   for (const value of [NaN, Infinity, cycle, new Date(), 1n])
     expect(() => json(value)).toThrow();
+});
+test("a field takes the label of either kind of row", async () => {
+  const { root } = recorder();
+  await root.render(
+    <div>
+      <UI.Row label="Public">
+        <Kit.NumberField id="kit" value={1} binding="k" />
+      </UI.Row>
+      <Kit.InspectorRow label="Kit">
+        <UI.NumField id="public" value={1} binding="p" />
+      </Kit.InspectorRow>
+    </div>,
+  );
+  const nodes = [...root.host.nodes.values()];
+  for (const field of ["kit", "public"]) {
+    const labelledBy = nodes.find((n) => n.props.id === field)!.props
+      .labelledBy;
+    expect(nodes.find((n) => n.props.id === labelledBy)?.type).toBe("text");
+  }
 });
