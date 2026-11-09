@@ -1032,9 +1032,10 @@ fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
     fonts_identity(&mut hash);
     hash.update(format!("{:?}", identity.tone).as_bytes());
     hash.update(renderer_identity().as_bytes());
-    if let Some(epoch) = identity.overrides {
-        hash.update(&std::process::id().to_le_bytes());
-        hash.update(&epoch.to_le_bytes());
+    // `CompatStore::cache_identity`: the wrappers' code and generation, or
+    // this process alone when their code is unknown.
+    if let Some(overrides) = identity.overrides {
+        hash.update(&overrides.to_le_bytes());
     }
     *hash.finalize().as_bytes()
 }
@@ -1171,6 +1172,52 @@ mod tests {
         assert!(disk.observe(&scene, &[], None, None, 1));
         ready(&disk);
         assert!(read_eventually(&disk, &scene, time).is_some());
+    }
+
+    /// Writes one override frame under identity 7 into `PM_RELAUNCH_DIR`:
+    /// the first launch of the relaunch test, run as its own process.
+    #[test]
+    #[ignore]
+    fn relaunch_writer() {
+        let Some(dir) = std::env::var_os("PM_RELAUNCH_DIR") else {
+            return;
+        };
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((PathBuf::from(dir), u64::MAX)))
+            .unwrap();
+        let scene = scene();
+        disk.observe(&scene, &[], Some(7), None, 1);
+        ready(&disk);
+        let time = write_frame(&disk, 30);
+        assert!(read_eventually(&disk, &scene, time).is_some());
+    }
+
+    /// Override frames another process rendered (a relaunch) are found again
+    /// with the same override identity, and never with another.
+    #[test]
+    fn override_frames_survive_a_relaunch_with_the_same_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = dir.path().join("frames");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "render_cache::tests::relaunch_writer",
+            ])
+            .env("PM_RELAUNCH_DIR", &frames)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the first launch wrote its frame");
+        let scene = scene();
+        let relaunched = DiskFrames::default();
+        relaunched.set_storage(Some((frames, u64::MAX))).unwrap();
+        relaunched.observe(&scene, &[], Some(7), None, 1);
+        ready(&relaunched);
+        let time = relaunched.with(|s| (s.frames.as_ref().unwrap().ticks(30).unwrap(), false));
+        assert!(read_eventually(&relaunched, &scene, time).is_some());
+        assert!(relaunched.observe(&scene, &[], Some(8), None, 1));
+        ready(&relaunched);
+        assert!(read_eventually(&relaunched, &scene, time).is_none());
     }
 
     /// Render Selection through the real `--engine-job` child: the frames
