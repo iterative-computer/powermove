@@ -22,6 +22,7 @@ pub fn clip(id: &str) -> Clip {
         media: Media::Ready,
         waveform: None,
         trim: None,
+        missing_effect: None,
     }
 }
 pub fn key(id: &str, time: f64) -> Key {

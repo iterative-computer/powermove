@@ -104,7 +104,12 @@ fn ruler_scissors_work_area_render_states_and_three_diamonds_are_explicit() {
     let f = scene(&reduced)
         .prepare(viewport(&reduced), &reduced)
         .unwrap();
-    assert!(!f.ops.iter().any(|o| o.shape == "stripes-45"));
+    // The render bar stops its stripes; an offline clip's hatch is static.
+    assert!(
+        !f.ops
+            .iter()
+            .any(|o| o.id.starts_with("render:") && o.shape == "stripes-45")
+    );
     assert_eq!(
         f.ops.iter().find(|o| o.id == "render:1").unwrap().opacity,
         0.5
@@ -366,5 +371,23 @@ fn track_ground_is_the_themed_panel_material() {
             t.translucency.panel as f64
         };
         assert_eq!(ground.opacity, alpha);
+    }
+}
+#[test]
+fn offline_clips_carry_the_media_offline_sign() {
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let t = Tokens::new(scheme, Accessibility::default());
+        let f = scene(&t).prepare(viewport(&t), &t).unwrap();
+        let fill = f.ops.iter().find(|o| o.id == "clip:offline").unwrap();
+        assert_eq!(fill.color, t.colors.viewer);
+        let hatch = f.ops.iter().find(|o| o.id == "clip-hatch:offline").unwrap();
+        assert_eq!((hatch.shape, hatch.color), ("stripes-45", t.colors.danger));
+        assert_eq!(hatch.opacity, t.translucency.offline_hatch as f64);
+        let lead = f.ops.iter().find(|o| o.id == "clip-offline:offline").unwrap();
+        assert_eq!(lead.text.as_deref(), Some("Offline"));
+        // The name follows the lead, in `text`.
+        let name = f.ops.iter().find(|o| o.id == "clip-content:offline").unwrap();
+        assert!(name.bounds.x > lead.bounds.x && name.color == t.colors.text);
+        assert!(!f.ops.iter().any(|o| o.id == "clip-hatch:selected"));
     }
 }

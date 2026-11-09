@@ -151,6 +151,8 @@ pub struct Clip {
     /// Already decoded/downsampled for this visible window, peak values in [-1,1].
     pub waveform: Option<Vec<f64>>,
     pub trim: Option<Edge>,
+    /// The first missing extension effect: the clip carries a quiet badge.
+    pub missing_effect: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
@@ -346,6 +348,7 @@ impl Scene {
                                     media: p.media(layer),
                                     waveform: p.waveform(layer),
                                     trim: None,
+                                    missing_effect: layer.missing_effects.first().cloned(),
                                 }),
                                 summary,
                             },
@@ -395,6 +398,7 @@ impl Scene {
                     media: p.media(layer),
                     waveform: p.waveform(layer),
                     trim: None,
+                    missing_effect: layer.missing_effects.first().cloned(),
                 });
             }
             let mut properties: HashMap<(Area, usize), Vec<PaintRow>> = HashMap::new();
@@ -984,6 +988,10 @@ fn span(a: f64, b: f64, y: f64, h: f64, v: Viewport) -> Option<Rect> {
     let end = b.min(v.width);
     (end > x).then_some(Rect::new(x, y, end - x, h.max(0.)))
 }
+/// Width of an offline clip's "Offline" lead, in `minimum` ems.
+const OFFLINE_ADVANCE: f64 = 3.6;
+/// Width of the "Missing effect" badge, in `minimum` ems.
+const MISSING_EFFECT_ADVANCE: f64 = 6.6;
 fn mix(a: u32, b: u32, amount: f64) -> u32 {
     [0, 8, 16].into_iter().fold(0, |out, s| {
         out | (((((a >> s) & 255) as f64 * (1. - amount) + ((b >> s) & 255) as f64 * amount).round()
@@ -1003,8 +1011,11 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     ) else {
         return;
     };
-    let fill = if c.media == Media::Offline {
-        colors.labels.gray
+    // Media Offline (docs/native/design/media-offline.md): the viewer's
+    // ground with the danger hatch, as the engine's card.
+    let offline = c.media == Media::Offline;
+    let fill = if offline {
+        colors.viewer
     } else {
         c.label.color(t)
     };
@@ -1025,6 +1036,18 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     o.radius = m.clip_radius as f64;
     o.detail = json!({"from":c.from,"duration":c.duration,"cursor":if c.locked {"notAllowed"}else{"openHand"},"sourceEdges":[v.x(c.from),v.x(c.from+c.duration)]});
     ops.push(o);
+    if offline {
+        let mut o = Op::new(
+            format!("clip-hatch:{}", c.id),
+            "stripes-45",
+            r,
+            colors.danger,
+        );
+        o.opacity = t.translucency.offline_hatch as f64;
+        o.radius = m.clip_radius as f64;
+        o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
+        ops.push(o);
+    }
     if !c.selected {
         // A hairline keyline gives the muted fill an edge against the tracks.
         let (edge, alpha) = t.edge();
@@ -1049,6 +1072,24 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         o.radius = m.clip_radius as f64;
         ops.push(o);
     }
+    // "Offline" leads in `danger`; the name follows in `text`.
+    let lead = (m.inset - m.inner_radius) as f64;
+    let offline_w = if offline {
+        let w = t.typography.minimum as f64 * OFFLINE_ADVANCE;
+        let mut o = Op::new(
+            format!("clip-offline:{}", c.id),
+            "text",
+            Rect::new(r.x + lead, r.y, w.min((r.width - lead).max(0.)), r.height),
+            colors.danger,
+        );
+        o.text = Some("Offline".into());
+        o.font_size = t.typography.minimum as f64;
+        o.detail = json!({"truncate":"tail"});
+        ops.push(o);
+        w + m.gap as f64
+    } else {
+        0.
+    };
     let mut o = Op::new(
         format!("clip-content:{}", c.id),
         if c.waveform.is_some() {
@@ -1057,14 +1098,12 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
             "text"
         },
         Rect::new(
-            r.x + (m.inset - m.inner_radius) as f64,
+            r.x + lead + offline_w,
             r.y,
-            (r.width - (m.inset - m.inner_radius) as f64).max(0.),
+            (r.width - lead - offline_w).max(0.),
             r.height,
         ),
-        if c.media == Media::Offline {
-            colors.danger
-        } else if c.media == Media::Loading {
+        if c.media == Media::Loading {
             colors.muted
         } else {
             colors.text
@@ -1080,11 +1119,28 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     } else {
         t.typography.body
     } as f64;
-    o.detail = json!({"truncate":"tail","offlineSymbol":if c.media==Media::Offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None},"waveform":c.waveform,"maxPeakToPeak":h-4.*m.inner_radius as f64});
+    o.detail = json!({"truncate":"tail","offlineSymbol":if offline {Some("exclamationmark.triangle.fill")}else{None},"lockSymbol":if c.locked {Some("lock")}else{None},"waveform":c.waveform,"maxPeakToPeak":h-4.*m.inner_radius as f64});
     if c.waveform.is_some() {
         o.opacity = 0.75;
     }
     ops.push(o);
+    if let Some(effect) = &c.missing_effect {
+        // A missing extension effect: a quiet trailing badge in `danger`; the
+        // layer still draws with the effect bypassed (media-offline.md).
+        let w = t.typography.minimum as f64 * MISSING_EFFECT_ADVANCE;
+        if r.width > w + 3. * lead {
+            let mut o = Op::new(
+                format!("clip-missing-effect:{}", c.id),
+                "text",
+                Rect::new(r.x + r.width - w - lead, r.y, w, r.height),
+                colors.danger,
+            );
+            o.text = Some("Missing effect".into());
+            o.font_size = t.typography.minimum as f64;
+            o.detail = json!({"truncate":"tail","tooltip":format!("Missing effect: {effect}")});
+            ops.push(o);
+        }
+    }
     if let Some(edge) = c.trim {
         let x = match edge {
             Edge::In => v.x(c.from),

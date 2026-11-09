@@ -391,6 +391,11 @@ impl Controller {
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.offline_changed)
+            && let Some(timeline) = self.builtins.timeline.clone()
+        {
+            timeline.update(cx, |t, cx| t.published(cx));
+        }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         if self.builtins.updating {
