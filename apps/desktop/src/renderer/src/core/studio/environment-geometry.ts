@@ -310,7 +310,10 @@ export function expandEnvironmentGeometry(document: StudioSceneDescription): Stu
     objects[displacement.object] = { ...object, mesh: displaceMesh(object.mesh, displacement) };
   }
   for (const scatter of source.scatters ?? [])
-    for (const instance of generateScatter(scatter, { ...source, objects })) instances.push(instance);
+    for (const instance of generateScatter(scatter, { ...source, objects })) {
+      if (instances.length >= 1000000) throw new Error('At most one million Studio instances');
+      instances.push(instance);
+    }
   for (const terrain of source.terrains ?? [])
     for (const object of terrainMeshes(terrain)) {
       const index = objects.length,

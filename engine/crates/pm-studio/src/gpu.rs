@@ -46,7 +46,7 @@ fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
   var rq: ray_query;
   var flags = RAY_FLAG_FORCE_OPAQUE;
   if (any) { flags |= RAY_FLAG_TERMINATE_ON_FIRST_HIT; }
-  rayQueryInitialize(&rq, tlas, RayDesc(flags, 0xffu, EPS, tmax, ro, rd));
+  rayQueryInitialize(&rq, tlas, RayDesc(flags, 0xffu, ray_epsilon(), tmax, ro, rd));
   rayQueryProceed(&rq);
   let x = rayQueryGetCommittedIntersection(&rq);
   if (x.kind != RAY_QUERY_INTERSECTION_TRIANGLE) { return h; }
@@ -572,7 +572,7 @@ impl Renderer {
         let (fwd,right,up)=c.basis();
         let tan_y = (c.fov.to_radians() * 0.5).tan();
         let aspect = self.width as f32 / self.height as f32;
-        let lens_radius = if c.f_stop > 0.0 { c.focal_mm / (2.0 * c.f_stop) } else { 0.0 };
+        let lens_radius = c.aperture_radius(scene.meters_per_unit);
         let focus = c.focus.map(|f| (f - c.position).dot(fwd)).unwrap_or((c.target - c.position).length());
         self.base = Params {
             cam_pos: c.position.to4(lens_radius),

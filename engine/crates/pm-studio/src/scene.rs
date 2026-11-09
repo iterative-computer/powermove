@@ -117,6 +117,9 @@ pub struct Camera {
 }
 
 impl Camera {
+    pub fn aperture_radius(&self,meters_per_unit:f32)->f32 {
+        if self.f_stop>0.{self.focal_mm*0.001/(2.*self.f_stop*meters_per_unit)}else{0.}
+    }
     /// An orthonormal camera frame, including views straight up/down at a sky.
     pub fn basis(&self)->(Vec3,Vec3,Vec3){
         let forward=(self.target-self.position).normalize();let side=forward.cross(Vec3::Y);
@@ -136,6 +139,9 @@ pub struct Object {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Scene {
+    /// Metres represented by one scene unit (legacy product scenes use mm).
+    #[serde(default="default_meters_per_unit")]
+    pub meters_per_unit:f32,
     #[serde(default)]
     pub world: crate::environment::World,
     #[serde(default)]
@@ -163,6 +169,8 @@ pub struct Scene {
     /// by); `None`: each object is its own layer.
     pub layers: Option<Vec<u32>>,
 }
+
+pub fn default_meters_per_unit()->f32{0.001}
 
 /// What the GPU reads, flattened.
 pub struct Prepared {
@@ -461,7 +469,7 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         let up = v3(0.0, 1.0, 0.0);
         lights.push(Softbox::for_highlight(target + v3(-30.0, 0.0, 20.0), up, camera.position, 600.0, 700.0, 380.0, Vec3::splat(3.0)));
     }
-    Some(Scene { instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![], world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
+    Some(Scene { meters_per_unit:0.001, instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![], world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
 }
 
 /// An original abstract wallpaper for the display: soft ribbons of blue and
@@ -501,6 +509,13 @@ pub fn screen_wallpaper(w: u32, h: u32, t: f32) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn physical_aperture_respects_scene_scale_and_old_files(){
+        let c=Camera::lens(v3(0.,0.,5.),Vec3::ZERO,50.,4.);
+        assert!((c.aperture_radius(1.)-0.00625).abs()<1e-7);assert!((c.aperture_radius(0.001)-6.25).abs()<1e-5);
+        let mut old=serde_json::to_value(preset("hero","blue",0.).unwrap()).unwrap();old.as_object_mut().unwrap().remove("meters_per_unit");
+        let scene:Scene=serde_json::from_value(old).unwrap();assert_eq!(scene.meters_per_unit,0.001);
+    }
     #[test]
     fn sky_cameras_keep_an_orthonormal_frame_at_the_poles(){
         for target in [Vec3::Y,-Vec3::Y,v3(1.,2.,3.)]{let c=Camera::lens(Vec3::ZERO,target,50.,0.);let(f,r,u)=c.basis();assert!((f.length()-1.).abs()<1e-6);assert!((r.length()-1.).abs()<1e-6);assert!((u.length()-1.).abs()<1e-6);assert!(f.dot(r).abs()<1e-6&&f.dot(u).abs()<1e-6&&r.dot(u).abs()<1e-6);}

@@ -8,11 +8,11 @@ import type { StudioCameraDescription, StudioCameraOptions, StudioMaterial, Stud
 const vec = (v: ArrayLike<number>, at = 0): StudioVec3 => ({ x: v[at]!, y: v[at + 1]!, z: v[at + 2]! });
 const tuple = (v: StudioVec3): [number, number, number] => [v.x, v.y, v.z];
 
-export function describeCamera(view: StudioView): { camera: StudioCameraDescription; options: StudioCameraOptions } {
+export function describeCamera(view: StudioView, metersPerUnit=0.1): { camera: StudioCameraDescription; options: StudioCameraOptions } {
   const c = view.camera, position = vec(c.position), target = vec(c.position.map((x, i) => x + c.forward[i]! * c.focus));
   const focal = 12 / Math.max(1e-8, c.tanY);
   return {
-    camera: { position, target, fov: 2 * Math.atan(c.tanY) * 180 / Math.PI, f_stop: c.lensRadius > 0 ? focal / (200 * c.lensRadius) : 0, focus: target, focal_mm: focal },
+    camera: { position, target, fov: 2 * Math.atan(c.tanY) * 180 / Math.PI, f_stop: c.lensRadius > 0 ? focal*0.001/(2*metersPerUnit*c.lensRadius) : 0, focus: target, focal_mm: focal },
     options: { projection: c.orthographic ? 'orthographic' : 'perspective', up: vec(c.up), ortho_height: c.orthographic ? c.tanY * 2 : 6, near: c.near ?? .01, far: c.far ?? 1000 },
   };
 }
@@ -40,7 +40,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
         if (count === 0xffffffff) continue;
         if (count === 0) { stack.push(start - baseNode); continue; }
         for (let t = start; t < start + count; t++) {
-          const material = input.tris[t * 24 + 18]!, layer = input.tris[t * 24 + 19]!;
+          const material = input.tris[t * 24 + 18]!, layerTag=Math.floor(Math.max(d[at+19]!,0)/2), layer = layerTag>0?layerTag-1:input.tris[t * 24 + 19]!;
           let mesh = groups.get(material);
           if (!mesh) { mesh = { positions: [], normals: [], uvs: [], indices: [] }; groups.set(material, mesh); }
           const index = mesh.positions.length;
@@ -61,7 +61,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
           if (mesh.indices.length === 1) {
             objects.push({ mesh, material }); layers.push(layer);
             const meta = input.instancePolicies?.[instance];
-            identities.push(identity ?? { layer: input.objects[layer]!, part: meta?.part ?? null, cast_shadow: meta?.castShadow ?? true, receive_shadow: meta?.receiveShadow ?? true });
+            identities.push(identity ?? { layer: input.objects[layer]!, part: meta?.part ?? null, primary_visible:d[at+23]!<0.5, cast_shadow: meta?.castShadow ?? true, receive_shadow: meta?.receiveShadow ?? true });
           }
         }
       }
@@ -77,9 +77,9 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
     if (d[o + 3] === 0) { lights.push({ center: vec(d, o), u: vec(d, o + 4), v: vec(d, o + 8), radiance: vec(d, o + 12) }); areaOptions.push(options); }
     else { extra.push({ pos: Array.from(d.subarray(o, o + 4)), u: Array.from(d.subarray(o + 4, o + 8)), v: Array.from(d.subarray(o + 8, o + 12)), radiance: Array.from(d.subarray(o + 12, o + 16)) }); extraOptions.push(options); }
   }
-  const { camera, options } = describeCamera(view);
+  const { camera, options } = describeCamera(view,input.metersPerUnit??0.1);
   return {
-    version: 1, scene: { world: input.world, objects, materials, lights, extra_lights: extra, layers, camera, backdrop: vec(view.backdrop), environment: [vec(view.environment.zenith), vec(view.environment.horizon)], exposure: view.exposure, shadow_catcher: view.shadowCatcher },
+    version: 1, scene: { meters_per_unit:input.metersPerUnit??0.1, world: input.world, objects, materials, lights, extra_lights: extra, layers, camera, backdrop: vec(view.backdrop), environment: [vec(view.environment.zenith), vec(view.environment.horizon)], exposure: view.exposure, shadow_catcher: view.shadowCatcher },
     layer_ids: [...input.objects], object_ids: identities, material_options: materialOptions, light_options: [...areaOptions, ...extraOptions],
     camera_options: options, environment_options: { backdrop_opaque: view.backdropOpaque, shadows: view.shadows, floor_y: view.floorY, ground: vec(view.environment.ground) },
     textures: maps.map((source, index) => {
@@ -91,12 +91,13 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
 
 export function viewFromDescription(document: StudioSceneDescription, aspect: number): StudioView {
   const s = document.scene, c = s.camera, o = document.camera_options;
+  const metres=s.meters_per_unit??0.1;if(!Number.isFinite(metres)||metres<=0)throw new Error('Invalid scene scale');
   const position = new THREE.Vector3(...tuple(c.position)), target = new THREE.Vector3(...tuple(c.target));
   const forward=target.clone().sub(position).normalize(),right=forward.clone().cross(new THREE.Vector3(...tuple(o.up))).normalize();
   if(right.lengthSq()<1e-12){if(Math.abs(forward.y)>.9999)right.set(1,0,0);else right.crossVectors(forward,Math.abs(forward.z)<.9?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0)).normalize();}
   const up=right.clone().cross(forward).normalize();
   return {
-    camera: { position: tuple(c.position), forward: forward.toArray() as [number, number, number], right: right.toArray() as [number, number, number], up: up.toArray() as [number, number, number], tanY: o.projection === 'orthographic' ? o.ortho_height / 2 : Math.tan(c.fov * Math.PI / 360), aspect, lensRadius: c.f_stop > 0 ? c.focal_mm / (200 * c.f_stop) : 0, focus: c.focus ? position.distanceTo(new THREE.Vector3(...tuple(c.focus))) : position.distanceTo(target), orthographic: o.projection === 'orthographic', near: o.near, far: o.far },
+    camera: { position: tuple(c.position), forward: forward.toArray() as [number, number, number], right: right.toArray() as [number, number, number], up: up.toArray() as [number, number, number], tanY: o.projection === 'orthographic' ? o.ortho_height / 2 : Math.tan(c.fov * Math.PI / 360), aspect, lensRadius: c.f_stop > 0 ? c.focal_mm*0.001/(2*c.f_stop*metres) : 0, focus: c.focus ? position.distanceTo(new THREE.Vector3(...tuple(c.focus))) : position.distanceTo(target), orthographic: o.projection === 'orthographic', near: o.near, far: o.far },
     exposure: s.exposure, backdrop: tuple(s.backdrop), backdropOpaque: document.environment_options.backdrop_opaque, shadowCatcher: s.shadow_catcher, shadows: document.environment_options.shadows, floorY: document.environment_options.floor_y,
     environment: { zenith: tuple(s.environment[0]), horizon: tuple(s.environment[1]), ground: tuple(document.environment_options.ground) },
   };
@@ -133,7 +134,7 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
     const mesh=placements?new THREE.InstancedMesh(g,material,placements.length):new THREE.Mesh(g,material);
     if(placements){placements.forEach((p,j)=>(mesh as THREE.InstancedMesh).setMatrixAt(j,instanceMatrix(p)));mesh.userData.studioInstanceLayerNames=placements.map(p=>p.layer==null?null:document.layer_ids[p.layer]);}
     mesh.userData.sceneId = document.object_ids[i]?.layer ?? document.layer_ids[document.scene.layers[i]!] ?? `object-${i}`;
-    mesh.userData.studioPart = document.object_ids[i]?.part ?? null;
+    mesh.userData.studioPart = document.object_ids[i]?.part ?? null;mesh.userData.studioPrimaryVisible=document.object_ids[i]?.primary_visible!==false;
     mesh.castShadow = document.object_ids[i]?.cast_shadow ?? true; mesh.receiveShadow = document.object_ids[i]?.receive_shadow ?? true; graph.add(mesh);
   });
   // Lights are already in the shared GPU layout; replace the extracted light segment below.
@@ -142,7 +143,7 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
   lights.push(...document.scene.extra_lights.flatMap(l => [...l.pos, ...l.u, ...l.v, ...l.radiance]));
   lights.push(...worldSun(document.scene.world??{}));
   const trailer=packWorld(document.scene.world??{},lights);
-  const data = new Float32Array(lights.length + scene.instanceCount * 36+trailer.length); data.set(lights); data.set(scene.sdata.subarray(scene.lightCount * 16,scene.lightCount*16+scene.instanceCount*36), lights.length); data.set(trailer,lights.length+scene.instanceCount*36);scene.world=document.scene.world; scene.sdata = data; scene.lightCount = lights.length / 16;
+  const data = new Float32Array(lights.length + scene.instanceCount * 36+trailer.length); data.set(lights); data.set(scene.sdata.subarray(scene.lightCount * 16,scene.lightCount*16+scene.instanceCount*36), lights.length); data.set(trailer,lights.length+scene.instanceCount*36);scene.world=document.scene.world;scene.metersPerUnit=document.scene.meters_per_unit??0.1; scene.sdata = data; scene.lightCount = lights.length / 16;
   const maps = scene.maps.map(map => {
     const index = textures.findIndex(t => 'source' in map && t.image === map.source);
     const t = document.textures[index];

@@ -18,6 +18,7 @@ export const STUDIO_MATERIAL_FLOATS = 32;
 export type StudioMap = { source: TexImageSource; flipY: boolean } | { screen: string };
 
 export type StudioScene = {
+  metersPerUnit?:number;
   world?: import('./environment').StudioWorld;
   positions: Float32Array;   // 12 floats per triangle (3 × vec4), model space, per-mesh BVH order
   tris: Float32Array;        // 24 floats per triangle (6 × vec4)
@@ -142,7 +143,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   // One BVH per mesh, in its own space, reused until its geometry or material
   // assignment changes; only the top level is rebuilt when things move.
   const blases: Blas[] = [];
-  const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean; layerOverride?:number }[] = [];
+  const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean; layerOverride?:number; primaryVisible:boolean }[] = [];
   let pending = 0, total = 0;
   for (const { mesh, id } of meshes) {
     const g = mesh.geometry as THREE.BufferGeometry;
@@ -193,7 +194,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       const world=mesh.matrixWorld.clone();if(instanced.isInstancedMesh){const local=new THREE.Matrix4();instanced.getMatrixAt(index,local);world.multiply(local);}
       const layerName=mesh.userData.studioInstanceLayerNames?.[index];let layerOverride:number|undefined;
       if(layerName){layerOverride=objectIndex.get(layerName);if(layerOverride===undefined){layerOverride=objects.length;objects.push(layerName);objectIndex.set(layerName,layerOverride);}}
-      instances.push({blas,world,part:mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh),castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,layerOverride});
+      instances.push({blas,world,part:mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh),castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,layerOverride,primaryVisible:mesh.userData.studioPrimaryVisible!==false});
       bounds.union(blas.bounds.clone().applyMatrix4(world));
     }
   }
@@ -296,7 +297,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       sdata.set([w[r]!, w[4 + r]!, w[8 + r]!, 0], o + 24 + r * 4);
     }
     sdata[o + 15] = geometry.roots.get(blas)!;
-    const override=instances[top.order[k]!]!.layerOverride;sdata[o+23]=override===undefined?0:override+1;
+    const override=instances[top.order[k]!]!.layerOverride;sdata[o+19]=override===undefined?0:2*(override+1);sdata[o+23]=instances[top.order[k]!]!.primaryVisible?0:1;
   }
 
   void environment;

@@ -47,7 +47,7 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
       let pixel=center+offset;
       if(any(pixel<vec2i(0))||any(pixel>=vec2i(R.dims.xy))){continue;}
       let h=reservoirs_in[u32(pixel.y)*R.dims.x+u32(pixel.x)];
-      if(h.key.w==0u||h.key.x>=P.counts.x||dot(h.normal.xyz,n)<.95||distance(h.surface.xyz,p)>max(.02*length(p-P.cam_pos.xyz),EPS*4.)){continue;}
+      if(h.key.w==0u||h.key.x>=P.counts.x||dot(h.normal.xyz,n)<.95||distance(h.surface.xyz,p)>max(.02*length(p-P.cam_pos.xyz),ray_epsilon()*4.)){continue;}
       let c=direct_candidate(h.key.x,h.key.y,p,n,v,m,w,floor_hit);
       let count=min(h.key.z,16u);let weight=c.importance*h.weights.x*f32(count);
       total_weight+=weight;candidates+=count;

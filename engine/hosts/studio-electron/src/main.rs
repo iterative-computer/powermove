@@ -192,7 +192,7 @@ impl Host {
         let tan_y = (camera.fov.to_radians() * 0.5).tan();
         let (lo, hi) = r.bounds();
         let center = (lo + hi) * 0.5;
-        let view = json!({"camera":{"position":camera.position.to_array(),"forward":forward.to_array(),"right":right.to_array(),"up":up.to_array(),"tanY":tan_y,"aspect":16.0/9.0,"lensRadius":if camera.f_stop>0.{camera.focal_mm/(2.*camera.f_stop)}else{0.},"focus":camera.focus.map(|f|(f-camera.position).dot(forward)).unwrap_or((camera.target-camera.position).length())},"exposure":r.scene.exposure,"backdrop":r.scene.backdrop.to_array(),"backdropOpaque":true,"shadowCatcher":r.scene.shadow_catcher,"shadows":true,"floorY":0.,"environment":{"zenith":r.scene.environment.0.to_array(),"horizon":r.scene.environment.1.to_array(),"ground":(r.scene.environment.1*0.5).to_array()},"bounds":[center.x,center.y,center.z,(hi-lo).length()*0.5]});
+        let view = json!({"camera":{"position":camera.position.to_array(),"forward":forward.to_array(),"right":right.to_array(),"up":up.to_array(),"tanY":tan_y,"aspect":16.0/9.0,"lensRadius":camera.aperture_radius(r.scene.meters_per_unit),"focus":camera.focus.map(|f|(f-camera.position).dot(forward)).unwrap_or((camera.target-camera.position).length())},"exposure":r.scene.exposure,"backdrop":r.scene.backdrop.to_array(),"backdropOpaque":true,"shadowCatcher":r.scene.shadow_catcher,"shadows":true,"floorY":0.,"environment":{"zenith":r.scene.environment.0.to_array(),"horizon":r.scene.environment.1.to_array(),"ground":(r.scene.environment.1*0.5).to_array()},"bounds":[center.x,center.y,center.z,(hi-lo).length()*0.5]});
         Ok((
             json!({"positions":positions,"tris":tris,"nodes":nodes,"materials":materials,"sdata":sdata,"topNodes":r.top_nodes,"instanceCount":r.placements.len(),"lightCount":p.lights.len(),"objects":r.identities,"view":view,"bounds":{"min":lo.to_array(),"max":hi.to_array()},"texture":texture}),
             binary,
@@ -300,6 +300,7 @@ impl Host {
                 if lighting_or_materials_changed {
                 // Small material/light arrays can be rebuilt without touching meshes or BLAS.
                 let metadata = Scene {
+                    meters_per_unit:r.scene.meters_per_unit,
                     instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![],
                     world: r.scene.world.clone(),
                     objects: vec![],

@@ -76,9 +76,9 @@ it('keeps scatter deterministic and matches a flat image heightfield', () => {
   const m = instanceMatrix({ object: 0, rotation: { x: 20, y: 40, z: 60 }, scale: { x: 2, y: 3, z: 4 } });
   expect(m.determinant()).toBeCloseTo(24, 6);
 });
-import { compileSceneDescription, describePreparedScene } from './scene-description';
+import { compileSceneDescription, describePreparedScene, viewFromDescription } from './scene-description';
 import type { StudioView } from './gpu';
-it('roundtrips a world without adding a second generated sun', () => {
+it('roundtrips a world, layer flags and visibility without adding a second sun', () => {
   const graph = new THREE.Scene(),
     mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial());
   mesh.userData.sceneId = 'box';
@@ -105,15 +105,25 @@ it('roundtrips a world without adding a second generated sun', () => {
   };
   const doc = describePreparedScene(prepared, view, []);
   doc.scene.world = { sky: { elevation: 45 } };
+  doc.scene.meters_per_unit = 1;
+  doc.scene.camera.focal_mm = 50;
+  doc.scene.camera.f_stop = 4;
+  expect(viewFromDescription(doc, 1).camera.lensRadius).toBeCloseTo(0.00625, 7);
+  doc.object_ids[0]!.primary_visible = false;
   doc.scene.instances = [
-    { object: 0, position: { x: 1, y: 0, z: 0 } },
+    { object: 0, layer: 0, position: { x: 1, y: 0, z: 0 } },
     { object: 0, position: { x: -1, y: 0, z: 0 } },
   ];
   const first = compileSceneDescription(doc);
   expect(first.scene.instanceCount).toBe(2);
   expect(first.scene.lightCount).toBe(1);
   expect(first.scene.triangles).toBe(12);
+  const offset = first.scene.lightCount * 16;
+  expect([first.scene.sdata[offset + 19], first.scene.sdata[offset + 36 + 19]]).toContain(2);
+  expect([first.scene.sdata[offset + 23], first.scene.sdata[offset + 36 + 23]]).toEqual([1, 1]);
   const roundtrip = describePreparedScene(first.scene, view, []);
+  expect(roundtrip.object_ids.every((o) => o.primary_visible === false)).toBe(true);
+  expect(roundtrip.scene.meters_per_unit).toBe(1);
   expect(roundtrip.scene.extra_lights).toHaveLength(0);
   expect(compileSceneDescription(roundtrip).scene.lightCount).toBe(1);
 });

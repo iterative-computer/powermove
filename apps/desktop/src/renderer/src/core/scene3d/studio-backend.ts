@@ -53,6 +53,7 @@ export type StudioSceneDescription = {
   version: 1;
   /** Direct serialized Rust Scene. Mesh positions/normals are evaluated world space. */
   scene: {
+    meters_per_unit?:number;
     world?: StudioWorld;
     instances?: StudioInstance[];
     terrains?: StudioTerrain[];

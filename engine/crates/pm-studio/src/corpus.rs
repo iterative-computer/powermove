@@ -38,6 +38,7 @@ fn add_box(s: &mut Scene, at: Vec3, size: Vec3, material: usize) {
 }
 fn base(sky: &str) -> Scene {
     Scene {
+        meters_per_unit:1.,
         world: World {
             sky: Sky::preset(sky),
             ..Default::default()

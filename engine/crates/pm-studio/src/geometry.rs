@@ -72,6 +72,9 @@ impl Scene {
             }
             for scatter in &self.scatters {
                 let generated = scatter.generate(&s);
+                if s.instances.len() + generated.len() > 1_000_000 {
+                    return Err("scene exceeds one million instances".into());
+                }
                 s.instances.extend(generated);
             }
             let mut layers = s
@@ -191,7 +194,7 @@ pub fn prepare(s: &Scene) -> Prepared {
                 normal[2][r],
                 match r {
                     0 => roots[inst.object] as f32,
-                    2 => inst.layer.map_or(0., |l| (l + 1) as f32),
+                    1 => inst.layer.map_or(0., |l| ((l + 1) * 2) as f32),
                     _ => 0.,
                 },
             ]);

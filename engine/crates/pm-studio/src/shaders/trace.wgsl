@@ -97,7 +97,7 @@ fn vector_to_world(i: u32, v: vec3f) -> vec3f {
 const GRID_CELLS: u32 = 524288u;
 
 const PI: f32 = 3.14159265;
-const EPS: f32 = 0.004;
+const LEGACY_EPS: f32 = 0.004;
 const BIG: f32 = 1e30;
 
 var<private> seed: u32;
@@ -128,7 +128,7 @@ fn hit_tri(ro: vec3f, rd: vec3f, i: u32, best: f32) -> vec3f {
   let v = dot(rd, qv) * inv;
   if (v < 0.0 || u + v > 1.0) { return vec3f(BIG, 0.0, 0.0); }
   let d = dot(e2, qv) * inv;
-  if (d <= EPS || d >= best) { return vec3f(BIG, 0.0, 0.0); }
+  if (d <= ray_epsilon() || d >= best) { return vec3f(BIG, 0.0, 0.0); }
   return vec3f(d, u, v);
 }
 
@@ -229,7 +229,7 @@ fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
     var hit=intersect(origin,rd,left,false);
     if(hit.tri<0){return Hit(tmax,-1,vec2f(0.0),0u);}
     if(sdata[P.counts.x*4u+hit.inst*9u+5u].w<0.5){hit.t+=offset;return hit;}
-    let step=hit.t+EPS;origin+=rd*step;offset+=step;left-=step;
+    let step=hit.t+ray_epsilon();origin+=rd*step;offset+=step;left-=step;
     if(left<=0.0){return Hit(tmax,-1,vec2f(0.0),0u);}
   }
   return Hit(tmax,-1,vec2f(0.0),0u);
@@ -237,7 +237,7 @@ fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
 
 fn surface_transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   var o = ro;
-  var left = dist - 2.0 * EPS;
+  var left = dist - 2.0 * ray_epsilon();
   var t = vec3f(1.0);
   var nearest = false;
   for (var k = 0; k < 6; k++) {
@@ -246,7 +246,7 @@ fn surface_transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
     let sf = surface(o, rd, h);
     let m = sf.m;
     if ((u32(m.policy.y) & 1u) == 0u) {
-      o += rd * (h.t + EPS); left -= h.t + EPS; nearest = true;
+      o += rd * (h.t + ray_epsilon()); left -= h.t + ray_epsilon(); nearest = true;
       if (left <= 0.0) { return t; } continue;
     }
     // With caustics on, light through glass arrives as photons (bent and
@@ -258,8 +258,8 @@ fn surface_transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
     t *= mix(vec3f(1.0), m.base.xyz, tr) * min(through, 1.0);
     // Continue past this surface; nearest-first from now on so none is skipped.
     nearest = true;
-    o = o + rd * (h.t + EPS);
-    left -= h.t + EPS;
+    o = o + rd * (h.t + ray_epsilon());
+    left -= h.t + ray_epsilon();
     if (left <= 0.0) { return t; }
   }
   return t;
@@ -403,7 +403,7 @@ fn ambient_visibility(ro:vec3f,rd:vec3f,dist:f32) -> f32 {
     let hit=intersect(origin,rd,left,false);if(hit.tri<0){return visible;}
     let sf=surface(origin,rd,hit);
     if((u32(sf.m.policy.y)&1u)!=0u){visible*=1.0-sf.m.extra.z;if(visible<0.001){return 0.0;}}
-    origin+=rd*(hit.t+EPS);left-=hit.t+EPS;if(left<=0.0){return visible;}
+    origin+=rd*(hit.t+ray_epsilon());left-=hit.t+ray_epsilon();if(left<=0.0){return visible;}
   }
   return visible;
 }
@@ -420,6 +420,22 @@ fn world_on() -> bool {
   let o=world_base();
   if(arrayLength(&sdata)<o+6u){return false;}
   return sdata[o].x==735031. && sdata[o].y==1.;
+}
+// Product scenes retain their established tolerance. Environment scenes use
+// the world extent/coordinate magnitude, so millimetre glass and trim in a
+// metre-sized room are not skipped by the old 0.004-unit near threshold.
+var<private> cached_epsilon:f32;
+fn ray_epsilon()->f32 {
+  if(cached_epsilon>0.){return cached_epsilon;}
+  cached_epsilon=LEGACY_EPS;
+  if(world_on()){
+    let h=world_row(0u);let fog=world_row(2u);let volumes=world_row(4u);
+    if(h.z*h.w>0. || fog.w>0. || volumes.y>0.){
+      let magnitude=max(P.bounds.w,max(max(abs(P.bounds.x),abs(P.bounds.y)),abs(P.bounds.z)));
+      cached_epsilon=clamp(magnitude*1e-6,1e-6,LEGACY_EPS);
+    }
+  }
+  return cached_epsilon;
 }
 fn world_row(i:u32)->vec4f {return sdata[world_base()+i];}
 fn map_count()->u32 {if(!world_on()){return 0u;}return u32(world_row(0u).z)*u32(world_row(0u).w);}
@@ -508,8 +524,8 @@ fn sphere_t(ro: vec3f, rd: vec3f, c: vec3f, r: f32) -> f32 {
   if (disc < 0.0) { return BIG; }
   let s = sqrt(disc);
   var t = -b - s;
-  if (t <= EPS) { t = -b + s; }
-  if (t <= EPS) { return BIG; }
+  if (t <= ray_epsilon()) { t = -b + s; }
+  if (t <= ray_epsilon()) { return BIG; }
   return t;
 }
 
@@ -521,7 +537,7 @@ fn hit_light(ro: vec3f, rd: vec3f, l: Light) -> f32 {
     let dn = dot(rd, n);
     if (dn >= 0.0) { return BIG; } // one-sided, emits along n
     let t = dot(l.pos.xyz - ro, n) / dn;
-    if (t <= EPS) { return BIG; }
+    if (t <= ray_epsilon()) { return BIG; }
     let q = ro + rd * t - l.pos.xyz;
     let uu = dot(q, l.u.xyz) / dot(l.u.xyz, l.u.xyz);
     let vv = dot(q, l.v.xyz) / dot(l.v.xyz, l.v.xyz);
@@ -948,7 +964,7 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     if ((u32(m.policy.y) & 8u) != 0u) { m.emit = vec4f(m.emit.xyz*c.rgb,m.emit.w); }
   }
   let instance_base=P.counts.x*4u+h.inst*9u;
-  if(sdata[instance_base+4u].w>0.5){
+  if((u32(max(sdata[instance_base+4u].w,0.))&1u)!=0u){
     let color=vec3f(sdata[instance_base+6u].w,sdata[instance_base+7u].w,sdata[instance_base+8u].w);
     m.base=vec4f(m.base.xyz*color,m.base.w);
     if((u32(m.policy.y)&8u)!=0u){m.emit=vec4f(m.emit.xyz*color,m.emit.w);}
@@ -965,7 +981,7 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   }
   if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w); }
   m.spec.x = max(m.spec.x, 0.002);
-  let layer_override=sdata[instance_base+5u].w;
+  let layer_override=floor(max(sdata[instance_base+4u].w,0.)*0.5);
   return Surface(p, n, ng, uv, m, select(u32(t.uv2m.w),u32(max(layer_override-1.,0.)),layer_override>0.));
 }
 
@@ -1015,7 +1031,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
     let q = p + d * tf;
     let n = vec3f(0.0, 1.0, 0.0);
     let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0), vec4f(1.0, 7.0, 0.0, 0.0), vec4f(-1.0, -1.0, -1.0, 1.0));
-    return sample_lights(q + n * EPS, n, -d, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
+    return sample_lights(q + n * ray_epsilon(), n, -d, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
   }
   let sf = surface(p, d, h);
   var n = sf.n;
@@ -1023,7 +1039,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   if (dot(d, ng) > 0.0) { n = -n; ng = -ng; }
   let nv = max(dot(n, -d), 1e-4);
   shade_t = vector_to_world(h.inst, tris[u32(h.tri)].tangent.xyz);
-  return sf.m.emit.xyz + sample_lights(sf.p + ng * EPS, n, -d, sf.m, lobe_probs(sf.m, nv), false);
+  return sf.m.emit.xyz + sample_lights(sf.p + ng * ray_epsilon(), n, -d, sf.m, lobe_probs(sf.m, nv), false);
 }
 
 // The sun disc as seen along an escaping ray (no MIS: used where light
@@ -1148,10 +1164,10 @@ fn path(px: vec2f) -> Sample {
       // A matte floor in reflections: one diffuse bounce, lit by the lights.
       let n = vec3f(0.0, 1.0, 0.0);
       let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0), vec4f(1.0, 7.0, 0.0, 0.0), vec4f(-1.0, -1.0, -1.0, 1.0));
-      s.radiance += tp * sample_lights(p + n * EPS, n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
+      s.radiance += tp * sample_lights(p + n * ray_epsilon(), n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
       if (photons_on) { s.radiance += tp * P.env_horizon.w / PI * caustic_at(p); }
       tp *= P.env_horizon.w;
-      ro = p + n * EPS;
+      ro = p + n * ray_epsilon();
       rd = cosine_dir(n, rnd2());
       chain = select(0, 1, photons_on);
       last_pdf = dot(n, rd) / PI;
@@ -1162,11 +1178,11 @@ fn path(px: vec2f) -> Sample {
     shade_t = vector_to_world(h.inst, tris[u32(h.tri)].tangent.xyz);
     // Partly transparent surfaces: pass straight through with 1 − opacity.
     if (m.extra.z < 0.999 && rnd() >= m.extra.z) {
-      ro = sf.p + rd * EPS;
+      ro = sf.p + rd * ray_epsilon();
       continue;
     }
     let front = dot(rd, sf.ng) < 0.0;
-    if (!front && (u32(m.policy.y) & 4u) == 0u) { ro = sf.p + rd * EPS; continue; }
+    if (!front && (u32(m.policy.y) & 4u) == 0u) { ro = sf.p + rd * ray_epsilon(); continue; }
     ambient_response = m.policy.x;
     var n = sf.n;
     var ng = sf.ng;
@@ -1179,7 +1195,7 @@ fn path(px: vec2f) -> Sample {
     }
     if ((u32(m.policy.y) & 8u) != 0u) { return s; }
     var nv = max(dot(n, v), 1e-4);
-    let p = sf.p + ng * EPS;
+    let p = sf.p + ng * ray_epsilon();
     // A near-mirror coat (cover glass, lacquer) is traced on every sample
     // instead of being picked 1 time in ~16, so its reflections never
     // sparkle; the path continues through the base layer.
@@ -1227,11 +1243,11 @@ fn path(px: vec2f) -> Sample {
       let F = fresnel_dielectric(abs(dot(v, hm)), eta);
       if (rnd() < F) {
         rd = reflect(-v, hm);
-        ro = sf.p + ng * EPS;
+        ro = sf.p + ng * ray_epsilon();
       } else {
         let r = refract(-v, hm, 1.0 / eta);
-        if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * EPS; }
-        else { rd = r; ro = sf.p - ng * EPS; tp *= m.base.xyz; }
+        if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * ray_epsilon(); }
+        else { rd = r; ro = sf.p - ng * ray_epsilon(); tp *= m.base.xyz; }
       }
       if (chain > 0) { chain = 2; }
       last_pdf = 0.0;
@@ -1255,13 +1271,13 @@ fn path(px: vec2f) -> Sample {
       if (chain > 0 && m.base.w > 0.5 && m.spec.x < 0.25) { chain = 2; } else { chain = 0; }
     } else if (m.emit.w > 0.0) {
       // Subsurface: a random walk inside the object; the path leaves where it exits.
-      let walk = random_walk(sf.p - ng * EPS, cosine_dir(-n, rnd2()), m);
+      let walk = random_walk(sf.p - ng * ray_epsilon(), cosine_dir(-n, rnd2()), m);
       if (walk.w <= 0.0) { return s; }
       chain = 0;
       tp *= m.base.xyz;
       ro = walk.xyz;
       rd = cosine_dir(exit_n, rnd2());
-      ro = ro + exit_n * EPS;
+      ro = ro + exit_n * ray_epsilon();
       last_pdf = max(dot(exit_n, rd), 1e-4) / PI;
       continue;
     } else {
@@ -1471,7 +1487,7 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
     let sf = surface(ro, rd, h);
     let m = sf.m;
     let front = dot(rd, sf.ng) < 0.0;
-    if (!front && (u32(m.policy.y) & 4u) == 0u) { ro = sf.p + rd * EPS; continue; }
+    if (!front && (u32(m.policy.y) & 4u) == 0u) { ro = sf.p + rd * ray_epsilon(); continue; }
     var n = sf.n;
     var ng = sf.ng;
     if (!front) { n = -n; ng = -ng; }
@@ -1490,18 +1506,18 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
       let eta = select(1.0 / ior, ior, front);
       let F = fresnel_dielectric(abs(dot(v, hm)), eta);
       if (rnd() < F) {
-        rd = reflect(-v, hm); ro = sf.p + ng * EPS;
+        rd = reflect(-v, hm); ro = sf.p + ng * ray_epsilon();
       } else {
         let r = refract(-v, hm, 1.0 / eta);
-        if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * EPS; }
-        else { rd = r; ro = sf.p - ng * EPS; flux *= m.base.xyz; }
+        if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * ray_epsilon(); }
+        else { rd = r; ro = sf.p - ng * ray_epsilon(); flux *= m.base.xyz; }
       }
       specular++;
     } else if (m.base.w > 0.5 && m.spec.x < 0.25) {
       // Polished metal: a near-mirror bounce tinted by the metal.
       let tb = basis(n);
       rd = reflect(-v, tb * sample_vndf(transpose(tb) * v, max(m.spec.x * m.spec.x, 0.0005), rnd2()));
-      ro = sf.p + ng * EPS;
+      ro = sf.p + ng * ray_epsilon();
       flux *= m.base.xyz;
       specular++;
     } else {

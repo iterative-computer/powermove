@@ -8,6 +8,7 @@ use pm_studio::{
 };
 fn world_scene() -> Scene {
     Scene {
+        meters_per_unit: 1.,
         world: World {
             hdri: Some(EnvironmentMap {
                 width: 8,
@@ -234,4 +235,50 @@ fn live_height_fog_matches_closed_form_optical_depth() {
         (got - expected).abs() < 0.01,
         "height fog expected {expected}, got {got}"
     );
+}
+
+#[test]
+fn metre_scenes_keep_millimetre_surface_hits() {
+    let mut r = Renderer::new(32, 32).expect("GPU");
+    let mut s = world_scene();
+    s.camera.position = v3(0., 0., 0.001);
+    s.camera.target = Vec3::ZERO;
+    s.objects.push(Object {
+        mesh: mesh::Mesh {
+            positions: vec![v3(-1., -1., 0.), v3(1., -1., 0.), v3(0., 1., 0.)],
+            normals: vec![v3(0., 0., 1.); 3],
+            uvs: vec![[0., 0.]; 3],
+            indices: vec![[0, 1, 2]],
+        },
+        material: 0,
+    });
+    r.set_scene(&s, &s.prepare());
+    let hit = r.probe(16., 16.);
+    assert!(
+        hit[1] >= 0. && hit[5] >= 0.,
+        "both traversal paths must retain the thin nearby surface: {hit:?}"
+    );
+    assert!((hit[0] - 0.001).abs() < 0.0001 && (hit[4] - 0.001).abs() < 0.0001);
+}
+
+#[test]
+fn instance_layer_override_does_not_hide_the_geometry() {
+    let mut r = Renderer::new(32, 32).expect("GPU");
+    let mut s = world_scene();
+    s.objects.push(Object {
+        mesh: mesh::sphere(Vec3::ZERO, 1., 16, 32),
+        material: 0,
+    });
+    s.instances = vec![pm_studio::scatter::Instance {
+        layer: Some(7),
+        ..Default::default()
+    }];
+    r.set_scene(&s, &s.prepare());
+    for rt in [true, false] {
+        r.hardware_rt = rt;
+        let pick = r
+            .pick_surface(0.5, 0.5)
+            .expect("layer override must remain visible");
+        assert_eq!(pick.layer, 7);
+    }
 }

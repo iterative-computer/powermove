@@ -59,7 +59,7 @@ impl Instance {
                 .to_array()
                 .iter()
                 .any(|x| !x.is_finite() || *x < 1e-4)
-            || self.layer.is_some_and(|l| l >= 16_777_215)
+            || self.layer.is_some_and(|l| l >= 8_388_607)
         {
             Err("invalid instance transform, source object or layer".into())
         } else {

@@ -239,7 +239,7 @@ impl ResidentScene {
                     nr[0][r],
                     nr[1][r],
                     nr[2][r],
-                    match r {0=>roots[source] as f32,2=>self.instance_layers[i].map_or(0.,|l|(l+1) as f32),_=>0.},
+                    match r {0=>roots[source] as f32,1=>self.instance_layers[i].map_or(0.,|l|((l+1)*2) as f32),_=>0.},
                 ]);
             }
             for r in 0..3 {
@@ -352,6 +352,7 @@ trait Metadata {
 impl Metadata for Scene {
     fn clone_without_objects(&self) -> Scene {
         Scene {
+            meters_per_unit:self.meters_per_unit,
             instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![],
             world: self.world.clone(),
             objects: vec![],
@@ -369,6 +370,7 @@ impl Metadata for Scene {
 }
 pub fn validate(s: &Scene) -> Result<(), String> {
     s.world.validate()?;
+    if !s.meters_per_unit.is_finite()||s.meters_per_unit<=0.{return Err("scene scale must be positive metres per unit".into());}
     for i in &s.instances {i.validate(s.objects.len())?;}
     if s.objects.len() > 65535 {
         return Err("scene needs 1–65535 objects".into());
