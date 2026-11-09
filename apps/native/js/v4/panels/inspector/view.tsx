@@ -293,9 +293,13 @@ function Field({
   };
   switch (control.kind) {
     case "text":
-      // API-GAP I1: kit has no multiline text/line-limit recipe. Keep
-      // the authored text in the existing native text component pending that API.
-      return <TextField {...bound} value={control.value} />;
+      return (
+        <TextField
+          {...bound}
+          value={control.value}
+          multiline={control.multiline}
+        />
+      );
     case "choice":
       return (
         <PopUpButton
@@ -408,6 +412,18 @@ function Property({
       <InspectorRow
         label={row.label}
         title={row.locked ? "Locked layers can’t be edited." : row.label}
+        // A multi-line editor grows its row; the label and diamond sit at its top.
+        style={
+          row.control.kind === "text" && row.control.multiline
+            ? {
+                height: null,
+                minHeight: token("metrics.row"),
+                alignItems: "start",
+                paddingTop: token("metrics.inner_radius"),
+                paddingBottom: token("metrics.inner_radius"),
+              }
+            : undefined
+        }
         leading={
           row.animation ? (
             <Action

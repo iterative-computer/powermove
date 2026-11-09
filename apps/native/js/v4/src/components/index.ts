@@ -134,8 +134,10 @@ export function NumberField(props: NumberFieldProps) {
     },
   });
 }
-export function TextField(props: Bound<string>) {
-  return field("text-field", "text", "input", props);
+/** `multiline`: a native multi-line editor (Return makes a new line). */
+export function TextField(props: Bound<string> & { multiline?: boolean }) {
+  const { multiline, ...rest } = props;
+  return field("text-field", "text", multiline ? "textarea" : "input", rest);
 }
 export interface Option {
   v: Json;
