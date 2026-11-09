@@ -119,7 +119,12 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
+            build_options(
+                &comp,
+                request,
+                self.shaders.fallback_runner,
+                self.isolate_layers,
+            ),
             None,
             None,
         );
