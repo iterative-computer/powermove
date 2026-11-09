@@ -12,6 +12,8 @@ pub enum TaskKind {
     Import,
     Export,
     Purge,
+    /// Generate Captions: speech heard, in seconds of source audio.
+    Captions,
 }
 impl TaskKind {
     pub fn label(&self) -> &'static str {
@@ -22,6 +24,7 @@ impl TaskKind {
             Self::Import => "Importing",
             Self::Export => "Exporting",
             Self::Purge => "Freeing Disk Space",
+            Self::Captions => "Generating Captions",
         }
     }
     pub fn symbol(&self) -> &'static str {
@@ -32,6 +35,7 @@ impl TaskKind {
             Self::Import => "square.and.arrow.down",
             Self::Export => "square.and.arrow.up",
             Self::Purge => "trash",
+            Self::Captions => "captions.bubble",
         }
     }
 }
@@ -40,6 +44,7 @@ pub enum ProgressUnit {
     Frames,
     Bytes,
     Items,
+    Seconds,
 }
 /// UI progress must pattern-match this type: unknown totals have no percentage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

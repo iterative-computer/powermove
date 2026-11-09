@@ -1064,6 +1064,7 @@ pub fn empty_state(
         ),
         "scopes" => ("No Picture", "Open a composition to see its scopes.", None),
         "mixer" => ("No Audio", "No audio in this composition.", None),
+        "captions" => ("No Captions", "Open a project to see its captions.", None),
         _ => ("Nothing Here", "This panel has nothing to show yet.", None),
     }
 }
@@ -1114,6 +1115,7 @@ fn builtin_title(id: &str) -> &str {
         "notes" => "Notes",
         "scopes" => "Scopes",
         "mixer" => "Mixer",
+        "captions" => "Captions",
         _ => id,
     }
 }
@@ -1128,7 +1130,7 @@ pub fn stacks(id: &str) -> bool {
     id != VIEWER
 }
 /// Every built-in panel, in Window ▸ Panels order.
-pub const PANELS: [&str; 13] = [
+pub const PANELS: [&str; 14] = [
     "assets",
     "layer-effects",
     "viewer",
@@ -1142,6 +1144,7 @@ pub const PANELS: [&str; 13] = [
     "notes",
     "scopes",
     "mixer",
+    "captions",
 ];
 /// Window edges that can receive a docked panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

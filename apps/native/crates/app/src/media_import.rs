@@ -84,6 +84,16 @@ impl Controller {
     /// Files dropped on the window: projects open, media lands at the playhead.
     pub(crate) fn import_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let media = self.open_dropped_project(paths, cx);
+        // SubRip and WebVTT files become captions layers at the playhead.
+        let (captions, media): (Vec<_>, Vec<_>) = media
+            .into_iter()
+            .partition(|p| crate::captions_panel::is_caption_file(p));
+        if self.session.is_some() {
+            let at = self.time();
+            for path in captions {
+                self.import_captions(path, at, cx);
+            }
+        }
         if !media.is_empty() && self.session.is_none() {
             self.message = "Open a project before importing media".into();
             cx.notify();

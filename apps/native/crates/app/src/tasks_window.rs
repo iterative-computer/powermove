@@ -24,6 +24,7 @@ fn units(unit: Option<ProgressUnit>) -> &'static str {
     match unit {
         Some(ProgressUnit::Frames) => "frames",
         Some(ProgressUnit::Items) => "items",
+        Some(ProgressUnit::Seconds) => "seconds",
         Some(ProgressUnit::Bytes) | None => "",
     }
 }
@@ -42,6 +43,7 @@ pub fn detail(task: &Task) -> String {
             pm_promedia::tasks::TaskKind::Export => "Exported".into(),
             pm_promedia::tasks::TaskKind::Render => "Rendered".into(),
             pm_promedia::tasks::TaskKind::Import => "Imported".into(),
+            pm_promedia::tasks::TaskKind::Captions => "Added".into(),
             _ => "Created".into(),
         },
         TaskState::Failed => p.error_message.unwrap_or("").into(),
@@ -81,7 +83,9 @@ impl TasksWindow {
                 Some(pm_promedia::tasks::TaskKind::Render) => {
                     let _ = tasks.cancel(id);
                 }
-                Some(pm_promedia::tasks::TaskKind::Export) => {
+                Some(
+                    pm_promedia::tasks::TaskKind::Export | pm_promedia::tasks::TaskKind::Captions,
+                ) => {
                     drop(tasks);
                     crate::export_coordinator::cancel_export(id);
                 }

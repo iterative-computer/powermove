@@ -17,6 +17,8 @@ mod first_run;
 mod gizmo;
 mod keyframe_sheets;
 
+mod captions_generate;
+mod captions_panel;
 #[cfg(test)]
 mod gizmo_tests;
 mod layer_commands;
@@ -58,6 +60,7 @@ mod ticket;
 mod timeline_surface;
 #[cfg(test)]
 mod timeline_tests;
+mod transcription;
 mod updates;
 mod v4_compile;
 mod v4_control;
@@ -189,6 +192,7 @@ fn main() -> Result<()> {
         return mcp_services::headless(profile, exports, launch);
     }
     std::fs::create_dir_all(&profile)?;
+    transcription::install(&profile);
     // Set before any worker exists. This also disables shell NSUserDefaults restoration.
     unsafe {
         std::env::set_var("PM_NATIVE_SHELL_STATE", profile.join("shell-layouts.json"));

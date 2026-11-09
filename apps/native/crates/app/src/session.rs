@@ -73,6 +73,7 @@ pub struct Controller {
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
     pub mixer: crate::mixer_panel::State,
+    pub captions: crate::captions_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -174,6 +175,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
                 .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::captions_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -420,6 +422,7 @@ impl Controller {
             scopes: Default::default(),
             perf: Default::default(),
             mixer: Default::default(),
+            captions: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -1553,6 +1556,18 @@ impl Controller {
             "import" => self.pick_media(None, true, cx),
             "importFolder" => self.pick_media_folder(None, cx),
             "importSequence" => self.pick_sequence(cx),
+            "addCaption" | "importCaptions" | "exportCaptions" | "generateCaptions"
+            | "deleteCaptions" | "splitCaption" => {
+                return self.captions_command(&cmd.name, window, cx);
+            }
+            "speechDelete" => {
+                if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
+                    self.confirm_speech_delete(id, cx);
+                }
+            }
+            name if name.starts_with("captions.layer:") => {
+                return self.captions_command(name, window, cx);
+            }
             "open" => {
                 let rx = platform::paths(&self.host.borrow().window, false);
                 cx.spawn(async move |this, cx| {
