@@ -63,68 +63,11 @@ const EXPORT_ROWS: [(&str, &str, &str, &str); 8] = [
         "Keep the background see-through, with straight alpha.",
     ),
 ];
-/// The formats this app exports, with v1's labels.
-const EXPORT_FORMATS: [(&str, &str); 6] = [
-    ("prores", "QuickTime · ProRes 4444"),
-    ("mp4", "MP4 · H.264"),
-    ("webm", "WebM · VP9"),
-    ("png", "PNG Sequence"),
-    ("still", "Still Frame (PNG)"),
-    ("json", "Project File (.pmv)"),
-];
-/// JavaScript `Number(value)` for a JSON value.
-fn js_number(value: &Value) -> f64 {
-    match value {
-        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
-        Value::Bool(b) => f64::from(u8::from(*b)),
-        Value::Null => 0.,
-        Value::String(text) => {
-            let text = text.trim();
-            if text.is_empty() {
-                0.
-            } else {
-                text.parse().unwrap_or(f64::NAN)
-            }
-        }
-        _ => f64::NAN,
-    }
-}
-/// main's `normalizeExportDefaults(raw, fallbackFps)`, field for field.
-pub(crate) fn normalize_export_defaults(stored: &Value, fallback_fps: f64) -> Value {
-    let pick = |key: &str, allowed: &[&str], fallback: &str| {
-        let value = stored[key].as_str().filter(|v| allowed.contains(v));
-        json!(value.unwrap_or(fallback))
-    };
-    let flag = |key: &str, fallback: bool| stored[key].as_bool().unwrap_or(fallback);
-    let base_fps = if fallback_fps.is_finite() && fallback_fps > 0. {
-        fallback_fps.min(240.)
-    } else {
-        30.
-    };
-    let fps = js_number(&stored["fps"]);
-    let scale = js_number(&stored["scale"]);
-    let number = |n: f64| serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number);
-    json!({
-        "format": pick("format", &V1_FORMATS, "mp4"),
-        "scale": number(if !scale.is_finite() || scale <= 0. { 1. } else { scale.clamp(0.01, 16.) }),
-        "fps": number(if fps.is_finite() && fps > 0. { fps.min(240.) } else { base_fps }),
-        "range": pick("range", &["work", "all"], "work"),
-        "quality": pick("quality", &["draft", "high", "max"], "high"),
-        "mblur": flag("mblur", true),
-        "audio": flag("audio", true),
-        "alpha": flag("alpha", false),
-    })
-}
 /// A usable work area (`[start, end]`, end after start), as main's planner asks.
 pub(crate) fn work_span(work: &Value) -> Option<(f64, f64)> {
     let (a, b) = (work.get(0)?.as_f64()?, work.get(1)?.as_f64()?);
     (b > a).then_some((a, b))
 }
-/// main's `EXPORT_FORMAT_OPTIONS` values: a stored format is kept even where
-/// this app has no encoder for it.
-const V1_FORMATS: [&str; 8] = [
-    "prores", "mp4", "webm", "rec", "png", "still", "web", "json",
-];
 /// v1 `EXPORT_FRAME_RATES`.
 const EXPORT_FRAME_RATES: [f64; 8] = [
     24000. / 1001.,
@@ -391,7 +334,7 @@ impl Backend {
             .get("exportDefaults")
             .map(|n| wire(&n.to_value()))
             .unwrap_or(Value::Null);
-        normalize_export_defaults(&stored, fps)
+        pm_promedia::export_panel::normalize_defaults(&stored, fps)
     }
     fn export_default_rows(
         &mut self,
@@ -403,16 +346,14 @@ impl Backend {
             .and_then(|n| n.to_value().as_f64())
             .unwrap_or(30.);
         let d = self.export_defaults(root, fps);
+        use pm_promedia::export_panel::Format;
         let format = d["format"].as_str().unwrap_or("mp4");
-        // Which settings a format reads (v1 `exportFieldSupport`); the rest stay
-        // visible but dimmed.
-        let video = matches!(format, "prores" | "mp4" | "webm");
-        let reads = |field: &str| match field {
-            "scale" | "fps" | "range" => format != "json",
-            "quality" => matches!(format, "mp4" | "webm"),
-            "mblur" | "audio" => video,
-            "alpha" => format == "prores" || format == "png" || format == "still",
-            _ => true,
+        let exported = serde_json::from_value::<Format>(json!(format)).ok();
+        // A v1 format this app can't export (rec, web) reads its size and range.
+        let reads = |field: &str| {
+            exported.map_or(matches!(field, "scale" | "fps" | "range"), |f| {
+                f.reads(field)
+            })
         };
         let ids: Vec<String> = EXPORT_ROWS
             .iter()
@@ -435,12 +376,12 @@ impl Backend {
                 let key = format!("project.{id}");
                 let (control, options) = match *field {
                     "format" => {
-                        let mut options: Vec<Value> = EXPORT_FORMATS
+                        let mut options: Vec<Value> = Format::ALL
                             .iter()
-                            .map(|(v, l)| json!({"v":v,"label":l}))
+                            .map(|f| json!({"v":f,"label":f.label()}))
                             .collect();
                         // A v1 format this app can't export still shows as stored.
-                        if !EXPORT_FORMATS.iter().any(|(v, _)| *v == format) {
+                        if exported.is_none() {
                             let label = match format {
                                 "rec" => "WebM · Realtime Capture",
                                 _ => "Web Animation · Code + Assets (.zip)",
@@ -581,7 +522,7 @@ impl Backend {
                         let mut defaults = self.export_defaults(root, fps);
                         defaults[*field] = value.clone();
                         // Only values a row offers, or a boolean for a switch.
-                        let checked = normalize_export_defaults(&defaults, fps);
+                        let checked = pm_promedia::export_panel::normalize_defaults(&defaults, fps);
                         if checked[*field] != *value {
                             return Err("Invalid export setting".into());
                         }

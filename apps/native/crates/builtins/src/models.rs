@@ -921,6 +921,9 @@ impl Backend {
                 "preset",
                 "presetName"
             ]))?;
+            let fresh =
+                serde_json::to_value(pm_promedia::export_panel::Options::new(width, height, fps))
+                    .map_err(|e| e.to_string())?;
             // As main's exporter: the project's export defaults open the sheet
             // (every project has them, normalized); the sheet's other fields keep
             // the last export's.
@@ -931,7 +934,7 @@ impl Backend {
                 .get("exportOpts")
                 .map(wire)
                 .filter(|v| crate::delivery::options(v).is_ok())
-                .unwrap_or_else(|| json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+                .unwrap_or_else(|| fresh.clone());
             let defaults = self.export_defaults(root, fps);
             let mut options = base.clone();
             for key in [
@@ -951,8 +954,9 @@ impl Backend {
             if crate::delivery::options(&options).is_err() {
                 options["format"] = base["format"].clone();
             }
-            let saved = Some(options);
-            let options=saved.filter(|v|crate::delivery::options(v).is_ok()).unwrap_or_else(||json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+            if crate::delivery::options(&options).is_err() {
+                options = fresh;
+            }
             self.native.export = json!({"version":1,"sequence":1,"project":null,"options":options,"bindings":fields,"presets":[],"capabilities":{},"run":{"phase":"idle"}});
         }
         let options: pm_promedia::export_panel::Options =
