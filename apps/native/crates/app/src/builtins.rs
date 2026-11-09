@@ -727,10 +727,17 @@ impl Controller {
             }
             let current = this
                 .update(cx, |v, _| {
-                    v.builtins
+                    let current = v
+                        .builtins
                         .runtime
                         .as_ref()
-                        .is_some_and(|r| Arc::ptr_eq(r, &runtime))
+                        .is_some_and(|r| Arc::ptr_eq(r, &runtime));
+                    // A stale open must not leave the panel marked as opening:
+                    // every later Settings/Export/Agent request would be ignored.
+                    if !current {
+                        v.builtins.opening_windows.remove(&id);
+                    }
+                    current
                 })
                 .unwrap_or(false);
             if !current {
