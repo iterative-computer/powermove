@@ -623,8 +623,8 @@ fn avif_container_transforms_follow_blink() {
         "an off-origin clap shows the whole image"
     );
     // Limited range (the app fixture) is in the class.
-    let limited = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/still-limited-range.avif");
+    let limited =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/still-limited-range.avif");
     assert_eq!(probe_image(&limited), Ok(()));
     std::fs::remove_dir_all(&d).ok();
 }

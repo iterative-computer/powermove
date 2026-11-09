@@ -77,8 +77,8 @@ fn a_scrub_frame_reports_stand_ins_until_the_exact_video_lands() {
     let gpu = pm_gpu::Gpu::new("scrub test").unwrap();
     let working = WorkingTexture::new(&gpu.device, Size::new(320, 180));
     let mut composer = Composer::new(&gpu.device, &gpu.queue);
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/h264-aac.mp4");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
     let media = MediaMap(Arc::new(BTreeMap::from([(
         "clip".to_owned(),
         Some(fixtures),

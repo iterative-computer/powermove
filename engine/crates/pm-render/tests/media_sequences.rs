@@ -332,9 +332,7 @@ fn rendition_or_reencode(dir: &std::path::Path, name: &str) -> std::path::PathBu
         e.join(name).join("native-source.webm")
     } else {
         let path = dir.join(format!("{name}.webm"));
-        let input = support::repo_root()
-            .join("engine/fixtures")
-            .join(name);
+        let input = support::repo_root().join("engine/fixtures").join(name);
         let out = Command::new(&bin)
             .args(["-v", "error", "-y", "-i"])
             .arg(input)

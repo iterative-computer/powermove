@@ -64,8 +64,8 @@ fn add_test_clean_aperture(path: &std::path::Path, width: u32, height: u32) {
 
 #[test]
 fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/h264-aac.mp4");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
     let mut renderer = Renderer::headless().unwrap();
     let (size, bytes, tags) = renderer
         .source_video_planes(&fixture, Ticks::ZERO, false)
@@ -93,11 +93,7 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     // A still cannot silently become a P3/Canvas RGBA compositor payload.
     let dir = tempfile::tempdir().unwrap();
     let still = dir.path().join("still.png");
-    std::fs::write(
-        &still,
-        include_bytes!("../../../fixtures/still-red.png"),
-    )
-    .unwrap();
+    std::fs::write(&still, include_bytes!("../../../fixtures/still-red.png")).unwrap();
     assert!(
         renderer
             .source_video_planes(&still, Ticks::ZERO, false)
@@ -107,8 +103,8 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
 
 #[test]
 fn original_prores_uses_native_conversion_when_the_presenter_cannot_import_it() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/prores422.mov");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/prores422.mov");
     let mut renderer = Renderer::headless().unwrap();
     assert!(
         renderer
@@ -845,8 +841,8 @@ fn untagged_vp9_rendition_uses_native_composition_colour() {
     // the native colour reading and conversion, without Canvas2D rounding.
     // Use the same converter flags as import.
     let dir = tempfile::tempdir().unwrap();
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/prores422.mov");
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/prores422.mov");
     let proxy = dir.path().join("browser.webm");
     let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
         .map(std::path::PathBuf::from)
@@ -1221,8 +1217,8 @@ fn minified_source_draws_reuse_one_pyramid() {
 /// layer of that asset within one code.
 #[test]
 fn monitor_reads_interpret_footage_as_composition_does() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/h264-aac.mp4");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
     let (w, h) = (160u32, 90u32);
     let interpret = json!({ "matrix": "bt709", "range": "full" });
     let (interpretation, issues) = pm_media::interpret::Interpretation::from_json(&interpret);
