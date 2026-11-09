@@ -224,6 +224,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               <UI.ProgressRow
                 id="export.progress"
                 label="Export progress"
+                // The bar speaks its label; the lines below show the words.
+                children={[]}
                 value={progress(s.run).value}
                 title={progress(s.run).eta}
                 metadata={{
