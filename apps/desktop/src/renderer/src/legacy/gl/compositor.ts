@@ -385,7 +385,7 @@ function program(key: any, frag: any, vert?: any) {
   const gl = GL.gl;
   const pending = pendingPrograms.get(key);
   if (pending) {
-    if (allowParallelCompile && !gl.getProgramParameter(pending.pr, parallelShaderCompile.COMPLETION_STATUS_KHR)) return null;
+    if (allowParallelCompile && !gl.getProgramParameter(pending.pr, parallelShaderCompile.COMPLETION_STATUS_KHR)) {if(materialCapture)materialCapture.loading=true;return null;}
     return completeProgram(key, pending);
   }
   let p = GL.progs.get(key);
@@ -394,7 +394,7 @@ function program(key: any, frag: any, vert?: any) {
   // round values while reading the preceding pass, including raw extensions.
   frag = frag.replace(/^(#version[^\n]*\n)/, '$1precision highp sampler2D;\n');
   if (allowParallelCompile && parallelShaderCompile && /^(sh:|extension:|fx:|tr:)/.test(key)) {
-    if (compileSubmitMs >= 4 || pendingPrograms.size >= 8) { frameFailed = true; pollCompiles(); return null; }
+    if (compileSubmitMs >= 4 || pendingPrograms.size >= 8) { frameFailed = true;if(materialCapture)materialCapture.loading=true;pollCompiles();return null; }
     const started = performance.now();
     const v = gl.createShader(gl.VERTEX_SHADER), f = gl.createShader(gl.FRAGMENT_SHADER), pr = gl.createProgram();
     if (!v || !f || !pr) {
@@ -409,6 +409,7 @@ function program(key: any, frag: any, vert?: any) {
     pendingPrograms.set(key, { pr, v, f }); GL.compiling = pendingPrograms.size;
     performanceMonitor.record({ id: `compile:${key}`, name: `Shader compilation · ${key}`, kind: 'shader' }, performance.now() - started);
     compileSubmitMs += performance.now() - started;
+    if(materialCapture)materialCapture.loading=true;
     pollCompiles(); PM.invalidate('status'); return null;
   }
   let v: any = null, f: any = null, pr: any = null;
