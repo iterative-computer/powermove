@@ -44,3 +44,30 @@ describe('FBX worker lifecycle',()=>{
     expect(mock.workers).toHaveLength(0);s.stop();
   });
 });
+
+describe('Studio IPC session ownership', () => {
+  it('rejects malformed and main-only commands before creating a process', async () => {
+    const s = setup(), request = s.handlers.get(STUDIO_NATIVE_IPC.request)!;
+    for (const command of [null, {}, {op:'unknown'}, {op:'shutdown'}, {op:'releaseFrame',frame:1}]) {
+      await expect(request(s.event, 'studio-1', command)).rejects.toThrow('Invalid Studio command');
+    }
+    expect(mock.workers).toHaveLength(0); s.stop();
+  });
+  it('bounds processes across windows and releases only the navigating owner', async () => {
+    const s = setup(), request = s.handlers.get(STUDIO_NATIVE_IPC.request)!;
+    const other = {sender: Object.assign(new EventEmitter(), {id:2})};
+    await request(s.event, 'studio-1', {op:'hello'});
+    await request(other, 'studio-1', {op:'hello'});
+    await expect(request(other, 'studio-2', {op:'hello'})).rejects.toThrow('Too many');
+    s.event.sender.emit('did-start-navigation', {}, 'app://editor/#x', true, true);
+    s.event.sender.emit('did-start-navigation', {}, 'app://frame', false, false);
+    expect(mock.workers[0].dispose).not.toHaveBeenCalled();
+    s.event.sender.emit('did-start-navigation', {}, 'app://editor', false, true);
+    expect(mock.workers[0].dispose).toHaveBeenCalledOnce();
+    expect(mock.workers[1].dispose).not.toHaveBeenCalled();
+    await request(other, 'studio-2', {op:'hello'});
+    other.sender.emit('render-process-gone');
+    expect(mock.workers[1].dispose).toHaveBeenCalledOnce();
+    expect(mock.workers[2].dispose).toHaveBeenCalledOnce(); s.stop();
+  });
+});

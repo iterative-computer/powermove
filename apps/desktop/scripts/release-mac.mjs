@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { verifyStudioRuntime } from './verify-studio-runtime.mjs';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -139,6 +140,7 @@ async function main() {
   const app = await findPackagedApp();
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
   await verifyNativeAddons(app);
+  await verifyStudioRuntime(app);
   await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
   await run('/usr/bin/xcrun', ['stapler', 'validate', app]);
 

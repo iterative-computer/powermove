@@ -975,7 +975,9 @@ if (!hasSingleInstanceLock) {
        with the dev entry script. The registry always opens `powermove://`,
        never a dev scheme. */
   if (app.isPackaged) {
-    app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
+    // An isolated packaged acceptance profile must not replace the installed
+    // app's protocol registration with a temporary bundle that will be deleted.
+    if (!userDataOverride) app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
   } else if (process.env['POWERMOVE_DEV_PROTOCOL'] === '1' && process.argv[1]) {
     app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [path.resolve(process.argv[1])]);
   }

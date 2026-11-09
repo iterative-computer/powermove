@@ -118,7 +118,9 @@ export class NativeStudioBackend implements StudioBackend {
   }
   private async upload(): Promise<void> {
     if (this.uploaded === this.revision) return;
-    const revision = this.revision;
+    // An editor edit can arrive at any IPC await below. Stamp only the input
+    // that was actually sent, so the next frame cannot skip that newer edit.
+    const revision = this.revision, sceneRevision = this.sceneRevision, mapsRevision = this.mapsRevision, maps = this.maps;
     if (this.prepared) {
       const scene = this.prepared;
       const nativeKey=geometryKey(scene);
@@ -135,9 +137,9 @@ export class NativeStudioBackend implements StudioBackend {
           await this.send({ op: 'prepared', ...small, positions: writer.append(scene.positions), tris: writer.append(scene.tris), nodes: writer.append(nodes), topNodes: scene.tlasNodes.byteLength / 64, instanceCount: scene.instanceCount, lightCount: scene.lightCount, objects: scene.objects.map(layer => ({ layer, part: '' })), instancePolicies: scene.instancePolicies }, writer.finish());
           this.geometryKey = nativeKey;
         }
-        this.uploadedSceneRevision=this.sceneRevision;
+        this.uploadedSceneRevision=sceneRevision;
       }
-      if(this.mapsRevision!==this.uploadedMapsRevision){await this.uploadTextures(this.maps);this.uploadedMapsRevision=this.mapsRevision;}
+      if(mapsRevision!==this.uploadedMapsRevision){await this.uploadTextures(maps);this.uploadedMapsRevision=mapsRevision;}
     } else { throw new Error('Set a Studio scene before rendering'); }
     this.uploaded = revision;
   }

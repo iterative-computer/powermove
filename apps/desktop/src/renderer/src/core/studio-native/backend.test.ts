@@ -10,6 +10,33 @@ const view: StudioView = { camera: { position: [0, 0, 5], forward: [0, 0, -1], r
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 
 describe('native Studio adapter', () => {
+  it('sends edits made while geometry and textures are uploading on the next frame', async () => {
+    let finish!: () => void;
+    const held = new Promise<void>(resolve => { finish = resolve; });
+    const calls: StudioNativeCommand[] = [];
+    let holdTextures = true;
+    const bridge: StudioNativeBridge = {
+      request: async (_session, command) => {
+        calls.push(command);
+        if (command.op === 'textures' && holdTextures) { holdTextures = false; await held; }
+        return { result: command.op === 'hello' ? { capabilities: ['preparedView'], layout: { materialBytes: 128, triangleBytes: 96 } } : null, binary: new Uint8Array(), generation: 1, roundTripMs: 0 };
+      }, release: async () => {}, status: async () => ({ available: true, running: true, generation: 1, failure: null })
+    };
+    const graph = new THREE.Scene(), mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial());
+    mesh.userData.sceneId = 'box'; graph.add(mesh);
+    const extract = () => extractScene(graph, () => true, { sky: new THREE.Color(), ground: new THREE.Color(), intensity: 0 });
+    const backend = new NativeStudioBackend(bridge); await backend.initialize(); backend.setView(view);
+    const describe = () => { throw new Error('binary path'); };
+    backend.setPreparedScene(extract(), [new Uint8Array(512 * 512 * 4)], describe);
+    const pending = backend.pick(.5, .5);
+    await vi.waitFor(() => expect(calls.some(c => c.op === 'textures')).toBe(true));
+    mesh.position.x = 2; graph.updateMatrixWorld(true);
+    backend.setPreparedScene(extract(), [new Uint8Array(512 * 512 * 4).fill(255)], describe);
+    finish(); await pending; await backend.pick(.5, .5);
+    expect(calls.filter(c => c.op === 'textures')).toHaveLength(2);
+    expect(calls.filter(c => c.op === 'preparedPatch')).toHaveLength(1);
+    backend.dispose(); mesh.geometry.dispose(); mesh.material.dispose();
+  });
   it('does not reopen a released session when an in-flight upload finishes after disposal',async()=>{
     let complete!:()=>void;
     const held=new Promise<void>(resolve=>{complete=resolve;});

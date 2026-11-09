@@ -1,17 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { StudioPacketDecoder, studioPacket } from './protocol';
-import { STUDIO_PROTOCOL, type StudioNativeCommand, type StudioNativeReply, type StudioNativeStatus } from '../../shared/studio-native';
+import { STUDIO_MAX_BINARY, STUDIO_MAX_JSON, STUDIO_PROTOCOL, type StudioNativeCommand, type StudioNativeReply, type StudioNativeStatus } from '../../shared/studio-native';
 
-type Pending = { resolve(value: StudioNativeReply): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; started: number };
+type Pending = { resolve(value: StudioNativeReply): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; started: number; bytes: number };
 export type HostOptions = {
   executable: string | null;
   args?: string[];
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  killTimeoutMs?: number;
+  maxQueuedBytes?: number;
   surfaceService?: string;
   spawnHost?: typeof spawn;
 };
@@ -29,7 +30,13 @@ export class StudioHostManager {
   private disposed = false;
   private crashes = 0;
   private retryAfter = 0;
+  private queuedBytes = 0;
+  private retainedBytes = 0;
+  private requests = 0;
   constructor(private readonly options: HostOptions) {}
+
+  /** Main-only identity used to authenticate incoming Mach surface messages. */
+  get processId(): number | null { return this.child?.pid ?? null; }
 
   status(): StudioNativeStatus { return { available: !!this.options.executable && !this.disposed, running: !!this.child, generation: this.generation, failure: this.failure }; }
   async connect(): Promise<void> {
@@ -55,7 +62,7 @@ export class StudioHostManager {
           for (const packet of decoder.push(chunk)) {
             const waiting = this.pending.get(packet.json.id);
             if (!waiting) continue;
-            this.pending.delete(packet.json.id); clearTimeout(waiting.timer);
+            this.pending.delete(packet.json.id); this.queuedBytes -= waiting.bytes; clearTimeout(waiting.timer);
             if (!packet.json.ok) waiting.reject(new Error(packet.json.error ?? 'Studio request failed'));
             else waiting.resolve({ result: packet.json.result, binary: packet.binary, generation: this.generation, roundTripMs: performance.now() - waiting.started });
           }
@@ -71,30 +78,50 @@ export class StudioHostManager {
   }
   async request(command: StudioNativeCommand, binary?: Uint8Array): Promise<StudioNativeReply> {
     if (!command || typeof command !== 'object' || !OPS.has(command.op)) throw new Error('Invalid Studio command');
-    await this.connect();
-    return this.send(command, binary);
+    // Reserve before awaiting the handshake: otherwise callers can retain
+    // unbounded scene payloads while a cold or hung helper is starting.
+    const bytes = studioPacket(0, command, binary).reduce((n, part) => n + part.byteLength, 0);
+    if (this.requests >= (command.op === 'releaseFrame' ? 11 : 8) || this.retainedBytes + bytes > (this.options.maxQueuedBytes ?? STUDIO_MAX_BINARY + STUDIO_MAX_JSON + 4096)) throw new Error('Native Studio queue memory budget exceeded');
+    this.requests++; this.retainedBytes += bytes;
+    try { await this.connect(); return await this.send(command, binary); }
+    finally { this.requests--; this.retainedBytes -= bytes; }
   }
   private send(command: StudioNativeCommand, binary?: Uint8Array): Promise<StudioNativeReply> {
     const child = this.child;
     if (!child) return Promise.reject(new Error('Native Studio is unavailable'));
-    if (this.pending.size >= 8 && command.op!=='releaseFrame') return Promise.reject(new Error('Native Studio queue is full'));
+    // Three reserved acknowledgements match the IOSurface pool. They cannot
+    // bypass the limit indefinitely, even if a renderer sends release spam.
+    if (this.pending.size >= (command.op === 'releaseFrame' ? 11 : 8)) return Promise.reject(new Error('Native Studio queue is full'));
     const id = this.nextId++;
     // Validate/serialize before adding a pending promise or touching stdin.
     const parts = studioPacket(id, command, binary);
+    const bytes = parts.reduce((n, part) => n + part.byteLength, 0);
+    if (this.queuedBytes + bytes > (this.options.maxQueuedBytes ?? STUDIO_MAX_BINARY + STUDIO_MAX_JSON + 4096)) return Promise.reject(new Error('Native Studio queue memory budget exceeded'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.fail(new Error('Native Studio response timed out')), this.options.timeoutMs ?? (command.op === 'render' ? 120_000 : 30_000));
       timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer, started: performance.now() });
-      child.stdin.cork();
-      for (const part of parts) child.stdin.write(part);
-      child.stdin.uncork();
+      this.pending.set(id, { resolve, reject, timer, started: performance.now(), bytes });
+      this.queuedBytes += bytes;
+      try {
+        child.stdin.cork();
+        for (const part of parts) child.stdin.write(part);
+        child.stdin.uncork();
+      } catch { this.fail(new Error('Native Studio pipe write failed')); }
     });
   }
   private fail(error: Error): void {
     const child = this.child; this.child = null; this.failure = error.message;
-    if (child) { child.stdin.destroy(); child.kill(); this.crashes++; this.retryAfter = performance.now() + Math.min(10_000, 100 * 2 ** Math.min(this.crashes - 1, 6)); }
+    if (child) {
+      child.stdin.destroy(); child.kill();
+      const reap = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }, this.options.killTimeoutMs ?? 1000);
+      reap.unref(); child.once('exit', () => clearTimeout(reap));
+      this.crashes++; this.retryAfter = performance.now() + Math.min(10_000, 100 * 2 ** Math.min(this.crashes - 1, 6));
+    }
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
     this.pending.clear();
+    this.queuedBytes = 0;
   }
   dispose(): void { this.disposed = true; this.fail(new Error('Studio session is closed')); }
 }
@@ -107,7 +134,8 @@ export function studioHostExecutable(appPath: string, resourcesPath?: string): s
     // Playwright and direct Electron launches use out/main as app.getAppPath().
     // Prefer the built runtime beside the project, including its surface addon.
     path.resolve(appPath, '../../resources/studio', filename),
-    path.join(process.env.CARGO_TARGET_DIR ?? path.join(homedir(), 'Developer', 'pm-target'), 'release', filename),
+    // Never guess a helper in a shared Cargo cache: another checkout can have
+    // a different ABI. The build copies this checkout's verified runtime above.
     path.resolve(appPath, '../../engine/target/release', filename),
   ];
   return candidates.find((p): p is string => !!p && existsSync(p)) ?? null;

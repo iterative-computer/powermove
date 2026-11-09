@@ -1,7 +1,7 @@
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from 'electron';
 import { StudioSurfaceReceiver } from './surface';
 import { StudioHostManager } from './manager';
-import { STUDIO_NATIVE_IPC, STUDIO_MAX_BINARY, type StudioNativeCommand } from '../../shared/studio-native';
+import { STUDIO_NATIVE_IPC, STUDIO_MAX_BINARY, isStudioNativeCommand, type StudioNativeCommand } from '../../shared/studio-native';
 
 /** No paths, executable names, or OS handles are accepted from the page. */
 export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHandler'>, executable: string | null,
@@ -21,15 +21,17 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
     if (watched.has(contents.id)) return;
     watched.add(contents.id);
     contents.on('render-process-gone', () => releaseAll(contents.id));
-    contents.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => { if (mainFrame) releaseAll(contents.id); });
+    contents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) releaseAll(contents.id); });
     contents.once('destroyed', () => { releaseAll(contents.id); watched.delete(contents.id); });
   };
   ipc.handle(STUDIO_NATIVE_IPC.request, async (event, key: unknown, command: StudioNativeCommand, binary?: Uint8Array) => {
     const id = check(event, key);
+    if (!isStudioNativeCommand(command)) throw new Error('Invalid Studio command');
     if (binary !== undefined && (!(binary instanceof Uint8Array) || binary.byteLength > STUDIO_MAX_BINARY)) throw new Error('Invalid Studio binary payload');
     if(command?.op==='importFbx') {
       if(!binary?.byteLength)throw new Error('FBX data is empty');
       if(imports.has(event.sender.id))throw new Error('An FBX import is already running');
+      if(imports.size >= 1)throw new Error('An FBX import is already running in another window');
       const worker=new StudioHostManager({executable,timeoutMs:120_000});
       imports.set(event.sender.id,worker);watch(event.sender);
       try {return await worker.request({op:'importFbx'},binary);}
@@ -40,7 +42,8 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
     let manager = owner.get(id);
     if (!manager) {
       // Bound the native memory budget; the backend releases idle sessions.
-      if (owner.size >= 2) throw new Error('Too many active Studio sessions');
+      const active = [...sessions.values()].reduce((n, entries) => n + entries.size, 0);
+      if (active >= 2) throw new Error('Too many active Studio sessions');
       const surface=StudioSurfaceReceiver.open(executable);
       manager = new StudioHostManager({ executable, surfaceService:surface?.service }); owner.set(id, manager);
       if(surface)surfaces.set(manager,surface);
@@ -48,7 +51,7 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
     const receiver=surfaces.get(manager);
     const reply=await manager.request(receiver?command:{...command,sharedTexture:false},binary);
     if(typeof reply.result?.surface==='number') {
-      try {if(!receiver)throw new Error('Studio surface transport is unavailable');await receiver.present(event.sender,id,reply,()=>{if(manager!.status().running&&manager!.status().generation===reply.generation)void manager!.request({op:'releaseFrame',frame:reply.result.surface}).catch(()=>{});});}
+      try {if(!receiver)throw new Error('Studio surface transport is unavailable');await receiver.present(event.sender,id,reply,manager.processId,()=>{if(manager!.status().running&&manager!.status().generation===reply.generation)void manager!.request({op:'releaseFrame',frame:reply.result.surface}).catch(()=>{});});}
       catch {return manager.request({...command,sharedTexture:false,goal:true,reset:false},binary);}
     }
     return reply;

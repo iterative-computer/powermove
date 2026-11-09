@@ -186,6 +186,7 @@ impl PackedScene {
         if positions
             .iter()
             .flatten()
+            .chain(bytemuck::cast_slice::<GpuTri, f32>(&tris))
             .chain(bytemuck::cast_slice::<GpuMaterial, f32>(&materials))
             .chain(sdata.iter().flatten())
             .any(|x| !x.is_finite())
@@ -496,22 +497,25 @@ fn placements(p: &Prepared, count: usize) -> Result<(Vec<RtGeometry>, Vec<RtPlac
     Ok((geometries, out))
 }
 fn triangle_range(nodes: &[WideNode], root: u32, triangles: usize) -> Result<(u32, u32), String> {
-    let mut stack = vec![root];
+    let mut stack = vec![(root, 0usize)];
     let mut visited = std::collections::HashSet::new();
     let (mut lo, mut hi) = (u32::MAX, 0);
-    while let Some(i) = stack.pop() {
-        if !visited.insert(i) {
-            return Err("cyclic/duplicate BLAS node".into());
+    while let Some((i, depth)) = stack.pop() {
+        if depth >= 60 || !visited.insert(i) {
+            return Err("cyclic/duplicate or excessively deep BLAS node".into());
         }
         let n = nodes
             .get(i as usize)
             .ok_or("BLAS root outside node buffer")?;
+        if n.lmin.iter().chain(n.lmax.iter()).chain(n.rmin.iter()).chain(n.rmax.iter()).any(|v| !v.is_finite()) {
+            return Err("BLAS contains non-finite bounds".into());
+        }
         for (child, count) in [(n.left, n.lcount), (n.right, n.rcount)] {
             if count == u32::MAX {
                 continue;
             }
             if count == 0 {
-                stack.push(child);
+                stack.push((child, depth + 1));
             } else {
                 let end = child.checked_add(count).ok_or("triangle range overflow")?;
                 if end as usize > triangles {
@@ -579,6 +583,19 @@ fn validate_top(nodes: &[WideNode], instances: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_deep_blas_and_non_finite_bounds() {
+        let leaf = WideNode { left: 0, lcount: 1, rcount: u32::MAX, ..Default::default() };
+        assert_eq!(triangle_range(&[leaf], 0, 1).unwrap(), (0, 1));
+        let mut bad = leaf;
+        bad.lmin[0] = f32::NAN;
+        assert!(triangle_range(&[bad], 0, 1).is_err());
+        let mut deep = vec![leaf; 65];
+        for (i, n) in deep.iter_mut().enumerate().take(64) {
+            n.left = (i + 1) as u32; n.lcount = 0; n.right = 0; n.rcount = 1;
+        }
+        assert!(triangle_range(&deep, 0, 1).is_err());
+    }
     #[test]
     fn layer_flags_preserve_visibility_and_reject_out_of_range_ids(){
         let mut data=vec![[0.;4];9];data[4][3]=2.;data[5][3]=1.;validate_instance_flags(&data,0,1,1).unwrap();

@@ -4,6 +4,8 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, chmodSync, rmSync } f
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { studioCargoTarget } from './studio-cargo-target.mjs';
+import { verifyStudioHost } from './verify-studio-runtime.mjs';
 
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const engine = path.resolve(desktop, '../../engine');
@@ -13,7 +15,7 @@ if (process.platform !== 'darwin') {
   console.info('Using in-page Studio on this platform.');
   process.exit(0);
 }
-const target = process.env.CARGO_TARGET_DIR ?? path.join(homedir(), 'Developer/pm-target');
+const target = studioCargoTarget();
 const cargo = process.env.CARGO ?? (existsSync(path.join(homedir(), '.cargo/bin/cargo')) ? path.join(homedir(), '.cargo/bin/cargo') : 'cargo');
 const run = (command, args, options = {}) => {
   const result = spawnSync(command, args, { stdio: 'inherit', ...options });
@@ -80,6 +82,7 @@ if (withOidn) {
 const nodeInclude = [process.env.NODE_INCLUDE_DIR, path.resolve(path.dirname(process.execPath), '../include/node'), '/opt/homebrew/include/node'].find(dir => dir && existsSync(path.join(dir, 'node_api.h')));
 if (!nodeInclude) throw new Error('Node headers are needed to build the Studio surface addon (set NODE_INCLUDE_DIR).');
 const addon=path.join(output,'studio-surface.node');
-run('xcrun',['clang++','-std=c++17','-fobjc-arc','-mmacosx-version-min=13.0','-O2','-bundle','-undefined','dynamic_lookup','-I',nodeInclude,'-I',path.join(engine,'crates/pm-studio/native'),'-framework','Foundation','-framework','IOSurface',path.join(desktop,'native/studio-surface.mm'),'-o',addon]);
+run('xcrun',['clang++','-std=c++17','-fobjc-arc','-mmacosx-version-min=13.0','-O2','-bundle','-undefined','dynamic_lookup','-I',nodeInclude,'-I',path.join(engine,'crates/pm-studio/native'),'-framework','Foundation','-framework','IOSurface','-lbsm',path.join(desktop,'native/studio-surface.mm'),'-o',addon]);
 run('/usr/bin/codesign',['--force','--sign','-',addon]);
+verifyStudioHost(host);
 console.info(`Built native Studio${withOidn ? ' with OIDN' : ''}`);

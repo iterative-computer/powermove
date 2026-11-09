@@ -8,6 +8,11 @@ export const STUDIO_PROTOCOL = 1;
 export const STUDIO_MAX_JSON = 4 * 1024 * 1024;
 export const STUDIO_MAX_BINARY = 256 * 1024 * 1024;
 export type StudioNativeCommand = { op: string; [key: string]: unknown };
+const STUDIO_COMMANDS = new Set(['hello', 'scene', 'preset', 'patch', 'screen', 'render', 'pick', 'bounds', 'prepared', 'preparedPatch', 'preparedView', 'textures', 'snapshot', 'importFbx']);
+/** Page-facing commands exclude lifecycle/texture acknowledgements owned by main. */
+export function isStudioNativeCommand(command: unknown): command is StudioNativeCommand {
+  return !!command && typeof command === 'object' && 'op' in command && typeof command.op === 'string' && STUDIO_COMMANDS.has(command.op);
+}
 export type StudioNativeReply = {
   result: any;
   binary: Uint8Array;

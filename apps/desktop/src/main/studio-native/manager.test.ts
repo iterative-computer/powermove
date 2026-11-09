@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { StudioHostManager } from './manager';
 import { StudioPacketDecoder, studioPacket } from './protocol';
 
@@ -12,6 +14,7 @@ process.stdin.on('data',chunk=>{
   const j=input.readUInt32LE(4),b=input.readUInt32LE(8);if(input.length<12+j+b)return;
   const q=JSON.parse(input.subarray(12,12+j));input=input.subarray(12+j+b);
   if(q.crash)process.exit(9);
+  if(q.hang)continue;
   const result=q.op==='hello'?{protocol:1}:{op:q.op,runAsNode:process.env.ELECTRON_RUN_AS_NODE??null};
   const json=Buffer.from(JSON.stringify({id:q.id,ok:true,result}));const h=Buffer.alloc(12);
   h.write('PMS1');h.writeUInt32LE(json.length,4);h.writeUInt32LE(4,8);
@@ -21,6 +24,42 @@ process.stdin.on('data',chunk=>{
 const manager = () => new StudioHostManager({ executable: process.execPath, args: ['-e', fixture], env: { ELECTRON_RUN_AS_NODE: '1' }, timeoutMs: 1000 });
 
 describe('native Studio process', () => {
+  it('bounds retained input while the helper is still starting', async () => {
+    const host = new StudioHostManager({ executable: process.execPath, args: ['-e', fixture.replace('if(q.hang)continue;', "if(q.hang||q.op==='hello')continue;")], timeoutMs: 100, maxQueuedBytes: 1024 });
+    const first = host.request({op:'bounds'},new Uint8Array(700)).catch(()=>{});
+    try { await expect(host.request({op:'bounds'},new Uint8Array(700))).rejects.toThrow('queue'); }
+    finally { host.dispose(); await first; }
+  });
+  it('bounds queued bytes and reserves only three frame-release requests', async () => {
+    const host = new StudioHostManager({ executable: process.execPath, args: ['-e', fixture], timeoutMs: 10_000, maxQueuedBytes: 1024 });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await host.connect();
+      pending.push(host.request({ op: 'bounds', hang: true }, new Uint8Array(700)).catch(() => {}));
+      await expect(host.request({ op: 'bounds' }, new Uint8Array(700))).rejects.toThrow('queue');
+    } finally { host.dispose(); await Promise.all(pending); }
+    const releases = manager();
+    try {
+      await releases.connect();
+      for (let i = 0; i < 11; i++) pending.push(releases.request({ op: 'releaseFrame', frame: i, hang: true }).catch(() => {}));
+      await expect(releases.request({ op: 'releaseFrame', frame: 12 })).rejects.toThrow('queue');
+    } finally { releases.dispose(); await Promise.all(pending); }
+  });
+  it('reaps a host that ignores graceful termination', async () => {
+    let child!: ReturnType<typeof spawn>;
+    const host = new StudioHostManager({
+      executable: process.execPath, args: ['-e', `setInterval(()=>{},1000);process.on('SIGTERM',()=>{});${fixture}`], killTimeoutMs: 30,
+      spawnHost: ((...args: Parameters<typeof spawn>) => (child = spawn(...args))) as typeof spawn,
+    });
+    try {
+      await host.connect();
+      const exited = once(child, 'exit');
+      host.dispose();
+      let timer: ReturnType<typeof setTimeout>;
+      const result = await Promise.race([exited, new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 1000); })]).finally(() => clearTimeout(timer));
+      expect(result).toEqual([null, 'SIGKILL']);
+    } finally { child?.kill('SIGKILL'); host.dispose(); }
+  });
   it('exchanges binary packets without exposing Electron launch flags', async () => {
     const host = manager();
     try {

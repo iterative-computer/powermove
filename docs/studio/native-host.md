@@ -43,7 +43,9 @@ The chosen path is:
 1. Studio packs the finished output on the GPU and blits it into one of three
    IOSurfaces.
 2. A private Mach message transfers an IOSurface right to a small stable N-API
-   addon in main. The addon resolves it to a local reference.
+   addon in main. The addon authenticates the kernel audit PID against main's
+   spawned helper before resolving a local reference. The random bootstrap
+   service name routes messages; it is not the authentication boundary.
 3. Electron imports and transfers the texture to a sandboxed preload receiver.
 4. The renderer draws the managed VideoFrame into its canvas. There is no CPU
    frame readback or pixel upload on this path. There are GPU copies.
@@ -195,7 +197,7 @@ From the repository root:
 ```sh
 bun install --frozen-lockfile
 bun run --cwd apps/desktop build
-CARGO_TARGET_DIR=~/Developer/pm-target CARGO_BUILD_JOBS=2 nice -n 10 ~/.cargo/bin/cargo test --manifest-path engine/Cargo.toml -p pm-studio -p pm-studio-host --features oidn,metalfx
+CARGO_TARGET_DIR=~/Developer/pm-target CARGO_BUILD_JOBS=2 nice -n 10 ~/.cargo/bin/cargo test --manifest-path engine/Cargo.toml --target-dir "$(node apps/desktop/scripts/studio-cargo-target.mjs)" -p pm-studio -p pm-studio-host --features oidn,metalfx
 bun run --cwd apps/desktop test -- src/main/studio-native/manager.test.ts src/renderer/src/core/studio-native/backend.test.ts src/renderer/src/core/studio-native/recovery.test.ts
 python3 apps/desktop/scripts/studio-native-smoke.py
 node apps/desktop/scripts/studio-native-electron.mjs
@@ -261,3 +263,51 @@ texture transfers and repeated layer additions. The Final-quality regression
 checks a 3D shot nested in a 2D composition against its configured sample goal.
 Development launches resolve the built runtime beside the desktop project so
 its surface addon is found before the shared Cargo binary fallback.
+
+## Local packaged acceptance
+
+From `apps/desktop`, run `bun run package:studio-local`, then
+`node scripts/verify-studio-package.mjs`. An alternative generated `.app` path
+can be passed as the first argument. The package is a Cargo release build with
+OIDN and a hardened, ad-hoc app signature. This command never notarizes,
+publishes, creates a release or installs over `/Applications/Powermove.app`.
+Direct macOS packager calls also rebuild the host in `beforePack`.
+The build uses a checkout-specific subdirectory under `CARGO_TARGET_DIR`
+(default `~/Developer/pm-target`) and verifies the executable's actual protocol
+and GPU data layout. A shared Cargo target was observed returning another
+worktree's incompatible material/triangle layout, despite a successful build.
+Never resolve a dev helper by guessing the shared cache's `release/` directory.
+`node scripts/studio-cargo-target.mjs` prints this checkout's isolated target;
+use it as Cargo's `--target-dir` when running the matching Rust tests.
+
+Ad-hoc signatures have no Team ID, so this local command uses a separate
+`entitlements.mac.adhoc.plist` with library validation disabled. Developer ID
+release signing keeps its existing policy. Both local packaging and the release
+verification path check the Studio executable, surface addon, OIDN CPU plugin,
+TBB, licenses, matching hardened signatures and relocatable library load paths.
+
+The acceptance harness clones the bundle into a disposable
+`Applications/Powermove.app` directory and uses a temporary profile with normal
+visible-window preferences (`POWERMOVE_BACKGROUND_TEST=0`). It first exercises
+the unchanged production fuses through Chromium CDP. Playwright's Electron
+main-process inspection requires the Node inspector fuse; only the disposable
+copy enables that fuse and is then ad-hoc signed again. The supplied package
+retains every production fuse. Results distinguish these two runs.
+
+Acceptance covers native model/text/World/terrain/scatter/light rendering,
+shared-texture transfers, changing render sizes, a native Final MP4 checked by
+ffprobe, killing the host with unsaved edits, portable recovery, another edit,
+save/quit/reopen and a fresh native render. Persistent layer/scene data is
+compared with absent `solo` normalized to `false`, matching project migration.
+The managed texture callback closes its VideoFrame and returns each host slot
+once, including failed receive/import/transfer paths; retained surface handles
+remain valid after the receiver port closes.
+
+Synthetic evidence goes to `/tmp/pm-shots/studio3d/laneP1/` by default
+(`PM_STUDIO_SHOTS` overrides it); it must stay outside Git. Temporary app copies
+and profiles are removed. The harness prepares the normal close/save barrier;
+for the known Electron 44 macOS native teardown stall, it reaps a process only
+after its successful Node exit marker. The ordinary smoke process is separately
+bounded and discarded. This is functional acceptance, not an editor performance
+benchmark: the [production checklist](production-readiness.md) defines the
+unmeasured M5 timing/memory gates and the later benchmark lane's entry point.
