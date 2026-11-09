@@ -261,7 +261,6 @@ test("one grid Tab stop; header, search, crumbs, grid, selection order", async (
   await event(root, find(root, "Search Media").id, "click");
   const r = replay(commits, view).at(-1)!;
   expect(r.focusOrder.map((id: number) => r.nodes[id].props.label)).toEqual([
-    "Project",
     "Search Media",
     "Add",
     "Search media",

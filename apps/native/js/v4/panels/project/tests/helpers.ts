@@ -20,7 +20,6 @@ import type { NativeServices } from "../index";
 export const native: NativeServices = {
   searchBinding: "test:search",
   renameBinding: "test:rename",
-  activatePanel() {},
   menu() {},
 };
 export const layout = { columns: 2, rowHeight: 160 }; // Synthetic host geometry, never production defaults.

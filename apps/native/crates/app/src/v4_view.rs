@@ -155,11 +155,7 @@ impl SurfaceView {
     ) -> Self {
         use raw_window_handle::HasWindowHandle;
         let table = Arc::new(TokenTable::new(tokens));
-        let prepared = Rc::new(Prepared::new(
-            &publication.panel,
-            publication.surface.clone(),
-            &table,
-        ));
+        let prepared = Rc::new(Prepared::new(publication.surface.clone(), &table));
         let mut this = Self {
             runtime,
             publication,
@@ -225,11 +221,10 @@ impl SurfaceView {
         let window = self.window;
         cx.spawn(async move |this, cx| {
             let surface = publication.surface.clone();
-            let panel = publication.panel.clone();
             let worker = table.clone();
             let prepared = cx
                 .background_executor()
-                .spawn(async move { Prepared::new(&panel, surface, &worker) })
+                .spawn(async move { Prepared::new(surface, &worker) })
                 .await;
             let _ = cx.update_window(window, |_, window, cx| {
                 this.update(cx, |v, cx| {
@@ -429,9 +424,8 @@ impl SurfaceView {
                     disabled,
                     default: primary,
                     destructive: button_role == Some("destructive"),
-                    // Bar pop-ups (viewer zoom, agent composer choices) are
-                    // borderless titles; inspector and sheet pop-ups keep the bezel.
-                    inline: matches!(self.publication.panel.as_str(), "viewer" | "agent")
+                    // Bar pop-ups are borderless titles; the rest keep the bezel.
+                    inline: crate::v4_compile::variant(node) == Some("inline")
                         && matches!(kind, crate::v4_control::Kind::Popup),
                 },
                 &tokens,
@@ -1390,9 +1384,9 @@ impl SurfaceView {
         if disabled {
             return element;
         }
-        // Finder drops reach the Project panel's own targets; the window's
-        // drop handler places anything landing elsewhere at the playhead.
-        if events.drop && self.publication.panel == "assets" {
+        // Finder drops reach targets that take files; the window's drop
+        // handler places anything landing elsewhere at the playhead.
+        if events.file_drop {
             let target = rgb(self.table.tokens.colors.selected_fill);
             element = element
                 .on_drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(target))

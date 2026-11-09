@@ -706,6 +706,7 @@ export function AgentView({
             onClick={() => send({ type: "attach" })}
           />
           <UI.PopUpButton
+            data-pm-variant="inline"
             id="agent-access"
             label={`Agent access, ${copy[s.settings.access]}`}
             value={s.settings.access}
@@ -721,6 +722,7 @@ export function AgentView({
             }))}
           />
           <UI.PopUpButton
+            data-pm-variant="inline"
             id="agent-provider"
             label="Agent provider"
             value={s.settings.provider}
@@ -732,6 +734,7 @@ export function AgentView({
             options={pairs(s.catalog.providers, s.settings.provider)}
           />
           <UI.PopUpButton
+            data-pm-variant="inline"
             id="agent-model"
             label="Model"
             value={s.settings.model}
@@ -748,6 +751,7 @@ export function AgentView({
           />
           {s.catalog.efforts.length > 1 && (
             <UI.PopUpButton
+              data-pm-variant="inline"
               id="agent-effort"
               label="Reasoning effort"
               value={s.settings.effort}

@@ -3,7 +3,7 @@ import { ProjectPanel, ProjectService } from "./index";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 
 export async function mount(env: BuiltinEnv): Promise<Mounted> {
-  const { native, platform, host, fields, activatePanel, report, root } = env;
+  const { native, platform, host, fields, report, root } = env;
   const service = new ProjectService(host, {
     command: "panel.project",
     subscription: "project",
@@ -18,7 +18,6 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       layout={native("project.layout")}
       native={{
         ...fields(["searchBinding", "renameBinding"]),
-        activatePanel,
         menu(entries, choose, context) {
           void platform("project.menu", { entries, context })
             .then((index) => {

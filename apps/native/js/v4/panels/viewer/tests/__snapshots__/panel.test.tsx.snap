@@ -26,11 +26,6 @@ exports[`wire tree / AX: empty-no-project (placeholders do not certify rendering
       "id": "viewer",
       "label": "Viewer",
       "role": "group",
-      "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
-      },
     },
     "text": "",
     "type": "div",
@@ -241,6 +236,7 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -305,6 +301,7 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -477,6 +474,7 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -587,9 +585,6 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -692,6 +687,7 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -756,6 +752,7 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -928,6 +925,7 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -1038,9 +1036,6 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -1143,6 +1138,7 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -1207,6 +1203,7 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -1379,6 +1376,7 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -1489,9 +1487,6 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -1594,6 +1589,7 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -1658,6 +1654,7 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -1830,6 +1827,7 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -1940,9 +1938,6 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -2045,6 +2040,7 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -2109,6 +2105,7 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -2281,6 +2278,7 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -2391,9 +2389,6 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
         "interaction": "hover",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -2496,6 +2491,7 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -2560,6 +2556,7 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -2732,6 +2729,7 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -2842,9 +2840,6 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
         "interaction": "focus",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -2907,11 +2902,6 @@ exports[`wire tree / AX: disabled-no-project (placeholders do not certify render
       "id": "viewer",
       "label": "Viewer",
       "role": "group",
-      "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
-      },
     },
     "text": "",
     "type": "div",
@@ -3122,6 +3112,7 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -3186,6 +3177,7 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -3358,6 +3350,7 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -3468,9 +3461,6 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -3573,6 +3563,7 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -3637,6 +3628,7 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -3809,6 +3801,7 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -3919,9 +3912,6 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
         "interaction": "media-drop",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -4024,6 +4014,7 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -4088,6 +4079,7 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -4260,6 +4252,7 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -4370,9 +4363,6 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
         "interaction": "effect-drop",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -4475,6 +4465,7 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -4539,6 +4530,7 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -4711,6 +4703,7 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -4821,9 +4814,6 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -4940,6 +4930,7 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -5112,6 +5103,7 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -5230,9 +5222,6 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -5294,6 +5283,7 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -5541,6 +5531,7 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -5713,6 +5704,7 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -5831,9 +5823,6 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -5895,6 +5884,7 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -6142,6 +6132,7 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -6314,6 +6305,7 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -6432,9 +6424,6 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -6496,6 +6485,7 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -6729,6 +6719,7 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -6793,6 +6784,7 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -6965,6 +6957,7 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -7075,9 +7068,6 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -7180,6 +7170,7 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -7244,6 +7235,7 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -7416,6 +7408,7 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Full",
       "metadata": {
@@ -7526,9 +7519,6 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -7635,9 +7625,6 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -7738,6 +7725,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -7910,6 +7898,7 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -8062,9 +8051,6 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -8165,6 +8151,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -8337,6 +8324,7 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -8537,6 +8525,7 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -8601,6 +8590,7 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -8773,6 +8763,7 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -8883,9 +8874,6 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -8988,6 +8976,7 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -9052,6 +9041,7 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -9224,6 +9214,7 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -9334,9 +9325,6 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -9439,6 +9427,7 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -9503,6 +9492,7 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, 54 percent",
       "metadata": {
@@ -9675,6 +9665,7 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -9785,9 +9776,6 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",
@@ -9890,6 +9878,7 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
     "listeners": {},
     "parent": 1,
     "props": {
+      "data-pm-slot": "header",
       "id": "viewer.bar",
       "style": {
         "alignItems": "center",
@@ -9954,6 +9943,7 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
       "binding": "viewer.zoom",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
       "metadata": {
@@ -10126,6 +10116,7 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
       "binding": "viewer.quality",
       "control": "select",
       "data-pm-component": "pop-up-button",
+      "data-pm-variant": "inline",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
       "metadata": {
@@ -10236,9 +10227,6 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
         "interaction": "idle",
       },
       "style": {
-        "background": {
-          "token": "colors.viewer",
-        },
         "flexGrow": 1,
         "minHeight": {
           "token": "metrics.hit",

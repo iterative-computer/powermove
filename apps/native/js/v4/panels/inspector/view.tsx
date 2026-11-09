@@ -660,6 +660,7 @@ export function InspectorPanel({
     >
       <div
         id="inspector:header"
+        data-pm-slot="header"
         style={{
           ...horizontal,
           justifyContent: "space-between",

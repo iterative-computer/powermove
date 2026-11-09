@@ -93,7 +93,6 @@ export interface Platform {
   /** NSMenu, including registry groups and Recent; never a DOM panel. */
   effectMenu(): Promise<string | null>;
   contextMenu(items: MenuItem[]): Promise<string | null>;
-  activatePanel(id: "assets"): void;
   /** Maps semantic IDs to accepted numeric nodes, queues native focus/reveal. */
   focus(id: string): void;
   announce(message: string): void;

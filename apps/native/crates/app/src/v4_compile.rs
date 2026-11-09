@@ -70,7 +70,8 @@ pub struct Events {
     pub pointer_up: bool,
     pub hover: bool,
     pub wheel: bool,
-    pub drop: bool,
+    /// Takes files dropped from Finder (`data-pm-drop="files"`).
+    pub file_drop: bool,
     pub key_down: bool,
 }
 impl Events {
@@ -85,7 +86,8 @@ impl Events {
             pointer_up: has("pointerup"),
             hover: has("pointerenter") || has("pointerleave"),
             wheel: has("wheel"),
-            drop: has("drop") || has("dragover"),
+            file_drop: (has("drop") || has("dragover"))
+                && node.props.get("data-pm-drop").and_then(Value::as_str) == Some("files"),
             key_down: has("keydown"),
         }
     }
@@ -209,7 +211,7 @@ impl NumberFacts {
     }
 }
 impl Prepared {
-    pub fn new(panel_id: &str, surface: Arc<Surface>, table: &TokenTable) -> Self {
+    pub fn new(surface: Arc<Surface>, table: &TokenTable) -> Self {
         let panel = Panel::prepare(
             surface.clone(),
             &table.tokens,
@@ -240,14 +242,7 @@ impl Prepared {
         let mut anchors = vec![];
         let mut has_keydown = false;
         for node in surface.nodes().values() {
-            let view = compile(
-                panel_id,
-                &surface,
-                node,
-                &panel,
-                table,
-                axes.remove(&node.id),
-            );
+            let view = compile(&surface, node, &panel, table, axes.remove(&node.id));
             if let Some(semantic) = &view.semantic {
                 semantics.entry(semantic.to_string()).or_insert(node.id);
             }
@@ -260,7 +255,7 @@ impl Prepared {
             has_keydown |= view.events.key_down;
             nodes.insert(node.id, view);
         }
-        let header = header(panel_id, &surface);
+        let header = header(&surface);
         Self {
             nodes,
             semantics,
@@ -273,31 +268,25 @@ impl Prepared {
         self.nodes.get(&id)
     }
 }
-fn header(panel: &str, surface: &Surface) -> Option<Id> {
+/// The root's child the panel declares as its header (`data-pm-slot="header"`):
+/// the shell shows it in the panel's header row.
+fn header(surface: &Surface) -> Option<Id> {
     let root = surface
         .node(0)?
         .children
         .first()
         .and_then(|id| surface.node(*id))?;
     root.children.iter().copied().find(|id| {
-        let Some(node) = surface.node(*id) else {
-            return false;
-        };
-        matches!(
-            node.props.get("id").and_then(Value::as_str),
-            Some("timeline:header" | "viewer.bar" | "inspector:header")
-        ) || matches!(panel, "assets" | "layer-effects" | "fxbrowser")
-            && node
-                .props
-                .get("style")
-                .and_then(|s| s.get("height"))
-                .and_then(|h| h.get("token"))
-                .and_then(Value::as_str)
-                == Some("metrics.header")
+        surface.node(*id).is_some_and(|node| {
+            node.props.get("data-pm-slot").and_then(Value::as_str) == Some("header")
+        })
     })
 }
+/// How the host presents an element (`data-pm-variant`).
+pub fn variant(node: &Node) -> Option<&str> {
+    node.props.get("data-pm-variant").and_then(Value::as_str)
+}
 fn compile(
-    panel_id: &str,
     surface: &Surface,
     node: &Node,
     panel: &Panel,
@@ -316,15 +305,11 @@ fn compile(
             .and_then(Value::as_str)
             == Some("colors.panel")
     });
-    if panel_id == "viewer" || (root_fill && (node.id == 0 || node.parent == Some(0))) {
+    if root_fill && (node.id == 0 || node.parent == Some(0)) {
         style.remove("background");
         style.remove("backgroundColor");
     }
-    let hidden = style.get("display").and_then(Value::as_str) == Some("none")
-        // Project and Effect Controls draw their own tab switch for the web
-        // host; here the shell's tab strip already is that switch.
-        || (matches!(panel_id, "assets" | "layer-effects")
-            && component == Some(Component::SegmentedControl));
+    let hidden = style.get("display").and_then(Value::as_str) == Some("none");
     let mut sheet = StyleRefinement::default().flex().flex_col().min_w(px(0.));
     if node.id == 0 || node.parent == Some(0) {
         sheet = sheet.size_full();
@@ -334,15 +319,17 @@ fn compile(
         sheet = match component {
             // Quiet source-list rows: selection and hover inset from the panel
             // edge by `gap`, text a further `gap` in (language §9 Lists).
-            Some(Component::ListItem | Component::TreeItem) if panel_id != "timeline" => sheet
-                .flex_row()
-                .items_center()
-                .min_h(px(t.metrics.row))
-                .mx(px(t.metrics.gap))
-                .px(px(t.metrics.gap))
-                .gap(px(t.metrics.gap)),
-            // Timeline outline rows share their band with the native track rows:
-            // selection spans the whole row, as in After Effects.
+            Some(Component::ListItem | Component::TreeItem) if variant(node) != Some("band") => {
+                sheet
+                    .flex_row()
+                    .items_center()
+                    .min_h(px(t.metrics.row))
+                    .mx(px(t.metrics.gap))
+                    .px(px(t.metrics.gap))
+                    .gap(px(t.metrics.gap))
+            }
+            // Band rows (the timeline outline) share their band with native
+            // track rows: selection spans the whole row, as in After Effects.
             Some(Component::InspectorRow | Component::ListItem | Component::TreeItem) => {
                 sheet.flex_row().items_center().min_h(px(t.metrics.row))
             }

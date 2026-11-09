@@ -44,6 +44,11 @@ export interface SurfaceProps {
   "aria-valuenow"?: number;
   "data-pm-component"?: string;
   "data-pm-slot"?: string;
+  /** How the native host presents this element: a borderless bar pop-up, or a
+   * row whose selection spans its whole band. */
+  "data-pm-variant"?: "inline" | "band";
+  /** Files dropped from Finder land on this target. */
+  "data-pm-drop"?: "files";
   "data-pm-system-placement"?: "system";
   "data-pm-dismiss-outside"?: boolean;
   "data-pm-live-edit"?: boolean;

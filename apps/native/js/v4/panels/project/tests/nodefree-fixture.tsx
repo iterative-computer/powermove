@@ -29,7 +29,6 @@ try {
       native={{
         searchBinding: "fixture:search",
         renameBinding: "fixture:rename",
-        activatePanel() {},
         menu() {},
       }}
       layout={{ columns: 1, rowHeight: 160 }}

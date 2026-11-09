@@ -86,6 +86,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
   return (
     <div
       id="timeline:header"
+      data-pm-slot="header"
       style={{
         ...split,
         height: t("metrics.header"),
@@ -578,6 +579,7 @@ const TimelineRow = memo(
     return (
       <UI.TreeItem
         id={`timeline:row:${row.id}`}
+        data-pm-variant="band"
         label={row.accessibilityLabel}
         selected={row.selected}
         tabIndex={-1}
