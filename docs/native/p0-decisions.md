@@ -249,3 +249,12 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Clip selection is the accent ring and row selection fills the layer column only (owner's demo), replacing language §11's `text` ring.
 - Review overrides are development-build only; a release build treats `--appearance`/`--accessibility` as unknown arguments and ignores `PM_NATIVE_ACCESSIBILITY`.
 - A workspace `gutterWidth` of 224 (v1's written default) takes the native timeline column default; other widths are kept as authored.
+
+## Core lane (wave 19, 2026-11-08)
+
+- With assistive technology connected, a reused cached view replays last frame's accessibility nodes, bounds, focus and actions (P-A11Y-CACHE) instead of rendering again; the adapter gets only changed nodes, nothing when nothing changed. The first frame after (re)activation renders every view.
+- Timeline clips are list box options (macOS static text) in a multiselectable list box, so AX walkers that skip groups (agents through cua-driver) list them; selection and Press as before.
+- Render Selection's status line counts `Rendering D of N frames` and clears when the render ends however it ends; Background Tasks keeps the outcome.
+- The status line's `N files offline` counts the Project panel's Missing (offline, changed, failed, cloud); pressing it lists only those files (`Missing files only` · Show All). The Project panel wire gains `Projection.missing_only` and a `Filter.missing_only` the panel may set (additive).
+- Effect Controls marks a missing effect `Not installed` in danger with the reason in its tooltip, like other missing signs.
+- Export is a sheet on the editor window that asked (`WindowOptions::sheet_parent`, P-SHEET), also in a background launch; Settings opens while it's shown (⌘,). The sheet keeps its fixed height for now.

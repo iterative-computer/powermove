@@ -224,7 +224,7 @@ mod tests {
     // Not `super::*`: gpui's `test` attribute macro would shadow `#[test]`.
     use super::{
         CHANNELS, channel_label, display_value, fit_scale, kind_name, needs_frame_outline,
-        parse_background, status_line, zoom_title,
+        offline_summary, parse_background, status_line, zoom_title,
     };
 
     #[test]
