@@ -1,11 +1,15 @@
 //! In-process native rendering. No Node, napi entrypoints, bridge or GPUI.
 //! Callers own below-slot placement and pump native layers on the main thread.
+pub mod audio;
+pub mod clock;
+pub mod media;
 pub mod color;
 pub mod compat;
 pub mod frame_codec;
 pub mod jobs;
 pub mod layers;
 pub mod policy;
+pub mod qos;
 mod present;
 mod render;
 pub mod render_cache;
@@ -40,7 +44,7 @@ impl Snapshot {
             .map(str::to_owned)
     }
 }
-pub use pm_node::present::document::MediaMap;
+pub use crate::media::MediaMap;
 use pm_protocol::{
     clock::{AudioLevels, ClockSample, TransportCommand},
     common::{Size, Ticks},
@@ -725,7 +729,7 @@ impl EngineService {
     /// `shader_cache` is a folder kept across launches for translated shaders.
     pub fn start_with_fonts(
         gpu: pm_gpu::Gpu,
-        fonts: pm_node::fonts::render::RenderFonts,
+        fonts: pm_render::text::host::RenderFonts,
         shader_cache: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         let device = metal_device(&gpu);
@@ -1937,7 +1941,7 @@ impl Headless {
             engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
         })
     }
-    pub fn with_fonts(fonts: pm_node::fonts::render::RenderFonts) -> Result<Self> {
+    pub fn with_fonts(fonts: pm_render::text::host::RenderFonts) -> Result<Self> {
         let mut h = Self::new()?;
         h.engine.set_fonts(fonts);
         Ok(h)

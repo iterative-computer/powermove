@@ -11,13 +11,14 @@ import { withData } from '../test/db';
 import { makeEnv } from '../test/env';
 import { publisher } from '../test/publish-fixture';
 import { publishLocalSamples, sampleDirs, sampleListings } from './local-samples';
+import { v1Desktop } from './lib/v1-ref';
 
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const expected = ['glass-tint', 'ease-lab', 'colour-match', 'wipe-set'];
 
 test('all sample trees compile for the desktop sandbox and declare scanned capabilities', async () => {
   // Keep desktop's Electron-only TypeScript dependencies outside cloud's tsconfig.
-  const { compileExtension } = await import('../../desktop/src/main/extensions/' + 'compiler') as {
+  const { compileExtension } = await import(join(v1Desktop, 'src/main/extensions/compiler')) as {
     compileExtension(options: { dir: string; entry: string; outDir: string }): Promise<{ ok: true; bundlePath: string } | { ok: false; error: string }>;
   };
   const temporary = await mkdtemp(join(tmpdir(), 'powermove-samples-'));

@@ -8,15 +8,17 @@ import { execFileSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 const REPO = process.env['PM_SHADER_GATE_REPO'] ?? resolve(import.meta.dirname, '../../../../..');
-import { launchApp } from '../../../../../apps/desktop/e2e/helpers/app';
-import { decodeProjectContainer } from '../../../../../apps/desktop/src/shared/project-container';
+// The self-rebuilt tool sits inside the Electron app's tree so its external
+// apps/desktop imports resolve; that app ships from main. Point PM_V1_REF at a
+// v1 checkout (default /tmp/pm-ref-v1.2.0).
+const V1 = resolve(process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0');
 
 // Playwright's Electron inspector handshake uses Node's WebSocket stack.
 // Bun's handshake can hang even though Electron boots. Transpile this tool
 // for Node, preserving the app helper's source directory and external deps.
 if (process.versions.bun) {
-  const file = join(REPO, 'apps/desktop/.vite/shader-user-setups.mjs');
-  const built = await Bun.build({ entrypoints: [import.meta.path], target: 'node', format: 'esm', packages: 'external', define: { __dirname: JSON.stringify(join(REPO, 'apps/desktop/e2e/helpers')) } });
+  const file = join(V1, 'apps/desktop/.vite/shader-user-setups.mjs');
+  const built = await Bun.build({ entrypoints: [import.meta.path], target: 'node', format: 'esm', packages: 'external', define: { __dirname: JSON.stringify(join(V1, 'apps/desktop/e2e/helpers')) } });
   if (!built.success) throw new Error(built.logs.join('\n'));
   await mkdir(resolve(file, '..'), { recursive: true });
   await writeFile(file, await built.outputs[0]!.text());
@@ -30,6 +32,9 @@ const root = resolve(flag('--root') ?? join(homedir(), 'Library/Application Supp
 const out = resolve(flag('--out') ?? join(root, 'shader-loader.json'));
 if (out.startsWith(resolve(REPO) + sep)) throw new Error('private loader capture must stay outside the repository');
 const captures: any[] = [];
+// Resolved from the v1 checkout at run time (node pass); the Electron app ships from main.
+const { launchApp } = await import(`${V1}/apps/desktop/e2e/helpers/app`);
+const { decodeProjectContainer } = await import(`${V1}/apps/desktop/src/shared/project-container`);
 if (!existsSync(root)) {
   console.log('SKIP user-setups: private corpus directory is absent');
 } else for (const folder of (await readdir(root, { withFileTypes: true })).filter(d => d.isDirectory()).sort((a,b) => a.name.localeCompare(b.name))) {

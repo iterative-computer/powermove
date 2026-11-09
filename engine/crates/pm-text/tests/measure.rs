@@ -8,9 +8,7 @@ use pm_text::{
 };
 
 fn font() -> FontBytes {
-    FontBytes::new(
-        include_bytes!("../../../../apps/desktop/assets/fonts/Geist-Variable.ttf").to_vec(),
-    )
+    FontBytes::new(include_bytes!("fixtures/Geist-Variable.ttf").to_vec())
 }
 fn content(text: &str) -> TextContent {
     TextContent {

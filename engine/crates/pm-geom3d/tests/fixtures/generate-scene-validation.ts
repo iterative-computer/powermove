@@ -1,7 +1,9 @@
 // Regenerate with: bun engine/crates/pm-geom3d/tests/fixtures/generate-scene-validation.ts
 // These are synthetic scenes. The acceptance oracle is today's parseScene.
-import { parseScene } from '../../../../../apps/desktop/src/renderer/src/core/scene3d/schema';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { parseScene } = await import(`${v1Root}/apps/desktop/src/renderer/src/core/scene3d/schema`);
 type Scene = Record<string, any>;
 const base = (): Scene => ({ objects: [{ id: 'a', source: { primitive: 'box' } }] });
 const cases: { name: string; scene: Scene; approved?: boolean }[] = [];

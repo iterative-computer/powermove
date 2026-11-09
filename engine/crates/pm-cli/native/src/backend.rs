@@ -220,7 +220,7 @@ mod native;
 #[cfg(target_os = "macos")]
 pub fn native_with_fonts(
     name: &str,
-    fonts: pm_node::fonts::render::RenderFonts,
+    fonts: pm_render::text::host::RenderFonts,
 ) -> Result<Box<dyn Backend>> {
     if name == "test-double" {
         return backend(name);

@@ -5,18 +5,14 @@
 //! across frame cache, render cache, Blender surfaces, 3D geometry, surface
 //! pool, decoders, and pipelines. A shrink is acknowledged once usage fits.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{ByteSize, Seq};
 use crate::error::EngineProcess;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Why a lease changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum LeaseReason {
     Initial,
@@ -30,7 +26,6 @@ pub enum LeaseReason {
 /// A memory allowance from the host. Epochs increase with every change;
 /// only the latest epoch is in force.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Lease {
     pub process: EngineProcess,
@@ -44,7 +39,6 @@ pub struct Lease {
 
 /// Bytes held per category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct LeaseCategories {
     pub frame_cache: ByteSize,
@@ -80,7 +74,6 @@ impl LeaseCategories {
 /// Engine usage against a lease epoch. Sent as the acknowledgement of a
 /// lease change and periodically (at least every 5 s while non-idle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct LeaseUsage {
     pub process: EngineProcess,
@@ -93,7 +86,6 @@ pub struct LeaseUsage {
 
 /// Engine to host: ask for more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct LeaseRequest {
     pub process: EngineProcess,

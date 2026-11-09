@@ -14,10 +14,12 @@
  */
 import { writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
-import { cueIndexAt, cueTokens, cueWords, normalizeCaptionStyle, presetStyle, textTokens, CAPTION_PRESETS } from '../../../../../apps/desktop/src/renderer/src/captions/model';
-import { layoutCaption, placeBlock, wordStates } from '../../../../../apps/desktop/src/renderer/src/captions/layout';
-import { createCaptionRasterizer } from '../../../../../apps/desktop/src/renderer/src/captions/render';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { cueIndexAt, cueTokens, cueWords, normalizeCaptionStyle, presetStyle, textTokens, CAPTION_PRESETS } = await import(`${v1Root}/apps/desktop/src/renderer/src/captions/model`);
+const { layoutCaption, placeBlock, wordStates } = await import(`${v1Root}/apps/desktop/src/renderer/src/captions/layout`);
+const { createCaptionRasterizer } = await import(`${v1Root}/apps/desktop/src/renderer/src/captions/render`);
 const SCALE = Number(process.env.PM_CAPTION_SCALE ?? 1);
 const OUT = process.env.PM_CAPTION_OUT ?? new URL('./caption-vectors.json.gz', import.meta.url).pathname;
 

@@ -15,12 +15,14 @@
  * PM_LAYERING_OUT writes elsewhere.
  */
 import { writeFileSync } from 'node:fs';
-import { install as installEasing } from '../../../../../apps/desktop/src/renderer/src/legacy/core/easing';
-import { install as installAnim } from '../../../../../apps/desktop/src/renderer/src/legacy/core/anim';
-import { install as installModel } from '../../../../../apps/desktop/src/renderer/src/legacy/core/model';
-import { compositionDepthIds, compositionOrderedLayers } from '../../../../../apps/desktop/src/renderer/src/core/scene3d/service';
-import { layer3DRole } from '../../../../../apps/desktop/src/renderer/src/core/scene3d/layers';
-import { compositingLayers } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/compositor';
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { install: installEasing } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/easing`);
+const { install: installAnim } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/anim`);
+const { install: installModel } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/model`);
+const { compositionDepthIds, compositionOrderedLayers } = await import(`${v1Root}/apps/desktop/src/renderer/src/core/scene3d/service`);
+const { layer3DRole } = await import(`${v1Root}/apps/desktop/src/renderer/src/core/scene3d/layers`);
+const { compositingLayers } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/gl/compositor`);
 
 const CASES = Number(process.env.PM_LAYERING_CASES ?? 80);
 const OUT = process.env.PM_LAYERING_OUT ?? new URL('../../tests/fixtures/scene3d-layering.json', import.meta.url).pathname;

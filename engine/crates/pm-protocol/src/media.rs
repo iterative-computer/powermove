@@ -7,13 +7,10 @@
 //! minted for the job engine's host port (contract 14: the engine accepts no
 //! raw paths); the engine resolves it with `resolveHandle`.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::host::CapabilityHandle;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Longest `interpret` member text a probe carries.
 pub const MAX_INTERPRET_BYTES: usize = 16 * 1024;
@@ -26,7 +23,6 @@ pub const MAX_FACT_TEXT: usize = 1024;
 /// Host → job engine: the facts of the file a handle names. Answer:
 /// `mediaFacts`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeMedia {
     /// A `mediaRead` handle bound to the job engine's host port and
@@ -51,7 +47,6 @@ impl Validate for ProbeMedia {
 
 /// What kind of media a file holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum MediaKind {
     Video,
@@ -61,7 +56,6 @@ pub enum MediaKind {
 
 /// Where a value of the reading came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -78,7 +72,6 @@ pub enum FactOrigin {
 
 /// One read-only fact ("Codec", "ProRes 422 HQ").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FactLine {
     pub label: String,
@@ -87,7 +80,6 @@ pub struct FactLine {
 
 /// One setting Interpret Footage can override.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct InterpretSetting {
     /// The `interpret` member it maps to (`primaries`, `frameRate`, ...).
@@ -103,7 +95,6 @@ pub struct InterpretSetting {
 /// Numeric import facts of the selected audio stream. Display labels and
 /// channel-layout names are presentation text, never metadata to parse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AudioFacts {
     pub sample_rate: u32,
@@ -112,12 +103,10 @@ pub struct AudioFacts {
 
 /// The job engine's answer to [`ProbeMedia`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct MediaFacts {
     pub kind: MediaKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub audio: Option<AudioFacts>,
     /// Read-only facts, in display order.
     pub facts: Vec<FactLine>,

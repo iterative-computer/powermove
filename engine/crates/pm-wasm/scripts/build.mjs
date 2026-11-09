@@ -8,10 +8,9 @@
    LTO applies: docs/engine/release-build.md) with the pinned toolchain
    (engine/env.sh), drops the custom sections
    (DWARF line tables, names) that the release profile keeps for native
-   builds, and writes the module to
-   apps/desktop/src/renderer/public/engine/pm_wasm.wasm (gitignored), which
-   the renderer serves at `engine/pm_wasm.wasm` and the headless host reads
-   from out/renderer/engine/. With --debug the custom sections are kept. */
+   builds, and writes the module to engine/target/pm-wasm/pm_wasm.wasm
+   (gitignored) unless --out says otherwise. With --debug the custom sections
+   are kept. */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -20,10 +19,9 @@ import { gzipSync } from 'node:zlib';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const engineDir = resolve(here, '../../..');
-const repo = resolve(engineDir, '..');
 const args = process.argv.slice(2);
 const outIndex = args.indexOf('--out');
-const out = outIndex >= 0 ? resolve(args[outIndex + 1]) : join(repo, 'apps/desktop/src/renderer/public/engine/pm_wasm.wasm');
+const out = outIndex >= 0 ? resolve(args[outIndex + 1]) : join(engineDir, 'target/pm-wasm/pm_wasm.wasm');
 const debug = args.includes('--debug');
 
 execFileSync('bash', ['-c', 'source env.sh && nice -n 15 cargo build --release --target wasm32-unknown-unknown -p pm-wasm-module'], {

@@ -15,7 +15,7 @@ pm-panel-inspector = { path = "../panel-inspector" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 serde_json = "1"
 pm-time = { path = "../../../../engine/crates/pm-time" }
-pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
 tempfile = "3"
 
 pm-panel-timeline = { path = "../panel-timeline" }

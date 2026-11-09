@@ -29,8 +29,7 @@ fn aac_and_opus_decode_as_today() {
     };
     // SAFETY: set before any thread opens a source in this process.
     unsafe { std::env::set_var("POWERMOVE_CHROMIUM_FFMPEG", &lib) };
-    let fixtures =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     const TODAY_AAC: &str = "3846f36f30ed0abb7df89dbb3385b87647cd4735ec5cd5035aa1e0ae21659556";
     for (file, want) in [
         ("tone.m4a", TODAY_AAC),
@@ -83,8 +82,7 @@ fn restored_sources_decode_lazily_and_count_length_on_first_read() {
     let dir = tempfile::tempdir().unwrap();
     // A copy: the per-file memo must not already know it.
     let file = dir.path().join("tone-copy.opus");
-    let fixtures =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     std::fs::copy(fixtures.join("tone.opus"), &file).unwrap();
     let cache = pm_audio::SourceCache::new(16 << 20, 0);
     let first = cache.open(&file, None).unwrap();

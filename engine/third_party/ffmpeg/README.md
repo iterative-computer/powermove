@@ -219,7 +219,7 @@ WebM, still, PNG-sequence, code and project exports do not use the encoder.
 | `apps/desktop/e2e/video-scrubbing.spec.ts:31` | `libx264` fixture, fixed 120-frame GOP | `h264_videotoolbox` with `-g 120` (closed GOP spacing should be checked) |
 | `apps/desktop/e2e/export-video-frames.spec.ts:19` | `libx264 -crf 0` lossless H.264 source | VideoToolbox has no lossless H.264; a lossless source needs another codec (FFV1, lossless VP9 as the WebM branch already does, or high-bitrate `h264_videotoolbox` with a tolerance) |
 | `apps/desktop/e2e/import-prores-alpha.spec.ts:22` | `prores_ks` 4444 alpha fixture | `prores_videotoolbox -profile:v 4444` |
-| `apps/desktop/e2e/fixtures/gen.sh` (h264-aac.mp4, h264-aac.mov, converted.mkv; prores422.mov, prores4444-alpha.mov and the hevc-alpha.mov made from it; tone.mp3) | `libx264`, `prores_ks`, `libmp3lame` | skipped gracefully by `gen.sh`'s encoder checks; committed fixtures stay valid. HEVC already prefers `hevc_videotoolbox`, AV1 falls back to `libsvtav1` |
+| `engine/fixtures/gen.sh` (h264-aac.mp4, h264-aac.mov, converted.mkv; prores422.mov, prores4444-alpha.mov and the hevc-alpha.mov made from it; tone.mp3) | `libx264`, `prores_ks`, `libmp3lame` | skipped gracefully by `gen.sh`'s encoder checks; committed fixtures stay valid. HEVC already prefers `hevc_videotoolbox`, AV1 falls back to `libsvtav1` |
 
 Everything else used today, including every decoder and demuxer behind the import
 formats in `shared/media-formats.ts`, is present (`verify.sh` checks each one).

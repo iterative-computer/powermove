@@ -153,7 +153,7 @@ fn check_frame(g: &Gpu, f: &DecodedFrame, what: &str, require_zero_copy: bool) -
 }
 
 fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
 fn corpus() -> PathBuf {

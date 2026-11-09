@@ -7,9 +7,6 @@
 //! when they are constructed, serialized, and deserialized.
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 /// Largest integer a JavaScript `number` represents exactly (2^53 − 1).
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
@@ -27,7 +24,6 @@ macro_rules! safe_uint {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
-        #[cfg_attr(feature = "ts", derive(TS), ts(type = "number"))]
         #[serde(try_from = "u64", into = "u64")]
         pub struct $name(u64);
 
@@ -115,7 +111,6 @@ safe_uint!(
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
-#[cfg_attr(feature = "ts", derive(TS), ts(type = "number"))]
 #[serde(try_from = "i64", into = "i64")]
 pub struct Ticks(i64);
 
@@ -163,7 +158,6 @@ impl From<Ticks> for i64 {
 
 /// A half-open tick interval `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TickRange {
     pub start: Ticks,
@@ -179,7 +173,6 @@ impl TickRange {
 /// An exact frame rate, `num / den` frames per second. Both parts positive.
 /// The wire carries the exact rational; pm-time owns frame math.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FrameRate {
     pub num: u32,
@@ -206,7 +199,6 @@ impl FrameRate {
 
 /// A signed playback rate, `num / den` times real time (J/K/L shuttle, reverse).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackRate {
     pub num: i32,
@@ -226,7 +218,6 @@ macro_rules! string_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-        #[cfg_attr(feature = "ts", derive(TS))]
         #[serde(transparent)]
         pub struct $name(pub String);
 
@@ -300,7 +291,6 @@ string_id!(
 
 /// A size in whole pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Size {
     pub width: u32,
@@ -324,7 +314,6 @@ impl Size {
 
 /// A rectangle in whole pixels, origin top-left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PixelRect {
     pub x: u32,
@@ -341,7 +330,6 @@ impl PixelRect {
 
 /// A rectangle in composition or view units (floating point).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Rect {
     pub x: f64,
@@ -363,7 +351,6 @@ pub const MAT4_IDENTITY: Mat4 = [
 /// A 32-byte content hash (BLAKE3 for media and surfaces, section 13). The
 /// protocol carries the digest; hashing is the producer's job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(type = "Uint8Array"))]
 #[serde(transparent)]
 pub struct ContentHash(#[serde(with = "serde_bytes")] pub [u8; 32]);
 
@@ -371,14 +358,12 @@ pub struct ContentHash(#[serde(with = "serde_bytes")] pub [u8; 32]);
 /// use shared surfaces, large payloads use cache files behind capability
 /// handles. [`crate::codec::MAX_MESSAGE_BYTES`] bounds every message.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(type = "Uint8Array"))]
 #[serde(transparent)]
 pub struct Bytes(#[serde(with = "serde_bytes")] pub Vec<u8>);
 
 /// An RGBA color with straight alpha, components in the working encoding
 /// (E-encoded in Standard color), not clamped.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Rgba {
     pub r: f64,

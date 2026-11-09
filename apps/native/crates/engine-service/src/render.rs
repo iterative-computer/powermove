@@ -140,7 +140,7 @@ pub struct Engine {
     queue: metal::CommandQueue,
     pipeline: metal::RenderPipelineState,
     pool: Vec<Arc<ExportedSurface>>,
-    fonts: Option<pm_node::fonts::render::RenderFonts>,
+    fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
@@ -353,7 +353,7 @@ impl Engine {
     pub(crate) fn compat(&self) -> Option<&Arc<crate::compat::CompatStore>> {
         self.compat_document.as_ref()
     }
-    pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
+    pub fn set_fonts(&mut self, fonts: pm_render::text::host::RenderFonts) {
         self.fonts = Some(fonts);
         self.font_generation = None;
         self.clear_cache();

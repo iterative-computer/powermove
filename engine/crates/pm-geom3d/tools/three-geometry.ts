@@ -16,10 +16,12 @@ import path from 'node:path';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const repo = path.join(here, '../../../..');
-const three = path.join(repo, 'apps/desktop/node_modules/three');
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const three = path.join(v1Root, 'apps/desktop/node_modules/three');
 const version = JSON.parse(readFileSync(path.join(three, 'package.json'), 'utf8')).version;
 if (version !== '0.180.0') throw new Error(`three.js ${version} is installed; the engine ports r180`);
-const { primitiveGeometry } = await import(path.join(repo, 'apps/desktop/src/renderer/src/core/scene3d/runtime.ts'));
+const { primitiveGeometry } = await import(path.join(v1Root, 'apps/desktop/src/renderer/src/core/scene3d/runtime.ts'));
 import { execFileSync } from 'node:child_process';
 
 // A deterministic pseudo-random sequence for generated meshes and OBJ files.
@@ -129,7 +131,7 @@ const objs = [
 ];
 const v8 = `
   const { createHash } = await import('node:crypto');
-  const { parseObj } = await import(${JSON.stringify(path.join(repo, 'apps/desktop/src/renderer/src/kernel/obj.ts'))});
+  const { parseObj } = await import(${JSON.stringify(path.join(v1Root, 'apps/desktop/src/renderer/src/kernel/obj.ts'))});
   const hash = a => createHash('sha256').update(new Uint8Array(a.buffer, a.byteOffset, a.byteLength)).digest('hex');
   const texts = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
   console.log(JSON.stringify(texts.map(text => { const m = parseObj(text);

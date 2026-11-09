@@ -28,7 +28,7 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Job renderer/audio and bundled FFmpeg bindings are macOS integration only.
 pm-gpu = { path = "../pm-gpu", optional = true }
-pm-protocol = { path = "../pm-protocol", default-features = false, optional = true }
+pm-protocol = { path = "../pm-protocol", optional = true }
 pm-model = { path = "../pm-model", optional = true }
 pm-eval = { path = "../pm-eval", optional = true }
 pm-render = { path = "../pm-render", optional = true }

@@ -32,6 +32,7 @@ pub mod png;
 #[cfg(all(feature = "engine", target_os = "macos"))]
 mod readback;
 #[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod raster;
 pub mod render;
 pub mod schedule;
 pub mod settings;

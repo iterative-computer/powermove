@@ -46,8 +46,8 @@ options:
   --wasm                  also compare through pm-wasm: the built module in Node
                           and the same engine natively (bit identity)
   --no-native             skip the native pm-eval comparison
-  --wasm-module <file>    the module (default: apps/desktop/src/renderer/public/
-                          engine/pm_wasm.wasm, from pm-wasm/scripts/build.mjs)
+  --wasm-module <file>    the module (default: engine/target/pm-wasm/
+                          pm_wasm.wasm, from pm-wasm/scripts/build.mjs)
   --wasm-subsets          serve metrics-and-shaping subsets as the app does
                           (ink-dependent values are then not compared)
   --node <bin>            Node binary (default: node)

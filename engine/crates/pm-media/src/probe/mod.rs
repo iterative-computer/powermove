@@ -726,8 +726,7 @@ mod tests {
     #[test]
     fn parallel_fingerprint_keeps_probe_and_index_identical() {
         // Large enough to take the parallel route.
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/desktop/e2e/fixtures/tone.wav");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/tone.wav");
         let size = std::fs::metadata(&path).unwrap().len();
         assert!(size >= 128 << 10);
         let (parallel, _) = probe_with_input(&path).unwrap();

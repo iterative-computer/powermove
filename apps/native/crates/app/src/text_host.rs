@@ -4,7 +4,8 @@
 //! mirror per project and feeds its engine the fonts a question lacks.
 use pm_kernel::text_host::{SharedTextHost, TextHost};
 use pm_kernel::{Published, QueryContext, QueryError, QueryMirror};
-use pm_node::fonts::render::{BrokerResolver, RenderFonts};
+use pm_render::text::host::RenderFonts;
+use pm_text::host::BrokerResolver;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;

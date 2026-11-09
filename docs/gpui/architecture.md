@@ -1,7 +1,8 @@
 # Powermove for Mac: the GPUI + AppKit rewrite
 
-Status: draft, 2026-10-31. Branch `feat/gpui-mac` (from `new-3d-system-native`,
-which carries the Rust engine). Code: `apps/mac`.
+Status: superseded by plan v6 (`v6-reconciliation.md`); the app is
+`apps/native`. The `apps/mac` spike this draft describes was deleted on
+2026-11-09; its last state is commit `bae578b60`.
 
 ## In one paragraph
 

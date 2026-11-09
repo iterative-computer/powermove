@@ -8,7 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-protocol = { path = "../pm-protocol" }
 # Work counters (docs/engine/perfbench.md).
 pm-perf = { path = "../pm-perf" }
 pm-fx-defs = { path = "../pm-fx-defs" }

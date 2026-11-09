@@ -30,7 +30,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 SRC="${1:-${PM_FFMPEG_DIR:-$HOME/Library/Caches/powermove-engine/ffmpeg/out}}"
-DEST="${2:-$REPO/apps/desktop/vendor/ffmpeg}"
+# The Electron app ships from main, not this branch. Pass the destination
+# explicitly, or set PM_V1_REF to a v1 checkout (default /tmp/pm-ref-v1.2.0).
+DEST="${2:-${PM_V1_REF:-/tmp/pm-ref-v1.2.0}/apps/desktop/vendor/ffmpeg}"
 
 die() { echo "package.sh: $*" >&2; exit 1; }
 [[ -x "$SRC/bin/ffmpeg" && -x "$SRC/bin/ffprobe" && -f "$SRC/manifest.json" ]] \

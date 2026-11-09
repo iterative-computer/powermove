@@ -28,6 +28,8 @@
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 
 const g = globalThis as any;
 g.self ??= globalThis;
@@ -44,7 +46,7 @@ g.FileReader ??= class FileReader {
 };
 
 const root = path.resolve(import.meta.dir, '../../../..');
-const { loadGltf } = await import(path.join(root, 'apps/desktop/src/renderer/src/core/scene3d/import-model.ts'));
+const { loadGltf } = await import(path.join(v1Root, 'apps/desktop/src/renderer/src/core/scene3d/import-model.ts'));
 
 const round = (v: number) => (Number.isFinite(v) ? Math.fround(v) : v);
 
@@ -233,8 +235,8 @@ async function objReference(dir: string) {
   const { createHash } = await import('node:crypto');
   const sha = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex');
   const floats = (a: Float32Array) => sha(new Uint8Array(a.buffer, a.byteOffset, a.byteLength));
-  const { prepareModelImport } = await import(path.join(root, 'apps/desktop/src/renderer/src/core/scene3d/import-bundle.ts'));
-  const { parseObj } = await import(path.join(root, 'apps/desktop/src/renderer/src/kernel/obj.ts'));
+  const { prepareModelImport } = await import(path.join(v1Root, 'apps/desktop/src/renderer/src/core/scene3d/import-bundle.ts'));
+  const { parseObj } = await import(path.join(v1Root, 'apps/desktop/src/renderer/src/kernel/obj.ts'));
   const parse = (source: string) => {
     try {
       const m = parseObj(source);

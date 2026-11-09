@@ -313,7 +313,7 @@ fn project(
     root: &Path,
     spec: &Path,
     work: &Path,
-    fonts: pm_node::fonts::render::RenderFonts,
+    fonts: pm_render::text::host::RenderFonts,
 ) -> Result<()> {
     space(root)?;
     let row = read(spec)?;
@@ -780,17 +780,17 @@ fn main() -> Result<()> {
         Some("inventory") => inventory(Path::new(&args[2])),
         Some("project") => {
             // Font registry lives on main; all project/kernel/GPU work runs off main.
-            let mut service = pm_node::fonts::FontService::new().map_err(anyhow::Error::msg)?;
-            let broker = pm_node::fonts::render::FontBroker::new();
+            let mut service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
+            let broker = pm_text::host::FontBroker::new();
             broker.set_wake(Arc::new(|| {}));
             broker.set_generation(service.generation());
-            let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
+            let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
             let root = PathBuf::from(&args[2]);
             let spec = PathBuf::from(&args[3]);
             let work = PathBuf::from(&args[4]);
             let worker = std::thread::spawn(move || project(&root, &spec, &work, fonts));
             while !worker.is_finished() {
-                pm_node::fonts::render::serve(&mut service, broker.take_asks());
+                pm_text::host::serve(&mut service, broker.take_asks());
                 std::thread::sleep(Duration::from_millis(2));
             }
             worker

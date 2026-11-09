@@ -16,4 +16,4 @@ libm.workspace = true
 [dev-dependencies]
 # Cross-checks only (tests/engine_formulas.rs); never for reference values.
 pm-color = { path = "../pm-color" }
-pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-protocol = { path = "../pm-protocol" }

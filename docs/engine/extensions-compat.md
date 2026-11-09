@@ -23,7 +23,7 @@ compatibility path, why it exists, and the invariants it keeps.
 | The compatibility context | `renderer/src/kernel/compat-context.ts` (`CompatContextHost`), wired in `kernel/install.ts` |
 | Provisional revisions | `engine-doc/barrier.ts`, `engine-connection/install.ts` (`flushSoon`), `engine-connection/session.ts`, `engine-connection/patch-coalesce.ts`, `pm-node` `present/render.rs` |
 | Today's export format ids | `shared/delivery.ts` (`storedFormatId`), `core/export-defaults.ts` |
-| Corpus and gates | `apps/desktop/e2e/fixtures/compat-corpus/`, `e2e/engine-*compat*.spec.ts`, `e2e/engine-customization-corpus.spec.ts`, `main/extensions/rebase-corpus.test.ts` |
+| Corpus and gates | `engine/fixtures/compat-corpus/`, `e2e/engine-*compat*.spec.ts`, `e2e/engine-customization-corpus.spec.ts`, `main/extensions/rebase-corpus.test.ts` |
 
 ## The raster override
 

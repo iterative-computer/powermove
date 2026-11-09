@@ -7,15 +7,8 @@ use pm_vector::kurbo::{Affine, Point};
 use pm_vector::render::scene::PixelRect;
 use pm_vector::render::svg::SvgDocument;
 
-fn art() -> &'static str {
-    include_str!("../../../../apps/desktop/e2e/engine-svg.spec.ts")
-        .split_once("const ART = `")
-        .expect("desktop ART fixture")
-        .1
-        .split_once("`;")
-        .expect("desktop ART fixture end")
-        .0
-}
+/// The desktop e2e suite's ART Cover image.
+const ART: &str = include_str!("fixtures/art-cover.svg");
 
 #[test]
 fn rotated_cover_blur_fits_the_float_budget_and_has_no_tile_seam() {
@@ -23,7 +16,7 @@ fn rotated_cover_blur_fits_the_float_budget_and_has_no_tile_seam() {
     gpu.device.set_device_lost_callback(|reason, message| {
         eprintln!("SVG Cover device lost: {reason:?}: {message}");
     });
-    let doc = SvgDocument::parse(art().as_bytes()).unwrap();
+    let doc = SvgDocument::parse(ART.as_bytes()).unwrap();
     assert!(doc.gpu_paintable());
     let world = Affine::translate((420.0, 120.0))
         * Affine::rotate(23.0_f64.to_radians())

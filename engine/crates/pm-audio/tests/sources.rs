@@ -16,7 +16,7 @@ use pm_audio::{MixFormat, SourceCache};
 use pm_protocol::common::TICKS_PER_SECOND;
 
 fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
 /// Forty minutes of AAC, far past the legacy decode budget (128 MiB, about
@@ -357,8 +357,7 @@ fn waveforms() {
 /// file (which differs only by float rounding).
 #[test]
 fn mp3_blocks_equal_todays_sequential_decode() {
-    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/tone.mp3");
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/tone.mp3");
     let cache = pm_audio::SourceCache::new(64 << 20, 0);
     let source = cache.open(&file, None).unwrap();
     let n = source.length().unwrap() as usize;

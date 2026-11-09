@@ -22,10 +22,13 @@
  */
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { canonicalHash, canonicalProject, canonicalStringify, realizeProject } from '../../../../../apps/desktop/src/shared/canonical-json';
-import { applyPatch, diffPatches, type Patch } from '../../../../../apps/desktop/src/shared/patch';
-import { COMP_FIELDS, canonicalizePatches, normalizeCompositions, realizePatches, rotateProject } from '../../../../../apps/desktop/src/renderer/src/legacy/core/compositions';
+import type { Patch } from '../../../../../apps/desktop/src/shared/patch';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { canonicalHash, canonicalProject, canonicalStringify, realizeProject } = await import(`${v1Root}/apps/desktop/src/shared/canonical-json`);
+const { applyPatch, diffPatches } = await import(`${v1Root}/apps/desktop/src/shared/patch`);
+const { COMP_FIELDS, canonicalizePatches, normalizeCompositions, realizePatches, rotateProject } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/compositions`);
 const here = import.meta.dir;
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 const text = (value: unknown) => canonicalStringify(value) ?? null;

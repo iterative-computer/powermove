@@ -46,7 +46,7 @@ fn capture_dir() -> Option<PathBuf> {
 
 /// A captured media path, or the same file in this checkout: captures
 /// record repository fixtures by the absolute path of the worktree that made
-/// them (`apps/desktop/e2e/fixtures/…`), which may be gone; media the capture
+/// them (`apps/desktop/e2e/fixtures/…`, now `engine/fixtures`), which may be gone; media the capture
 /// generated lives in its own `media/` directory.
 fn resolve_media(capture: &Path, file: &Path) -> PathBuf {
     if file.is_file() {
@@ -55,7 +55,7 @@ fn resolve_media(capture: &Path, file: &Path) -> PathBuf {
     let Some(name) = file.file_name() else {
         return file.to_path_buf();
     };
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     [capture.join("media").join(name), fixtures.join(name)]
         .into_iter()
         .find(|p| p.is_file())

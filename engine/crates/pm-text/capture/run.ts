@@ -9,7 +9,9 @@ const crate = join(import.meta.dir, '..');
 const repo = join(crate, '..', '..', '..');
 const root = join(repo, 'engine', 'target', 'pm-text');
 mkdirSync(root, { recursive: true });
-const electron = join(repo, 'apps', 'desktop', 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
+// The Electron app ships from main; its node_modules live in a v1 checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const electron = join(v1Root, 'apps', 'desktop', 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
 // The parent shell may run inside an Electron app with ELECTRON_RUN_AS_NODE set,
 // which would start the capture host as plain Node.
 const env = { ...process.env };

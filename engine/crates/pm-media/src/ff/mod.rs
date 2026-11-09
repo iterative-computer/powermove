@@ -871,15 +871,12 @@ mod tests {
     #[test]
     fn h264_headers_say_what_the_decoded_probe_says() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut files: Vec<_> = [
-            "../apps/desktop/e2e/fixtures",
-            "crates/pm-render/tests/fixtures/video",
-        ]
-        .iter()
-        .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap())
-        .map(|e| e.unwrap().path())
-        .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("mp4" | "mov")))
-        .collect();
+        let mut files: Vec<_> = ["fixtures", "crates/pm-render/tests/fixtures/video"]
+            .iter()
+            .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap())
+            .map(|e| e.unwrap().path())
+            .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("mp4" | "mov")))
+            .collect();
         files.sort();
         let mut compared = 0;
         for path in files {

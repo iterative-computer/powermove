@@ -9,7 +9,7 @@ publish.workspace = true
 
 [dependencies]
 pm-time = { path = "../pm-time" }
-pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-protocol = { path = "../pm-protocol" }
 pm-model = { path = "../pm-model" }
 pm-eval = { path = "../pm-eval" }
 pm-media = { path = "../pm-media" }

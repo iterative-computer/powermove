@@ -48,11 +48,11 @@ const PACK: &[(&str, &str)] = &[
     // load here too, and it is the API for commands, keys, menus and effects.
     (
         "v3/EXTENSIONS.md",
-        include_str!("../../../../desktop/docs/EXTENSIONS.md"),
+        include_str!("../../../js/compat/api-pack/EXTENSIONS.md"),
     ),
     (
         "v3/api.ts",
-        include_str!("../../../../desktop/src/renderer/src/kernel/api.ts"),
+        include_str!("../../../js/compat/api-pack/api.ts"),
     ),
     (
         "v3/extensions.ts",
@@ -60,39 +60,39 @@ const PACK: &[(&str, &str)] = &[
     ),
     (
         "v3/project.ts",
-        include_str!("../../../../desktop/src/renderer/src/core/types/project.ts"),
+        include_str!("../../../js/compat/api-pack/project.ts"),
     ),
     (
         "v3/commands.ts",
-        include_str!("../../../../desktop/src/renderer/src/core/types/commands.ts"),
+        include_str!("../../../js/compat/api-pack/commands.ts"),
     ),
     (
         "v3/samples/gradient-tint/manifest.json",
-        include_str!("../../../../desktop/docs/samples/gradient-tint/manifest.json"),
+        include_str!("../../../js/compat/api-pack/samples/gradient-tint/manifest.json"),
     ),
     (
         "v3/samples/gradient-tint/index.ts",
-        include_str!("../../../../desktop/docs/samples/gradient-tint/index.ts"),
+        include_str!("../../../js/compat/api-pack/samples/gradient-tint/index.ts"),
     ),
     (
         "v3/samples/gradient-tint/README.md",
-        include_str!("../../../../desktop/docs/samples/gradient-tint/README.md"),
+        include_str!("../../../js/compat/api-pack/samples/gradient-tint/README.md"),
     ),
     (
         "v3/samples/media-browser/manifest.json",
-        include_str!("../../../../desktop/docs/samples/media-browser/manifest.json"),
+        include_str!("../../../js/compat/api-pack/samples/media-browser/manifest.json"),
     ),
     (
         "v3/samples/media-browser/index.ts",
-        include_str!("../../../../desktop/docs/samples/media-browser/index.ts"),
+        include_str!("../../../js/compat/api-pack/samples/media-browser/index.ts"),
     ),
     (
         "v3/samples/media-browser/MediaBrowserPanel.svelte",
-        include_str!("../../../../desktop/docs/samples/media-browser/MediaBrowserPanel.svelte"),
+        include_str!("../../../js/compat/api-pack/samples/media-browser/MediaBrowserPanel.svelte"),
     ),
     (
         "v3/samples/media-browser/README.md",
-        include_str!("../../../../desktop/docs/samples/media-browser/README.md"),
+        include_str!("../../../js/compat/api-pack/samples/media-browser/README.md"),
     ),
 ];
 const ACTIVATION: Duration = Duration::from_secs(10);

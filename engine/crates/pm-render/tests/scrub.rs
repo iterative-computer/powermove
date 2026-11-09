@@ -27,7 +27,7 @@ fn clip() -> (pm_model::Document, MapResolver) {
     let mut resolver = MapResolver::default();
     resolver.paths.insert(
         "clip".into(),
-        repo_root().join("apps/desktop/e2e/fixtures/h264-aac.mp4"),
+        repo_root().join("engine/fixtures/h264-aac.mp4"),
     );
     (load(&doc), resolver)
 }

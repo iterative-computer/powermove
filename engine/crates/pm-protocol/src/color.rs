@@ -6,12 +6,8 @@
 //! encoder-input shader must agree with them within each bar's tolerance.
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 /// Color primaries (ITU-T H.273 `ColourPrimaries`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Primaries {
     /// BT.709 and sRGB (H.273 code 1).
@@ -70,7 +66,6 @@ impl Primaries {
 
 /// How code values map to light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Transfer {
     /// Display encoding E: the sRGB piecewise curve extended to all reals.
@@ -106,7 +101,6 @@ pub enum Transfer {
 
 /// Y′CbCr matrix coefficients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum MatrixCoefficients {
     /// RGB, no matrix (H.273 code 0).
@@ -136,7 +130,6 @@ impl MatrixCoefficients {
 
 /// Quantization range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Range {
     /// Narrow, "video" range (luma 16..235 at 8-bit).
@@ -147,23 +140,18 @@ pub enum Range {
 
 /// Chroma subsampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 pub enum Subsampling {
     #[serde(rename = "444")]
-    #[cfg_attr(feature = "ts", ts(rename = "444"))]
     S444,
     #[serde(rename = "422")]
-    #[cfg_attr(feature = "ts", ts(rename = "422"))]
     S422,
     #[serde(rename = "420")]
-    #[cfg_attr(feature = "ts", ts(rename = "420"))]
     S420,
 }
 
 /// Chroma sample location (H.273 `chroma_sample_loc_type`, 0 to 5).
 /// Untagged 4:2:0 is `Left` (type 0), section 9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ChromaSiting {
     /// Type 0: horizontally co-sited with the left luma sample, vertically centered.
@@ -205,7 +193,6 @@ impl ChromaSiting {
 
 /// How a source's alpha relates to its color.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -227,7 +214,6 @@ pub enum AlphaMode {
 
 /// A full description of how to read or write pixel values.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ColorDescription {
     pub primaries: Primaries,
@@ -266,7 +252,6 @@ impl ColorDescription {
 
 /// The encoding of intermediates (section 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum WorkingEncoding {
     /// Linear blending off: premultiplied, display encoding E, BT.709 primaries.
@@ -277,7 +262,6 @@ pub enum WorkingEncoding {
 
 /// Intermediate storage precision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Precision {
     /// Normalized 8-bit working targets (`rgba8unorm`), matching project Color depth 8.
@@ -290,7 +274,6 @@ pub enum Precision {
 
 /// Where screen, overlay, and soft light run when linear blending is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum BlendDomain {
     /// HDR-safe formulas in the active encoding (default).
@@ -301,7 +284,6 @@ pub enum BlendDomain {
 
 /// Project color mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ColorMode {
     /// SDR delivery: HDR sources are tone mapped to SDR white at input.
@@ -312,7 +294,6 @@ pub enum ColorMode {
 
 /// The project's `color` field as the engine sees it (Settings › Project › Color).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectColor {
     pub mode: ColorMode,
@@ -325,7 +306,6 @@ pub struct ProjectColor {
         default = "default_mastering_peak",
         skip_serializing_if = "is_default_mastering_peak"
     )]
-    #[cfg_attr(feature = "ts", ts(as = "Option<u16>", optional))]
     pub mastering_peak: u16,
 }
 
@@ -366,7 +346,6 @@ impl ProjectColor {
 
 /// The nine blend modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum BlendMode {
     Normal,
@@ -393,7 +372,6 @@ impl BlendMode {
 
 /// 3D tone mapping (decision 17): curves differ by design at cutover.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -409,7 +387,6 @@ pub enum ToneMapping3d {
 
 /// An output's color tag choice (section 9, output tags).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -434,7 +411,6 @@ pub enum OutputColor {
 
 /// The two tags S2 tests for "Rec.709 (QuickTime and Safari)" (section 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum QuickTimeTag {
     /// CICP 1-13-1 (sRGB transfer). Named explicitly: ts-rs camel-cases
@@ -449,7 +425,6 @@ pub enum QuickTimeTag {
 
 /// The canvas color space the viewer draws into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ViewerColorSpace {
     /// `srgb` canvas: working values encoded with E.
@@ -460,7 +435,6 @@ pub enum ViewerColorSpace {
 
 /// ITU-T H.273 code points written to VUI, `colr nclx`, `cICP`, or WebM Colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Cicp {
     pub primaries: u8,
@@ -498,7 +472,6 @@ impl OutputColor {
 /// The color-related components of a render cache key (section 8). The
 /// render graph hashes [`ColorKey::key_bytes`] together with its other inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ColorKey {
     pub working: WorkingEncoding,
@@ -639,7 +612,6 @@ pub const fn ycbcr_codable_range(bit_depth: u8) -> Option<(u32, u32)> {
 /// Offsets and scales that normalize integer code values to Y′ in 0..1 and
 /// Cb, Cr in −0.5..0.5 (section 13, normalization).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Normalization {
     pub luma_offset: f64,
@@ -660,7 +632,6 @@ impl Normalization {
 
 /// How sample bits sit in their container word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SampleAlignment {
     /// VideoToolbox `x420`/`x422` and P010: n-bit value in the high bits of 16.
@@ -703,18 +674,6 @@ pub fn normalization(bits: u8, alignment: SampleAlignment, range: Range) -> Norm
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The TypeScript bindings name each tag as it travels (the desktop app
-    /// sends them in export settings).
-    #[cfg(feature = "ts")]
-    #[test]
-    fn quicktime_tags_have_the_same_names_on_the_wire_and_in_typescript() {
-        let ts = <QuickTimeTag as ts_rs::TS>::inline(&ts_rs::Config::default());
-        for tag in [QuickTimeTag::Cicp1_13_1, QuickTimeTag::Cicp1_2_1Gamma22] {
-            let wire = serde_json::to_string(&tag).unwrap();
-            assert!(ts.contains(&wire), "{wire} is not in {ts}");
-        }
-    }
 
     fn close(a: f64, b: f64, tolerance: f64) -> bool {
         (a - b).abs() <= tolerance

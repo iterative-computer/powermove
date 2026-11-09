@@ -4,6 +4,8 @@ Plan v6 ("Powermove Native: plan for the full Rust app", Jude, 2026-10-29) is
 the execution baseline from 2026-11-01. This branch was started before it
 arrived. This note maps what exists here onto v6's work packages, so nothing is
 redone or lost. Where v6 and `architecture.md` disagree, **v6 wins**.
+The `apps/mac` workspace was deleted on 2026-11-09 once everything below had
+been carried over; read it at commit `bae578b60`.
 
 ## What v6 changes from architecture.md
 

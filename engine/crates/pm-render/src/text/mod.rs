@@ -13,6 +13,7 @@
 //! anchors are `pm-eval`'s.
 
 pub mod gpu;
+pub mod host;
 pub mod served;
 
 use std::hash::{Hash, Hasher};

@@ -170,63 +170,6 @@ fn golden_fixtures_are_current() {
     );
 }
 
-#[cfg(feature = "ts")]
-#[test]
-fn typescript_regeneration_is_a_no_op() {
-    let files = pm_protocol::ts::generate().unwrap();
-    let drift = pm_protocol::ts::drift(&files, &pm_protocol::ts::output_dir()).unwrap();
-    assert!(
-        drift.is_empty(),
-        "apps/desktop/src/shared/engine-protocol is out of date: {drift:?}\nRun: source engine/env.sh && cd engine && cargo run -p pm-protocol --bin pm-protocol-gen"
-    );
-}
-
-#[cfg(feature = "ts")]
-#[test]
-fn typescript_has_no_bigint_and_covers_the_envelope() {
-    let files = pm_protocol::ts::generate().unwrap();
-    for (path, text) in &files {
-        assert!(
-            !text.contains("bigint"),
-            "{} exposes a 64-bit integer; use a safe newtype",
-            path.display()
-        );
-        for line in text
-            .lines()
-            .filter(|l| !l.trim_start().starts_with(['*', '/']))
-        {
-            for token in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
-            {
-                let field = token.strip_suffix(':').unwrap_or("");
-                assert!(
-                    !field.contains('_'),
-                    "{} has a snake_case field {field:?}; the wire is camelCase",
-                    path.display()
-                );
-            }
-        }
-    }
-    let index = &files[std::path::Path::new("index.ts")];
-    for name in [
-        "Envelope",
-        "Message",
-        "Request",
-        "Response",
-        "Event",
-        "Hello",
-        "Welcome",
-        "EngineError",
-        "EvaluatedScene",
-        "FrameRequest",
-        "FrameDescriptor",
-    ] {
-        assert!(
-            index.contains(&format!("export type {{ {name} }}")),
-            "index.ts lacks {name}"
-        );
-    }
-}
-
 #[test]
 fn truncated_fixtures_fail_cleanly() {
     for (name, bytes) in samples::fixture_files().unwrap() {

@@ -7,17 +7,13 @@
 //! governor) derives media time from the latest sample with the same integer
 //! math, so they agree to the tick.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{AssetId, HostMicros, PlaybackRate, Seq, TICKS_PER_SECOND, TickRange, Ticks};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Transport state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum TransportState {
     Stopped,
@@ -30,7 +26,6 @@ pub enum TransportState {
 /// change, device change) and at least 4 times a second while playing. A loop
 /// wrap is not a discontinuity: the line wraps by `loop_range`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ClockSample {
     pub seq: Seq,
@@ -101,7 +96,6 @@ impl Validate for ClockSample {
 
 /// How a seek lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SeekMode {
     /// Exact frame, original quality as soon as it decodes.
@@ -112,7 +106,6 @@ pub enum SeekMode {
 
 /// Transport commands from the renderer (notifications; the clock samples are the answer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -149,7 +142,6 @@ pub enum TransportCommand {
 /// Engine"). One event carries the four messages, each naming its
 /// direction; all are session-bound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -170,7 +162,6 @@ pub enum AudioMessage {
         /// Echoed by the decoder so replaced sources and resyncs cannot
         /// accept a prior request's envelope.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "ts", ts(optional))]
         request: Option<Seq>,
     },
     /// Engine → renderer: an asset's waveform envelope (`peakEnvelope` of
@@ -192,11 +183,9 @@ pub enum AudioMessage {
         generation: u32,
         // Original media's presentation endpoint; absent when unavailable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "ts", ts(optional))]
         duration: Option<Ticks>,
         levels: ChannelLevels,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "ts", ts(optional))]
         error: Option<String>,
     },
 }
@@ -204,7 +193,6 @@ pub enum AudioMessage {
 /// Linear levels per bus channel (peak magnitude and RMS over the last
 /// render), with the media time they were heard at.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AudioLevels {
     pub media_time: Ticks,
@@ -213,7 +201,6 @@ pub struct AudioLevels {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct StripLevels {
     /// The strip's top-level layer id.
@@ -222,7 +209,6 @@ pub struct StripLevels {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelLevels {
     pub peak: Vec<f32>,
@@ -230,13 +216,11 @@ pub struct ChannelLevels {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AudioPeaks {
     pub asset: String,
     /// The request generation of `PeaksWanted` (absent for older senders).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub request: Option<Seq>,
     pub peaks_per_second: f64,
     /// Program seconds of the source.

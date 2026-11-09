@@ -12,6 +12,8 @@ import { launchLegacyApp } from './app';
 import { repoRoot } from './catalog';
 import { newProject } from './doc';
 import { encodePng } from './png';
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 
 
 const out = path.resolve(process.argv[2] ?? '');
@@ -19,8 +21,8 @@ if (!process.argv[2] || out === repoRoot || out.startsWith(repoRoot + path.sep))
 mkdirSync(out, { recursive: true });
 const bundlePath = path.join(out, 'fallback.bundle.js');
 if (process.argv.includes('--prepare')) {
-  const { build } = await import(path.join(repoRoot, 'apps/desktop/node_modules/esbuild/lib/main.js'));
-  const bundle = await build({ stdin: { contents: `export { ShaderFallbackRunner } from './src/renderer/src/engine-connection/shader-fallback';`, resolveDir: path.join(repoRoot, 'apps/desktop') }, bundle: true, write: false, format: 'iife', globalName: 'DepthFallback', target: 'es2022' });
+  const { build } = await import(path.join(v1Root, 'apps/desktop/node_modules/esbuild/lib/main.js'));
+  const bundle = await build({ stdin: { contents: `export { ShaderFallbackRunner } from './src/renderer/src/engine-connection/shader-fallback';`, resolveDir: path.join(v1Root, 'apps/desktop') }, bundle: true, write: false, format: 'iife', globalName: 'DepthFallback', target: 'es2022' });
   writeFileSync(bundlePath, bundle.outputFiles[0]!.text);
   process.exit(0);
 }

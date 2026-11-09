@@ -17,18 +17,20 @@
  */
 import { writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
-import { install as installEasing } from '../../../../../apps/desktop/src/renderer/src/legacy/core/easing';
-import { install as installAnim } from '../../../../../apps/desktop/src/renderer/src/legacy/core/anim';
-import { install as installModel } from '../../../../../apps/desktop/src/renderer/src/legacy/core/model';
-import * as S3 from '../../../../../apps/desktop/src/renderer/src/legacy/core/space-3d';
-import * as Parenting from '../../../../../apps/desktop/src/renderer/src/legacy/core/parenting';
-import { validMatteSource } from '../../../../../apps/desktop/src/renderer/src/legacy/core/matte';
-import { sourceTime } from '../../../../../apps/desktop/src/renderer/src/legacy/core/retiming';
-import { sizeBounds, sizeAnchorOffset } from '../../../../../apps/desktop/src/renderer/src/legacy/core/size-anchor';
-import { fontAnchorOffset } from '../../../../../apps/desktop/src/renderer/src/legacy/core/font-anchor';
-import * as TA from '../../../../../apps/desktop/src/renderer/src/legacy/core/text-animation';
-import { compositingLayers, hasRenderableEffects, install as installCompositor } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/compositor';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { install as installEasing } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/easing`);
+const { install as installAnim } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/anim`);
+const { install as installModel } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/model`);
+const S3: any = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/space-3d`);
+const Parenting: any = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/parenting`);
+const { validMatteSource } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/matte`);
+const { sourceTime } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/retiming`);
+const { sizeBounds, sizeAnchorOffset } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/size-anchor`);
+const { fontAnchorOffset } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/font-anchor`);
+const TA: any = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/text-animation`);
+const { compositingLayers, hasRenderableEffects, install as installCompositor } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/gl/compositor`);
 const SCALE = Number(process.env.PM_LAYER_SCALE ?? 1);
 const OUT = process.env.PM_LAYER_OUT ?? new URL('./layer-vectors.json.gz', import.meta.url).pathname;
 

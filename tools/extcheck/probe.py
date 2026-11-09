@@ -50,7 +50,7 @@ def main():
     parser.add_argument('--reference-root', type=Path, required=True)
     parser.add_argument('--reference-revision', choices=list(run.REFERENCES.values()), default=run.REFERENCE)
     parser.add_argument('--native-runner', type=Path, required=True)
-    parser.add_argument('--corpus-root', type=Path, default=run.ROOT/'apps/desktop/e2e/fixtures/compat-corpus')
+    parser.add_argument('--corpus-root', type=Path, default=run.ROOT/'engine/fixtures/compat-corpus')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.output.resolve().is_relative_to(run.ROOT):parser.error('Private diagnostics belong outside the public checkout')

@@ -22,10 +22,13 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { v1Resolve } from './v1-resolve';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const crate = path.join(here, '../..');
 const repo = path.join(crate, '../../..');
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const commit = execSync('git rev-parse --short=8 HEAD', { cwd: repo }).toString().trim();
@@ -51,7 +54,7 @@ function png(w: number, h: number, rgba: Uint8Array) {
   return Buffer.concat(parts);
 }
 
-const build = await Bun.build({ entrypoints: [path.join(here, 'page.ts')], target: 'browser', minify: false });
+const build = await Bun.build({ entrypoints: [path.join(here, 'page.ts')], target: 'browser', minify: false, plugins: [v1Resolve] });
 if (!build.success) { console.error(build.logs); process.exit(1); }
 const bundle = await build.outputs[0]!.text();
 const server = Bun.serve({
@@ -78,7 +81,7 @@ const server = Bun.serve({
   },
 });
 
-const { chromium } = await import(path.join(repo, 'apps/desktop/node_modules/playwright/index.mjs'));
+const { chromium } = await import(path.join(v1Root, 'apps/desktop/node_modules/playwright/index.mjs'));
 mkdirSync(out, { recursive: true });
 const browser = await chromium.launch({ headless: true, args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
 const fixtures: any[] = [];

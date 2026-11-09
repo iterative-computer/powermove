@@ -47,7 +47,7 @@ pub fn repo_root() -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    here.join("apps/desktop/e2e/fixtures")
+    here.join("engine/fixtures")
         .exists()
         .then(|| here.canonicalize().unwrap_or(here))
 }

@@ -81,7 +81,7 @@ extension oracle or declare a P2 match.
 ## Inputs and privacy
 
 Default inputs are immediate manifest-bearing children of the owner's installed
-extension root and `apps/desktop/e2e/fixtures/compat-corpus`. Override with
+extension root and `engine/fixtures/compat-corpus`. Override with
 `--owner-root` and `--corpus-root`. These are separate source populations; they
 are not deduplicated across populations. Nested manifests are not separate
 installations. Enabled state, projects, variables, credentials, storage, and

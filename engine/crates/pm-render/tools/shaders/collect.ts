@@ -43,7 +43,9 @@ import { PREAMBLES, REPO, VERTEX, snapshots } from '../effects/preambles';
 import { HEIGHT, WIDTH, makeImages } from '../effects/images';
 import { BUILTIN_LAYERS, SHADER_HEADER, SHADER_PRESETS, SHADER_TEMPLATE, extensionLayers, missingLayerBody, parseUniforms } from './sources';
 
-const APP = join(REPO, 'apps', 'desktop');
+// The Electron app ships from main; its tree lives in a v1 checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const APP = join(v1Root, 'apps', 'desktop');
 const RENDERER = join(APP, 'src', 'renderer', 'src');
 const CORPUS_ROOT = join(homedir(), 'Library', 'Application Support', 'Powermove Engine Corpus');
 const args = process.argv.slice(2);
@@ -416,7 +418,7 @@ for (const file of (await readdir(join(APP, 'e2e'))).filter((f) => f.endsWith('.
 }
 
 /* ── 7. scenes shipped with the app and site ───────────────────────── */
-for (const file of ['apps/desktop/src/renderer/public/onboarding/scene.json', 'apps/www/static/hero/scene.json']) {
+for (const file of ['engine/crates/pm-model/tests/fixtures/scenes/onboarding.json', 'apps/www/static/hero/scene.json']) {
   if (!existsSync(join(REPO, file))) continue;
   const scene = JSON.parse(await readFile(join(REPO, file), 'utf8'));
   const tag = slug(file.split('/').slice(-3, -1).join('-'));

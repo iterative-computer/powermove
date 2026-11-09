@@ -12,6 +12,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node
 
 const crate = path.resolve(import.meta.dir, '..');
 const repo = path.resolve(crate, '../../..');
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 const argv = process.argv.slice(2);
 const flag = (key: string) => { const n = argv.indexOf(key); return n < 0 ? undefined : argv[n + 1]; };
 const capture = flag('--capture'), output = flag('--out'), bundlePath = flag('--bundle');
@@ -49,7 +51,7 @@ const server = Bun.serve({ port: 0, async fetch(request) {
   }
   return new Response('not found', { status: 404 });
 } });
-const { chromium } = await import(path.join(repo, 'apps/desktop/node_modules/playwright/index.mjs'));
+const { chromium } = await import(path.join(v1Root, 'apps/desktop/node_modules/playwright/index.mjs'));
 let browser;
 try {
   browser = await chromium.launch({ headless: true,

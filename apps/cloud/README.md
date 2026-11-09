@@ -280,12 +280,12 @@ registered callback URI.
 
 ## Publishing built-ins
 
-The ten extensions in `apps/desktop/src/extensions/` are published under
-`powermove/<id>` by `bun run --cwd apps/desktop publish:builtins`, which
-drives the same objects + publish protocol as the desktop. A changed tree
-must bump `version` in its `manifest.json`; `bun run check` at the repo root
-(or `check:builtins` in `apps/desktop`) compares each tree hash with
-`src/extensions/.builtin-versions.json` and fails otherwise. After bumping,
+The Electron app's ten built-in extensions are published under
+`powermove/<id>` with `publishBuiltins` (`scripts/lib/publish-builtins.ts`),
+which drives the same objects + publish protocol as the desktop. The app
+ships from `main`, so the built-in trees come from a v1 checkout: point
+`PM_V1_REF` at it (default `/tmp/pm-ref-v1.2.0`). A changed tree must bump
+`version` in its `manifest.json`. After bumping,
 refresh the file with `check:builtins --update`. A pull-request workflow
 runs the check; the release workflow publishes when `POWERMOVE_REGISTRY_TOKEN`
 is configured and skips otherwise.

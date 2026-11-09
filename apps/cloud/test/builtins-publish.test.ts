@@ -2,13 +2,14 @@ import { expect, test } from 'bun:test';
 import { readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { walkDir } from '@powermove/registry/node';
-import { type BuiltinPlan, publishBuiltins } from '../../desktop/scripts/lib/publish-builtins';
+import { type BuiltinPlan, publishBuiltins } from '../scripts/lib/publish-builtins';
+import { v1Desktop } from '../scripts/lib/v1-ref';
 import { createApp } from '../src/app';
 import { extensions, releases, repos } from '../src/db/schema';
 import { withData } from './db';
 import { makeEnv } from './env';
 import { publisher } from './publish-fixture';
-const root = resolve(import.meta.dir, '../../desktop/src/extensions');
+const root = resolve(v1Desktop, 'src/extensions');
 const expectedCategories: Record<string, BuiltinPlan['category']> = {
   'effects-basic': 'effects',
   inspector: 'panels',

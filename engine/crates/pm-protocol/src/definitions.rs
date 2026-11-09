@@ -8,18 +8,14 @@
 //! carry a generation; the engine applies them in order and reports compile
 //! failures per definition.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{DefinitionId, Seq};
 use crate::error::EngineError;
 use crate::validate::{Validate, Violation, ensure, ensure_unique};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// What a definition registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum DefinitionKind {
     Effect,
@@ -29,7 +25,6 @@ pub enum DefinitionKind {
 
 /// Where the winning registration came from; decides the limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum DefinitionOrigin {
     /// A built-in extension.
@@ -51,7 +46,6 @@ impl DefinitionOrigin {
 /// An extension layer's renderer, verbatim from the registration
 /// (`kernel/sandbox-schemas.ts` `layers.renderer`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -65,16 +59,13 @@ pub enum LayerRenderer {
     Mesh { asset_field: String },
     /// The legacy kernel-owned scene renderer.
     #[serde(rename = "scene3d")]
-    #[cfg_attr(feature = "ts", ts(rename = "scene3d"))]
     Scene3d,
     /// A 3D world member.
     #[serde(rename = "layer3d")]
-    #[cfg_attr(feature = "ts", ts(rename = "layer3d"))]
     Layer3d { role: Layer3dRole },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Layer3dRole {
     Object,
@@ -84,7 +75,6 @@ pub enum Layer3dRole {
 
 /// One parameter (UI fields stripped).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -122,7 +112,6 @@ impl ParamSpec {
 /// Kernel-wrapped GLSL ES 3.00 ready for the engine pipeline (section 11:
 /// wrapping uses the existing kernel generators, which stay TypeScript).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct WrappedGlsl {
     pub source: String,
@@ -136,7 +125,6 @@ pub struct WrappedGlsl {
 
 /// Effect and transition flags (`kernel/api.ts` `EffectDefinition`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DefinitionFlags {
     /// Ping-pong passes, 1 to 8.
@@ -166,7 +154,6 @@ impl Default for DefinitionFlags {
 
 /// A registered definition as the engine sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DefinitionSnapshot {
     pub id: DefinitionId,
@@ -367,7 +354,6 @@ pub const BUILTIN_3D_IDS: [&str; 4] = [
 /// missing: effects are skipped with their data kept, layers show the
 /// checkerboard placeholder).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DefinitionRemoval {
     pub id: DefinitionId,
@@ -376,7 +362,6 @@ pub struct DefinitionRemoval {
 
 /// Pushed on every register, dispose, and hot reload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DefinitionsUpdate {
     /// Increases by one per update on a session; `full` resets the set.
@@ -406,7 +391,6 @@ impl Validate for DefinitionsUpdate {
 
 /// The engine's answer to an update.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DefinitionsApplied {
     pub generation: Seq,
@@ -416,7 +400,6 @@ pub struct DefinitionsApplied {
 
 /// The snapshots an export job or Collect Project embeds.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DefinitionSetSnapshot {
     pub generation: Seq,

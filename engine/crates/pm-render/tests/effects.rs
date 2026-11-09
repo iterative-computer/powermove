@@ -82,7 +82,7 @@ fn document(
     let mut resolver = MapResolver::default();
     resolver.paths.insert(
         "still".into(),
-        repo_root().join("apps/desktop/e2e/fixtures/still-alpha.png"),
+        repo_root().join("engine/fixtures/still-alpha.png"),
     );
     (load(&doc), resolver)
 }
@@ -1060,7 +1060,7 @@ fn a_viewport_safe_chain_renders_a_padded_crop_of_the_region() {
     let mut res = MapResolver::default();
     res.paths.insert(
         "still".into(),
-        repo_root().join("apps/desktop/e2e/fixtures/still-alpha.png"),
+        repo_root().join("engine/fixtures/still-alpha.png"),
     );
     let mut r = builtins();
     let full_req = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
@@ -1139,7 +1139,7 @@ fn builtin_costs_at_uhd() {
         let mut res = MapResolver::default();
         res.paths.insert(
             "still".into(),
-            repo_root().join("apps/desktop/e2e/fixtures/still-alpha.png"),
+            repo_root().join("engine/fixtures/still-alpha.png"),
         );
         let req = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
         let first = std::time::Instant::now();

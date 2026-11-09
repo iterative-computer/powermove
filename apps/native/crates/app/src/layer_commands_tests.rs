@@ -280,8 +280,8 @@ fn commands_with_nothing_to_act_on_are_not_handled() {
 
 #[test]
 fn a_font_registry_that_cannot_answer_refuses_the_split_and_writes_nothing() {
-    let broker = pm_node::fonts::render::FontBroker::new();
-    let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
+    let broker = pm_text::host::FontBroker::new();
+    let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
     broker.close();
     let actor = KernelActor::spawn(KernelConfig {
         text: Some(crate::text_host::text_host(&fonts)),

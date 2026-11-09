@@ -90,7 +90,7 @@ def main():
     parser.add_argument("--reference-root", type=Path, required=True)
     parser.add_argument("--reference-revision", choices=list(run.REFERENCES.values()), default=run.REFERENCE)
     parser.add_argument("--native-runner", type=Path, required=True)
-    parser.add_argument("--corpus-root", type=Path, default=run.ROOT/"apps/desktop/e2e/fixtures/compat-corpus")
+    parser.add_argument("--corpus-root", type=Path, default=run.ROOT/"engine/fixtures/compat-corpus")
     parser.add_argument("--owner-root", type=Path)
     parser.add_argument("--store", action="store_true")
     parser.add_argument("--only", help="Public fixture directory name")

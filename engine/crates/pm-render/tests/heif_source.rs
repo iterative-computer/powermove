@@ -25,10 +25,10 @@ import ImageIO
 let root = URL(fileURLWithPath: CommandLine.arguments[1])
 let out = URL(fileURLWithPath: CommandLine.arguments[2])
 let cases: [(String, String, Bool, Bool, Int)] = [
-    ("existing", "apps/desktop/e2e/fixtures/still.heic", false, false, 1),
+    ("existing", "engine/fixtures/still.heic", false, false, 1),
     ("deep", "engine/crates/pm-render/tests/fixtures/stills2/png-chrm-srgb-gama-16.png", true, false, 1),
     ("deep-alpha", "engine/crates/pm-render/tests/fixtures/stills2/png-cicp-1-13-16-alpha.png", true, false, 1),
-    ("p3-alpha-oriented", "apps/desktop/e2e/fixtures/still-alpha.png", true, true, 6),
+    ("p3-alpha-oriented", "engine/fixtures/still-alpha.png", true, true, 6),
 ]
 var report: [[String: Any]] = []
 for (name, input, encode, p3, orientation) in cases {

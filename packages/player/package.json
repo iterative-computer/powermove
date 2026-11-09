@@ -3,7 +3,7 @@
   "license": "AGPL-3.0-or-later",
   "version": "0.0.0",
   "private": true,
-  "description": "Powermove web player and SVG adapter, bundled from the desktop app's player sources for browsers.",
+  "description": "Powermove web player and SVG adapter, bundled for browsers from the Electron app's player sources at a pinned commit.",
   "type": "module",
   "exports": {
     "./player": {
@@ -13,21 +13,17 @@
     "./svg-player": {
       "types": "./dist/svg-player.d.ts",
       "default": "./dist/svg-player.js"
-    },
-    "./build": {
-      "types": "./build.d.mts",
-      "default": "./build.mjs"
     }
   },
   "files": [
-    "dist",
-    "build.mjs",
-    "build.d.mts"
+    "dist"
   ],
   "scripts": {
     "build": "node build.mjs"
   },
   "devDependencies": {
-    "esbuild": "0.25.12"
+    "esbuild": "0.25.12",
+    "three": "0.180.0",
+    "zod": "4.6.5"
   }
 }

@@ -7,10 +7,6 @@
 //! a capability handle that the host minted, bound to one session and one
 //! port, and rejects anywhere else (section 19, security).
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::blender::{BlenderJobRequest, BlenderStatus};
 use crate::common::{AssetId, ContentHash, JobId, SessionId};
 use crate::definitions::DefinitionSetSnapshot;
@@ -18,13 +14,12 @@ use crate::error::EngineError;
 use crate::lease::{Lease, LeaseRequest};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// An unguessable 128-bit capability, written as 32 lowercase hex digits.
 /// Only the host mints handles, from a cryptographic RNG.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(try_from = "String", into = "String")]
-#[cfg_attr(feature = "ts", ts(type = "string"))]
 pub struct CapabilityHandle(String);
 
 /// A string that is not 32 lowercase hex digits.
@@ -76,13 +71,11 @@ impl From<CapabilityHandle> for String {
 
 /// Identifies one MessagePort (or pipe) between the host and an engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PortId(pub u32);
 
 /// Derived caches the engine may read or write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum CacheKind {
     MediaIndex,
@@ -98,7 +91,6 @@ pub enum CacheKind {
 
 /// What a handle grants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -122,7 +114,6 @@ pub enum CapabilityKind {
 
 /// Ask the host for a handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct MintHandle {
     pub kind: CapabilityKind,
@@ -131,7 +122,6 @@ pub struct MintHandle {
 
 /// A minted handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct HandleGrant {
     pub handle: CapabilityHandle,
@@ -142,7 +132,6 @@ pub struct HandleGrant {
 
 /// How an engine may open the file a handle names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum HandleAccess {
     /// Media reads, project store, extension bundles.
@@ -173,7 +162,6 @@ impl CapabilityKind {
 /// binding against the session and the port the request arrived on, so a
 /// handle minted for another engine launch or session is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveHandle {
     pub handle: CapabilityHandle,
@@ -184,7 +172,6 @@ pub struct ResolveHandle {
 /// opened. Only the host sends it, only on an engine's host port, and only
 /// for a handle bound to that port.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct HandleResolved {
     pub handle: CapabilityHandle,
@@ -199,7 +186,6 @@ pub const MAX_RESOLVED_PATH_BYTES: usize = 4096;
 
 /// What happens when an output's name is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum OverwritePolicy {
     /// Pick a unique name (agents always).
@@ -212,7 +198,6 @@ pub enum OverwritePolicy {
 
 /// Who chooses where an output goes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -233,7 +218,6 @@ pub enum OutputChoice {
 
 /// Engine (job) to host: where should this job's output go?
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OutputDestinationRequest {
     pub job: JobId,
@@ -242,13 +226,11 @@ pub struct OutputDestinationRequest {
     /// The output is a folder of files (PNG sequences): the host creates an
     /// empty owner-only temporary folder instead of a file.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub folder: bool,
 }
 
 /// The host's answer: a handle to a temporary file in the destination folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OutputDestination {
     pub job: JobId,
@@ -258,7 +240,6 @@ pub struct OutputDestination {
 /// Facts the engine verified about an output before it is moved into place
 /// (section 17, verification).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OutputVerification {
     pub codec: String,
@@ -272,7 +253,6 @@ pub struct OutputVerification {
 /// Engine to host: the output is encoded and verified; move it into place.
 /// Empty or unverified files are removed instead (`commit: false`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CommitOutput {
     pub job: JobId,
@@ -284,7 +264,6 @@ pub struct CommitOutput {
 /// The host's answer: the real path, returned to the agent after encoding
 /// and verification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OutputCommitted {
     pub job: JobId,
@@ -293,7 +272,6 @@ pub struct OutputCommitted {
 
 /// Hardware codec sessions arbitrated by main (section 13, decode service).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum HardwareSessionKind {
     Decode,
@@ -304,7 +282,6 @@ pub enum HardwareSessionKind {
 
 /// Ask for, or give back, hardware codec sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareSessionRequest {
     pub kind: HardwareSessionKind,
@@ -314,7 +291,6 @@ pub struct HardwareSessionRequest {
 
 /// The host's grant: sessions now held by the requester.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareSessionGrant {
     pub kind: HardwareSessionKind,

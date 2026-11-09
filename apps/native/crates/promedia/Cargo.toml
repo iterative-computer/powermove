@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 pm-color = { path = "../../../../engine/crates/pm-color" }
 pm-time = { path = "../../../../engine/crates/pm-time" }
-pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

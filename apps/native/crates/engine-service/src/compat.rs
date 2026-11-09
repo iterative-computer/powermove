@@ -65,7 +65,7 @@ impl LayerRasters {
     pub fn start(
         device: wgpu::Device,
         queue: wgpu::Queue,
-        fonts: Option<pm_node::fonts::render::RenderFonts>,
+        fonts: Option<pm_render::text::host::RenderFonts>,
     ) -> anyhow::Result<Arc<Self>> {
         let (tx, rx) = channel::<Job>();
         std::thread::Builder::new()
@@ -137,12 +137,12 @@ fn paint(renderer: &mut Renderer, request: BaseRequest) -> Result<Option<BaseRas
             [0., 0., 1., 1.],
         )));
     }
-    let painted = pm_node::present::snapshot::encode_rgba8_f32(
+    let painted = pm_export::raster::encode_rgba8_f32(
         &raster.pixels.pixels,
         SnapshotPixels::Straight,
     );
     let window = if raster.crops { request.crop } else { None };
-    Ok(pm_node::present::snapshot::place_raster(
+    Ok(pm_export::raster::place_raster(
         &painted,
         raster.pixels.crop,
         raster.canvas,

@@ -36,11 +36,13 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import * as corner from '../../../../../apps/desktop/src/renderer/src/legacy/gl/corner-geometry';
-import { shapeRasterGeometry } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/shape-raster-window';
-import { groupMatrix, pathPoints, pathValues, rasterPaths, tracePath } from '../../../../../apps/desktop/src/renderer/src/legacy/core/vector-paths';
-import { isProperty } from '../../../../../apps/desktop/src/renderer/src/legacy/core/content-properties';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const corner: any = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/gl/corner-geometry`);
+const { shapeRasterGeometry } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/gl/shape-raster-window`);
+const { groupMatrix, pathPoints, pathValues, rasterPaths, tracePath } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/vector-paths`);
+const { isProperty } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/content-properties`);
 const legacy = path.resolve(import.meta.dir, '../../../../../apps/desktop/src/renderer/src/legacy');
 
 /* ── V8's Math.hypot ──

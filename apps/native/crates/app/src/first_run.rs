@@ -1074,8 +1074,7 @@ fn play_chime() {
     use objc2::{AnyThread, MainThreadMarker};
     use objc2_app_kit::{NSSound, NSWorkspace};
     use objc2_foundation::NSData;
-    const SOUND: &[u8] =
-        include_bytes!("../../../../desktop/src/renderer/public/onboarding/assets/media-0.wav");
+    const SOUND: &[u8] = include_bytes!("../assets/onboarding-chime.wav");
     if MainThreadMarker::new().is_none()
         || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     {

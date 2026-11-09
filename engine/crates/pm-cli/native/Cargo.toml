@@ -32,11 +32,12 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 pm-engine-service = { path = "../../../../apps/native/crates/engine-service" }
-pm-protocol = { path = "../../pm-protocol", default-features = false }
+pm-protocol = { path = "../../pm-protocol" }
 pm-time = { path = "../../pm-time" }
 pm-export = { path = "../../pm-export" }
 pm-media = { path = "../../pm-media" }
-pm-node = { path = "../../pm-node", default-features = false }
+pm-text = { path = "../../pm-text", default-features = false, features = ["system"] }
+pm-render = { path = "../../pm-render" }
 
 [profile.dev]
 debug = 0

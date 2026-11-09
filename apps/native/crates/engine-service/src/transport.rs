@@ -1,15 +1,13 @@
 //! Reuse the existing presenter policy without its bridge transport.
-use pm_node::present::{
-    audio::{AudioCtl, AudioLink},
-    clock::TransportClock,
-    document::MediaMap,
-};
+use crate::clock::TransportClock;
+use crate::media::MediaMap;
+use crate::audio::{AudioCtl, AudioLink};
 use pm_protocol::{
     clock::{ClockSample, TransportCommand, TransportState},
     common::PlaybackRate,
 };
 
-pub use pm_node::present::clock::PREROLL_US;
+pub use crate::clock::PREROLL_US;
 #[derive(Clone, Copy, Debug)]
 pub enum ShuttleKey {
     J,
@@ -85,7 +83,7 @@ impl Transport {
         doc: &pm_model::Document,
         comp: String,
         media: MediaMap,
-        levels: pm_node::present::audio::LevelsSink,
+        levels: crate::audio::LevelsSink,
     ) -> anyhow::Result<()> {
         self.audible =
             pm_audio::graph::audible(doc, &comp, &mut pm_eval::Evaluator::new()).unwrap_or(false);
@@ -101,13 +99,11 @@ impl Transport {
                 .unwrap_or(false);
         if let Some(audio) = &self.audio {
             // Composition identity is fixed for a viewer.
-            audio.send(AudioCtl::Document(
-                pm_engine::document::DocumentUpdate::Replace {
-                    root: snapshot.document.root().cloned(),
-                    revision: pm_protocol::common::Revision::new(snapshot.revision)
-                        .expect("kernel revision"),
-                },
-            ));
+            audio.send(AudioCtl::Document {
+                root: snapshot.document.root().cloned(),
+                revision: pm_protocol::common::Revision::new(snapshot.revision)
+                    .expect("kernel revision"),
+            });
             audio.send(AudioCtl::Media(media));
         }
     }
@@ -148,7 +144,7 @@ impl Transport {
                     });
                     self.clock.hold(from, now);
                     self.awaiting = Some((
-                        now + pm_node::present::render::AUDIO_START_TIMEOUT_US,
+                        now + crate::clock::AUDIO_START_TIMEOUT_US,
                         before,
                         rate,
                     ));
@@ -167,7 +163,7 @@ impl Transport {
                     });
                     self.clock.hold(here, now);
                     self.awaiting = Some((
-                        now + pm_node::present::render::AUDIO_START_TIMEOUT_US,
+                        now + crate::clock::AUDIO_START_TIMEOUT_US,
                         before,
                         PlaybackRate::NORMAL,
                     ));
@@ -183,7 +179,7 @@ impl Transport {
                         a.send(AudioCtl::Seek(time.get()));
                         self.clock.hold(time.get(), now);
                         self.awaiting = Some((
-                            now + pm_node::present::render::AUDIO_START_TIMEOUT_US,
+                            now + crate::clock::AUDIO_START_TIMEOUT_US,
                             before,
                             rate,
                         ));

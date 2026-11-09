@@ -23,13 +23,10 @@
 //! contract 14), which runs the request in a window's runner. The textures
 //! and the result travel as files in the scratch cache area.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::Bytes;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Largest target edge: WebGL's `MAX_TEXTURE_SIZE` on the GPUs the app
 /// runs on (16,384 on Apple GPUs through ANGLE), the limit today's
@@ -56,25 +53,21 @@ pub const MAX_UNITS: u32 = 16;
 
 /// One `glUniform*` call in issue order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 pub struct ShaderFallbackCall {
     /// `1f`, `2f`, `3f`, `4f`, `1i`, or `m3` (column-major).
     #[serde(rename = "fn")]
-    #[cfg_attr(feature = "ts", ts(rename = "fn"))]
     pub function: String,
     pub name: String,
     pub v: Vec<f64>,
     /// Applied to this uniform instead when `name` is not active in the
     /// linked program (`setParam`'s positional alias `u_p<i>` or `u_c<i>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub alias: Option<String>,
 }
 
 /// Which texture a unit samples: texture `texture` of the request, or from
 /// the second pass on (`chain`) the previous pass's output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ShaderFallbackUnit {
     pub unit: u32,
@@ -89,7 +82,6 @@ pub struct ShaderFallbackUnit {
 /// Textures (when `textures` > 0) share the target's format and size, sampled
 /// linear with clamp-to-edge; units not named sample nothing (0, 0, 0, 1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ShaderFallbackRequest {
     /// SHA-256 (hex) of everything that decides the pixels.
@@ -135,7 +127,6 @@ const fn is_default_color_depth(value: &u8) -> bool {
 /// binary16. At 32, `rgba16f` is empty and `rgba32f` carries four binary32
 /// values per pixel. Little-endian, rows in GL order (row 0 at the bottom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ShaderFallbackInput {
     pub key: String,
@@ -146,7 +137,6 @@ pub struct ShaderFallbackInput {
     pub rows: u32,
     pub rgba16f: Bytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub rgba32f: Option<Bytes>,
 }
 
@@ -159,7 +149,6 @@ pub struct ShaderFallbackInput {
 /// (WebGL refuses the program), `watchdogTimeout` (its draw passed the
 /// runner's deadline), `unsupported` (no runner is available).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct HostShaderFallback {
     pub request: ShaderFallbackRequest,
@@ -256,7 +245,6 @@ impl Validate for HostShaderFallback {
 /// `rgba16f` is empty and `rgba32f` carries binary32 values. Little-endian,
 /// rows in GL order (row 0 at the bottom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ShaderFallbackPixels {
     pub key: String,
@@ -266,12 +254,10 @@ pub struct ShaderFallbackPixels {
     pub rows: u32,
     pub rgba16f: Bytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub rgba32f: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",

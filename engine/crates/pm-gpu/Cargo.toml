@@ -11,7 +11,7 @@ publish.workspace = true
 pm-color = { path = "../pm-color" }
 # decode_in (feature `decode-in`, on by default) reads pm-media frames.
 pm-media = { path = "../pm-media", optional = true }
-pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-protocol = { path = "../pm-protocol" }
 # Work counters (docs/engine/perfbench.md).
 pm-perf = { path = "../pm-perf" }
 thiserror.workspace = true

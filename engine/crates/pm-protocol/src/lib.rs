@@ -1,8 +1,8 @@
 //! Engine protocol messages and contract types (sections 19 and 27).
 //!
 //! `pm-protocol` holds the fifteen Phase 0 contracts as Rust types with
-//! serde, MessagePack (rmp-serde), and TypeScript generation (ts-rs). Each
-//! contract has an RFC in `docs/engine/rfcs/` (see [`ContractId::rfc`]);
+//! serde and MessagePack (rmp-serde). Each contract has an RFC in
+//! `docs/engine/rfcs/` (see [`ContractId::rfc`]);
 //! the plan is `docs/rust-engine.md`. All contracts are drafts (version 0)
 //! until their consumer phase starts.
 //!
@@ -54,9 +54,6 @@ pub mod version;
 
 #[doc(hidden)]
 pub mod samples;
-
-#[cfg(feature = "ts")]
-pub mod ts;
 
 pub use codec::{CodecError, decode, encode};
 pub use envelope::{Envelope, Event, Message, Request, Response};

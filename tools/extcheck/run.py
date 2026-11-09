@@ -440,7 +440,7 @@ def fixture_identity():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--owner-root", type=Path, default=Path.home()/"Library/Application Support/Powermove/extensions")
-    parser.add_argument("--corpus-root", type=Path, default=ROOT/"apps/desktop/e2e/fixtures/compat-corpus")
+    parser.add_argument("--corpus-root", type=Path, default=ROOT/"engine/fixtures/compat-corpus")
     parser.add_argument("--store", action="store_true")
     parser.add_argument("--reference-root", type=Path, required=True)
     parser.add_argument("--reference-revision", choices=list(REFERENCES.values()), default=REFERENCE)

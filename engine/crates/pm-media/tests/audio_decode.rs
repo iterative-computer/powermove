@@ -8,7 +8,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
 fn ffmpeg() -> PathBuf {

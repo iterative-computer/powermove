@@ -23,10 +23,6 @@
 //! **Stats.** The interactive engine reports what its presentation costs
 //! ([`RenderStats`]) for the status bar and the performance panel.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{
     AssetId, ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq,
     SessionId, Size, Ticks,
@@ -37,6 +33,7 @@ use crate::frame::{
 use crate::host::PortId;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Results at or below this size travel inline; larger ones in shared memory.
 pub const INLINE_PIXEL_BYTES: usize = 1024 * 1024;
@@ -80,7 +77,6 @@ pub const MAX_LAYER_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// How a snapshot is scheduled against playback and gestures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SnapshotClass {
     /// A renderer thread is blocked on it (`render.snapshot`,
@@ -99,7 +95,6 @@ pub enum SnapshotClass {
 
 /// How the result's pixels are encoded: always RGBA8, rows top-down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SnapshotPixels {
     /// Premultiplied color over black with alpha 255 (today's
@@ -114,7 +109,6 @@ pub enum SnapshotPixels {
 
 /// What a snapshot renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -146,7 +140,6 @@ pub enum SnapshotTarget {
         /// not the document's own (a raster wrapper's modified copy): drawn
         /// in the composition as the document's layer `layer` would be.
         #[serde(default)]
-        #[cfg_attr(feature = "ts", ts(optional = nullable))]
         content: Option<Bytes>,
     },
     /// A source frame at `SnapshotRequest::time`, independently of the composition.
@@ -158,7 +151,6 @@ pub enum SnapshotTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SourceFit {
     Stretch,
@@ -167,7 +159,6 @@ pub enum SourceFit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SourceColor {
     /// Browser Canvas2D display pixels, used by posters and filmstrips.
@@ -180,7 +171,6 @@ pub enum SourceColor {
 
 /// One snapshot of a composition (or one layer of it) at one time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotRequest {
     pub composition: CompositionId,
@@ -197,7 +187,6 @@ pub struct SnapshotRequest {
     /// A frozen viewer's original canvas and preview view. When present,
     /// render that canvas before its CSS box is scaled into the stage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub viewer: Option<SnapshotViewer>,
     /// Longest the engine waits for the envelope's revision and for its
     /// turn before it answers `timeout` (milliseconds, 1 to
@@ -213,12 +202,10 @@ pub struct SnapshotRequest {
     /// [`MAX_BLENDER_WAIT_MS`]). The time the Blender stage runs does not
     /// count against `wait_ms`.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
     pub blender_wait_ms: u32,
     /// `PM.captionsHidden`: omit caption layers from this frame capture.
     /// Per request; it never changes the viewer or a later capture.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub captions_hidden: bool,
     /// Keys of shader fallback requests (from an earlier `needsRenderer`)
     /// the caller drew and posted on the session's port before asking
@@ -229,14 +216,12 @@ pub struct SnapshotRequest {
     /// `needsRenderer` round. Only these answers are already on their way:
     /// a viewer ask may still need the caller's now-blocked event loop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<CompatNeed>>", optional))]
     pub compat_uploaded: Vec<CompatNeed>,
 }
 
 /// Immutable view selected by a viewer snapshot. This never changes the
 /// session's live viewer state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotViewer {
     pub view: Option<ViewOverride>,
@@ -439,7 +424,6 @@ impl Validate for SnapshotRequest {
 /// names the port from the IPC sender, so a window can only snapshot its
 /// own sessions; the engine refuses a session the port does not own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct HostSnapshot {
     pub renderer: PortId,
@@ -455,7 +439,6 @@ impl Validate for HostSnapshot {
 
 /// Where a result's pixels are.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -500,7 +483,6 @@ impl PixelPayload {
 /// context), named so the renderer can draw and upload them
 /// ([`CompatMessage::Pixels`]) before it asks again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CompatNeed {
     pub composition: CompositionId,
@@ -515,7 +497,6 @@ pub struct CompatNeed {
     /// whole raster (exports and snapshots never crop). Part of the need's
     /// identity: another window is another answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub crop: Option<crate::common::PixelRect>,
 }
 
@@ -524,7 +505,6 @@ pub struct CompatNeed {
 // second allocation to every source frame and snapshot.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -581,7 +561,6 @@ impl Validate for SnapshotOutcome {
 /// Source video planes remain encoded in the stream's colour space. Chromium
 /// samples and colour-manages them exactly as its CSS video compositor does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SourceVideoFrame {
     // WebCodecs buffer layout: nv12, planar i420a, i422 or i420p10, or rgba.
@@ -593,7 +572,6 @@ pub struct SourceVideoFrame {
     pub range: String,
     // Visible width when Chromium retains a wider coded row (VP9 stride).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub visible_width: Option<u32>,
 }
 
@@ -662,7 +640,6 @@ impl Validate for SourceVideoFrame {
 /// packed native YUV planes, or engine-converted RGBA, for a source-only
 /// VideoFrame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotResult {
     /// The exact revision rendered (≥ the request's minimum).
@@ -680,11 +657,9 @@ pub struct SnapshotResult {
     /// `RasterSurface` `w`, `h`); the pixels are that box at the asked
     /// scale. `None` for frames.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub layer_box: Option<[f64; 2]>,
     /// For a `Layer` target: the rest of today's raster geometry.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub raster: Option<RasterGeometry>,
     pub quality: FrameQuality,
     /// Time the request waited in the engine (revision and its turn), and
@@ -692,14 +667,12 @@ pub struct SnapshotResult {
     pub waited_us: u32,
     pub render_us: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub video: Option<SourceVideoFrame>,
 }
 
 /// A layer raster's geometry besides its anchor and box (today's
 /// `RasterSurface` fields the pixels alone do not give).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RasterGeometry {
     /// The raster's whole canvas in pixels.
@@ -712,12 +685,10 @@ pub struct RasterGeometry {
     pub cropped: bool,
     /// Today's `selection` (`x0`, `y0`, `x1`, `y1` in layer pixels).
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub selection: Option<[f64; 4]>,
     /// Today's `fontOffset` (`x`, `y`): a text layer's typography anchoring
     /// shift, when it has one.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub font_offset: Option<[f64; 2]>,
 }
 
@@ -782,7 +753,6 @@ impl Validate for SnapshotResult {
 
 /// How compatibility pixels are encoded: rows top-down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum CompatFormat {
     /// 8-bit premultiplied RGBA (a canvas or `readPixels` RGBA8 result).
@@ -807,7 +777,6 @@ impl CompatFormat {
 
 /// What produced compatibility pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum CompatSource {
     /// A `services` `raster` override's result for the layer.
@@ -822,7 +791,6 @@ pub enum CompatSource {
 /// The image whose exact Chromium Canvas2D PNG Blender needs. `content` is
 /// SHA-256 of the original file, so a window with a stale asset cannot answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderPngRequest {
     pub asset: String,
@@ -843,7 +811,6 @@ impl Validate for BlenderPngRequest {
 /// producer drew it. `key` is the producer's cache key (today's raster
 /// cache key: it changes whenever anything that decides the pixels does).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CompatKey {
     pub composition: CompositionId,
@@ -871,7 +838,6 @@ impl CompatKey {
 
 /// Rows `row .. row + rows` of a compatibility raster.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CompatPixels {
     pub id: CompatKey,
@@ -891,23 +857,19 @@ pub struct CompatPixels {
     /// `h`, the quad the compositor draws it on). Absent: the pixel size
     /// over `scale`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub size: Option<[f64; 2]>,
     /// The part of the raster the quad samples (today's `uv`: offset and
     /// scale, 0..1). Absent: the whole raster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub uv: Option<[f64; 4]>,
     /// The crop window of the need this raster answers ([`CompatNeed::crop`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub crop: Option<crate::common::PixelRect>,
 }
 
 /// A layer at one frame that a producer passed through: the engine draws it
 /// natively (a `raster` override that returned the base raster unchanged).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CompatNative {
     pub composition: CompositionId,
@@ -920,7 +882,6 @@ pub struct CompatNative {
     pub revision: Revision,
     /// The crop window of the need it answers ([`CompatNeed::crop`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub crop: Option<crate::common::PixelRect>,
 }
 
@@ -928,7 +889,6 @@ pub struct CompatNative {
 /// `Pixels`, `Forget`, `Producers`, `Native`, and `Reuse` go to the engine,
 /// `Needs` to the renderer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -960,7 +920,6 @@ pub enum CompatMessage {
         revision: Revision,
         /// The crop window of the need it answers ([`CompatNeed::crop`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "ts", ts(optional))]
         crop: Option<crate::common::PixelRect>,
     },
     /// Engine → renderer: what a viewer frame at `revision` needs before it
@@ -1103,7 +1062,6 @@ fn valid_scale(scale: f64) -> Result<(), Violation> {
 /// The document revision the export snapshot was taken at.
 /// Set only for `blenderPng`; the original file's content identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CompatFrameRequest {
     pub document: DocumentId,
@@ -1121,17 +1079,14 @@ pub struct CompatFrameRequest {
     /// (docs/engine/extensions-compat.md, "Exports"). `layer` names the
     /// composition then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub frame: Option<CompatFrameInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub blender: Option<BlenderPngRequest>,
 }
 
 /// An export frame a compatibility context draws over
 /// ([`CompatFrameRequest::frame`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CompatFrameInput {
     pub width: u32,
@@ -1210,7 +1165,6 @@ impl Validate for CompatFrameRequest {
 
 /// The answer to a [`CompatFrameRequest`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CompatFrame {
     pub key: String,
@@ -1223,15 +1177,12 @@ pub struct CompatFrame {
     /// The producer passed the layer through: the engine draws it itself
     /// (the payload is empty).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub native: bool,
     /// The quad in layer pixels and the part of the raster it samples (as
     /// [`CompatPixels`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub size: Option<[f64; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub uv: Option<[f64; 4]>,
 }
 
@@ -1304,7 +1255,6 @@ impl Validate for CompatFrame {
 /// after it goes idle. Replaces today's `GL.stats` and GPU timing for the
 /// status bar and the performance panel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RenderStats {
     /// Frames presented to the session since it opened.
@@ -1333,7 +1283,6 @@ pub struct RenderStats {
     /// The session's audio playback health, once its audio started
     /// (absent for a session that has not opened audio).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub audio: Option<AudioDiagnostics>,
 }
 
@@ -1341,12 +1290,10 @@ pub struct RenderStats {
 /// and the performance panel. Counters run since the session's audio
 /// started; a report goes out when any of them changes, paused or not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AudioDiagnostics {
     /// Why no output device opened (the run follows the host clock).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub error: Option<String>,
     /// Distinct playback problems, oldest first (at most 16): media that
     /// did not resolve, mix and transport errors, and voices dropped to
@@ -1363,7 +1310,6 @@ pub struct AudioDiagnostics {
 /// A viewer frame's tag: the frame a consumer asks about (the depth and id
 /// surface, the overlay geometry) is the one presented with these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FrameTag {
     pub revision: Revision,

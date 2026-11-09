@@ -19,12 +19,14 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { registerV1Resolve, v1Resolve } from './v1-resolve';
 import { readFileSync } from 'node:fs';
-import { cases, meshCases } from './cases';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const crate = path.join(here, '../..');
 const repo = path.join(crate, '../../..');
+registerV1Resolve();
+const { cases, meshCases } = await import('./cases');
 const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const commit = execSync('git rev-parse --short=8 HEAD', { cwd: repo }).toString().trim();
@@ -35,7 +37,7 @@ const all = cases();
 const meshes = meshCases();
 writeFileSync(path.join(crate, 'tests/fixtures/scene3d-cases.json'), JSON.stringify({ three: '0.180.0', cases: all, meshes }, null, 1) + '\n');
 // The compositor's own mesh and placeholder shaders (template literals in the sources).
-const source = (file: string) => readFileSync(path.join(repo, 'apps/desktop/src/renderer/src/legacy/gl', file), 'utf8');
+const source = (file: string) => readFileSync(path.join(v1Root, 'apps/desktop/src/renderer/src/legacy/gl', file), 'utf8');
 const literal = (text: string, name: string) => {
   const m = new RegExp(`${name.replace('.', '\\.')} = \`([\\s\\S]*?)\`;`).exec(text);
   if (!m) throw new Error(`${name} not found`);
@@ -94,7 +96,7 @@ mkdirSync(path.join(out, 'tex'), { recursive: true });
 const names = new Set(all.flatMap(c => Object.values(c.textures || {})));
 for (const name of names) { const [w, h, px] = texture(name); writeFileSync(path.join(out, 'tex', `${name}.png`), png(w, h, px)); }
 
-const build = await Bun.build({ entrypoints: [path.join(here, 'scene-page.ts')], target: 'browser', minify: false });
+const build = await Bun.build({ entrypoints: [path.join(here, 'scene-page.ts')], target: 'browser', minify: false, plugins: [v1Resolve] });
 if (!build.success) { console.error(build.logs); process.exit(1); }
 const bundle = await build.outputs[0]!.text();
 const server = Bun.serve({
@@ -122,7 +124,7 @@ const server = Bun.serve({
   },
 });
 
-const { chromium } = await import(path.join(repo, 'apps/desktop/node_modules/playwright/index.mjs'));
+const { chromium } = await import(path.join(v1Root, 'apps/desktop/node_modules/playwright/index.mjs'));
 const browser = await chromium.launch({ headless: true, args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
 try {
   const page = await browser.newPage();

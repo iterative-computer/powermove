@@ -2,7 +2,7 @@
 //! Phase 3a gate (docs/engine/phase3a-gate.md): "the engine within 1 CV of an
 //! FFmpeg plus zimg reference using the same chroma filter".
 //!
-//! Two sets of sources. The e2e fixture videos (`apps/desktop/e2e/fixtures`)
+//! Two sets of sources. The e2e fixture videos (`engine/fixtures`)
 //! are flat: every frame is one Y'CbCr triple (ffmpeg `signalstats` over 24
 //! frames, e.g. `prores422.mov` Y = 324, U = 360, V = 960 throughout), so they
 //! check the matrix and range conversion only and never exercise chroma
@@ -1207,7 +1207,7 @@ fn measure(
 #[test]
 #[ignore = "gate measurement (docs/engine/phase3a-gate.md); run with --ignored"]
 fn video_class_against_ffmpeg_and_zimg() {
-    let fixtures = repo().join("apps/desktop/e2e/fixtures");
+    let fixtures = repo().join("engine/fixtures");
     let mut r = Renderer::headless().expect("a Metal device");
     let mut rows = Vec::new();
     println!(

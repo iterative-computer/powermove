@@ -21,10 +21,12 @@
  * Numbers are written as the hex of their IEEE-754 bits.
  */
 import { writeFileSync } from 'node:fs';
-import { install as installEasing } from '../../../../../apps/desktop/src/renderer/src/legacy/core/easing';
-import { install as installAnim } from '../../../../../apps/desktop/src/renderer/src/legacy/core/anim';
-import { install as installModel } from '../../../../../apps/desktop/src/renderer/src/legacy/core/model';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { install as installEasing } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/easing`);
+const { install as installAnim } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/anim`);
+const { install as installModel } = await import(`${v1Root}/apps/desktop/src/renderer/src/legacy/core/model`);
 const OUT = process.env.PM_EXPR_HELPER_OUT ?? new URL('./expression-helper-vectors.json', import.meta.url).pathname;
 let seed = Number(process.env.PM_EXPR_HELPER_SEED ?? 0x5a3e17);
 function rand(): number {

@@ -627,8 +627,7 @@ fn monitor_solo_and_meters() {
 /// A video without a soundtrack plays nothing and reports nothing.
 #[test]
 fn a_silent_video_is_not_a_problem() {
-    let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures");
+    let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     let v = layer(
         "V",
         "video",

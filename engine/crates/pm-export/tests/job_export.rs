@@ -30,7 +30,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    repo_root().join("apps/desktop/e2e/fixtures").join(name)
+    repo_root().join("engine/fixtures").join(name)
 }
 
 fn scratch(name: &str) -> PathBuf {

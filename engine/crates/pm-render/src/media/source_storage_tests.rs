@@ -273,8 +273,7 @@ fn video_storage_follows_project_and_source_depth_with_one_reading() {
     let pipelines = Pipelines::new(&gpu.device);
     let mut media = MediaCache::new(&gpu.device);
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video");
-    let eight = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+    let eight = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
     let ten = fixtures.join("hevc10-709-limited.mp4");
     let hdr = fixtures.join("hevc10-2020-pq.mp4");
     use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};

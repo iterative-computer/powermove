@@ -20,8 +20,11 @@
  */
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { applyPatch, isPatchList, type Patch, type PathPart } from '../../../../../apps/desktop/src/shared/patch';
+import type { Patch, PathPart } from '../../../../../apps/desktop/src/shared/patch';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { applyPatch, isPatchList } = await import(`${v1Root}/apps/desktop/src/shared/patch`);
 type Case = {
   name: string;
   /** JSON text of the starting document, or null for `undefined`. */

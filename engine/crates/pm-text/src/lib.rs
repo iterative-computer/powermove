@@ -26,6 +26,7 @@ pub mod compat;
 pub mod corpus;
 pub mod fallback_cache;
 pub mod font;
+pub mod host;
 #[cfg(feature = "level2")]
 pub mod level2;
 pub mod measure;

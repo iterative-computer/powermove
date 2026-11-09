@@ -22,10 +22,12 @@ import path from 'node:path';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const repo = path.resolve(here, '../../..');
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
 const out = path.resolve(process.argv[2] ?? path.join(here, 'out'));
 const ffmpeg = path.join(out, 'bin', 'ffmpeg');
 const ffprobe = path.join(out, 'bin', 'ffprobe');
-const desktop = path.join(repo, 'apps/desktop/src');
+const desktop = path.join(v1Root, 'apps/desktop/src');
 
 // render-encoder.ts imports `app`, `BrowserWindow`, and `dialog` from electron at
 // module scope; encoderArgs itself is pure. A stub module lets it load in bun.

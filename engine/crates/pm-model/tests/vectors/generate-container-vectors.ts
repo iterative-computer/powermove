@@ -9,11 +9,14 @@
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { canonicalHash } from '../../../../../apps/desktop/src/shared/canonical-json';
-import { decodeProjectContainer, encodeProjectContainer, isProjectContainer } from '../../../../../apps/desktop/src/shared/project-container';
-import { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter, type ProjectIndex } from '../../../../../apps/desktop/src/shared/project-incremental';
-import { sha256Hex } from '../../../../../apps/desktop/src/shared/sha256';
+import type { ProjectIndex } from '../../../../../apps/desktop/src/shared/project-incremental';
 
+// The Electron app ships from main; its v1 source lives in a checkout at PM_V1_REF (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { canonicalHash } = await import(`${v1Root}/apps/desktop/src/shared/canonical-json`);
+const { decodeProjectContainer, encodeProjectContainer, isProjectContainer } = await import(`${v1Root}/apps/desktop/src/shared/project-container`);
+const { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter } = await import(`${v1Root}/apps/desktop/src/shared/project-incremental`);
+const { sha256Hex } = await import(`${v1Root}/apps/desktop/src/shared/sha256`);
 const here = import.meta.dir;
 const outDir = path.join(here, '..', 'fixtures', 'containers');
 rmSync(outDir, { recursive: true, force: true });

@@ -15,7 +15,7 @@ OUT = HERE.parents[2] / 'pm-render/src/text/graphite'
 OUT.mkdir(parents=True, exist_ok=True)
 SKIA, TINT = map(str, map(pathlib.Path.resolve, map(pathlib.Path, sys.argv[1:])))
 HEADER = ('// Generated from Skia chrome/m152 747cf654ed6f864f4402e7d6eb54a6ede60141e5.\n'
-          '// Skia, Copyright Google LLC, BSD-3-Clause. See pm-skia-path/LICENSE.\n')
+          '// Skia, Copyright Google LLC, BSD-3-Clause. See tools/graphite-oracle/SKIA-LICENSE.\n')
 METAL = ('// Dawn/Tint 571752c9cb3ed36a3194854374984427794c4dda; see tools/graphite-oracle/DAWN-LICENSE.\n'
          '#pragma METAL fp math_mode(relaxed)\n')
 with tempfile.TemporaryDirectory() as tmp:

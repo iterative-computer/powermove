@@ -287,7 +287,7 @@ mod tests {
     }
 
     fn fixtures() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
     }
 
     #[test]

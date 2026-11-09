@@ -12,10 +12,6 @@
 //! `StaleRevision` after its wait bound). On responses and events it is the
 //! revision the answer was computed at.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::blender::{
     BlenderJobRequest, BlenderModelJob, BlenderProgress, BlenderStatus, BlenderSurface,
 };
@@ -51,10 +47,10 @@ use crate::shader_fallback::ShaderFallbackMessage;
 use crate::slicing::{DeadlineSignal, SlicingPolicy};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::{ContractId, Hello, WIRE_VERSION, Welcome};
+use serde::{Deserialize, Serialize};
 
 /// One protocol message with its routing and revision tags.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Envelope {
     /// Must equal [`WIRE_VERSION`].
@@ -89,7 +85,6 @@ impl Envelope {
 
 /// The message kinds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -122,7 +117,6 @@ pub enum Message {
 
 /// Engine session roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SessionRole {
     /// The window's live document in the interactive engine.
@@ -134,7 +128,6 @@ pub enum SessionRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OpenSession {
     pub document: DocumentId,
@@ -144,7 +137,6 @@ pub struct OpenSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluateRequest {
     pub composition: CompositionId,
@@ -155,7 +147,6 @@ pub struct EvaluateRequest {
 /// Pixels returned by value (thumbnails, posters, the synchronous
 /// compatibility path).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RenderedImage {
     pub width: u32,
@@ -167,7 +158,6 @@ pub struct RenderedImage {
 
 /// Requests. Each names its direction; a peer answers only requests it serves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -239,7 +229,6 @@ pub enum Request {
 
 /// Responses, one per request kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -276,7 +265,6 @@ pub enum Response {
 
 /// One-way messages. Each names its direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",

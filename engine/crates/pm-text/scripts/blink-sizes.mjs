@@ -29,7 +29,9 @@ import { fileURLToPath } from 'node:url';
 
 const crate = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = join(crate, '../../..');
-const { chromium } = createRequire(join(repo, 'apps/desktop/package.json'))('playwright');
+// The Electron app ships from main; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0) for playwright.
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const { chromium } = createRequire(join(v1Root, 'apps/desktop/package.json'))('playwright');
 
 /** The cases and expected widths, read from tests/blink_sizes.rs. */
 function expectedCases() {

@@ -111,13 +111,13 @@ pub fn run() -> anyhow::Result<()> {
     );
     let (snapshot, media, duration, rate) = scene()?;
     // The font registry answers on this thread, as the app's main thread does.
-    let mut font_service = pm_node::fonts::FontService::new().map_err(anyhow::Error::msg)?;
-    let fonts = pm_node::fonts::render::FontBroker::new();
+    let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
+    let fonts = pm_text::host::FontBroker::new();
     fonts.set_wake(std::sync::Arc::new(|| {}));
     fonts.set_generation(font_service.generation());
     let service = EngineService::start_with_fonts(
         pm_gpu::Gpu::new("service-offscreen-diagnostic")?,
-        pm_node::fonts::render::RenderFonts::new(fonts.clone()),
+        pm_render::text::host::RenderFonts::new(fonts.clone()),
         None,
     )?;
     let viewer = service.viewer(ViewerConfig {
@@ -162,7 +162,7 @@ pub fn run() -> anyhow::Result<()> {
     let settle = Instant::now();
     viewer.scrub(Ticks::ZERO)?;
     while viewer.status().frame.is_none() && settle.elapsed() < Duration::from_secs(120) {
-        pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
+        pm_text::host::serve(&mut font_service, fonts.take_asks());
         viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -203,7 +203,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut costs = Vec::new();
     let (mut failures, mut stand_ins, mut lowest_quality) = (0, 0, 1f64);
     while started.elapsed().as_secs_f64() < seconds + 1. {
-        pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
+        pm_text::host::serve(&mut font_service, fonts.take_asks());
         let now = Instant::now();
         if now >= next {
             viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
@@ -245,7 +245,7 @@ pub fn run() -> anyhow::Result<()> {
         let input = Instant::now();
         viewer.scrub(at)?;
         loop {
-            pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
+            pm_text::host::serve(&mut font_service, fonts.take_asks());
             viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
             let status = viewer.status();
             if status
@@ -274,7 +274,7 @@ pub fn run() -> anyhow::Result<()> {
             let input = Instant::now();
             viewer.scrub(at)?;
             loop {
-                pm_node::fonts::render::serve(&mut font_service, fonts.take_asks());
+                pm_text::host::serve(&mut font_service, fonts.take_asks());
                 viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
                 let status = viewer.status();
                 if status
@@ -330,8 +330,8 @@ pub fn run() -> anyhow::Result<()> {
 fn fill_range(
     viewer: &pm_engine_service::Viewer,
     service: &EngineService,
-    font_service: &mut pm_node::fonts::FontService,
-    fonts: &pm_node::fonts::render::FontBroker,
+    font_service: &mut pm_text::host::FontService,
+    fonts: &pm_text::host::FontBroker,
     dir: &str,
     start: Ticks,
     end: Ticks,
@@ -348,7 +348,7 @@ fn fill_range(
     viewer.scrub(end)?;
     viewer.scrub(start)?;
     let queued = loop {
-        pm_node::fonts::render::serve(font_service, fonts.take_asks());
+        pm_text::host::serve(font_service, fonts.take_asks());
         viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
         // No window publication: the bench's overrides (none) need no pin.
         match disk.start_fill(seconds(start), seconds(end), &exe, Default::default(), None) {
@@ -364,7 +364,7 @@ fn fill_range(
     };
     let filling = Instant::now();
     loop {
-        pm_node::fonts::render::serve(font_service, fonts.take_asks());
+        pm_text::host::serve(font_service, fonts.take_asks());
         let bars = disk.bars();
         if !bars.running && (bars.done >= queued || bars.error.is_some()) {
             anyhow::ensure!(bars.error.is_none(), "{:?}", bars.error);

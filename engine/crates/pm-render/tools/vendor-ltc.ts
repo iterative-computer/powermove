@@ -12,7 +12,9 @@ import path from 'node:path';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const repo = path.join(here, '../../../..');
-const three = path.join(repo, 'apps/desktop/node_modules/three');
+// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
+const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+const three = path.join(v1Root, 'apps/desktop/node_modules/three');
 const version = JSON.parse(readFileSync(path.join(three, 'package.json'), 'utf8')).version;
 if (version !== '0.180.0') throw new Error(`three.js ${version} is installed; the native 3D pass ports r180`);
 const { RectAreaLightTexturesLib } = await import(path.join(three, 'examples/jsm/lights/RectAreaLightTexturesLib.js'));
