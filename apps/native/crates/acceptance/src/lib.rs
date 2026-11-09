@@ -3,6 +3,7 @@
 pub mod catalog;
 pub mod closure_mcp;
 pub mod curve_oracle;
+pub mod e2e;
 pub mod fixture;
 pub mod headless;
 pub mod keyboard;

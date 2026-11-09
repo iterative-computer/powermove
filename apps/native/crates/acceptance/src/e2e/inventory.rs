@@ -57,11 +57,11 @@ pub fn bindings() -> Vec<Binding> {
 /// catalog. No planned test, helper regex match or post-tag case becomes a pass.
 pub fn validate() -> Result<(), String> {
     let frozen = frozen();
-    let catalog = pm_acceptance::catalog::Catalog::embedded()?;
+    let catalog = crate::catalog::Catalog::embedded()?;
     let backings = backings();
     let bindings = bindings();
     let declaration_rows =
-        pm_acceptance::catalog::csv_rows(include_str!("../../data/e2e-declarations.csv"))?;
+        crate::catalog::csv_rows(include_str!("../../data/e2e-declarations.csv"))?;
     if declaration_rows.len() != frozen.cases.len() + 1 {
         return Err("frozen declaration map cardinality drift".into());
     }
@@ -146,7 +146,7 @@ pub fn validate() -> Result<(), String> {
             return Err(format!("invalid native binding {}", binding.check));
         }
     }
-    let registered = crate::checks::ALL
+    let registered = super::checks::ALL
         .iter()
         .map(|c| c.id)
         .collect::<BTreeSet<_>>();
@@ -172,7 +172,7 @@ fn is_hash(value: &str) -> bool {
 #[derive(Debug, Serialize)]
 pub struct CheckResult {
     pub id: String,
-    pub status: pm_acceptance::runner::Status,
+    pub status: crate::runner::Status,
     pub kind: String,
     pub scope: String,
     pub reason: String,
@@ -188,7 +188,7 @@ pub struct MissingCapability {
 #[derive(Debug, Serialize)]
 pub struct DeclarationResult {
     pub source: LegacyCase,
-    pub status: pm_acceptance::runner::Status,
+    pub status: crate::runner::Status,
     pub scope: &'static str,
     pub supporting_checks: Vec<String>,
     pub missing: Vec<MissingCapability>,
@@ -208,7 +208,7 @@ pub struct Report {
 }
 impl Report {
     pub fn exit_code(&self) -> i32 {
-        use pm_acceptance::runner::Status;
+        use crate::runner::Status;
         if self.checks.iter().any(|c| c.status == Status::Fail) {
             1
         } else if self.cases.iter().any(|c| c.status == Status::BlockedBy) {
@@ -220,20 +220,20 @@ impl Report {
 }
 pub fn run(filter: Option<&str>) -> Result<Report, String> {
     validate()?;
-    if filter.is_some_and(|id| !crate::checks::ALL.iter().any(|c| c.id == id)) {
+    if filter.is_some_and(|id| !super::checks::ALL.iter().any(|c| c.id == id)) {
         return Err("unknown native check ID".into());
     }
     let frozen = frozen();
     let backings = backings();
     let bindings = bindings();
-    let catalog = pm_acceptance::catalog::Catalog::embedded()?;
-    let checks = crate::checks::ALL
+    let catalog = crate::catalog::Catalog::embedded()?;
+    let checks = super::checks::ALL
         .iter()
         .filter(|c| filter.is_none_or(|id| id == c.id))
         .map(|check| {
             let binding = bindings.iter().find(|b| b.check == check.id).unwrap();
             let result =
-                pm_acceptance::runner::execute(check.id, "e2e", &binding.kind, check.id, check.run);
+                crate::runner::execute(check.id, "e2e", &binding.kind, check.id, check.run);
             CheckResult {
                 id: check.id.into(),
                 status: result.status,
@@ -284,7 +284,7 @@ pub fn run(filter: Option<&str>) -> Result<Report, String> {
                 .collect::<Vec<_>>();
             let failed = supporting
                 .iter()
-                .filter(|c| c.status == pm_acceptance::runner::Status::Fail)
+                .filter(|c| c.status == crate::runner::Status::Fail)
                 .collect::<Vec<_>>();
             for check in &failed {
                 missing.push(MissingCapability {
@@ -309,11 +309,11 @@ pub fn run(filter: Option<&str>) -> Result<Report, String> {
             // trait double never certifies a remaining UI/pixel assertion.
             DeclarationResult {
                 status: if !failed.is_empty() {
-                    pm_acceptance::runner::Status::Fail
+                    crate::runner::Status::Fail
                 } else if !complete.is_empty() && missing.is_empty() {
-                    pm_acceptance::runner::Status::Pass
+                    crate::runner::Status::Pass
                 } else {
-                    pm_acceptance::runner::Status::BlockedBy
+                    crate::runner::Status::BlockedBy
                 },
                 scope: if complete.is_empty() {
                     "supporting-only"
@@ -386,13 +386,12 @@ mod tests {
     fn a_passing_double_never_turns_into_a_legacy_pass() {
         let report = run(Some("surface_stable_ids")).unwrap();
         assert_eq!(report.checks.len(), 1);
-        assert_eq!(report.checks[0].status, pm_acceptance::runner::Status::Pass);
+        assert_eq!(report.checks[0].status, crate::runner::Status::Pass);
         assert!(
             report
                 .cases
                 .iter()
-                .all(|c| c.status == pm_acceptance::runner::Status::BlockedBy
-                    && !c.missing.is_empty())
+                .all(|c| c.status == crate::runner::Status::BlockedBy && !c.missing.is_empty())
         );
         assert_eq!(report.exit_code(), 2);
     }
@@ -401,29 +400,23 @@ mod tests {
         let report = run(Some("easing_set_batch")).unwrap();
         assert_eq!(report.checks.len(), 1);
         assert_eq!(report.cases.len(), 1);
-        assert_eq!(report.checks[0].status, pm_acceptance::runner::Status::Pass);
-        assert_eq!(
-            report.cases[0].status,
-            pm_acceptance::runner::Status::BlockedBy
-        );
+        assert_eq!(report.checks[0].status, crate::runner::Status::Pass);
+        assert_eq!(report.cases[0].status, crate::runner::Status::BlockedBy);
         assert!(!report.cases[0].missing.is_empty());
         assert_eq!(report.exit_code(), 2);
     }
     #[test]
     fn one_passing_parameter_variant_does_not_certify_the_declaration() {
         let report = run(Some("easing_replace_batch")).unwrap();
-        assert_eq!(report.checks[0].status, pm_acceptance::runner::Status::Pass);
-        assert_eq!(
-            report.cases[0].status,
-            pm_acceptance::runner::Status::BlockedBy
-        );
+        assert_eq!(report.checks[0].status, crate::runner::Status::Pass);
+        assert_eq!(report.cases[0].status, crate::runner::Status::BlockedBy);
         assert_eq!(report.cases[0].missing[0].id, "easing_set_batch");
         assert_eq!(report.exit_code(), 2);
     }
     #[test]
     fn a_complete_headless_equivalent_can_pass_without_claiming_host_parity() {
         let report = run(Some("selection_preserves_redo")).unwrap();
-        assert_eq!(report.cases[0].status, pm_acceptance::runner::Status::Pass);
+        assert_eq!(report.cases[0].status, crate::runner::Status::Pass);
         assert_eq!(report.cases[0].scope, "complete-headless");
         assert!(report.cases[0].missing.is_empty());
         assert_eq!(report.exit_code(), 0);

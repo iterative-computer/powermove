@@ -41,7 +41,7 @@ fn main() {
             let exit = i32::from(report.exit_code(true));
             Ok((serde_json::to_string_pretty(&report).unwrap(), exit))
         } else {
-            let report = pm_acceptance_e2e::inventory::run(filter.as_deref())?;
+            let report = pm_acceptance::e2e::inventory::run(filter.as_deref())?;
             let exit = report.exit_code();
             Ok((serde_json::to_string_pretty(&report).unwrap(), exit))
         }

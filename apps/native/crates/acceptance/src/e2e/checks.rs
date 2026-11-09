@@ -1,4 +1,4 @@
-use pm_acceptance::fixture::{Fixture, layer, tool_error, without_revision};
+use crate::fixture::{Fixture, layer, tool_error, without_revision};
 use pm_kernel::{
     Call, Caller, Command, DocumentStore, HistoryCall, KernelActor, KernelConfig, OpenSource,
     Origin, Reply, Request, SelectionCall, WriteBody,
@@ -108,7 +108,7 @@ fn evaluate(doc: Value, id: &str, path: &str, time: f64) -> f64 {
 
 /// Shared unchanged independent authored-curve oracle.
 fn easing(operation: &str) -> Check {
-    pm_acceptance::curve_oracle::easing(operation)
+    crate::curve_oracle::easing(operation)
 }
 fn easing_replace_batch() -> Check {
     easing("replace_keyframes")
@@ -835,45 +835,37 @@ struct SurfaceDouble {
     actions: Mutex<Vec<Value>>,
 }
 impl SurfaceHook for SurfaceDouble {
-    fn list_panels(&self) -> pm_mcp::Result<Value> {
-        Ok(json!([{"id":"synthetic.panel"}]))
-    }
-    fn inspect(&self, panel: &str, element: Option<&str>) -> pm_mcp::Result<Value> {
-        if panel != "synthetic.panel" || element.is_some_and(|e| e != "stable.play") {
+    fn call(&self, tool: &str, _: Option<&str>, args: &Value) -> pm_mcp::Result<Value> {
+        if tool != "interact_panel"
+            || args["panelId"] != "synthetic.panel"
+            || args["ref"] != "stable.play"
+        {
             return Err(pm_mcp::Error::invalid("unknown stable id"));
         }
-        Ok(json!({"testDouble":true,"panelId":panel,"elementId":element}))
-    }
-    fn drive(&self, panel: &str, element: &str, action: &Value) -> pm_mcp::Result<Value> {
-        self.inspect(panel, Some(element))?;
-        self.actions.lock().unwrap().push(action.clone());
+        self.actions.lock().unwrap().push(args["action"].clone());
         Ok(json!({"testDouble":true}))
-    }
-    fn capture(&self, _: &str) -> pm_mcp::Result<Value> {
-        Err(pm_mcp::Error::unavailable("real WebKit panel pixels"))
     }
 }
 fn surface(unknown: bool) -> Check {
-    let f = Fixture::new()?;
+    let mut f = Fixture::new()?;
     let double = Arc::new(SurfaceDouble {
         actions: Mutex::new(vec![]),
     });
     f.host.lock().unwrap().surfaces = Some(double.clone());
-    let before = f.document()?;
-    let host = f.host.lock().unwrap();
-    assert_eq!(host.list_panels().unwrap()[0]["id"], "synthetic.panel");
+    let before = without_revision(f.document()?);
+    let element = if unknown { "child-0" } else { "stable.play" };
+    let reply = f.call(
+        "interact_panel",
+        json!({"panelId":"synthetic.panel","ref":element,"action":"click"}),
+    );
     if unknown {
-        assert!(
-            host.drive_element("synthetic.panel", "child-0", &json!({"type":"click"}))
-                .is_err()
-        );
+        assert!(reply.is_err());
         assert!(double.actions.lock().unwrap().is_empty());
     } else {
-        host.drive_element("synthetic.panel", "stable.play", &json!({"type":"click"}))
-            .unwrap();
-        assert_eq!(double.actions.lock().unwrap().len(), 1);
+        reply?;
+        assert_eq!(*double.actions.lock().unwrap(), vec![json!("click")]);
     }
-    assert_eq!(host.read_document(&f.id).unwrap(), before);
+    assert_eq!(without_revision(f.document()?), before);
     Ok(())
 }
 fn surface_stable_ids() -> Check {
@@ -904,7 +896,7 @@ fn pending_tools_are_explicit() -> Check {
         if pm_mcp::catalog::IMPLEMENTED.contains(&name) {
             continue;
         }
-        let args = pm_acceptance::scenarios::pending_arguments(&spec["inputSchema"])?;
+        let args = crate::scenarios::pending_arguments(&spec["inputSchema"])?;
         if name == "project_memory" {
             assert_eq!(f.call(name, args)?, json!({"memory":[],"total":0}));
             let error = tool_error(

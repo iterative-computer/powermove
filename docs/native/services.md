@@ -139,9 +139,9 @@ Linux verification commands (Rust 1.96.1):
 ```sh
 source /workspace/.tools/activate.sh
 cd /workspace/powermove
-cargo test --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml
-cargo clippy --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --all-targets --no-deps -- -D warnings
-cargo fmt --manifest-path apps/native/crates/services/isolated/Cargo.toml -- --check
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-services
+cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --no-deps -- -D warnings
+cargo fmt --manifest-path apps/native/Cargo.toml -p pm-services -- --check
 ```
 
 The isolated manifest points to the **same `src/lib.rs` and tests** and keeps its

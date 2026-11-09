@@ -1,14 +1,10 @@
 [package]
 name = "pm-acceptance-runtime"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0-or-later"
+description = "Acceptance backing executable for checks that need V8, compat and services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 publish = false
-
-# An optional native backing executable keeps V8 out of the kernel-only harness
-# and does not require a change to the shared native-workspace lockfile.
-[workspace]
-resolver = "3"
 
 [features]
 macos-sandbox = ["pm-runtime-v8/macos-sandbox", "pm-compat-runner/macos-sandbox"]
@@ -24,8 +20,4 @@ pm-remote-dom = { path = "../../remote-dom" }
 pm-surface = { path = "../../surface" }
 pm-store-host = { path = "../../store-host" }
 pm-recorder-raster = { path = "../../recorder-raster" }
-serde_json = "=1.0.150"
-
-[profile.dev]
-debug = 0
-incremental = false
+serde_json = "1"

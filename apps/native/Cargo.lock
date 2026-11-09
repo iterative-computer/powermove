@@ -4618,6 +4618,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-acceptance-runtime"
+version = "0.1.0"
+dependencies = [
+ "pm-acceptance",
+ "pm-compat-runner",
+ "pm-mcp",
+ "pm-promedia",
+ "pm-recorder-raster",
+ "pm-remote-dom",
+ "pm-runtime-v8",
+ "pm-services",
+ "pm-store-host",
+ "pm-surface",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-agents"
 version = "0.1.0"
 dependencies = [

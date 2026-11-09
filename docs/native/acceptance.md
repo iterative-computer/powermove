@@ -270,7 +270,7 @@ cargo test --locked -p pm-acceptance
 cargo run --locked -p pm-acceptance -- --workflow W033 --format markdown
 cargo run --locked -p pm-acceptance -- --format e2e-csv
 cargo run --locked -p pm-acceptance -- --format catalog
-cargo test --locked --manifest-path crates/acceptance/runtime/Cargo.toml
+cargo test --locked -p pm-acceptance-runtime
 ```
 
 JSON format `powermove.acceptance`, version 1, includes case kinds/status/reasons,
@@ -519,7 +519,7 @@ defect above; strict W040 exits 2. Every Cargo build/test/run/Clippy uses `--loc
 ```sh
 source /workspace/.tools/activate.sh; cd /workspace/powermove
 apps/native/crates/acceptance/scripts/verify.sh --strict
-cargo run --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml --bin pm-e2e-triage
+cargo run --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance --bin pm-e2e-triage
 python3 apps/native/crates/acceptance/scripts/refresh-reports.py work/native-acceptance/report.json
 ```
 
@@ -1235,9 +1235,7 @@ needed any dependency update; every Cargo command uses `--locked`.
 Exact suite commands, also executed by `verify.sh --strict`:
 
 ```sh
-cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance
-cargo test --locked --manifest-path apps/native/crates/acceptance/runtime/Cargo.toml
-cargo test --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance -p pm-acceptance-runtime
 python3 -m unittest discover -s apps/native/crates/acceptance/scripts -p 'test_*.py'
 ```
 
