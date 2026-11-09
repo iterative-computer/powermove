@@ -1,4 +1,5 @@
 import { attachStudioWorld } from '../scene3d/environment-render';
+import { combineOpaqueDepthSet } from './compositing';
 import { studioGeometryIdle } from './blas';
 import * as THREE from 'three';
 import { extractScene, isPending, MAP_SIZE, type StudioPending, type StudioScene } from './extract';
@@ -9,6 +10,7 @@ import { describeCamera, describePreparedScene } from './scene-description';
 import { studioBackendFactory, studioBackendRevision, type StudioBackend, type StudioFrame, type StudioRenderRequest, type StudioTextureSource } from '../scene3d/studio-backend';
 
 export const STUDIO_FINAL_SAMPLES = 64;
+let emptyCombinedLayer:OffscreenCanvas|undefined;
 const STUDIO_STILL_SAMPLES = 4, REFINE_SAMPLES = 256, REFINE_DELAY_MS = 140, JOB_TTL_MS = 10_000;
 export type StudioPreview = 'fast' | 'quality';
 type Job = {
@@ -236,6 +238,15 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const splat=studioSplatLayer(runtime,camera,objectId,depthIds,width,height,bottom);
   if(splat){s.frames++;return {canvas:splat,version:`splat:${runtime.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}`};}
   const cam = cameraOf(camera, width, height); if (!cam) throw new Error('Unsupported Studio camera');
+  const separate=separateCompositing(PM,runtime,time);
+  if(final && objectId && combineOpaqueDepthSet(PM,depthIds,separate,time,runtime)) {
+    if(!bottom) {
+      if(!emptyCombinedLayer){emptyCombinedLayer=new OffscreenCanvas(2,2);emptyCombinedLayer.getContext('2d')!.clearRect(0,0,2,2);}
+      const canvas=emptyCombinedLayer;
+      return {canvas,version:'opaque-depth-set-member'};
+    }
+    objectId='';
+  }
   const capture=final || still?s.capture:null;
   const captureKey=capture?`${PM.animVersion?.() ?? ''}:${runtime.studioId ?? (runtime.studioId=nextRuntime++)}:${[...depthIds].sort()}:${objectId}:${time}:${width}:${height}:${bottom}:${JSON.stringify(cam)}:${PM._studioShutterSamples || 1}`:'';
   if(capture && PM._studioPreparing){capture.requested.add(captureKey);if(runtime.materialsPending){capture.loading=true;return null;}}
@@ -245,7 +256,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   // Prepared exports/agent frames consume native capture images above; an
   // unprepared readback uses the same Studio shader synchronously on WebGPU.
   const synchronous=!!PM._studioSyncCapture;
-  const separate=separateCompositing(PM,runtime,time),hiddenPrimary=new Set([...separate].filter(id=>id!==objectId && depthIds.has(id)));
+  const hiddenPrimary=new Set([...separate].filter(id=>id!==objectId && depthIds.has(id)));
   const fork=[...depthIds].some(id=>separate.has(id));
   const geometrySetKey=`${runtime.studioId ?? (runtime.studioId = nextRuntime++)}:${[...depthIds].sort().join(',')}`;
   const setKey = `${geometrySetKey}${fork?`:layer:${objectId}`:''}${synchronous?':sync':''}`;
