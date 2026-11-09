@@ -612,6 +612,38 @@ impl TimelineSurface {
             cx.defer(move |cx| delegate.view_facts(facts, cx));
         }
     }
+    /// The v1 `timeline` service's writes from the window's realm: its view
+    /// (`pps`, `scrollT`, `scrollY`), `graph` (shown or not, whatever it
+    /// was), `frameView` and `reveal`.
+    pub fn service_request(
+        &mut self,
+        request: &serde_json::Value,
+        time: f64,
+        cx: &mut Context<Self>,
+    ) {
+        let number = |key: &str| request[key].as_f64();
+        if ["pps", "scrollT", "scrollY"]
+            .iter()
+            .any(|k| number(k).is_some())
+        {
+            self.set_view(number("pps"), number("scrollT"), number("scrollY"), cx);
+        }
+        if let Some(shown) = request["graph"].as_bool() {
+            let id = if shown { "graph.show" } else { "graph.hide" };
+            self.command(id, time, None, false, cx);
+        }
+        if request["frameView"] == true {
+            self.fit_time(cx);
+        }
+        if let Some(layer) = request["reveal"]["layer"].as_str() {
+            let keys = request["reveal"]["keys"].as_array().map_or(vec![], |keys| {
+                keys.iter()
+                    .filter_map(|k| k.as_str().map(str::to_owned))
+                    .collect()
+            });
+            self.reveal(layer.to_owned(), keys, cx);
+        }
+    }
     /// The service's writable `pps`, `scrollT` and `scrollY`, as main's fields.
     pub fn set_view(
         &mut self,
@@ -1396,6 +1428,10 @@ impl TimelineSurface {
         self.graph_area()
             .and_then(|a| self.graph_ops(a))
             .unwrap_or_default()
+    }
+    #[cfg(test)]
+    pub fn graph_display(&self) -> pm_panel_timeline::GraphDisplay {
+        self.model.graph_display
     }
     #[cfg(test)]
     pub fn graph(&self) -> Option<Arc<Graph>> {

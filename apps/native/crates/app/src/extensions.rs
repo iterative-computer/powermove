@@ -610,29 +610,7 @@ impl Controller {
                     return;
                 };
                 let time = self.time();
-                timeline.update(cx, |t, cx| {
-                    let number = |key: &str| request[key].as_f64();
-                    if ["pps", "scrollT", "scrollY"]
-                        .iter()
-                        .any(|k| number(k).is_some())
-                    {
-                        t.set_view(number("pps"), number("scrollT"), number("scrollY"), cx);
-                    }
-                    if request["graph"].is_boolean() {
-                        t.command("graph", time, None, false, cx);
-                    }
-                    if request["frameView"] == true {
-                        t.fit_time(cx);
-                    }
-                    if let Some(layer) = request["reveal"]["layer"].as_str() {
-                        let keys = request["reveal"]["keys"].as_array().map_or(vec![], |keys| {
-                            keys.iter()
-                                .filter_map(|k| k.as_str().map(str::to_owned))
-                                .collect()
-                        });
-                        t.reveal(layer.to_owned(), keys, cx);
-                    }
-                });
+                timeline.update(cx, |t, cx| t.service_request(&request, time, cx));
             }
             Some("fonts") => self.ensure_page_fonts(&request["faces"], cx),
             Some("download") => {

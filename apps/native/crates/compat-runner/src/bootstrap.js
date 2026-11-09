@@ -834,7 +834,6 @@ globalThis.__compat = {
         return !!lane().graph;
       },
       set graph(value) {
-        if (!!value === !!lane().graph) return;
         lane().graph = !!value;
         timeline({ graph: !!value });
       },

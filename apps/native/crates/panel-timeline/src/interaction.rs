@@ -465,6 +465,17 @@ impl TimelineModel {
                 };
                 Plan::default()
             }
+            // The `timeline` service's `graph = shown`: idempotent.
+            "graph.show" => {
+                if self.graph_display == GraphDisplay::DopeSheet {
+                    self.graph_display = GraphDisplay::Graph;
+                }
+                Plan::default()
+            }
+            "graph.hide" => {
+                self.graph_display = GraphDisplay::DopeSheet;
+                Plan::default()
+            }
             "graph.value" => {
                 self.graph_mode = GraphMode::Value;
                 Plan::default()

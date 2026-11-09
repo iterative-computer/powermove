@@ -1079,3 +1079,26 @@ fn a_long_clip_name_ends_in_an_ellipsis_that_fits() {
     );
     assert_eq!(crate::timeline_surface::fit_tail("Clip", fits(1)), None);
 }
+/// The v1 `timeline` service's `graph = shown` sets the graph editor shown
+/// or hidden whatever it was (it used to toggle), keeping a combined view.
+#[gpui::test]
+fn the_timeline_service_shows_or_hides_the_graph_as_asked(cx: &mut TestAppContext) {
+    use pm_panel_timeline::GraphDisplay::{Combined, DopeSheet, Graph};
+    let mut s = stage(cx, 1);
+    let mut ask = |s: &mut Stage, request: serde_json::Value| {
+        s.surface
+            .update(&mut s.vcx, |t, cx| t.service_request(&request, 0., cx));
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| t.graph_display())
+    };
+    let shown = serde_json::json!({"graph": true});
+    let hidden = serde_json::json!({"graph": false});
+    assert_eq!(ask(&mut s, shown.clone()), Graph);
+    assert_eq!(ask(&mut s, shown.clone()), Graph);
+    assert_eq!(ask(&mut s, hidden.clone()), DopeSheet);
+    assert_eq!(ask(&mut s, hidden), DopeSheet);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.combined", 0., None, false, cx)
+    });
+    assert_eq!(ask(&mut s, shown), Combined);
+}
