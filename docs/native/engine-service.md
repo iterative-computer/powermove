@@ -221,10 +221,14 @@ Opus review remain outstanding. No P1/colour/performance gate is declared passed
   Viewer changes retire content/cache identity; export serializes the snapshot.
   Unsupported nonempty requirements fail visibly until P2 activation exists.
 - `ExportHandle::start_scheduled` checks service activity over inherited pipes
-  before **each export band**. Playback, pending input, dirty content and viewer
-  flights defer export. Each grant admits one renderer band; cancellation and
-  parent EOF interrupt the wait. The app passes `engine.export_activity()`.
-  This replaces unrestricted whole-frame export submissions. A band already on
+  before each export submission. Playback, pending input, dirty content and
+  viewer flights defer export. Within 1 s of viewer activity each grant admits
+  one renderer band (a scrub or play waits behind one band at most); once the
+  viewer is quiet a grant admits the whole frame. Cancellation and parent EOF
+  interrupt the wait. The app passes `engine.export_activity()`. Bands cost a
+  whole composition render each where a pass renders whole for any region
+  (precomps, multi-pass effects): banding every frame made Paper's agent
+  export 0.37 fps against 11.6 fps in whole frames. A submission already on
   the GPU cannot be preempted; physical interactive-latency protection under
   export load remains **UNVERIFIED**, including expensive indivisible passes.
 - `scrub_at` preserves NSEvent input origin. Frame reports expose optional

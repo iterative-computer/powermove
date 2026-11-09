@@ -133,6 +133,46 @@ fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
     assert!(!dir.path().join("cancel-deferred").exists());
 }
 
+/// A quiet viewer lets an export submit whole frames (one GPU submission per
+/// frame); right after the viewer drew, it submits bands, so the viewer
+/// waits behind one band at most.
+#[test]
+fn quiet_viewer_exports_whole_frames_and_activity_bands_them() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let run = |name: &str, activity: Arc<AtomicBool>, quiet_after: Duration| {
+        let child = ExportHandle::start_scheduled(
+            Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+            request(dir.path().join(name), 1),
+            activity.clone(),
+        )
+        .unwrap();
+        std::thread::sleep(quiet_after);
+        activity.store(false, Ordering::Release);
+        while !child.status().state.is_terminal() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let submissions = child.submissions();
+        assert_eq!(child.wait().unwrap().state, JobState::Done);
+        submissions
+    };
+    // 30 frames of 180 rows: 12 bands each.
+    let quiet = run("quiet", Arc::new(AtomicBool::new(false)), Duration::ZERO);
+    assert_eq!(quiet, 30, "a quiet viewer still banded the export");
+    let active = run(
+        "active",
+        Arc::new(AtomicBool::new(true)),
+        Duration::from_millis(200),
+    );
+    assert!(
+        active > 30,
+        "frames right after viewer activity were not banded ({active} submissions)"
+    );
+}
+
 #[test]
 fn child_export_services_font_requests_for_visible_text() {
     let dir = tempfile::tempdir().unwrap();

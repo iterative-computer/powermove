@@ -270,6 +270,7 @@ pub struct ExportHandle {
     cancel: Arc<AtomicBool>,
     status: Arc<Mutex<JobStatus>>,
     reader: Option<std::thread::JoinHandle<()>>,
+    submissions: Arc<std::sync::atomic::AtomicU64>,
 }
 impl ExportHandle {
     /// Call from a job worker: process spawn and snapshot serialization are
@@ -351,6 +352,27 @@ impl ExportHandle {
         let events = state.clone();
         let id = request.job;
         let compat_input = input.clone();
+        let submissions = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let granted = submissions.clone();
+        // When the viewer was last seen drawing or playing (ms since the
+        // export started, 0: not since), sampled for the export's life so
+        // activity between two grants counts.
+        let started = std::time::Instant::now();
+        let active_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ended = Arc::new(AtomicBool::new(false));
+        {
+            let (interactive, active_ms, ended) =
+                (interactive.clone(), active_ms.clone(), ended.clone());
+            std::thread::spawn(move || {
+                while !ended.load(Ordering::Acquire) {
+                    if interactive.load(Ordering::Acquire) {
+                        let ms = started.elapsed().as_millis() as u64 + 1;
+                        active_ms.store(ms, Ordering::Release);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+        }
         let reader = std::thread::spawn(move || {
             for line in std::io::BufReader::new(output).lines() {
                 if let Ok(text) = line.as_deref()
@@ -383,14 +405,16 @@ impl ExportHandle {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                     }
                     if !gate_cancel.load(Ordering::Acquire) {
+                        let last = active_ms.load(Ordering::Acquire);
+                        let quiet = last == 0
+                            || started.elapsed().as_millis() as u64 + 1 - last
+                                >= QUIET.as_millis() as u64;
+                        let grant: &[u8] = if !quiet { b"grant\n" } else { b"grant frame\n" };
                         let mut input = gate_input.lock().unwrap();
-                        if input
-                            .write_all(b"grant\n")
-                            .and_then(|_| input.flush())
-                            .is_err()
-                        {
+                        if input.write_all(grant).and_then(|_| input.flush()).is_err() {
                             break;
                         }
+                        granted.fetch_add(1, Ordering::Relaxed);
                     }
                     continue;
                 }
@@ -402,6 +426,7 @@ impl ExportHandle {
                     _ => break,
                 }
             }
+            ended.store(true, Ordering::Release);
             let mut last = events.lock().unwrap();
             if !last.state.is_terminal() {
                 *last = status(
@@ -419,10 +444,16 @@ impl ExportHandle {
             cancel,
             status: state,
             reader: Some(reader),
+            submissions,
         })
     }
     pub fn status(&self) -> JobStatus {
         self.status.lock().unwrap().clone()
+    }
+    /// GPU submissions granted so far: one per frame while the viewer is
+    /// quiet, one per band of a frame after viewer activity.
+    pub fn submissions(&self) -> u64 {
+        self.submissions.load(Ordering::Relaxed)
     }
     pub fn cancel(&mut self) -> Result<()> {
         self.cancel.store(true, Ordering::Release);
@@ -481,8 +512,8 @@ pub fn run_child() -> Result<()> {
                 replies.reply(text);
                 continue;
             }
-            if matches!(line.as_deref(), Ok("grant")) {
-                let _ = grant.send(());
+            if let Ok(text @ ("grant" | "grant frame")) = line.as_deref() {
+                let _ = grant.send(text == "grant frame");
                 continue;
             }
             if matches!(line.as_deref(), Ok("cancel")) {
@@ -885,11 +916,17 @@ impl pm_render::compat::CompatRasters for JobRasters {
         mine
     }
 }
-/// Inherited-pipe admission. Exactly one renderer band per grant; never a
-/// whole-frame burst. Cancellation and parent EOF interrupt a deferred export.
-struct ChildGate(Mutex<std::sync::mpsc::Receiver<()>>);
+/// How long the viewer stays quiet before an export submits whole frames
+/// again: until then each grant admits one band, so a scrub or a play that
+/// resumes waits behind at most one band (Metal cannot preempt a submission).
+const QUIET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Inherited-pipe admission: `grant` admits one renderer band (the viewer was
+/// active within [`QUIET`]), `grant frame` the rest of the frame.
+/// Cancellation and parent EOF interrupt a deferred export.
+struct ChildGate(Mutex<std::sync::mpsc::Receiver<bool>>);
 impl pm_export::render::GpuGate for ChildGate {
-    fn admit(&self, _: u64, _: u32, cancel: &AtomicBool) -> Option<u32> {
+    fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
         {
             let mut out = std::io::stdout().lock();
             if out
@@ -903,7 +940,7 @@ impl pm_export::render::GpuGate for ChildGate {
         let permits = self.0.lock().unwrap();
         while !cancel.load(Ordering::Acquire) {
             match permits.recv_timeout(std::time::Duration::from_millis(5)) {
-                Ok(()) => return Some(1),
+                Ok(frame) => return Some(if frame { units } else { 1 }),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return None,
             }
