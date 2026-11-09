@@ -80,6 +80,13 @@ pub struct VersionMetadata {
 pub struct Current {
     pub yanked: bool,
 }
+/// One storefront shelf (`featured`, `picks`, `new` or a category).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Shelf {
+    pub id: String,
+    pub title: String,
+    pub items: Vec<Value>,
+}
 #[derive(Deserialize)]
 struct Versions {
     items: Vec<VersionMetadata>,
@@ -89,7 +96,7 @@ impl<T: StoreTransport> StoreClient<T> {
     pub fn new(origin: &str, transport: T) -> Result<Self> {
         let origin = Url::parse(origin)?;
         ensure!(
-            origin.scheme() == "https"
+            (origin.scheme() == "https" || dev_loopback(&origin))
                 && origin.host_str().is_some()
                 && origin.username().is_empty()
                 && origin.password().is_none()
@@ -191,33 +198,86 @@ impl<T: StoreTransport> StoreClient<T> {
             "invalid Store page"
         );
         for item in &mut page.items {
-            uuid(field(item, "repoId")?)?;
-            slug(field(item, "slug")?)?;
-            // Match tagged icon policy: only content-addressed same-origin PNGs.
-            let icon = item
-                .get("iconUrl")
-                .and_then(Value::as_str)
-                .and_then(|icon| self.origin.join(icon).ok())
-                .filter(|url| {
-                    url.origin() == self.origin.origin()
-                        && url.username().is_empty()
-                        && url.password().is_none()
-                        && url.query().is_none()
-                        && url.fragment().is_none()
-                })
-                .filter(|url| {
-                    url.path()
-                        .strip_prefix("/v1/store/icons/")
-                        .and_then(|path| path.strip_suffix(".png"))
-                        .is_some_and(|hash| validate_hash(hash).is_ok())
-                })
-                .map(|url| Value::String(url.into()))
-                .unwrap_or(Value::Null);
-            item.as_object_mut()
-                .context("invalid listing")?
-                .insert("iconUrl".into(), icon);
+            self.admit_listing(item)?;
         }
         Ok(page)
+    }
+    /// The storefront (`GET /v1/store/browse`): titled shelves of listings.
+    pub fn browse(&mut self) -> Result<Vec<Shelf>> {
+        #[derive(Deserialize)]
+        struct Browse {
+            sections: Vec<Shelf>,
+        }
+        let mut browse: Browse = self.request("/v1/store/browse", vec![], None)?;
+        ensure!(browse.sections.len() <= 32, "invalid Store page");
+        for shelf in &mut browse.sections {
+            ensure!(
+                shelf.items.len() <= 50 && shelf.id.len() <= 64 && shelf.title.len() <= 200,
+                "invalid Store page"
+            );
+            for item in &mut shelf.items {
+                self.admit_listing(item)?;
+            }
+        }
+        Ok(browse.sections)
+    }
+    /// One extension's page (`GET /v1/store/x/<handle>/<slug>`), with every
+    /// release for the version list.
+    pub fn detail(&mut self, handle: &str, slug_value: &str) -> Result<Value> {
+        ensure!(valid_handle(handle), "invalid publisher handle");
+        slug(slug_value)?;
+        let mut detail: Value =
+            self.request(&format!("/v1/store/x/{handle}/{slug_value}"), vec![], None)?;
+        self.admit_listing(&mut detail)?;
+        let releases = detail
+            .get("releases")
+            .and_then(Value::as_array)
+            .context("missing Store releases")?;
+        ensure!(releases.len() <= 1000, "invalid Store releases");
+        for release in releases {
+            uuid(field(release, "id")?)?;
+            version(field(release, "version")?)?;
+        }
+        Ok(detail)
+    }
+    /// Required listing fields, and the tagged icon policy: only
+    /// content-addressed same-origin PNGs keep their URL.
+    fn admit_listing(&self, item: &mut Value) -> Result<()> {
+        uuid(field(item, "repoId")?)?;
+        slug(field(item, "slug")?)?;
+        ensure!(
+            item.pointer("/owner/handle")
+                .and_then(Value::as_str)
+                .is_some_and(valid_handle),
+            "invalid publisher handle"
+        );
+        if let Some(latest) = item.get("latest").filter(|l| !l.is_null()) {
+            uuid(field(latest, "id")?)?;
+            version(field(latest, "version")?)?;
+        }
+        let icon = item
+            .get("iconUrl")
+            .and_then(Value::as_str)
+            .and_then(|icon| self.origin.join(icon).ok())
+            .filter(|url| {
+                url.origin() == self.origin.origin()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            })
+            .filter(|url| {
+                url.path()
+                    .strip_prefix("/v1/store/icons/")
+                    .and_then(|path| path.strip_suffix(".png"))
+                    .is_some_and(|hash| validate_hash(hash).is_ok())
+            })
+            .map(|url| Value::String(url.into()))
+            .unwrap_or(Value::Null);
+        item.as_object_mut()
+            .context("invalid listing")?
+            .insert("iconUrl".into(), icon);
+        Ok(())
     }
     pub fn versions(&mut self, installed: &[InstalledRelease]) -> Result<Vec<VersionMetadata>> {
         ensure!(installed.len() <= 200, TooLarge; "version batch exceeds 200");
@@ -255,6 +315,19 @@ impl<T: StoreTransport> StoreClient<T> {
         }
         Ok(response.items)
     }
+}
+/// Development builds may read a fixture Store on this Mac over plain HTTP
+/// (`http://127.0.0.1:<port>/`); release builds take HTTPS only.
+fn dev_loopback(origin: &Url) -> bool {
+    cfg!(debug_assertions) && origin.scheme() == "http" && origin.host_str() == Some("127.0.0.1")
+}
+/// The registry's publisher handle grammar (`^[a-z0-9][a-z0-9-]{1,38}$`).
+pub fn valid_handle(value: &str) -> bool {
+    (2..=39).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
