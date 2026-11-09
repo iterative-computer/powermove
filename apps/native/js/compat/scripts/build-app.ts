@@ -65,6 +65,21 @@ const controls: Bun.BunPlugin = {
         resolveDir: dirname(path),
       };
     });
+    // v1 swapped each <select> for a DOM trigger and hid the select with app
+    // CSS this realm doesn't load, so both showed ("Photos ⌄ Photos"). Here the
+    // select itself is the control: the page draws it as a native pop-up.
+    build.onLoad(
+      { filter: /frozen\/reference\/controls\/select\/enhance\.ts$/ },
+      () => ({
+        contents: [
+          "export const enhanceSelect = () => () => {};",
+          "export const refreshSelect = () => {};",
+          "export const fancySelect = () => ({ update() {}, destroy() {} });",
+          "export const autoEnhanceSelects = () => () => {};",
+        ].join("\n"),
+        loader: "js",
+      }),
+    );
     build.onLoad(
       { filter: /frozen\/reference\/.*\.css$/ },
       async ({ path }) => ({
