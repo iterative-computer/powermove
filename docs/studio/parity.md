@@ -225,6 +225,10 @@ after integrating the Cycles comparison and lighting-accuracy branch. Its
 optional Blender regression and six Python metric/LUT checks pass. See the
 [Cycles yardstick and measured limits](cycles-yardstick.md). The four environment
 acceptance cases also pass with native transport disabled, forcing WebGPU.
+Both additional export films pass: the six-second product film and the
+25-second film spanning eleven still checkpoints. Film stills use asynchronous
+Final preparation; its initial readiness check seeks to a 3D shot because the
+opening 2D card does not need to retain native sessions.
 Typecheck has zero errors and the existing IconCropper accessibility warning.
 The native/WebGPU transport harness passes hero and room comparisons (mean
 RGB differences below 0.006 code values out of 255), empty-scene transitions

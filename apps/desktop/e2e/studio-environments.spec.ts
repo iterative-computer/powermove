@@ -1,8 +1,9 @@
 import {mkdir,writeFile} from 'node:fs/promises';
 import {expect,test} from './helpers/app';
-const folder='/tmp/pm-shots/studio3d/laneF';
+const folder=process.env.PM_ENVIRONMENT_SHOTS || '/tmp/pm-shots/studio3d/laneF';
+test.beforeEach(async()=>{await mkdir(folder,{recursive:true});});
 test('agent authors a fog-lit room and a scattered golden-hour landscape',async({session})=>{
-  test.setTimeout(240000);await mkdir(folder,{recursive:true});await session.openEditor();
+  test.setTimeout(240000);await session.openEditor();
   const page=session.page;
   const build=async(kind:'room'|'landscape')=>page.evaluate(async(kind)=>{
     const PM=(window as any).PM;PM.pause();PM.AutomaticPreview?.cancel();PM.replaceProject(PM.mkProject({name:`Environment ${kind}`,w:640,h:360,fps:24,dur:1}));
