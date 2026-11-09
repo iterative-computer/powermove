@@ -71,6 +71,9 @@ pub(crate) struct Overrides {
     batches: Arc<Mutex<Batches>>,
     realm: Arc<Mutex<Option<RasterInbox>>>,
     pins: Arc<Mutex<Pins>>,
+    /// Where this window's extensions load from: the disk render cache keys
+    /// override frames by their code.
+    roots: Arc<Vec<std::path::PathBuf>>,
 }
 
 fn answer_of(answer: RasterAnswer) -> Reply {
@@ -98,10 +101,16 @@ fn answer_of(answer: RasterAnswer) -> Reply {
 }
 
 impl Overrides {
-    pub(crate) fn new(engine: &EngineService, kernel: KernelHandle, project: String) -> Self {
+    pub(crate) fn new(
+        engine: &EngineService,
+        kernel: KernelHandle,
+        project: String,
+        roots: Vec<std::path::PathBuf>,
+    ) -> Self {
         let doc_id = kernel.published(&project).map_or(0, |p| p.snapshot.doc_id);
         Self {
             store: engine.compat(doc_id),
+            roots: Arc::new(roots),
             doc_id,
             rasters: engine.layer_rasters(),
             kernel,
@@ -177,8 +186,13 @@ impl Overrides {
         );
         let export = self.export_answerer();
         let doc_id = self.doc_id;
+        let roots = self.roots.clone();
         let producing = Arc::new(move |on: bool, epoch: u64| {
             let revision = kernel.published(&project).map_or(0, |p| p.revision());
+            // On the realm's worker, when the wrappers change: a few stats.
+            if on {
+                store.set_code(pm_compat_runner::discovery::stamp(&roots).max(1));
+            }
             store.set_state(on, revision, epoch);
             // Exports started while an override is registered ask this realm.
             let store = store.clone();

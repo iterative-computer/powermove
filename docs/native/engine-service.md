@@ -484,10 +484,18 @@ a standalone probe found no latency difference across those settings.
   Storage › Renders folder captured at its start. A Background Tasks row shows
   frame progress; Cancel stops the child; a full disk or Render Files Limit
   fails the task by name.
+- Frames are stored losslessly (`frame_codec`): 64-row stripes of per-channel
+  left differences split into byte planes, LZFSE each; stripes code and
+  decode on four threads. A 1080p frame of the 867-layer project is 3.9 MB
+  instead of 16.6 MB; the reader loads one (file, checksum, decode) in about
+  14 ms.
 - Frames are keyed by a fingerprint of the whole composition: canonical
   document, contributed definitions, media content (sampled) and stamps
   (rechecked every 2 s), installed fonts, the viewer's output tone, a digest
-  of the running binary, and with raster overrides the session's wrappers.
+  of the running binary, and with raster overrides the stamp of the
+  extension code the wrappers come from (ids, file names, sizes, mtimes) and
+  their generation in the realm, so a relaunch with unchanged extensions
+  finds them.
   Every asynchronous result (fingerprint, fill progress, read) is fenced by the
   observation generation; storage changes and deletions raise it.
 - Playing and scrubbing show frames a reader thread has loaded ahead of the

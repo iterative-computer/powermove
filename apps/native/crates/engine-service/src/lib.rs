@@ -2,6 +2,7 @@
 //! Callers own below-slot placement and pump native layers on the main thread.
 pub mod color;
 pub mod compat;
+pub mod frame_codec;
 pub mod jobs;
 pub mod layers;
 pub mod policy;
@@ -1292,7 +1293,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"disk":t.disk,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
-                        "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
+                        "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
                         "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
@@ -1666,7 +1667,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let overrides = engine
                 .compat()
                 .filter(|store| store.producing_now())
-                .map(|store| store.epoch());
+                .map(|store| store.cache_identity());
             if shared.disk.observe(
                 &scene,
                 engine.definitions(),

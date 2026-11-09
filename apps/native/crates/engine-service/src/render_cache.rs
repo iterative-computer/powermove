@@ -34,8 +34,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::render::Scene;
 
-/// Frames on disk: RGBA16F rows, top-down, premultiplied working values.
-pub const FORMAT: &str = "rgba16f-viewer-v1";
+/// Frames on disk: RGBA16F rows, top-down, premultiplied working values,
+/// coded losslessly (`crate::frame_codec`).
+pub const FORMAT: &str = "rgba16f-viewer-lzfse-v2";
 /// Media stamps are looked at again at most this often.
 const MEDIA_RECHECK: Duration = Duration::from_secs(2);
 /// The same storage is indexed again at most this often.
@@ -637,7 +638,6 @@ impl DiskFrames {
         }
         let n = frames.index(time)?;
         let size = frames.size;
-        let bytes = u64::from(size.width) * u64::from(size.height) * 8;
         let ahead: Vec<(i64, RenderKey)> = (n..(n + AHEAD).min(frames.count))
             .filter(|k| frames.present.contains(k))
             .filter_map(|k| Some((k, frames.key(k)?)))
@@ -646,7 +646,7 @@ impl DiskFrames {
         drop(state);
         let found = self.inner.reader.take(generation, n);
         for (k, key) in ahead {
-            self.inner.reader.ask(generation, k, key, &cache, bytes);
+            self.inner.reader.ask(generation, k, key, &cache, size);
         }
         found.map(|bytes| (size, bytes))
     }
@@ -815,7 +815,7 @@ struct Ask {
     id: (u64, i64),
     key: RenderKey,
     cache: Arc<RenderCache>,
-    bytes: u64,
+    size: Size,
 }
 /// A read frame: the generation it was asked at, and its index.
 type ReadId = (u64, i64);
@@ -835,12 +835,9 @@ impl Reader {
             .name("pm-render-cache-read".into())
             .spawn(move || {
                 for ask in rx {
-                    let data = ask
-                        .cache
-                        .get(&ask.key)
-                        .ok()
-                        .flatten()
-                        .filter(|d| d.len() as u64 == ask.bytes);
+                    let data = ask.cache.get(&ask.key).ok().flatten().and_then(|d| {
+                        crate::frame_codec::decode(&d, ask.size.width, ask.size.height)
+                    });
                     let mut ready = shared.lock().unwrap();
                     ready.asked.remove(&ask.id);
                     if let Some(data) = data {
@@ -862,7 +859,7 @@ impl Reader {
             .find(|(id, _)| *id == (generation, n))
             .map(|(_, bytes)| bytes.clone())
     }
-    fn ask(&self, generation: u64, n: i64, key: RenderKey, cache: &Arc<RenderCache>, bytes: u64) {
+    fn ask(&self, generation: u64, n: i64, key: RenderKey, cache: &Arc<RenderCache>, size: Size) {
         let id = (generation, n);
         {
             let mut ready = self.ready.lock().unwrap();
@@ -875,7 +872,7 @@ impl Reader {
             id,
             key,
             cache: cache.clone(),
-            bytes,
+            size,
         };
         if self.asks.try_send(ask).is_err() {
             self.ready.lock().unwrap().asked.remove(&id);
@@ -1100,7 +1097,9 @@ mod tests {
             std::iter::repeat_n(half::f16::from_f32(0.25).to_le_bytes(), 640 * 360 * 4)
                 .flatten()
                 .collect();
-        cache.put(&key, &bytes).unwrap();
+        cache
+            .put(&key, &crate::frame_codec::encode(&bytes, 640, 360))
+            .unwrap();
         disk.reindex(true).unwrap();
         time
     }

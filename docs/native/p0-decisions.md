@@ -249,3 +249,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Clip selection is the accent ring and row selection fills the layer column only (owner's demo), replacing language §11's `text` ring.
 - Review overrides are development-build only; a release build treats `--appearance`/`--accessibility` as unknown arguments and ignores `PM_NATIVE_ACCESSIBILITY`.
 - A workspace `gutterWidth` of 224 (v1's written default) takes the native timeline column default; other widths are kept as authored.
+
+## Perf lane (wave 19)
+
+- An export's encoder finishes the frames it holds for reordering when no frame has come for 5 s (`ENCODER_IDLE`): a viewer playing through an export defers its frames, and the hardware H.264 encoder dropped held B-frames after 30-75 s idle (AVE error -1004), failing the export with "VideoToolbox dropped a frame".
+- wgpu builds with its `std` feature (pm-gpu): error scopes are per thread; without it every thread shared one stack, so building effect programs on the prewarm worker broke the frame's scopes. The viewer now queues the document's effect programs on that worker when its document or definitions change.
+- Vector cache misses record into the frame's command encoder (per-encoder upload slots, 64 MB per frame before a scene records on its own); legacy effect uniforms take ranges of shared per-frame chunks.
+- Disk render cache frames are coded losslessly with LZFSE over left-difference byte planes (format `rgba16f-viewer-lzfse-v2`; earlier frames are never read and age out under the limit).
+- Raster-override frames in the disk render cache are keyed by the extension code stamp plus the realm's wrapper generation (no stamp: this process only), so they survive relaunch while the extensions are unchanged. Overrides that depend on state outside their code (extension storage, time, network) can show a kept frame drawn before that state changed, as they already could within a session.

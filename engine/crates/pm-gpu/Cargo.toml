@@ -15,7 +15,9 @@ pm-protocol = { path = "../pm-protocol", default-features = false }
 # Work counters (docs/engine/perfbench.md).
 pm-perf = { path = "../pm-perf" }
 thiserror.workspace = true
-wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+# `std`: error scopes are per thread (without it every thread shares one
+# stack, and a program built on another thread breaks the frame's scopes).
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl", "std"] }
 wgpu-hal = { version = "30", features = ["metal"] }
 objc2 = "0.6"
 objc2-metal = { version = "0.3", features = ["objc2-io-surface"] }

@@ -11,6 +11,9 @@ pub struct Trace {
     pub predicted: f64,
     pub render_start: f64,
     pub render_submitted: f64,
+    /// The render thread's own CPU time from render start to submission
+    /// (ms): the frame's CPU cost without time spent preempted.
+    pub render_cpu_ms: f64,
     pub drawable_asked: f64,
     pub drawable_acquired: f64,
     pub encode_end: f64,
@@ -29,6 +32,17 @@ pub struct Trace {
 }
 pub fn now() -> f64 {
     objc2_quartz_core::CACurrentMediaTime()
+}
+
+/// This thread's CPU time in milliseconds.
+pub fn thread_cpu_ms() -> f64 {
+    unsafe extern "C" {
+        fn clock_gettime_nsec_np(clock: u32) -> u64;
+    }
+    /// `CLOCK_THREAD_CPUTIME_ID` on Darwin.
+    const THREAD_CPUTIME: u32 = 16;
+    // SAFETY: a libSystem call with a valid clock id; it only reads the clock.
+    unsafe { clock_gettime_nsec_np(THREAD_CPUTIME) as f64 / 1e6 }
 }
 
 /// Opt-in diagnostic writer. It never blocks the presenter and streams NDJSON

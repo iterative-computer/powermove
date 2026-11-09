@@ -331,6 +331,7 @@ impl Controller {
             &self.engine,
             self.kernel.clone(),
             project.clone(),
+            roots(&self.profile),
         );
         let frames = crate::mcp_services::frame_renderer(
             self.kernel.clone(),

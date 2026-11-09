@@ -1036,6 +1036,7 @@ fn fill_cache(
             .iter()
             .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
             .collect();
+        let bytes = crate::frame_codec::encode(&bytes, fill.width, fill.height);
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
         }

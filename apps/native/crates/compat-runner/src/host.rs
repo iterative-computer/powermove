@@ -1462,15 +1462,7 @@ impl Owner {
         }
     }
     fn stamp(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        for found in discovery::scan(&self.config.roots) {
-            found.id.hash(&mut hash);
-            if let Ok(tree) = compile::fingerprint(&found.directory) {
-                tree.hash(&mut hash);
-            }
-        }
-        hash.finish()
+        discovery::stamp(&self.config.roots)
     }
     /// The record alone. Whether a Store extension's helper runs is `sync_stores`.
     fn compile(&mut self, compiler: &SvelteCompiler, found: &Discovered) -> Value {
