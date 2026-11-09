@@ -199,3 +199,46 @@ impl Clock {
         self.last = None;
     }
 }
+
+/// Closed-form damped oscillator (any mass) for handing velocity between
+/// Core Animation springs (`CASpringAnimation` on AppKit popups): sample where
+/// the previous spring is, then start the next one from there.
+#[derive(Clone, Copy, Debug)]
+pub struct Analytic {
+    pub from: f64,
+    pub velocity: f64,
+    pub target: f64,
+    pub mass: f64,
+    pub stiffness: f64,
+    pub damping: f64,
+}
+impl Analytic {
+    pub fn sample(self, seconds: f64) -> (f64, f64) {
+        let alpha = self.damping / (2. * self.mass);
+        let omega2 = self.stiffness / self.mass;
+        let x = self.from - self.target;
+        let d = omega2 - alpha * alpha;
+        if d > f64::EPSILON {
+            let w = d.sqrt();
+            let b = (self.velocity + alpha * x) / w;
+            let (s, c) = (w * seconds).sin_cos();
+            let decay = (-alpha * seconds).exp();
+            let y = x * c + b * s;
+            let v = -alpha * y - x * w * s + b * w * c;
+            (self.target + decay * y, decay * v)
+        } else if d.abs() <= f64::EPSILON {
+            let b = self.velocity + alpha * x;
+            let decay = (-alpha * seconds).exp();
+            let y = x + b * seconds;
+            (self.target + decay * y, decay * (b - alpha * y))
+        } else {
+            let root = (-d).sqrt();
+            let r1 = -alpha + root;
+            let r2 = -alpha - root;
+            let a = (self.velocity - r2 * x) / (r1 - r2);
+            let b = x - a;
+            let (e1, e2) = ((r1 * seconds).exp(), (r2 * seconds).exp());
+            (self.target + a * e1 + b * e2, a * r1 * e1 + b * r2 * e2)
+        }
+    }
+}

@@ -63,14 +63,9 @@ impl<K: Copy + Eq + Hash> Hovers<K> {
 
 /// A selection that slides between items (a segment, a tab): x, y, width,
 /// height, springing on `Preset::Layout` from wherever it is.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Glide {
     rect: Option<Animated<4>>,
-}
-impl Default for Glide {
-    fn default() -> Self {
-        Self { rect: None }
-    }
 }
 impl Glide {
     /// Head for `bounds`; the first target is taken at once.

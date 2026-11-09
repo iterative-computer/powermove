@@ -2458,7 +2458,7 @@ pub struct Popup {
     parent: Retained<NSWindow>,
     search: Retained<NSTextField>,
     body: Retained<NSView>,
-    spring: Option<(std::time::Instant, crate::transient::Spring)>,
+    spring: Option<(std::time::Instant, pm_design::motion::Analytic)>,
     rows: Vec<Retained<NSButton>>,
     /// Right-aligned shortcut labels for the visible rows.
     hints: Vec<Retained<NSTextField>>,
@@ -2808,7 +2808,7 @@ fn animate(
     w: &NSWindow,
     enter: bool,
     t: &Tokens,
-    state: &mut Option<(std::time::Instant, crate::transient::Spring)>,
+    state: &mut Option<(std::time::Instant, pm_design::motion::Analytic)>,
 ) -> f64 {
     let duration = if t.accessibility.reduce_motion {
         t.motion.reduced
@@ -2867,7 +2867,7 @@ fn animate(
                     let damping: f64 = msg_send![&*spring, damping];
                     *state = Some((
                         std::time::Instant::now(),
-                        crate::transient::Spring {
+                        pm_design::motion::Analytic {
                             from: from_value,
                             velocity,
                             target: 1.,
