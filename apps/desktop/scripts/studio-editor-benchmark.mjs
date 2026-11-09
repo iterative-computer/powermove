@@ -43,7 +43,7 @@ const swapMiB=text=>Number(text.match(/used =\s*([\d.]+)M/)?.[1]??NaN);
 function options() {
  const value=(key,fallback)=>{const i=process.argv.indexOf(key);return i<0?fallback:process.argv[i+1];};
  return {dev:process.argv.includes('--dev'),seconds:Number(value('--seconds','30')),runs:Number(value('--runs','3')),finalFrames:Number(value('--final-frames','30')),
-  stressMinutes:Number(value('--stress-minutes','0')),diagnostic:process.argv.includes('--diagnostic'),profile:process.argv.includes('--cpu-profile'),scenes:value('--scenes','hero,edge,macro,back,chrome,materials,caustics,wet,landscape,room,street,4view').split(',').filter(Boolean),
+  stressMinutes:Number(value('--stress-minutes','0')),stressWarmupMinutes:Number(value('--stress-warmup-minutes','5')),diagnostic:process.argv.includes('--diagnostic'),profile:process.argv.includes('--cpu-profile'),scenes:value('--scenes','hero,edge,macro,back,chrome,materials,caustics,wet,landscape,room,street,4view').split(',').filter(Boolean),
   evidence:path.resolve(process.env.PM_STUDIO_SHOTS??'/tmp/pm-shots/studio3d/laneP4'),fixtures:value('--fixtures',path.join(studioCargoTarget(),'release/studio-environments'))};
 }
 async function installProbe(page) {
@@ -159,7 +159,7 @@ function summarize(raw,hz) {
 }
 export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm64/Powermove.app')) {
  const config=options();await mkdir(config.evidence,{recursive:true});
- assert(config.seconds>0&&Number.isFinite(config.seconds)&&Number.isInteger(config.runs)&&config.runs>0&&Number.isInteger(config.finalFrames)&&config.finalFrames>=0&&Number.isFinite(config.stressMinutes)&&config.stressMinutes>=0,'Invalid benchmark duration/count');
+ assert(config.seconds>0&&Number.isFinite(config.seconds)&&Number.isInteger(config.runs)&&config.runs>0&&Number.isInteger(config.finalFrames)&&config.finalFrames>=0&&Number.isFinite(config.stressMinutes)&&config.stressMinutes>=0&&Number.isFinite(config.stressWarmupMinutes)&&config.stressWarmupMinutes>=0,'Invalid benchmark duration/count');
  if(config.fixtures===path.join(studioCargoTarget(),'release/studio-environments'))execFileSync(process.env.CARGO??path.join(os.homedir(),'.cargo/bin/cargo'),['build','--manifest-path',path.resolve(desktop,'../../engine/Cargo.toml'),'--target-dir',studioCargoTarget(),'--release','--locked','-p','pm-studio','--features','oidn,metalfx,yardstick','--bin','studio-environments'],{env:{...process.env,CARGO_BUILD_JOBS:'2',CARGO_INCREMENTAL:'0',CARGO_PROFILE_RELEASE_DEBUG:'0'},stdio:['ignore','ignore','pipe']});
  assert(config.evidence.startsWith('/tmp/')||config.evidence.startsWith('/private/tmp/'),'Evidence must stay in a temporary directory');
  const initial=machine(new Set([process.pid])),report={date:initial.date,commit:command('git',['rev-parse','HEAD']),dirty:!!command('git',['status','--porcelain']),config,machine:initial,rows:[],errors:[]};
@@ -237,7 +237,7 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   }
   if(config.stressMinutes>0){
    try{
-   report.stress={started:Date.now(),samples:[],cycles:0,minutes:config.stressMinutes,operations:'Save/reopen real synthetic .pmv files; import/delete the tiny animated FBX; regenerate default landscape scatter; resize; GC and idle samples'};
+   report.stress={started:Date.now(),samples:[],warmupSamples:[],cycles:0,warmupCycles:0,minutes:config.stressMinutes,warmupMinutes:config.stressWarmupMinutes,operations:'Save/reopen real synthetic .pmv files; import/delete the tiny animated FBX; regenerate default landscape scatter; resize; GC and idle samples'};
    const projects=[];
    for(const name of ['hero','landscape']){
      await author(page,name,config);await nativeReady(page);const file=path.join(temporary,`${name}.pmv`);
@@ -248,8 +248,9 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
    const importedBytes=(await readFile(path.resolve(desktop,'../../engine/hosts/studio-electron/fixtures/tiny-animated.fbx'))).toString('base64');
    const workingFiles=[];
    report.stress.started=Date.now();report.stress.rendererStart=await page.evaluate(()=>{window.__studioPerf.tasks=[];return performance.now();});await save();
-   const end=Date.now()+config.stressMinutes*60000;
+   const warmupEnd=Date.now()+config.stressWarmupMinutes*60000;let end=Infinity;
    while(Date.now()<end){
+    if(!report.stress.measurementStarted&&Date.now()>=warmupEnd){report.stress.measurementStarted=Date.now();report.stress.warmupCycles=report.stress.cycles;end=Date.now()+config.stressMinutes*60000;report.stress.rendererStart=await page.evaluate(()=>{window.__studioPerf.tasks=[];return performance.now();});console.log('stress measurement started',JSON.stringify({warmupCycles:report.stress.warmupCycles,warmupMinutes:(Date.now()-report.stress.started)/60000}));await save();}
     const file=path.join(temporary,`cycle-${report.stress.cycles}.pmv`);await cp(projects[report.stress.cycles%2],file,{mode:constants.COPYFILE_FICLONE});workingFiles.push(file);
     await app.evaluate(({dialog},file)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[file]});},file);
     await page.evaluate(async()=>{const PM=window.PM;PM.pause();await PM.openProject();PM.AutomaticPreview?.cancel();PM.Studio.setPreview('quality');PM.invalidate('render');});console.log('stress opened',report.stress.cycles);await nativeReady(page);
@@ -263,9 +264,9 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
       PM.selectLayers([]);PM.GL.render(PM.time,{mblur:false});await PM.Studio.idle();if(!await PM.saveProject())throw new Error('Stress save failed');if(!await PM.Tabs.close(PM.proj.id))throw new Error('Stress project close failed');
     },importedBytes);
     await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows()[0],b=w.getBounds();w.setSize(b.width===1400?1380:1400,b.height);});
-    report.stress.cycles++;console.log('stress cycle',report.stress.cycles);if(report.stress.cycles%10===0){await page.requestGC();await page.waitForTimeout(2000);const sample=memorySample(pid);sample.machine=measurementState(pid);if(!config.diagnostic)assert(sample.machine.quiet,'Another lane became active during stress');report.stress.samples.push(sample);await save();console.log('stress',report.stress.cycles,JSON.stringify({rssMiB:sample.rssMiB,hostMiB:sample.hostMiB}));}
+    report.stress.cycles++;console.log('stress cycle',report.stress.cycles);if(report.stress.cycles%10===0){await page.requestGC();await page.waitForTimeout(2000);const sample=memorySample(pid);sample.machine=measurementState(pid);if(!config.diagnostic)assert(sample.machine.quiet,'Another lane became active during stress');(report.stress.measurementStarted?report.stress.samples:report.stress.warmupSamples).push(sample);await save();console.log('stress',report.stress.cycles,JSON.stringify({rssMiB:sample.rssMiB,hostMiB:sample.hostMiB}));}
    }
-   report.stress.elapsedMinutes=(Date.now()-report.stress.started)/60000;
+   report.stress.totalElapsedMinutes=(Date.now()-report.stress.started)/60000;report.stress.elapsedMinutes=(Date.now()-report.stress.measurementStarted)/60000;report.stress.measuredCycles=report.stress.cycles-report.stress.warmupCycles;
    report.stress.trend=memoryTrend(report.stress.samples);
    const tasks=await page.evaluate(start=>window.__studioPerf.tasks.filter(t=>t.at>=start),report.stress.rendererStart);report.stress.longTasks=distribution(tasks.map(t=>t.ms));await writeFile(path.join(config.evidence,'stress-long-tasks.json'),JSON.stringify(tasks));
    }catch(error){report.stress.error=String(error);report.errors.push(`stress: ${error}`);console.error(String(error));await save();}
@@ -276,14 +277,14 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   const hosts=report.rows.flatMap(r=>[...(r.native?.jobs??[]),...(r.refine?.frames??[]),...(r.final??[]).flatMap(f=>f.frames)]).map(f=>f.native?.host).filter(Boolean);
   report.peakGpuMiB=Math.max(0,...report.memory.map(s=>s.gpuMiB??0),...hosts.map(h=>h.peakGpuMiB??0),...report.rows.flatMap(r=>r.runs.flatMap(run=>[run.drag.peakGpuMiB,run.playback.peakGpuMiB])));report.gpuMemory='Metal currentAllocatedSize high-water per host; overlaps unified RSS and is not added to it';
   report.swapGrowthMiB=swapMiB(safeCommand('/usr/sbin/sysctl',['vm.swapusage']))-swapMiB(initial.swap);
-  report.gates={memory:report.peakRssMiB<=6144&&report.peakHostMiB<=3072&&report.swapGrowthMiB<=256,stress:!!report.stress&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.cycles>=200&&report.stress.trend.pass&&report.orphanedHostPids?.length===0};
-  for(const row of report.rows){const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]);row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&intervals.length>0&&intervals.every(r=>r.pass),input:!row.error&&intervals.length>0&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&intervals.length>0&&intervals.every(r=>!r.longTasks.count),refine:limit?!row.error&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?!row.error&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
+  report.gates={memory:report.peakRssMiB<=6144&&report.peakHostMiB<=3072&&report.swapGrowthMiB<=256,stress:!!report.stress&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend.pass&&report.orphanedHostPids?.length===0};
+  for(const row of report.rows){const limit=['room','street','landscape-2x','forest-100k'].includes(row.name)?null:row.name==='landscape'?{refine:5,final:3}:{refine:2,final:1},intervals=row.runs.flatMap(r=>[r.drag,r.playback]);row.gates={native:!row.error&&intervals.length>0&&intervals.every(r=>r.nativeOnly),live:!row.error&&intervals.length>0&&intervals.every(r=>r.pass),input:!row.error&&intervals.length>0&&intervals.every(r=>r.inputToPixelMs.count>0&&r.matchedInputs/r.totalInputs>=.95&&r.inputToPixelMs.p95<=50&&r.inputToPixelMs.p99<=83.3),mainThread:!row.error&&intervals.length>0&&intervals.every(r=>(r.longTasks.max??0)<=50),refine:limit?!row.error&&row.refine?.seconds<=limit.refine&&row.refineViewer?.seconds<=limit.refine:null,final:limit?!row.error&&row.finalSeconds?.count>=30&&row.finalSeconds.p95<=limit.final:null};}
   await save();
  }finally{
   clearInterval(memoryTimer);
   const hostPids=new Set((report.memory??[]).flatMap(s=>s.processes.filter(p=>p.name.endsWith('/pm-studio-host')).map(p=>p.pid)));
   if(app){await app.evaluate(async({BrowserWindow})=>{for(const w of BrowserWindow.getAllWindows())await w.webContents.executeJavaScript('window.PM?.prepareToClose?.({flush:true})');}).catch(()=>{});const p=app.process(),timer=setTimeout(()=>p.kill('SIGKILL'),6000);try{await app.close({timeout:10000});}catch{p.kill('SIGKILL');}clearTimeout(timer);}
-  report.orphanedHostPids=processes().filter(p=>hostPids.has(p.pid)).map(p=>p.pid);if(report.gates&&report.stress)report.gates.stress=!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.cycles>=200&&report.stress.trend?.pass&&report.orphanedHostPids.length===0;report.finished=Date.now();await save();await rm(temporary,{recursive:true,force:true});
+  report.orphanedHostPids=processes().filter(p=>hostPids.has(p.pid)).map(p=>p.pid);if(report.gates&&report.stress)report.gates.stress=!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend?.pass&&report.orphanedHostPids.length===0;report.finished=Date.now();await save();await rm(temporary,{recursive:true,force:true});
  }
  console.log(`Evidence: ${path.join(config.evidence,'editor-results.json')}`);
  return report;

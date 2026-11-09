@@ -99,7 +99,11 @@ The harness enables the inspector only in that disposable copy. Dev mode
 uses the built editor and bundled native host, with no development server.
 Both modes assert `native-studio` for every pane and real shared-texture
 transfers. `--diagnostic` permits concurrent workloads and cannot establish a
-quiet-machine acceptance result. `--cpu-profile` writes editor CPU profiles.
+quiet-machine acceptance result. Memory stress uses a fixed five-minute
+warmup followed by the requested measurement duration; `--stress-minutes 30`
+therefore runs for at least 35 minutes. Warmup samples are retained separately.
+`--stress-warmup-minutes` permits short harness checks; shortening the measured
+30-minute period does not pass the retention gate. `--cpu-profile` writes editor CPU profiles.
 `--scenes`, `--seconds`, `--runs` and `--final-frames` support reproductions;
 shortened runs do not satisfy the full gates.
 
