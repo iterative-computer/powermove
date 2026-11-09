@@ -301,10 +301,18 @@ export function kindSymbol(kind: string): string | null {
     )[kind] ?? null
   );
 }
-function Layer({ row, send }: { row: LayerRow; send: Send }) {
-  // Unset switches appear under the pointer or keyboard focus only, so a
-  // selection never squeezes every layer name behind four icons.
-  const show = row.hovered || row.focused;
+function Layer({
+  row,
+  send,
+  single,
+}: {
+  row: LayerRow;
+  send: Send;
+  single: boolean;
+}) {
+  // Unset switches appear under the pointer, keyboard focus or a single
+  // selected layer, so a multi-selection never squeezes every name.
+  const show = row.hovered || row.focused || (row.selected && single);
   return (
     <>
       <div
@@ -555,9 +563,11 @@ const TimelineRow = memo(
   function TimelineRow({
     row: published,
     send,
+    single,
   }: {
     row: Row;
     send: Send;
+    single: boolean;
     key?: string;
   }) {
     let clickModifiers: Modifiers = {};
@@ -606,7 +616,7 @@ const TimelineRow = memo(
         }}
       >
         {row.kind === "layer" ? (
-          <Layer row={row} send={send} />
+          <Layer row={row} send={send} single={single} />
         ) : row.kind === "property" ? (
           <Property row={row} send={send} />
         ) : (
@@ -649,6 +659,7 @@ const TimelineRow = memo(
   },
   (before, after) =>
     before.send === after.send &&
+    before.single === after.single &&
     JSON.stringify(before.row) === JSON.stringify(after.row),
 );
 
@@ -755,7 +766,12 @@ export function TimelinePanel({
                   }}
                 >
                   {f.window.rows.map((row) => (
-                    <TimelineRow key={row.id} row={row} send={send} />
+                    <TimelineRow
+                      key={row.id}
+                      row={row}
+                      send={send}
+                      single={!f.selection || f.selection.count <= 1}
+                    />
                   ))}
                   {f.window.total === 0 && (
                     <div

@@ -618,27 +618,54 @@ fn compile(
             .then(|| node.props.get("unit").and_then(Value::as_str))
             .flatten()
             .filter(|u| !u.is_empty())
+            // Split wells (Position X | Y) keep their values whole: the pair's
+            // units give way when any value and unit would not fit (the row names it).
+            .filter(|u| {
+                let Some(slot) = node.parent.and_then(|p| surface.node(p)).filter(|slot| {
+                    slot.props.get("data-pm-slot").and_then(Value::as_str) == Some("value")
+                }) else {
+                    return true;
+                };
+                let wells: Vec<&Node> = slot
+                    .children
+                    .iter()
+                    .filter_map(|c| surface.node(*c))
+                    .filter(|c| Component::of(c) == Some(Component::NumberField))
+                    .collect();
+                wells.len() < 2
+                    || wells.iter().all(|w| {
+                        let shown = w
+                            .props
+                            .get("value")
+                            .and_then(Value::as_f64)
+                            .map_or(0, |v| number_facts(w).text(v).chars().count());
+                        shown + 1 + u.chars().count() <= SPLIT_WELL_CHARS
+                    })
+            })
             .map(|u| SharedString::from(u.to_owned())),
-        number: (component == Some(Component::NumberField)).then(|| {
-            let number = |key: &str, default| {
-                node.props
-                    .get(key)
-                    .and_then(Value::as_f64)
-                    .unwrap_or(default)
-            };
-            NumberFacts {
-                value: number("value", 0.),
-                step: number("step", 1.),
-                speed: number("speed", 0.5),
-                min: number("min", -f64::MAX),
-                max: number("max", f64::MAX),
-                precision: node
-                    .props
-                    .get("precision")
-                    .and_then(Value::as_u64)
-                    .map(|n| n.min(9) as u32),
-            }
-        }),
+        number: (component == Some(Component::NumberField)).then(|| number_facts(node)),
+    }
+}
+/// Characters a split value well shows at `body` size (half the value column).
+const SPLIT_WELL_CHARS: usize = 7;
+fn number_facts(node: &Node) -> NumberFacts {
+    let number = |key: &str, default| {
+        node.props
+            .get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(default)
+    };
+    NumberFacts {
+        value: number("value", 0.),
+        step: number("step", 1.),
+        speed: number("speed", 0.5),
+        min: number("min", -f64::MAX),
+        max: number("max", f64::MAX),
+        precision: node
+            .props
+            .get("precision")
+            .and_then(Value::as_u64)
+            .map(|n| n.min(9) as u32),
     }
 }
 fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTable) -> Kit {
