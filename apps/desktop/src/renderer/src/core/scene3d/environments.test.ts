@@ -19,6 +19,15 @@ function editor(){
 }
 function edit(PM:any,args:any){const r=editScene(PM,args,{origin:'agent'});expect(r.ok,r.message).toBe(true);return r;}
 describe('environment documents and guarded agent edits',()=>{
+  it('carries hundreds of practical lights through document parsing and scene preparation',()=>{
+    const lights=Array.from({length:240},(_,i)=>({id:`practical_${i}`,type:'point',p:{x:i%12,y:2,z:-Math.floor(i/12),intensity:3}}));
+    const scene=parseScene({lights});
+    const PM=editor();edit(PM,{operation:'create',scene});
+    expect(compositionScene(PM).lights).toHaveLength(240);
+    let count=0;compositionRuntime(PM,0).scene.traverse((o:any)=>{if(o.isPointLight)count++;});
+    expect(count).toBe(240);
+    expect(()=>parseScene({lights:Array.from({length:4097},(_,i)=>({...lights[0],id:`light_${i}`}))})).toThrow();
+  });
   it('keeps old documents valid without adding world layers',()=>{
     const old=parseScene({objects:[{id:'old',source:{primitive:'box'},castShadow:false,receiveShadow:false}]});
     expect(old.objects[0]!.world).toBeUndefined();expect(old.objects[0]!.materialOptions).toBeUndefined();expect(old.camera.p.irisAspect!.v).toBe(1);

@@ -124,7 +124,9 @@ export const environmentSchema = z.object({
 }).strict();
 const schema = z.object({
   version: z.literal(1).default(1), objects: z.array(objectSchema).max(512).default([]),
-  lights: z.array(lightSchema).max(16).default([]), camera: cameraSchema.default({} as any),
+  // Studio's light hierarchy supports large practical-light rigs. Bound the
+  // document without retaining the legacy sixteen-light ceiling.
+  lights: z.array(lightSchema).max(4096).default([]), camera: cameraSchema.default({} as any),
   environment: environmentSchema.default({} as any)
 }).strict();
 export type Scene3D = z.output<typeof schema>;
