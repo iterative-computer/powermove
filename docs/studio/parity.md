@@ -265,3 +265,12 @@ Remaining implementation limits are explicit:
   genuinely 16 bit, from floating GPU buffers, without RGBA8 expansion.
 - Sources/modes/preset selection are structural edits; evaluated settings use
   ordinary timeline channels. EXR input assumes linear sRGB/Rec.709.
+
+
+Natural environment defaults now include smooth camera-dependent terrain grids,
+thermal erosion, blended procedural ground, deterministic branching plants,
+grass and displaced rocks, plus shared distance-based mesh LOD. Leaves use a
+thin diffuse transmission closure. These are shared native/WebGPU features;
+local GPU terrain tessellation, hydraulic erosion, continuous LOD crossfades,
+HDRI ground projection and production-asset/Cycles equivalence remain gaps.
+See [the environment contract](environments.md#natural-landscape-content).

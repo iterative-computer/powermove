@@ -53,8 +53,10 @@ Reference reuse verifies the exact scene JSON, image size and exporter script.
 The Rust exporter also accepts `--input path/to/scene.json` for transport
 isolation experiments using the same scene.rs contract.
 
-The optional Rust test runs three 128×72 scenes (hero, chrome, room), with
-128 Studio samples and 256 Cycles samples. It uses `tolerances.json` to bound
+The optional Rust test runs all 11 corpus scenes at 128×72, normally with
+128 Studio samples and 256 Cycles samples. The dense procedural forest uses
+384 / 768 samples to resolve thin foliage while keeping its existing error
+limits. Explicit command-line sample counts still take precedence. It uses `tolerances.json` to bound
 mean ΔE00, minimum SSIM and absolute fitted exposure separately for each scene.
 These are drift alarms with noise/mapping margins, not a parity target. Cargo
 tests detect Blender automatically and skip cleanly when it is absent. With
@@ -249,3 +251,9 @@ Cycles render 33.2 seconds). These are bounded diagnostic sizes, not full-size
 export timings. Validation passed 55 Rust/GPU/host/reference tests, the optional
 regression without pre-enabling `yardstick`, and six Python metric/skip/LUT
 checks. No Blender dependency was added to app builds or packaging.
+
+
+The natural environment meshes preserve per-vertex linear tint and per-face
+materials in the reference. Thin leaves map to a 65% Diffuse / 35% Translucent
+closure; no glass interior is introduced. Procedural grain, bark and vein detail
+remain an explicitly reported approximation rather than external image textures.

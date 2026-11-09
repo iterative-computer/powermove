@@ -20,7 +20,7 @@ export const terrainRegionSchema = z.object({p:props({minHeight:[n(),-100000],ma
 export const terrainSchema = z.object({
   heightSource:environmentSourceSchema.nullable().default(null),heights:z.array(n(-1,1)).max(66049).default([]),
   regions:z.array(terrainRegionSchema).max(8).default([]),
-  p:props({width:[n(.001,10000),20],depth:[n(.001,10000),20],resolution:[n(2,256),64],amplitude:[n(0,10000),2],frequency:[n(.00001,1000),.1],octaves:[n(1,12),5],seed:[n(0,4294967295),1],ridged:[z.boolean(),false]}).prefault({})
+  p:props({width:[n(.001,10000),20],depth:[n(.001,10000),20],resolution:[n(2,256),64],amplitude:[n(0,10000),2],frequency:[n(.00001,1000),.1],octaves:[n(1,12),5],seed:[n(0,4294967295),1],ridged:[z.boolean(),false],detail:[n(0,.25),0],erosion:[n(0,64),0],adaptive:[z.boolean(),false],blend:[n(0,1),0],natural:[z.boolean(),false],waterLevel:[n(),-100000],snowLevel:[n(),100000]}).prefault({})
 }).strict();
 export const scatterSchema = z.object({model:z.string().min(1).max(160),surface:z.string().min(1).max(160),
   p:props({count:[n(0,100000),100],density:[n(0,1),1],seed:[n(0,4294967295),1],scaleMin:[n(.0001,1000),.8],scaleMax:[n(.0001,1000),1.2],rotationMin:[n(-360000,360000),0],rotationMax:[n(-360000,360000),360],minHeight:[n(),-100000],maxHeight:[n(),100000],minSlope:[n(0,90),0],maxSlope:[n(0,90),60]}).prefault({})
@@ -40,7 +40,7 @@ const CHANNEL_LABELS:Record<string,Record<string,string>>={
   world:{groundColor:'Ground color',intensity:'Intensity',rotation:'Rotation',visible:'Visible to Camera',metersPerUnit:'Meters per Unit',elevation:'Sun Height',azimuth:'Sun Direction',haze:'Haze',sunIntensity:'Sun Strength',sunRadius:'Sun Size',overcast:'Clouds',
     fogDensity:'Fog',fogColor:'Fog Color',fogAnisotropy:'Fog Forward Glow',fogBaseHeight:'Fog Base',fogHeightFalloff:'Fog Falloff',fogDistance:'Fog Distance',adaptive:'Adaptive Sampling',minSamples:'Minimum Samples',relativeError:'Relative Error',absoluteError:'Absolute Error'},
   fog:{shape:'Shape',width:'Width',height:'Height',depth:'Depth',density:'Density',color:'Color',anisotropy:'Forward Glow'},
-  terrain:{width:'Width',depth:'Depth',resolution:'Resolution',amplitude:'Height',frequency:'Feature Size',octaves:'Detail',seed:'Variation',ridged:'Ridges'},
+  terrain:{width:'Width',depth:'Depth',resolution:'Resolution',amplitude:'Height',frequency:'Feature Size',octaves:'Detail',seed:'Variation',ridged:'Ridges',detail:'Fine Detail',erosion:'Erosion',adaptive:'Adaptive Detail',blend:'Cover Blend',natural:'Natural Ground',waterLevel:'Water Level',snowLevel:'Snow Line'},
   region:{minHeight:'Above',maxHeight:'Below',minSlope:'Steeper Than',maxSlope:'Flatter Than',color:'Color',roughness:'Roughness',metalness:'Metalness'},
   scatter:{count:'Count',density:'Density',seed:'Variation',scaleMin:'Smallest',scaleMax:'Largest',rotationMin:'Turn From',rotationMax:'Turn To',minHeight:'Above',maxHeight:'Below',minSlope:'Steeper Than',maxSlope:'Flatter Than'},
   materialOptions:{castsShadows:'Casts Shadows',acceptsShadows:'Accepts Shadows',acceptsLights:'Accepts Lights',appearsInReflections:'Appears in Reflections'}

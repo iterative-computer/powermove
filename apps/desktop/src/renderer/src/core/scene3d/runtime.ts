@@ -1,3 +1,4 @@
+import { makeNature,natureGeometry,natureMesh } from '../studio/nature';
 import { channelValues } from './environment-data';
 import { environmentImage,environmentImageKey,terrainSettings,makeTerrain,syncEnvironmentGraph } from './environment-render';
 import { disposeStudioSplats } from '../studio/splat-raster';
@@ -36,6 +37,7 @@ export function primitiveGeometry(source: SceneSource): THREE.BufferGeometry {
     return new THREE.ExtrudeGeometry(shape,{depth:source.depth,steps:1,bevelEnabled:!!source.bevel,
       bevelSegments:3,bevelThickness:source.bevel || 0,bevelSize:source.bevel || 0});
   }
+  if ('nature' in source)return natureGeometry(natureMesh(source.nature,source.seed));
   if ('assetId' in source) throw new Error('Asset geometry must be supplied by the asset store');
   const p = source.parameters || {},s=p.segments || 48;
   switch (source.primitive) {
@@ -137,9 +139,10 @@ export class SceneRuntime {
     texture.rotation=original.rotation;texture.matrixAutoUpdate=original.matrixAutoUpdate;texture.matrix.copy(original.matrix);
   }
 
-  private makeObject(node: SceneObject): THREE.Object3D {
+  private makeObject(node: SceneObject,camera?:{position:{x:number;y:number;z:number};fov:number}): THREE.Object3D {
     if(node.world || node.fog || node.scatter)return new THREE.Group();
-    if(node.terrain)return makeTerrain(node,terrainSettings(node.terrain,environmentImage(node.terrain.heightSource,node.id,this.getter,this.compositionGetter)));
+    if(node.terrain)return makeTerrain(node,terrainSettings(node.terrain,environmentImage(node.terrain.heightSource,node.id,this.getter,this.compositionGetter),camera));
+    if ('nature' in node.source)return makeNature(node.source.nature,node.source.seed);
     if ('assetId' in node.source) {
       const asset = this.getter(node.source.assetId);
       if (asset?.object3d) {
@@ -183,17 +186,19 @@ export class SceneRuntime {
       // Expressions can be invalid while the user is typing; keep the last stored value usable.
       return [k,typeof v.v==='number'?Number.isFinite(value)?value:v.v:typeof value===typeof v.v?value:v.v];
     }));
+    const cameraValues=values(data.camera.p,'camera'),terrainCamera={position:{x:cameraValues.x,y:cameraValues.y,z:cameraValues.z},fov:cameraValues.fov};
     let importedVertices=0;
     for(const node of data.objects)if('assetId' in node.source)importedVertices+=assets(node.source.assetId)?.vertices || 0;
     // CAD assemblies and splat captures run to tens of millions; Studio prepares large models in the background.
     if(importedVertices>30_000_000)throw new Error('Imported scene exceeds 30 million vertices; simplify or split the models');
     for (const node of data.objects) {
       const terrainImage=node.terrain?environmentImage(node.terrain.heightSource,node.id,assets,compositionGetter):null;
-      const source = signature(node.source)+':'+node.useSourceMaterials+(node.terrain?JSON.stringify([node.terrain,environmentImageKey(terrainImage)]):''),asset='assetId' in node.source ? assets(node.source.assetId) : null;
+      const terrainDetail=node.terrain?terrainSettings(node.terrain,terrainImage,terrainCamera).resolution:0;
+      const source = signature(node.source)+':'+node.useSourceMaterials+(node.terrain?JSON.stringify([node.terrain,environmentImageKey(terrainImage),terrainDetail]):''),asset='assetId' in node.source ? assets(node.source.assetId) : null;
       let object = this.objects.get(node.id);
       if (!object || this.sources.get(node.id)!==source || this.assetRefs.get(node.id)!==asset) {
         if (object) this.remove(node.id,object);
-        object=this.makeObject(node);this.objects.set(node.id,object);this.sources.set(node.id,source);this.assetRefs.set(node.id,asset);
+        object=this.makeObject(node,terrainCamera);this.objects.set(node.id,object);this.sources.set(node.id,source);this.assetRefs.set(node.id,asset);
         this.scene.add(object);
       }
       object.name=node.name;object.userData.sceneId=node.id;
@@ -213,10 +218,11 @@ export class SceneRuntime {
         c.castShadow=options?options.castsShadows!=='off':node.castShadow;c.receiveShadow=options?options.acceptsShadows:node.receiveShadow;
         c.userData.studioPrimaryVisible=options?.castsShadows!=='only';
         for(const material of Array.isArray(c.material)?c.material:[c.material]){material.userData.studioAcceptsLights=options?.acceptsLights!==false;material.userData.studioReflections=options?.appearsInReflections!==false;}
+        if(c.userData.studioNaturalGround)return;
         if(c.userData.terrainRegion){const p=c.userData.terrainRegion;c.material.color.set(p.color);c.material.roughness=p.roughness;c.material.metalness=p.metalness;return;}
         if (c.userData.splat) { c.castShadow=c.receiveShadow=false; return; }
         if (c.userData.missing) return;
-        if(node.useSourceMaterials){
+        if(node.useSourceMaterials || 'nature' in node.source){
           for(const material of Array.isArray(c.material)?c.material:[c.material]){
             if(material.isMeshBasicMaterial){
               // glTF unlit screens already emit their full colour. Treat an

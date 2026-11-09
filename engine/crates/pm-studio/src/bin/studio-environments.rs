@@ -16,7 +16,16 @@ fn main() {
         PathBuf::from(arg(&args, "--out").unwrap_or_else(|| "/tmp/pm-shots/studio3d/laneC".into()));
     std::fs::create_dir_all(&out).unwrap();
     let name = arg(&args, "--scene").unwrap_or_else(|| "env-room".into());
-    let scene = corpus::scene(&name).expect("environment scene name");
+    let scene = if let Some(path) = arg(&args, "--scene-file") {
+        serde_json::from_slice(&std::fs::read(path).expect("scene file")).expect("valid scene JSON")
+    } else {
+        corpus::scene(&name).expect("environment scene name")
+    };
+    let scene = if args.iter().any(|s| s == "--expand") {
+        scene.expanded().expect("valid environment geometry")
+    } else {
+        scene
+    };
     std::fs::write(
         out.join(format!("{name}-scene.json")),
         serde_json::to_string(&scene).unwrap(),
@@ -62,7 +71,19 @@ fn main() {
     r.live = false;
     let start = Instant::now();
     let trace_ms = r.trace(spp, 8, true, 1000000);
-    let (pixels, post_ms) = r.finish(0);
+    let denoise = args.iter().any(|s| s == "--denoise");
+    #[cfg(feature = "oidn")]
+    let (pixels, post_ms) = if denoise {
+        let d = pm_studio::oidn::Denoiser::new().expect("OIDN");
+        r.finish_with(&|c, a, n| d.run(c, a, n, 4, w as usize, h as usize))
+    } else {
+        r.finish(0)
+    };
+    #[cfg(not(feature = "oidn"))]
+    let (pixels, post_ms) = {
+        assert!(!denoise, "build with --features oidn for denoising");
+        r.finish(0)
+    };
     let total_seconds = start.elapsed().as_secs_f64();
     write_png(&out.join(format!("{name}-final{spp}.png")), w, h, &pixels).unwrap();
     let bytes = prepared.positions.len() * 16
@@ -74,7 +95,7 @@ fn main() {
         .instancing
         .as_ref()
         .map_or(1, |i| i.placements.len());
-    let result = serde_json::json!({"scene":name,"size":[w,h],"samples":spp,"prepareMs":prepare_ms,"uploadMs":upload_ms,"traceMs":trace_ms,"postMs":post_ms,"totalSeconds":total_seconds,"uniqueTriangles":prepared.tris.len(),"instances":instances,"lights":prepared.lights.len(),"preparedMiB":bytes as f64/1048576.,"adapter":r.adapter,"hardwareRt":r.uses_hardware_rt()});
+    let result = serde_json::json!({"scene":name,"size":[w,h],"samples":spp,"denoised":denoise,"prepareMs":prepare_ms,"uploadMs":upload_ms,"traceMs":trace_ms,"postMs":post_ms,"totalSeconds":total_seconds,"uniqueTriangles":prepared.tris.len(),"instances":instances,"lights":prepared.lights.len(),"preparedMiB":bytes as f64/1048576.,"adapter":r.adapter,"hardwareRt":r.uses_hardware_rt()});
     println!("{result}");
     std::fs::write(
         out.join(format!("{name}-final-metrics.json")),

@@ -251,12 +251,13 @@ extended import cases are listed separately in the checklist.
   Shift moves 10°); Sun height, direction, strength, Haze, Clouds, Intensity,
   Rotation, Visible to camera; and **Atmosphere** height fog. With the World
   selected, dragging the sky in the viewer puts the sun under the pointer.
-- **Terrain** arrives as rolling hills with grass, rock on steep slopes and
-  light grass on top. In a composition without a sky or camera it also adds a
-  golden-hour World and a camera that frames it, in one Undo. Shape buttons
+- **Terrain** arrives as smooth rolling hills with blended grass, soil, rock,
+  beach and snow materials. In a composition without a sky or camera it also adds a
+  golden-hour World, a camera, mixed trees, meadow grass, bushes and rocks, in one Undo. Shape buttons
   (Rolling hills, Mountains, Dunes, Nearly flat), **Shape from** (generated
   or a height image/layer/composition) and each ground cover's limits.
-- **Scatter**: Copies of, Over, New variation, Count, Density, size and turn
+- **Scatter** offers Pine, Oak, Birch, Bush, Grass and Rock alongside user models.
+  Copies of, Over, New variation, Count, Density, size and turn
   ranges, slope and height limits.
 - **Material Options** (After Effects' wording) on models and on every 3D
   solid, footage, text, shape and pre-comp layer; extruded text and shapes
@@ -337,8 +338,10 @@ values; ordinary image, composition and layer sources are decoded from sRGB.
 Terrain can use procedural noise, `heightSource` (image asset/layer/comp), or
 normalized `heights` with exactly `(resolution+1)^2` entries. Image luminance
 becomes height multiplied by amplitude. Resolution is 2–256; octaves 1–12.
-Material regions are evaluated in order, first matching slope/height wins;
-otherwise the terrain's ordinary material is used. Slopes are degrees from up.
+Legacy material regions keep their ordered slope/height selection. New natural
+Terrain blends colors, roughness and metalness over shared smooth vertices.
+`p.natural`, `blend`, `detail`, `erosion`, `adaptive`, `waterLevel` and `snowLevel`
+are ordinary editable channels; erosion is thermal (0–64 steps). Slopes are degrees from up.
 There are at most eight regions. Their color, roughness, metalness and limits
 are channels, including `terrain.region0.color` and `terrain.region0.minSlope`.
 
@@ -441,3 +444,12 @@ Pass export is the evaluated 3D world; ordinary 2D overlays, per-layer composito
 effects and motion blur are not applied to the data passes. Beauty uses the
 same 3D renderer without those later compositor operations. Data passes use a
 single center ray (with the camera aperture) and an opacity threshold of 0.5.
+
+Built-in nature is procedural and deterministic. Agents can add a model with
+`source:{nature:"birch",seed:41}` or scatter with `model:"nature:conifer"`;
+other species are broadleaf, bush, grass and rock. A built-in scatter stores a
+real reusable source-layer reference. Source seed changes the plant/rock shape;
+Scatter seed changes placements. Thin leaves transmit diffuse light, and distant
+copies switch to simpler shared meshes. Saved/imported user models retain their
+existing behavior. Native/WebGPU data and measured limits are documented in
+[`environments.md`](../../../docs/studio/environments.md#natural-landscape-content).

@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { channelValues } from './environment-data';
-import { terrainMeshes,generateScatter,instanceMatrix } from '../studio/environment-geometry';
+import { terrainMeshes,generateScatter,instanceMatrix,bakeTerrain,terrainResolution } from '../studio/environment-geometry';
 import { packWorld,worldSun,type StudioWorld } from '../studio/environment';
+import {selectNatureLod} from '../studio/nature';
 import type { StudioScene } from '../studio/extract';
 import type { Scene3D,SceneObject } from './schema';
 
@@ -56,8 +57,13 @@ export function worldForNode(node:any,image:ReturnType<typeof environmentImage>)
   world.adaptive={enabled:p.adaptive,min_samples:Math.round(p.minSamples),relative_error:p.relativeError,absolute_error:p.absoluteError};
   return world;
 }
-export function terrainSettings(node:any,image:ReturnType<typeof environmentImage>){
+type TerrainSettings={size:[number,number];resolution:number;amplitude:number;frequency:number;octaves:number;seed:number;ridged:boolean;detail:number;erosion:number;adaptive:boolean;blend:number;natural:boolean;water_level:number;snow_level:number;heights:number[];material:number;layers:{material:number;min_height:number;max_height:number;min_slope:number;max_slope:number}[];center?:{x:number;y:number;z:number}};
+const terrainSettingsCache=new WeakMap<object,{key:string;heights:any;result:any}>();
+export function terrainSettings(node:any,image:ReturnType<typeof environmentImage>,camera?:{position:{x:number;y:number;z:number};fov:number}){
   const p=channelValues(node.p),resolution=Math.round(p.resolution),heights:number[]=[];
+  const selected=terrainResolution({size:[p.width,p.depth],resolution,adaptive:p.adaptive},camera);
+  const key=JSON.stringify([p,node.regions,environmentImageKey(image),selected]);
+  const cached=terrainSettingsCache.get(node);if(cached?.key===key && cached.heights===node.heights)return cached.result as TerrainSettings;
   if(image){
     const stride=image.pixels.length/(image.width*image.height);
     for(let y=0;y<=resolution;y++)for(let x=0;x<=resolution;x++){
@@ -66,24 +72,29 @@ export function terrainSettings(node:any,image:ReturnType<typeof environmentImag
       heights.push(Math.max(0,Math.min(1,.2126*read(0)+.7152*read(1)+.0722*read(2))));
     }
   }
-  return {size:[p.width,p.depth] as [number,number],resolution,amplitude:p.amplitude,frequency:p.frequency,octaves:Math.round(p.octaves),seed:Math.round(p.seed),ridged:p.ridged,heights:image?heights:node.heights,
+  const settings={size:[p.width,p.depth] as [number,number],resolution,amplitude:p.amplitude,frequency:p.frequency,octaves:Math.round(p.octaves),seed:Math.round(p.seed),ridged:p.ridged,detail:p.detail??0,erosion:Math.round(p.erosion??0),adaptive:p.adaptive??false,blend:p.blend??0,natural:p.natural??false,water_level:p.waterLevel??-100000,snow_level:p.snowLevel??100000,heights:image?heights:node.heights,
     material:0,layers:node.regions.map((region:any,i:number)=>{const p=channelValues(region.p);return {material:i+1,min_height:p.minHeight,max_height:p.maxHeight,min_slope:p.minSlope,max_slope:p.maxSlope};})};
+  const result=(settings.adaptive || settings.erosion?bakeTerrain(settings,selected):settings) as TerrainSettings;
+  terrainSettingsCache.set(node,{key,heights:node.heights,result});return result;
 }
 export function makeTerrain(node:SceneObject,settings:ReturnType<typeof terrainSettings>):THREE.Group{
   const group=new THREE.Group();
-  for(const part of terrainMeshes(settings)){
+  const palette=[rgb(node.material.p.color!.v),...node.terrain!.regions.map(r=>rgb(channelValues(r.p).color))];
+  for(const part of terrainMeshes(settings,palette,[{roughness:node.material.p.roughness!.v,metallic:node.material.p.metalness!.v},...node.terrain!.regions.map(r=>{const p=channelValues(r.p);return {roughness:p.roughness,metallic:p.metalness};})])){
     const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(part.mesh.positions.flatMap(v=>[v.x,v.y,v.z]),3));
-    g.setAttribute('normal',new THREE.Float32BufferAttribute(part.mesh.normals.flatMap(v=>[v.x,v.y,v.z]),3));g.setAttribute('uv',new THREE.Float32BufferAttribute(part.mesh.uvs.flat(),2));g.setIndex(part.mesh.indices.flat());
+    g.setAttribute('normal',new THREE.Float32BufferAttribute(part.mesh.normals.flatMap(v=>[v.x,v.y,v.z]),3));g.setAttribute('uv',new THREE.Float32BufferAttribute(part.mesh.uvs.flat(),2));if(part.mesh.colors)g.setAttribute('color',new THREE.Float32BufferAttribute(part.mesh.colors.flatMap(v=>[v.x,v.y,v.z]),3));g.setIndex(part.mesh.indices.flat());
     const material=new THREE.MeshPhysicalMaterial(),region=node.terrain!.regions[part.material-1];
     if(region){const p=channelValues(region.p);material.color.set(p.color);material.roughness=p.roughness;material.metalness=p.metalness;}
+    if(part.mesh.colors){material.color.setRGB(1,1,1);material.vertexColors=true;material.metalness=0;material.roughness=.88;material.userData.studioProcedural=1;}
     material.userData.sourceMaterialIndex=part.material;
-    const mesh=new THREE.Mesh(g,material);mesh.userData.terrainRegion=region?channelValues(region.p):null;group.add(mesh);
+    const mesh=new THREE.Mesh(g,material);mesh.userData.studioNaturalGround=!!part.mesh.colors;mesh.userData.terrainRegion=region?channelValues(region.p):null;group.add(mesh);
   }
   return group;
 }
 export function clearScatterChildren(object:THREE.Object3D):void{for(const child of [...object.children]){object.remove(child);(child as any).dispose?.();if(child.userData.studioOwnsMaterial)for(const material of Array.isArray((child as any).material)?(child as any).material:[(child as any).material])material.dispose();if(child.userData.studioOwnsGeometry)(child as any).geometry.dispose();}}
 function prototypeMeshes(root:THREE.Object3D,visit:(mesh:any)=>void):void{const walk=(object:THREE.Object3D,visible:boolean)=>{const show=visible && (object===root || object.visible);if(!show)return;visit(object);for(const child of object.children)walk(child,show);};walk(root,true);}
 const scatterCache=new WeakMap<object,string>();
+const scatterPlacements=new WeakMap<object,{signature:string;placements:ReturnType<typeof generateScatter>}>();
 /** Called after main has installed its world matrices, so surfaces and prototypes
  * share the same parent/anchor semantics as ordinary models. */
 export function syncEnvironmentGraph(runtime:any,data:Scene3D,assets:(id:string)=>any,composition:(id:string,source:any)=>any):void{
@@ -105,28 +116,46 @@ export function syncEnvironmentGraph(runtime:any,data:Scene3D,assets:(id:string)
     }
     if(!node.scatter)continue;
     const source=runtime.objects.get(node.scatter.model),surface=runtime.objects.get(node.scatter.surface),p=channelValues(node.scatter.p);
-    if(!source || !surface){clearScatterChildren(object);scatterCache.delete(object);runtime.warnings.push('Scatter model or surface is unavailable');continue;}
+    if(!source || !surface){clearScatterChildren(object);scatterCache.delete(object);scatterPlacements.delete(object);runtime.warnings.push('Scatter model or surface is unavailable');continue;}
     const geometryKey=(root:THREE.Object3D)=>{const keys:any[]=[];prototypeMeshes(root,(mesh:any)=>{if(mesh.isMesh)keys.push(mesh.geometry.uuid,mesh.geometry.getAttribute('position')?.version,mesh.geometry.index?.version,mesh.matrixWorld.elements,mesh.morphTargetInfluences,mesh.skeleton?Array.from(mesh.skeleton.boneMatrices):null,(Array.isArray(mesh.material)?mesh.material:[mesh.material]).map((m:any)=>m.uuid));});return keys;};
-    const signature=JSON.stringify([p,node.materialOptions,node.castShadow,node.receiveShadow,source.matrixWorld.elements,surface.matrixWorld.elements,source.uuid,surface.uuid,geometryKey(source),geometryKey(surface)]);
+    const placementSignature=JSON.stringify([p,node.materialOptions,node.castShadow,node.receiveShadow,source.matrixWorld.elements,surface.matrixWorld.elements,source.uuid,surface.uuid,geometryKey(source),geometryKey(surface)]);
+    const camera=runtime.camera.position as THREE.Vector3;
+    const signature=placementSignature+(source.userData.studioNature?`:${Math.floor(camera.x/8)},${Math.floor(camera.y/8)},${Math.floor(camera.z/8)}`:'');
     if(scatterCache.get(object)===signature)continue;
     scatterCache.set(object,signature);
     clearScatterChildren(object);
+    let cached=scatterPlacements.get(object);
+    if(!cached || cached.signature!==placementSignature){
     const positions:any[]=[],normals:any[]=[],indices:any[]=[],uvs:any[]=[];
     prototypeMeshes(surface,(mesh:any)=>{if(!mesh.isMesh)return;const g=mesh.geometry,position=g.getAttribute('position'),normal=g.getAttribute('normal'),offset=positions.length;
       for(let i=0;i<position.count;i++){positions.push(xyz((mesh.getVertexPosition?mesh.getVertexPosition(i,new THREE.Vector3()):new THREE.Vector3().fromBufferAttribute(position,i)).applyMatrix4(mesh.matrixWorld)));normals.push(xyz(normal?new THREE.Vector3().fromBufferAttribute(normal,i).transformDirection(mesh.matrixWorld):new THREE.Vector3(0,1,0)));uvs.push([0,0]);}
       const index=g.getIndex();for(let i=0;i<(index?.count??position.count);i+=3)indices.push([0,1,2].map(j=>offset+(index?index.getX(i+j):i+j)));
     });
     const placements=generateScatter({objects:[0],surface:0,count:Math.round(p.count),density:p.density,seed:Math.round(p.seed),scale:[p.scaleMin,p.scaleMax],rotation:[p.rotationMin,p.rotationMax],min_height:p.minHeight,max_height:p.maxHeight,min_slope:p.minSlope,max_slope:p.maxSlope},{objects:[{mesh:{positions,normals,indices,uvs},material:0}]} as any);
+    cached={signature:placementSignature,placements};scatterPlacements.set(object,cached);
+    }
+    const placements=cached.placements;
     const inverse=object.matrixWorld.clone().invert(),sourceInverse=source.matrixWorld.clone().invert();
-    prototypeMeshes(source,(mesh:any)=>{if(!mesh.isMesh)return;const options=node.materialOptions?channelValues(node.materialOptions.p):null;
+    const prototypes:THREE.Mesh[]=[];
+    if(source.userData.studioNature){for(const child of source.children)if((child as any).isMesh)prototypes.push(child as THREE.Mesh);}
+    else prototypeMeshes(source,(mesh:any)=>{if(mesh.isMesh)prototypes.push(mesh);});
+    // Partition transforms only. All levels retain their own resident BLAS.
+    let selected:number[]=[];
+    if(source.userData.studioNature){
+      const g=prototypes[0]!.geometry;if(!g.boundingBox)g.computeBoundingBox();const size=g.boundingBox!.getSize(new THREE.Vector3()),scale=source.getWorldScale(new THREE.Vector3()),diameter=Math.max(size.x,size.y,size.z)*Math.max(Math.abs(scale.x),Math.abs(scale.y),Math.abs(scale.z));
+      selected=placements.map(p=>selectNatureLod(diameter*(p.scale?.x??1),camera.distanceTo(new THREE.Vector3(p.position!.x,p.position!.y,p.position!.z))));
+    }
+    for(const mesh of prototypes){const level=mesh.userData.studioNatureLevel;
+      const chosen=level===undefined?placements:placements.filter((_,i)=>selected[i]===level);if(!chosen.length)continue;
+      const options=node.materialOptions?channelValues(node.materialOptions.p):null;
       const material=options?(Array.isArray(mesh.material)?mesh.material.map((m:any)=>m.clone()):mesh.material.clone()):mesh.material;
       if(options)for(const m of Array.isArray(material)?material:[material]){m.userData.studioAcceptsLights=options.acceptsLights;m.userData.studioReflections=options.appearsInReflections;}
-      const instanced=new THREE.InstancedMesh(mesh.geometry,material,placements.length);
+      const instanced=new THREE.InstancedMesh(mesh.geometry,material,chosen.length);
       instanced.userData.sceneId=node.id;instanced.userData.studioSharedPrototype=true;instanced.userData.studioOwnsMaterial=!!options;instanced.userData.studioPrimaryVisible=options?.castsShadows!=='only';instanced.userData.studioPart=mesh.userData.studioPart;instanced.castShadow=options?options.castsShadows!=='off':node.castShadow && mesh.castShadow;instanced.receiveShadow=options?options.acceptsShadows:node.receiveShadow && mesh.receiveShadow;
       const relative=sourceInverse.clone().multiply(mesh.matrixWorld),sourceScale=source.getWorldScale(new THREE.Vector3()),sourceRotation=new THREE.Matrix4().makeRotationFromQuaternion(source.getWorldQuaternion(new THREE.Quaternion()));
-      placements.forEach((placement,i)=>{const m=instanceMatrix(placement).multiply(sourceRotation).scale(sourceScale).multiply(relative);instanced.setMatrixAt(i,inverse.clone().multiply(m));});
+      chosen.forEach((placement,i)=>{const m=instanceMatrix(placement).multiply(sourceRotation).scale(sourceScale).multiply(relative);instanced.setMatrixAt(i,inverse.clone().multiply(m));});
       instanced.instanceMatrix.needsUpdate=true;object.add(instanced);
-    });
+    }
   }
   if(volumes.length)world.volumes=volumes;
   runtime.studioWorld=environment || volumes.length?world:undefined;

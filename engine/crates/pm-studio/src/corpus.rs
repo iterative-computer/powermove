@@ -3,9 +3,10 @@ use crate::{
     environment::{Sky, World},
     math::{Vec3, v3},
     mesh::{self, Mesh},
-    scatter::{Exclusion, Instance, Scatter},
+    nature::{Nature, Species},
+    scatter::{Instance, Scatter},
     scene::{Camera, GpuLight, Material, Object, Scene},
-    terrain::{Terrain, TerrainLayer},
+    terrain::Terrain,
 };
 fn cube(size: Vec3) -> Mesh {
     let mut m = Mesh::default();
@@ -38,7 +39,7 @@ fn add_box(s: &mut Scene, at: Vec3, size: Vec3, material: usize) {
 }
 fn base(sky: &str) -> Scene {
     Scene {
-        meters_per_unit:1.,
+        meters_per_unit: 1.,
         world: World {
             sky: Sky::preset(sky),
             ..Default::default()
@@ -56,7 +57,7 @@ fn base(sky: &str) -> Scene {
         instances: vec![],
         scatters: vec![],
         terrains: vec![],
-        displacements:vec![],
+        displacements: vec![],
     }
 }
 pub fn scene(name: &str) -> Option<Scene> {
@@ -65,6 +66,8 @@ pub fn scene(name: &str) -> Option<Scene> {
         "env-street" => street(),
         "env-landscape" => landscape(50_000),
         "env-landscape-100k" => landscape(100_000),
+        "env-default-landscape" => default_landscape(),
+        "env-nature-closeup" => nature_closeup(),
         _ => return None,
     })
 }
@@ -75,7 +78,14 @@ fn room() -> Scene {
     s.world.atmosphere.density = 0.022;
     s.world.atmosphere.anisotropy = 0.55;
     s.world.atmosphere.distance = 35.;
-    s.world.volumes.push(crate::environment::Volume{shape:crate::environment::VolumeShape::Box,center:v3(-2.9,2.4,-1.5),size:v3(2.,2.,2.5),density:0.035,color:Vec3::splat(0.9),anisotropy:0.65});
+    s.world.volumes.push(crate::environment::Volume {
+        shape: crate::environment::VolumeShape::Box,
+        center: v3(-2.9, 2.4, -1.5),
+        size: v3(2., 2., 2.5),
+        density: 0.035,
+        color: Vec3::splat(0.9),
+        anisotropy: 0.65,
+    });
     s.materials = vec![
         Material::dielectric(v3(0.62, 0.57, 0.47), 0.9),
         Material::dielectric(v3(0.23, 0.105, 0.045), 0.48),
@@ -215,30 +225,20 @@ fn street() -> Scene {
     s.exposure = 1.8;
     s
 }
-fn tree() -> Mesh {
-    let mut m = cube(v3(0.22, 1.8, 0.22)).placed(0., 0., v3(0., 0.9, 0.));
-    for (y, r, height) in [(1.1, 1.1, 2.5), (2., 0.85, 2.2), (2.9, 0.6, 1.8)] {
-        let start = m.positions.len() as u32;
-        let segments = 8;
-        for i in 0..segments {
-            let a = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let b = (i + 1) as f32 / segments as f32 * std::f32::consts::TAU;
-            let p = [
-                v3(r * a.sin(), y, r * a.cos()),
-                v3(r * b.sin(), y, r * b.cos()),
-                v3(0., y + height, 0.),
-            ];
-            let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize();
-            for p in p {
-                m.positions.push(p);
-                m.normals.push(n);
-                m.uvs.push([0., 0.]);
-            }
-            let at = start + i * 3;
-            m.indices.push([at, at + 1, at + 2]);
+/// Install one three-level multi-material prototype, preserving shared geometry.
+fn add_nature(s: &mut Scene, species: Species, seed: u32) -> [usize; 3] {
+    let nature = Nature { species, seed };
+    let material = s.materials.len();
+    s.materials.extend(nature.materials());
+    std::array::from_fn(|lod| {
+        let mut mesh = nature.mesh(lod);
+        for m in &mut mesh.triangle_materials {
+            *m += material;
         }
-    }
-    m
+        let index = s.objects.len();
+        s.objects.push(Object { mesh, material });
+        index
+    })
 }
 fn landscape(count: u32) -> Scene {
     let mut s = base("golden-hour");
@@ -248,67 +248,151 @@ fn landscape(count: u32) -> Scene {
     s.world.atmosphere.height_falloff = 0.02;
     s.world.atmosphere.anisotropy = 0.55;
     s.world.atmosphere.distance = 1800.;
-    s.materials = vec![
-        Material::dielectric(v3(0.035, 0.10, 0.035), 0.9),
-        Material::dielectric(v3(0.18, 0.16, 0.12), 0.9),
-        Material::dielectric(v3(0.21, 0.25, 0.10), 1.),
-        Material::dielectric(v3(0.35, 0.32, 0.25), 0.9),
-    ];
-    s.objects.push(Object {
-        mesh: tree(),
-        material: 0,
-    });
-    s.objects.push(Object {
-        mesh: mesh::sphere(Vec3::ZERO, 1., 6, 10)
-            .transformed(|p| v3(p.x * 1.6, (p.y + 1.) * 0.7, p.z), |n| n),
-        material: 1,
-    });
-    s.displacements.push(crate::displacement::Displacement{object:1,width:8,height:8,values:(0..64).map(|i|((crate::terrain::hash(i+81)>>8) as f32)/16777216.).collect(),strength:0.6,mid_level:0.5,subdivision:1});
+    s.materials = vec![Material::dielectric(v3(0.14, 0.19, 0.055), 0.88)];
+    let pine = add_nature(&mut s, Species::Conifer, 41);
+    let oak = add_nature(&mut s, Species::Broadleaf, 73);
+    let birch = add_nature(&mut s, Species::Birch, 19);
+    let rock = add_nature(&mut s, Species::Rock, 81);
+    let grass = add_nature(&mut s, Species::Grass, 66);
+    let bush = add_nature(&mut s, Species::Bush, 94);
     let terrain = Terrain {
         size: [1200., 1200.],
         resolution: 128,
+        adaptive: true,
         amplitude: 55.,
         frequency: 0.003,
         seed: 712,
-        material: 2,
-        layers: vec![TerrainLayer {
-            material: 3,
-            min_height: -1000.,
-            max_height: 1000.,
-            min_slope: 35.,
-            max_slope: 90.,
-        }],
+        material: 0,
+        detail: 0.015,
+        erosion: 10,
+        natural: true,
+        blend: 0.12,
+        water_level: -24.,
+        snow_level: 46.,
         ..Default::default()
     };
     let y = terrain.sample(0., 240.).0;
     s.terrains.push(terrain);
-    s.instances = vec![
-        Instance {
-            object: 0,
-            position: v3(1500., 0., 0.),
+    // One explicit off-camera placement suppresses the prototypes' implicit
+    // identity placements. Every forest placement below is a real tree.
+    s.instances = vec![Instance {
+        object: pine[0],
+        position: v3(1500., 0., 0.),
+        ..Default::default()
+    }];
+    s.scatters = vec![
+        Scatter {
+            objects: vec![pine[0], pine[0], oak[0], birch[0]],
+            lods: vec![pine, oak, birch],
+            seed: 517,
+            count,
+            terrain: Some(0),
+            size: [1180., 1180.],
+            scale: [0.65, 1.4],
+            max_slope: 90.,
             ..Default::default()
         },
-        Instance {
-            object: 1,
-            position: v3(1500., 0., 0.),
+        Scatter {
+            objects: vec![grass[0]],
+            lods: vec![grass],
+            seed: 633,
+            count: count / 2,
+            terrain: Some(0),
+            size: [1180., 1180.],
+            scale: [0.7, 1.5],
+            max_slope: 90.,
+            ..Default::default()
+        },
+        Scatter {
+            objects: vec![rock[0], bush[0]],
+            lods: vec![rock, bush],
+            seed: 483,
+            count: count / 25,
+            terrain: Some(0),
+            size: [1180., 1180.],
+            scale: [0.5, 1.7],
+            max_slope: 90.,
             ..Default::default()
         },
     ];
-    // Exactly count accepted copies; a wide height/slope range exercises the
-    // placement count, while a circular clearing is made in a separate fixture.
-    s.scatters = vec![Scatter {
-        objects: vec![0, 0, 0, 1],
-        seed: 517,
-        count,
-        terrain: Some(0),
-        size: [1180., 1180.],
-        scale: [0.65, 1.8],
-        max_slope: 90.,
-        exclusions: Vec::<Exclusion>::new(),
-        ..Default::default()
-    }];
     s.camera = Camera::lens(v3(0., y + 25., 240.), v3(0., 8., -120.), 40., 0.);
     s.exposure = 0.85;
+    s
+}
+fn default_landscape() -> Scene {
+    let mut s = landscape(520);
+    s.terrains[0] = Terrain {
+        size: [180., 180.],
+        resolution: 128,
+        adaptive: true,
+        amplitude: 14.,
+        frequency: 0.018,
+        seed: 41,
+        detail: 0.018,
+        erosion: 12,
+        natural: true,
+        blend: 0.16,
+        water_level: -9.,
+        snow_level: 14.,
+        ..Default::default()
+    };
+    s.scatters[0].size = [174., 174.];
+    s.scatters[0].scale = [0.65, 1.05];
+    s.scatters[0].max_slope = 40.;
+    s.scatters[1].size = [174., 174.];
+    s.scatters[1].count = 18000;
+    s.scatters[1].scale = [0.7, 1.5];
+    s.scatters[1].max_slope = 40.;
+    s.scatters[2].size = [174., 174.];
+    s.scatters[2].count = 100;
+    s.scatters[2].max_slope = 50.;
+    s.world.atmosphere.density = 0.003;
+    s.world.atmosphere.height_falloff = 0.08;
+    s.world.atmosphere.distance = 500.;
+    let y = s.terrains[0].sample(10., 62.).0;
+    s.camera = Camera::lens(v3(10., y + 12., 62.), v3(-8., 2., -35.), 32., 0.);
+    s
+}
+fn nature_closeup() -> Scene {
+    let mut s = default_landscape();
+    s.terrains[0].size = [60., 60.];
+    s.terrains[0].amplitude = 0.8;
+    s.terrains[0].frequency = 0.06;
+    s.terrains[0].adaptive = false;
+    s.terrains[0].resolution = 128;
+    s.scatters.clear();
+    s.instances.clear();
+    // Keep a tree, sapling, several rocks and grass in a single inspectable shot.
+    for (object, x, z, scale) in [
+        (0, -3., -3., 0.8),
+        (3, 3., -5., 0.85),
+        (6, 0.5, -8., 0.85),
+        (9, 1., 0., 1.1),
+        (9, -1.2, 0.5, 0.65),
+        (15, -2.5, -0.8, 0.85),
+    ] {
+        let y = s.terrains[0].sample(x, z).0;
+        s.instances.push(Instance {
+            object,
+            position: v3(x, y, z),
+            scale: Vec3::splat(scale),
+            rotation: v3(0., x * 41., 0.),
+            ..Default::default()
+        });
+    }
+    s.scatters = vec![Scatter {
+        objects: vec![12],
+        lods: vec![[12, 13, 14]],
+        seed: 87,
+        count: 1500,
+        terrain: Some(0),
+        size: [20., 20.],
+        scale: [0.5, 1.2],
+        max_slope: 90.,
+        ..Default::default()
+    }];
+    s.camera = Camera::lens(v3(7., 2.8, 11.), v3(-0.5, 2., -3.), 35., 0.);
+    s.world.atmosphere.density = 0.001;
     s
 }
 #[cfg(test)]
@@ -319,7 +403,8 @@ mod tests {
         let s = street();
         assert_eq!(s.extra_lights.len(), 50);
         let s = landscape(50000).expanded().unwrap();
-        assert_eq!(s.instances.len(), 50002 + s.objects.len() - 2);
-        assert!(s.objects.len() < 8);
+        assert_eq!(s.instances.len(), 50000 + 25000 + 2000 + 2);
+        assert_eq!(s.objects.len(), 19);
+        assert!(s.instances.iter().filter(|i| i.object < 9).count() >= 50000);
     }
 }

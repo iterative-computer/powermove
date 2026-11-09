@@ -60,6 +60,6 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   if(valid==0u){return vec3f(0.);}
   let c=direct_candidate(chosen_light,chosen_seed,p,n,v,m,w,floor_hit);
   var visibility=vec3f(1.);let light=light_at(chosen_light);
-  if(P.opts.y==0u&&light.u.w>=0.&&(floor_hit||(u32(m.policy.y)&2u)!=0u)){visibility=transmittance(p,c.sample.dir,c.sample.dist);}
+  if(P.opts.y==0u&&light.u.w>=0.&&(floor_hit||(u32(m.policy.y)&2u)!=0u)){visibility=transmittance(p-select(vec3f(0.),n*ray_epsilon()*2.,thin_leaf(m) && dot(n,c.sample.dir)<0.),c.sample.dir,c.sample.dist);}
   return c.f * visibility * normalization;
 }

@@ -17,6 +17,7 @@ fn receiver() -> Scene {
         normals: vec![Vec3::Y; 4],
         uvs: vec![[0., 0.]; 4],
         indices: vec![[0, 2, 1], [0, 3, 2]],
+            ..Default::default()
     };
     Scene {
         meters_per_unit: 1.,

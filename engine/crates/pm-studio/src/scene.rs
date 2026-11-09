@@ -34,11 +34,14 @@ pub struct Material {
     pub anisotropy: f32,
     /// Subsurface mean free path in scene units (0: opaque).
     pub subsurface: f32,
+    /// Procedural surface: 0 plain, 1 ground, 2 stone, 3 bark, 4 thin leaf, 5 grass, 6 birch bark.
+    #[serde(default)]
+    pub procedural: u32,
 }
 
 impl Material {
     pub fn dielectric(base: Vec3, roughness: f32) -> Self {
-        Material { base, metallic: 0.0, roughness, coat: 0.0, coat_roughness: 0.03, transmission: 0.0, ior: 1.5, specular: 1.0, emission: Vec3::ZERO, screen: false, sheen: 0.0, film_nm: 0.0, dispersion: 0.0, droplets: 0.0, anisotropy: 0.0, subsurface: 0.0 }
+        Material { base, metallic: 0.0, roughness, coat: 0.0, coat_roughness: 0.03, transmission: 0.0, ior: 1.5, specular: 1.0, emission: Vec3::ZERO, screen: false, sheen: 0.0, film_nm: 0.0, dispersion: 0.0, droplets: 0.0, anisotropy: 0.0, subsurface: 0.0, procedural: 0 }
     }
     pub fn metal(base: Vec3, roughness: f32) -> Self {
         Material { metallic: 1.0, ..Self::dielectric(base, roughness) }
@@ -250,14 +253,17 @@ impl Scene {
         for (object, o) in self.objects.iter().enumerate() {
             let m = &o.mesh;
             let layer = self.layers.as_ref().and_then(|l| l.get(object).copied()).unwrap_or(object as u32);
-            for t in &m.indices {
+            for (face, t) in m.indices.iter().enumerate() {
                 let [a, b, c] = t.map(|i| i as usize);
                 corners.push([m.positions[a], m.positions[b], m.positions[c]]);
                 positions_raw.push([m.positions[a].to4(0.0), m.positions[b].to4(0.0), m.positions[c].to4(0.0)]);
                 raw.push(GpuTri {
-                    n: [m.normals[a].to4(0.0), m.normals[b].to4(0.0), m.normals[c].to4(0.0)],
+                    n: [a,b,c].map(|i| m.normals[i].to4(m.colors.get(i).map_or(f32::from_bits(0xffffffff), |c| {
+                        let b=c.to_array().map(|v|(v.clamp(0.,1.)*255.).round() as u32);
+                        f32::from_bits(b[0] | b[1]<<8 | b[2]<<16 | 255<<24)
+                    }))),
                     uv01: [m.uvs[a][0], m.uvs[a][1], m.uvs[b][0], m.uvs[b][1]],
-                    uv2m: [m.uvs[c][0], m.uvs[c][1], o.material as f32, layer as f32],
+                    uv2m: [m.uvs[c][0], m.uvs[c][1], m.triangle_materials.get(face).copied().unwrap_or(o.material) as f32, layer as f32],
                     tangent: tangent([m.positions[a], m.positions[b], m.positions[c]], [m.uvs[a], m.uvs[b], m.uvs[c]]),
                 });
             }
@@ -281,7 +287,7 @@ impl Scene {
         let materials = self
             .materials
             .iter()
-            .map(|m| GpuMaterial {
+            .enumerate().map(|(index, m)| GpuMaterial {
                 base: m.base.to4(m.metallic),
                 spec: [m.roughness.max(0.002), m.coat, m.coat_roughness.max(0.002), m.transmission],
                 emit: m.emission.to4(m.subsurface),
@@ -289,7 +295,8 @@ impl Scene {
                 // The display's composition is texture layer 0.
                 maps: [-1.0, if m.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
                 layers: [m.sheen, m.film_nm, m.dispersion, m.droplets],
-                policy: [1.0, 7.0, 0.0, 0.0],
+                policy: [1.0, if self.objects.iter().any(|o| !o.mesh.colors.is_empty() &&
+                    (o.material==index || o.mesh.triangle_materials.contains(&index))) {23.0} else {7.0}, 0.0, m.procedural as f32],
                 maps2: [-1.0, -1.0, -1.0, 1.0],
             })
             .collect();

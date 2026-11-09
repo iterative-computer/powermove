@@ -77,6 +77,8 @@ def build(out, samples):
     if meta['scene'] == 'caustics':
         warnings.append('Caustics use ordinary unfiltered paths with mesh emitters; MNEE is not configured. Use the physical-floor Mitsuba check for focused energy/shape.')
     screen = bpy.data.images.load(str(out / 'screen.png'))
+    colored_materials = {index for obj in data['objects'] if obj['mesh'].get('colors')
+                         for index in [obj['material'], *obj['mesh'].get('triangle_materials', [])]}
     materials = []
     dispersive = []
     for i, m in enumerate(data['materials']):
@@ -151,6 +153,29 @@ def build(out, samples):
             mul.inputs[1].default_value = vector(m['emission'])
             mat.node_tree.links.new(tex.outputs['Color'], mul.inputs[0])
             mat.node_tree.links.new(mul.outputs['Vector'], n.inputs['Emission Color'])
+        if i in colored_materials:
+            tint = mat.node_tree.nodes.new('ShaderNodeVertexColor')
+            tint.layer_name = 'StudioTint'
+            color = mat.node_tree.nodes.new('ShaderNodeMixRGB')
+            color.blend_type = 'MULTIPLY'
+            color.inputs[0].default_value = 1
+            color.inputs[1].default_value = (*vector(m['base']), 1)
+            mat.node_tree.links.new(tint.outputs['Color'], color.inputs[2])
+            mat.node_tree.links.new(color.outputs[0], n.inputs['Base Color'])
+            if m.get('procedural') in (4, 5):
+                # The same energy-conserving thin diffuse sheet as Studio:
+                # 65% reflection and 35% transmission, with no glass interior.
+                diffuse = mat.node_tree.nodes.new('ShaderNodeBsdfDiffuse')
+                translucent = mat.node_tree.nodes.new('ShaderNodeBsdfTranslucent')
+                mix = mat.node_tree.nodes.new('ShaderNodeMixShader')
+                mix.inputs[0].default_value = .35
+                for node in (diffuse, translucent):
+                    mat.node_tree.links.new(color.outputs[0], node.inputs['Color'])
+                mat.node_tree.links.new(diffuse.outputs[0], mix.inputs[1])
+                mat.node_tree.links.new(translucent.outputs[0], mix.inputs[2])
+                mat.node_tree.links.new(mix.outputs[0], mat.node_tree.nodes.get('Material Output').inputs['Surface'])
+            if m.get('procedural'):
+                warnings.append(f'material {i}: shared vertex tint and thin leaves; Studio procedural grain/bark/vein detail is not baked into the reference')
         materials.append(mat)
 
     meshes = []
@@ -174,7 +199,15 @@ def build(out, samples):
         # Studio's first texture row is UV v=0; Blender's images start at the bottom.
         uv.data.foreach_set('uv', [c for face in m['indices'] for idx in face
                                   for c in (m['uvs'][idx][0], 1 - m['uvs'][idx][1])])
-        mesh.materials.append(materials[obj['material']])
+        if m.get('colors'):
+            tint = mesh.color_attributes.new(name='StudioTint', type='FLOAT_COLOR', domain='POINT')
+            tint.data.foreach_set('color', [c for color in m['colors'] for c in (*vector(color), 1)])
+        if m.get('triangle_materials'):
+            for material in materials:
+                mesh.materials.append(material)
+            mesh.polygons.foreach_set('material_index', m['triangle_materials'])
+        else:
+            mesh.materials.append(materials[obj['material']])
         meshes.append(mesh)
 
     instances = data.get('instances') or [dict(object=i) for i in range(len(meshes))]

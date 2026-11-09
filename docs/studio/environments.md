@@ -195,11 +195,13 @@ passed with hardware ray queries, reservoirs, MetalFX and shared textures disabl
 - HDRI ground projection is not implemented; the existing shadow catcher works
   with environment illumination. Large decoded HDRIs use prepared binary
   uploads, since canonical JSON packets are limited to 4 MiB.
-- No terrain erosion, blended material splats, adaptive subdivision, instance
-  LOD, out-of-core paging, collision avoidance, normal-aligned scatter or density
-  textures. Geometry displacement is uniform CPU preparation.
-- The corpus is intentionally simple and asset-free. Photorealistic environment
-  art, formal Cycles parity and sustained full-editor performance remain gates.
+- Terrain uses bounded camera-dependent uniform grids, rather than local GPU
+  microdisplacement. Thermal erosion is available; hydraulic erosion, out-of-core
+  paging, collision avoidance, normal-aligned scatter and density textures remain
+  gaps. Instance LOD switches meshes without crossfading.
+- The corpus uses deterministic procedural assets without external textures.
+  These improve default content; formal Cycles parity and sustained full-editor
+  performance remain gates.
 
 Physical references: [Bruneton and Neyret's atmosphere model](https://ebruneton.github.io/precomputed_atmospheric_scattering/),
 [PBRT transmittance](https://www.pbr-book.org/4ed/Volume_Scattering/Transmittance),
@@ -238,15 +240,16 @@ row-major grayscale values; height is center.y + amplitude × value. Load/resize
 an image outside the scene contract before sending heights. Material layers
 are ordered `{material,min_height,max_height,min_slope,max_slope}` regions;
 the first matching triangle center/face slope wins, otherwise base material.
-These are discrete regions, not blended splat materials. Terrain gets smooth
-vertex normals. Scatter evaluates the actual piecewise planar mesh grid, so
+With `blend:0,natural:false` these retain the original discrete regions.
+Nonzero `blend` smoothly combines region colors, roughness and metalness at
+shared vertices. Terrain gets smooth vertex normals. Scatter evaluates the actual piecewise planar mesh grid, so
 instances do not hover over an independently evaluated noise function.
 
 `Scene::expanded()` resolves terrain/scatter once. Shared source vertices and
 one BLAS per prototype remain resident; the TLAS and nine-vec4 transform rows
 scale with placements. Both the standalone renderer and native scene protocol
 use this path. Transform patches address placement input order when explicit
-instances are present. Maximum one million total placements; no LOD or paging.
+instances are present. Maximum one million total placements. Optional distance-based mesh LOD is available; paging is not.
 
 ## Desktop integration
 
@@ -301,3 +304,109 @@ tracing for 1920×1080 output), then use MetalFX or the portable temporal filter
 This fixed initial budget avoids mid-drag target/scaler reallocations. The
 `STUDIO_LIVE_SCALE` diagnostic override still applies. Refine/Final trace the
 requested dimensions. Sky-only scenes keep the existing Live budget.
+
+## Natural landscape content
+
+Existing scenes retain their old defaults. New desktop Terrain content opts into:
+
+- `adaptive:true`: grid resolution follows camera distance and field of view,
+  rounded to a power of two between the requested resolution and 256. This is
+  chosen during preparation, not a per-ray quadtree. Image heights are resampled;
+  procedural heights are evaluated at the selected grid density.
+- `detail` (0..0.25): fine geometric noise as a fraction of height. The shared
+  shader adds object-space grain and close-range bump; unresolved grain fades
+  with the pixel footprint.
+- `erosion` (0..64): conservative four-neighbour thermal erosion steps, with a
+  34-degree talus. Meshes and scatter sample the same baked grid.
+- `natural:true`: slope and curvature mix grass, soil and rock. `water_level`
+  adds beach sand; `snow_level` adds snow above the chosen elevation, reduced on
+  steep faces. These are ground materials, not generated water geometry.
+- `blend` (0..1): ordered authored regions feather over that ground. Height
+  feather is amplitude × blend; slope feather is 45 degrees × blend. Region
+  roughness and metalness remain effective alongside color.
+
+Rust `nature::Nature {species,seed}` produces three texture-free shared meshes
+and two materials. Species are `conifer`, `broadleaf`, `birch`, `bush`, `grass`
+and `rock`. Trees have tapered branching wood and folded leaf cards; grass has
+curved blades. Leaves use a thin diffuse sheet: 65% reflection and 35% diffuse
+transmission, with total energy bounded by leaf albedo. This is translucency,
+not a volumetric subsurface random walk. Displaced rocks weld their UV-seam
+normals and place their lowest point at the root plane.
+
+A scatter's optional `lods:[[near,medium,far],...]` refers to source-object
+indices; each near source also appears in `objects`. Source diameter × instance
+scale / camera distance selects full detail at 0.09 or above, medium at 0.02 or
+above, and sparse distant cards below. Changing LOD preserves placement, seed,
+rotation and scale. There are no billboard image assets. The desktop reuses
+placements while the camera moves and updates LOD groups in eight-unit camera
+cells; it retains full-detail source models for direct editing. Camera-only
+resident native updates reuse their prepared LOD until geometry is prepared
+again. Extremely close views can reveal card silhouettes.
+
+Desktop model sources accept `{nature:"birch",seed:41}`. Scatter accepts an
+existing model layer as before, or `model:"nature:conifer"` (also broadleaf,
+birch, bush, grass and rock). A built-in choice creates/reuses a hidden ordinary
+source model and stores its actual layer ID in Scatter. Geometry variation is
+`source.seed`; Scatter's seed varies placement. Add Terrain in an empty
+composition creates the lit/framed landscape, mixed trees, meadow, stones and
+bushes in one Undo. Existing compositions retain their lighting and camera.
+
+Mesh JSON adds optional `colors` (linear RGB per vertex) and
+`triangle_materials` (material index per face). Both default to empty. Vertex
+tints use the existing packed-normal color channel; GPU buffer strides are
+unchanged. `Material.procedural` defaults to zero and occupies material policy
+row `.w`: 1 ground, 2 stone, 3 bark, 4 thin leaf, 5 grass, 6 birch bark. Ground
+uses object-space mapping; its UV pair carries interpolated roughness and
+metalness. Native and portable traversal use the same surface shader.
+
+The Cycles test exporter carries vertex tint, per-face materials and the thin
+leaf closure. Its procedural grain/bark/vein texture mapping remains approximate.
+The dense forest regression uses 384 Studio / 768 Cycles samples to resolve
+fine foliage; its existing ΔE00, SSIM and exposure limits are unchanged.
+
+
+### Natural-content measurements
+
+Measured 2026-11-09 on the base Apple M5 with 16 GB memory. Other development
+lanes were active; clocks and thermals were not locked. The hidden Electron
+harness applied 45 small camera/time edits. Live traced 640×360 for 1920×1080
+output, with Metal ray queries, shared textures and MetalFX. Timing includes
+IPC and a canvas readback that forces pixel completion, not display scanout or
+all editor compositing. Refine traced 16 samples at 1920×1080 and used OIDN;
+this is a denoised preview, not convergence.
+
+| Fixture | Placements | Live median / p95 | Refine + OIDN |
+|---|---:|---:|---:|
+| Natural landscape fixture | 18,619 | 30.4 / 33.0 ms | 4.12 s |
+| Trees, rocks and grass close-up | 1,507 | 22.8 / 23.3 ms | 2.56 s |
+| Forest: 50k trees + ground cover | 77,002 | 33.5 / 34.5 ms | 4.90 s |
+| Forest: 100k trees + ground cover | 154,002 | 37.0 / 37.8 ms | 5.73 s |
+
+The 100k forest contains exactly 100,000 tree placements plus 50,000 grass
+tufts, 4,000 bushes/rocks, one off-camera source placement and terrain. All
+three LODs share 211,878 unique triangles across 19 prototypes. Its prepared
+CPU/GPU-upload data was 62.87 MiB, preparation 158.2 ms and device/upload
+100.7 ms. Peak native-process RSS during the Electron run was 1,609 MiB;
+this excludes Electron and is not total unified GPU memory. These results
+show interactive roughly 27 fps in this harness, not sustained full-editor
+60 fps. The landscape fixture uses the same ground and nature system as the
+new desktop default; the desktop arranges its six scatter layers separately.
+
+At 960×540, 128 samples and OIDN, standalone close-up and 100k forest trace/post
+took 2.95 / 6.45 seconds. At 64 samples with denoising disabled, all four
+native/WebGPU comparisons passed the existing threshold. Mean RGB code-value
+differences were 0.873 / 0.205 / 2.631 / 2.496 out of 255 in table order;
+isolated stochastic foliage-edge differences are larger. Seeded Rust/TypeScript
+mesh comparisons agreed within 0.00001 scene units for terrain and every
+species. Full validation passed 81 Rust tests including all 11 Cycles regression
+scenes, 251 Studio/scene desktop tests, 11 environment e2e tests, typecheck,
+12 yardstick metric tests and extension boundary/version checks.
+
+Evidence, exact production Add Terrain capture, before/after PNGs and captions
+are under `/tmp/pm-shots/studio3d/laneI/`, outside Git. Reproduce with:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=~/Developer/pm-target CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test --manifest-path engine/Cargo.toml -p pm-studio -p pm-studio-host --features oidn,metalfx
+PM_STUDIO_SCENES=env-default-landscape,env-nature-closeup,env-landscape,env-landscape-100k PM_STUDIO_FRAMES=45 PM_STUDIO_SHOTS=/tmp/pm-shots/studio3d/laneI/benchmark POWERMOVE_STUDIO_HOST=apps/desktop/resources/studio/pm-studio-host nice -n 10 node apps/desktop/scripts/studio-native-electron.mjs
+nice -n 10 ~/Developer/pm-target/release/studio-environments --scene env-landscape-100k --spp 128 --denoise --out /tmp/pm-shots/studio3d/laneI/after
+```

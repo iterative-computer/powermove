@@ -55,6 +55,8 @@
       "max_abs_exposure_ev": 0.5
     },
     "env-landscape": {
+      "studio_samples": 384,
+      "cycles_samples": 768,
       "max_mean_delta_e": 3.5,
       "min_ssim": 0.8,
       "max_abs_exposure_ev": 0.25

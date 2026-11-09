@@ -138,7 +138,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       // Studio's material layers: sheen, thin film (nm), dispersion, droplets.
       m.sheen ?? 0, m.iridescence > 0 ? (m.iridescenceThicknessRange?.[1] ?? 400) : 0, m.userData?.studioDispersion ?? m.dispersion ?? 0, m.userData?.droplets ?? 0,
       m.userData?.materialAmbientUniform?.value ?? 1,
-      (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0) | (m.userData?.studioReflections===false?32:0), m.alphaTest ?? 0, 0,
+      (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0) | (m.userData?.studioReflections===false?32:0), m.alphaTest ?? 0, m.userData?.studioProcedural ?? 0,
       layer(m.roughnessMap), layer(m.metalnessMap), layer(m.aoMap), m.normalScale?.x ?? 1,
     ];
     if(!values.every(v=>Number.isFinite(Math.fround(v))))throw new Error('Material contains non-finite values');

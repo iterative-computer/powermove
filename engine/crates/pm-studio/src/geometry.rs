@@ -61,6 +61,11 @@ impl Scene {
         for scatter in &self.scatters {
             scatter.validate(self)?;
         }
+        s.terrains = self
+            .terrains
+            .iter()
+            .map(|t| t.baked(t.resolution_for_camera(&self.camera)))
+            .collect();
         if !self.terrains.is_empty() || !self.scatters.is_empty() {
             if s.instances.is_empty() {
                 s.instances = (0..s.objects.len())
@@ -82,8 +87,21 @@ impl Scene {
                 .clone()
                 .unwrap_or_else(|| (0..s.objects.len() as u32).collect());
             layers.resize(s.objects.len(), 0);
-            for terrain in &self.terrains {
-                for (material, mesh) in terrain.meshes() {
+            for terrain in s.terrains.clone() {
+                let meshes = if terrain.blend > 0. || terrain.natural {
+                    let mesh = terrain.blended_mesh(&s.materials);
+                    let material = s.materials.len();
+                    s.materials.push(crate::scene::Material {
+                        base: Vec3::splat(1.),
+                        procedural: 1,
+                        roughness: 0.88,
+                        ..s.materials[terrain.material]
+                    });
+                    vec![(material, mesh)]
+                } else {
+                    terrain.meshes()
+                };
+                for (material, mesh) in meshes {
                     let object = s.objects.len();
                     s.objects.push(crate::scene::Object { mesh, material });
                     layers.push(object as u32);
@@ -130,6 +148,15 @@ pub fn prepare(s: &Scene) -> Prepared {
     // The actual world is packed exactly once, after all placements.
     let world = std::mem::take(&mut metadata.world);
     let mut out = metadata.prepare();
+    for o in &s.objects {
+        if !o.mesh.colors.is_empty() {
+            out.materials[o.material].policy[1] =
+                (out.materials[o.material].policy[1] as u32 | 16) as f32;
+            for &m in &o.mesh.triangle_materials {
+                out.materials[m].policy[1] = (out.materials[m].policy[1] as u32 | 16) as f32;
+            }
+        }
+    }
     out.positions.clear();
     out.tris.clear();
     out.nodes = top;

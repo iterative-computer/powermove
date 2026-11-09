@@ -137,7 +137,9 @@ export function listModelMaterials(PM:any,layerId:string):SourceMaterialInfo[] {
   if(isExtrudedLayer(layer))return EXTRUSION_SURFACES.map((surface,index)=>({index,name:surface[0]!.toUpperCase()+surface.slice(1),slots:[...MATERIAL_SLOTS],maps:{...layer.d.extrusion.surfaces?.[surface]?.maps}}));
   if(!object)return [];
   const asset=object.source?.assetId && PM.assets?.get?.(object.source.assetId);
-  return (asset?.materials || (!object.source?.assetId?[{index:0,name:'Material'}]:[])).map((material:any)=>({index:material.index,name:material.name,
+  const species=object.source?.nature;
+  const natureMaterials=species==='rock'?[{index:0,name:'Stone'}]:species==='grass'?[{index:1,name:'Grass'}]:species?[{index:0,name:'Bark'},{index:1,name:'Leaves'}]:null;
+  return (asset?.materials || natureMaterials || (!object.source?.assetId?[{index:0,name:'Material'}]:[])).map((material:any)=>({index:material.index,name:material.name,
     slots:[...MATERIAL_SLOTS],maps:{...(object.sourceMaterials?.[material.index] || {})}}));
 }
 

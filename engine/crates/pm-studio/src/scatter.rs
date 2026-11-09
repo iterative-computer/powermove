@@ -71,6 +71,8 @@ impl Instance {
 #[serde(default)]
 pub struct Scatter {
     pub objects: Vec<usize>,
+    /// Optional [near, medium, far] source indices; the first is in objects.
+    pub lods: Vec<[usize; 3]>,
     pub seed: u32,
     /// Upper bound on accepted instances. Density thins candidates deterministically.
     pub count: u32,
@@ -99,6 +101,7 @@ impl Default for Scatter {
         Self {
             objects: vec![0],
             seed: 1,
+            lods: vec![],
             count: 100,
             density: 1.,
             terrain: None,
@@ -119,6 +122,7 @@ impl Scatter {
     pub fn validate(&self, s: &Scene) -> Result<(), String> {
         if self.objects.is_empty()
             || self.objects.iter().any(|&i| i >= s.objects.len())
+            || self.lods.iter().flatten().any(|&i| i >= s.objects.len())
             || self.count > 1_000_000
             || self.terrain.is_some_and(|i| i >= s.terrains.len())
             || self.surface.is_some_and(|i| i >= s.objects.len())
@@ -156,7 +160,22 @@ impl Scatter {
             state = hash(state);
             (state >> 8) as f32 * (1. / 16777216.)
         };
-        let terrain: Option<&Terrain> = self.terrain.map(|i| &s.terrains[i]);
+        let baked_terrain = self
+            .terrain
+            .filter(|&i| s.terrains[i].erosion > 0)
+            .map(|i| s.terrains[i].baked(s.terrains[i].resolution));
+        let terrain: Option<&Terrain> = baked_terrain
+            .as_ref()
+            .or_else(|| self.terrain.map(|i| &s.terrains[i]));
+        let lods: Vec<_> = self
+            .lods
+            .iter()
+            .map(|chain| {
+                let (lo, hi) = s.objects[chain[0]].mesh.bounds();
+                let d = hi - lo;
+                (*chain, d.x.max(d.y).max(d.z))
+            })
+            .collect();
         let surface = self.surface.map(|i| &s.objects[i].mesh);
         let mut cdf = Vec::new();
         let mut total = 0.;
@@ -213,9 +232,19 @@ impl Scatter {
                 continue;
             }
             let scale = self.scale[0] + (self.scale[1] - self.scale[0]) * r[4];
+            let source =
+                self.objects[(r[5] * self.objects.len() as f32) as usize % self.objects.len()];
+            let object = lods.iter().find(|(chain, _)| chain[0] == source).map_or(
+                source,
+                |(chain, diameter)| {
+                    chain[crate::nature::select_lod(
+                        diameter * scale,
+                        (p - s.camera.position).length(),
+                    )]
+                },
+            );
             out.push(Instance {
-                object: self.objects
-                    [(r[5] * self.objects.len() as f32) as usize % self.objects.len()],
+                object,
                 position: p,
                 rotation: v3(
                     0.,
@@ -253,6 +282,43 @@ mod tests {
         );
         let b = Scatter { seed: 2, ..a };
         assert_ne!(first, b.generate(&s));
+    }
+    #[test]
+    fn lod_changes_geometry_without_rerolling_the_forest() {
+        let mut s = crate::scene::preset("hero", "blue", 0.).unwrap();
+        let n = crate::nature::Nature {
+            species: crate::nature::Species::Conifer,
+            seed: 41,
+        };
+        s.objects = (0..3)
+            .map(|lod| crate::scene::Object {
+                mesh: n.mesh(lod),
+                material: 0,
+            })
+            .collect();
+        s.materials = n.materials().to_vec();
+        s.camera.position = v3(0., 1., 0.);
+        let scatter = Scatter {
+            objects: vec![0],
+            lods: vec![[0, 1, 2]],
+            count: 3000,
+            size: [2000., 2000.],
+            scale: [1., 1.],
+            ..Default::default()
+        };
+        scatter.validate(&s).unwrap();
+        let a = scatter.generate(&s);
+        let b = Scatter {
+            lods: vec![],
+            ..scatter.clone()
+        }
+        .generate(&s);
+        assert!(a.iter().any(|i| i.object == 0));
+        assert!(a.iter().any(|i| i.object == 1));
+        assert!(a.iter().any(|i| i.object == 2));
+        assert!(a.iter().zip(&b).all(|(a, b)| a.position == b.position
+            && a.scale == b.scale
+            && a.rotation == b.rotation));
     }
     #[test]
     fn terrain_height_and_slope_limits() {

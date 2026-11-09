@@ -49,6 +49,7 @@ fn plane(z: f32, facing: f32) -> Mesh {
         } else {
             vec![[0, 2, 1], [0, 3, 2]]
         },
+        ..Default::default()
     }
 }
 fn center(r: &mut Renderer) -> f32 {

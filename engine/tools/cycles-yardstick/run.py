@@ -239,6 +239,8 @@ def main():
     if not blender:
         print('SKIP: Blender absent; Cycles is an optional test-only yardstick.')
         return 0
+    explicit_samples=args.samples is not None
+    explicit_cycles_samples=args.cycles_samples is not None
     if args.regression:
         tolerances = json.loads((HERE/'tolerances.json').read_text())
         args.scenes = args.scenes or ','.join(tolerances['scenes'])
@@ -281,13 +283,16 @@ def main():
     results = []
     for name in names:
         print(f'{name}: rendering/scoring',flush=True)
+        limit=tolerances['scenes'][name] if args.regression else {}
+        studio_samples=args.samples if explicit_samples else limit.get('studio_samples',args.samples)
+        cycles_samples=args.cycles_samples if explicit_cycles_samples else limit.get('cycles_samples',args.cycles_samples)
         out = args.out/name
         out.mkdir(exist_ok=True)
         if not args.score_only:
             if shutil.disk_usage(args.out).free < 8_000_000_000:
                 raise RuntimeError('less than 8 GB free; stopping before further renders')
             if not args.cycles_only:
-                run_logged([studio,'--scene',name,'--out',out,'--size',args.size,'--spp',args.samples],out/'studio.log',175)
+                run_logged([studio,'--scene',name,'--out',out,'--size',args.size,'--spp',studio_samples],out/'studio.log',175)
             if args.reuse_cycles:
                 original = args.reuse_cycles/name
                 reuse_reference(original,out)
@@ -296,7 +301,7 @@ def main():
                 # Concrete replay script alongside each exported scene, with no .blend file.
                 script.write_text(exporter_script())
                 run_logged([blender,'-b','--factory-startup','--threads','2','--python-exit-code','1',
-                            '--python',script,'--',out,args.cycles_samples],out/'cycles.log',175)
+                            '--python',script,'--',out,cycles_samples],out/'cycles.log',175)
         result = compare(out)
         results.append(result)
         print(f"{name}: ΔE00 {result['regions']['whole']['delta_e_mean']:.3f}, SSIM {result['regions']['whole']['ssim']:.4f}",flush=True)

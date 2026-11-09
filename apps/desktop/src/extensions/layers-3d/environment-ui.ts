@@ -1,3 +1,4 @@
+import {BUILTIN_NATURE,LANDSCAPE_TERRAIN,LANDSCAPE_WORLD,LANDSCAPE_CAMERA,LANDSCAPE_SCATTERS} from './landscape-defaults';
 import type { PowermoveAPI } from 'powermove';
 import type { FieldSpec } from './scene-model';
 
@@ -143,36 +144,37 @@ export function addFog(api: PowermoveAPI): string | null {
   return run(api, { operation: 'add_fog', fog: { p: { shape: 'box', width: 4, height: 2, depth: 4, density: 0.03, color: '#E6E1DA', anisotropy: 0.4 } } }, 'Add Fog Volume');
 }
 
-/** Rolling hills: grass on gentle ground, rock on steep slopes, light grass on
-    top. In a composition without a sky or lights it also adds a golden-hour
+/** Rolling hills with blended ground, trees, stones and meadow grass. In a composition without a sky or lights it also adds a golden-hour
     World, and without a camera one that frames the land, in one Undo, so the
     first frame already reads as a landscape. */
 export function addTerrain(api: PowermoveAPI): string | null {
   const layers = api.model.curComp().layers as any[];
   const lit = layers.some(l => l.d?.data?.object?.world || l.d?.data?.light);
   const framed = layers.some(l => l.d?.data?.camera);
+  const empty=layers.length===0;
   const label = 'Add Terrain';
   api.edit.begin(label, { origin: 'command' });
   try {
     const result = api.scene3d.edit({
       operation: 'add_terrain',
-      terrain: {
-        p: { width: 30, depth: 30, resolution: 96, amplitude: 3, frequency: 0.12, octaves: 5, seed: 41, ridged: false },
-        regions: [
-          { p: { minSlope: 32, color: '#8C7D64', roughness: 0.9 } },
-          { p: { minHeight: 1.4, color: '#A3A078' } },
-          { p: { maxHeight: 1.4, color: '#687348' } }
-        ]
-      }
+      terrain: LANDSCAPE_TERRAIN
     } as any, { origin: 'command' });
     if (!result.ok) throw new Error(result.message);
     if (!lit) {
-      const world = api.scene3d.edit({ operation: 'set_world', world: { mode: 'sky', preset: 'golden-hour', p: { elevation: 14, azimuth: -60, haze: 2.7, fogDensity: 0.003, fogColor: '#E7D2B8', fogHeightFalloff: 0.14, fogDistance: 150 } } } as any, { origin: 'command' });
+      const world = api.scene3d.edit({ operation: 'set_world', world: {...LANDSCAPE_WORLD,p:{...LANDSCAPE_WORLD.p,metersPerUnit:empty?1:.1}} } as any, { origin: 'command' });
       if (!world.ok) throw new Error(world.message);
     }
     if (!framed) {
-      const camera = api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 18, y: 12, z: 23, targetX: 0, targetY: 0, targetZ: 0, fov: 45 } } } as any, { origin: 'command' });
+      const camera = api.scene3d.edit({ operation: 'add_camera', camera: LANDSCAPE_CAMERA } as any, { origin: 'command' });
       if (!camera.ok) throw new Error(camera.message);
+    }
+    if(empty){
+      const surface=(result.data.result as any)?.id;
+      for(const defaults of LANDSCAPE_SCATTERS){
+        const {name,...scatter}=defaults;
+        const added=api.scene3d.edit({operation:'add_scatter',name,scatter:{...scatter,surface}} as any,{origin:'command'});
+        if(!added.ok)throw new Error(added.message);
+      }
     }
     const committed = api.edit.commit(label);
     if (!committed.ok) throw new Error(committed.message);
@@ -191,8 +193,9 @@ export function addTerrain(api: PowermoveAPI): string | null {
 export function scatterSources(api: PowermoveAPI): { models: { id: string; name: string }[]; surfaces: { id: string; name: string; terrain: boolean }[] } {
   const layers = api.model.curComp().layers as any[];
   const usable = layers.filter(l => { const o = l.d?.data?.object; return o && !o.world && !o.fog && !o.scatter; });
+  const builtins=BUILTIN_NATURE.map(choice=>{const existing=usable.find(l=>l.d.data.object.source?.nature===choice.id.slice(7) && l.name===choice.name);return {...choice,id:existing?.id ?? choice.id};});
   return {
-    models: usable.filter(l => !l.d.data.object.terrain).map(l => ({ id: l.id, name: l.name })),
+    models: [...builtins,...usable.filter(l => !l.d.data.object.terrain && !builtins.some(choice=>choice.id===l.id)).map(l => ({ id: l.id, name: l.name }))],
     surfaces: usable.map(l => ({ id: l.id, name: l.name, terrain: !!l.d.data.object.terrain }))
   };
 }

@@ -7,7 +7,7 @@ import {editScene} from './operations';
 import {compositionRuntime} from './service';
 import {extractScene} from '../studio/extract';
 import {attachStudioWorld,worldForNode,terrainSettings} from './environment-render';
-import {remapMaterialLayerLinks} from './material-maps';
+import {remapMaterialLayerLinks,listModelMaterials} from './material-maps';
 import {worldSchema,materialOptionsSchema} from './environment-data';
 import {describePreparedScene,compileSceneDescription} from '../studio/scene-description';
 import {viewOf,cameraOf} from '../studio';
@@ -71,6 +71,21 @@ describe('environment documents and guarded agent edits',()=>{
     expect((runtime as any).studioWorld.volumes[0].density).toBe(.03);
     expect(sceneProperties(PM.L('ground')).map(p=>p.key)).toContain('terrain.region0.color');
     expect(editScene(PM,{operation:'add_scatter',scatter:{model:'missing',surface:'ground'}}).ok).toBe(false);
+  });
+  it('creates seeded built-in nature sources and partitions their instance detail',()=>{
+    const PM=editor();edit(PM,{operation:'add_terrain',id:'ground',terrain:{p:{resolution:8,width:2000,depth:2000,amplitude:0}}});
+    edit(PM,{operation:'add_scatter',id:'forest',scatter:{model:'nature:conifer',surface:'ground',p:{count:1500,seed:17,maxSlope:90}}});
+    const scene=compositionScene(PM),source=scene.objects.find(o=>'nature' in o.source)!;
+    expect(source.source).toEqual({nature:'conifer',seed:1});expect(source.p.visible!.v).toBe(false);
+    expect(listModelMaterials(PM,source.id).map(m=>[m.index,m.name])).toEqual([[0,'Bark'],[1,'Leaves']]);
+    const runtime=compositionRuntime(PM),instances=runtime.objects.get('forest')!.children as THREE.InstancedMesh[];
+    expect(instances.reduce((n,m)=>n+m.count,0)).toBe(1500);expect(instances.length).toBe(3);
+    const matrices=instances.map(m=>Array.from(m.instanceMatrix.array));
+    edit(PM,{operation:'update_scatter',target:'forest',patch:{p:{count:40}}});PM.hist.undo();
+    expect((compositionRuntime(PM).objects.get('forest')!.children as THREE.InstancedMesh[]).map(m=>Array.from(m.instanceMatrix.array))).toEqual(matrices);
+    const modelId=source.id;edit(PM,{operation:'add_scatter',id:'more',scatter:{model:'nature:conifer',surface:'ground',p:{count:5}}});
+    expect(compositionScene(PM).objects.filter(o=>'nature' in o.source)).toHaveLength(1);
+    expect(compositionScene(PM).objects.find(o=>o.id==='more')!.scatter!.model).toBe(modelId);
   });
   it('keeps hidden prototypes usable and removes missing-source copies without stale geometry',()=>{
     const PM=editor();edit(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}});edit(PM,{operation:'add_terrain',id:'ground',terrain:{p:{resolution:2,amplitude:0}}});

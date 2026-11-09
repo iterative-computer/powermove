@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir,writeFile } from 'node:fs/promises';
 import { chooseNativeMenu, expect, test } from './helpers/app';
 
 /* World, Terrain, Scatter, Fog Volume, Ambient/Environment lights, Material
@@ -160,9 +160,21 @@ test('A Terrain in an empty composition arrives lit and framed, in one Undo', as
   await page.evaluate(() => { const PM = (window as any).PM; PM.pause(); });
   await chooseNativeMenu(session, ['Terrain'], () => page.evaluate(() => (window as any).PM.cmd('3d.add-menu')));
   const kinds = async () => (await objects(page)).map((l: any) => l.object?.terrain ? 'terrain' : l.object?.world ? 'world' : l.camera ? 'camera' : 'other').sort();
-  expect(await kinds()).toEqual(['camera', 'terrain', 'world']);
+  expect(await kinds()).toEqual(['camera',...Array(12).fill('other'),'terrain','world'].sort());
+  const landscape=await objects(page);
+  expect(landscape.filter((l:any)=>l.object?.scatter)).toHaveLength(6);
+  expect(landscape.filter((l:any)=>l.object?.source?.nature)).toHaveLength(6);
+  expect(landscape.find((l:any)=>l.object?.terrain).object.terrain.p.natural.v).toBe(true);
   await expect(page.getByRole('button', { name: 'Rolling hills' })).toBeVisible();
   await shot(page, '13-terrain-empty-comp');
+  if(shots){
+    const png=await page.evaluate(async()=>{
+      const PM=(window as any).PM;PM.agentFrameCapture=true;
+      try{await PM.prepareFrame(0,{mblur:false,width:960,height:540});return PM.renderFrameTo(0,960,540,{mblur:false}).toDataURL('image/png');}
+      finally{PM.agentFrameCapture=false;}
+    });
+    await writeFile(`${shots}/default-landscape-app-final.png`,Buffer.from(png.split(',')[1]!, 'base64'));
+  }
   // Selection changes are undoable too; the edit itself is one entry.
   const undo = await page.evaluate(() => { const PM = (window as any).PM; const labels: string[] = []; while (PM.hist.canUndo() && PM.hist.label() !== 'Add Terrain') { labels.push(PM.hist.label()); PM.hist.undo(); } const found = PM.hist.label(); PM.hist.undo(); return { found, skipped: labels }; });
   expect(undo.found).toBe('Add Terrain');

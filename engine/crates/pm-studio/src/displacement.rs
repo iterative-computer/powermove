@@ -64,8 +64,9 @@ impl Displacement {
         let mut m = mesh.clone();
         for _ in 0..self.subdivision {
             let old = std::mem::take(&mut m.indices);
+            let old_materials = std::mem::take(&mut m.triangle_materials);
             let mut edges = std::collections::HashMap::new();
-            for [a, b, c] in old {
+            for (face, [a, b, c]) in old.into_iter().enumerate() {
                 let mut midpoint = |a: u32, b: u32| -> u32 {
                     let key = if a < b { (a, b) } else { (b, a) };
                     *edges.entry(key).or_insert_with(|| {
@@ -77,12 +78,14 @@ impl Displacement {
                             (m.uvs[a][0] + m.uvs[b][0]) * 0.5,
                             (m.uvs[a][1] + m.uvs[b][1]) * 0.5,
                         ]);
+                        if !m.colors.is_empty() { m.colors.push((m.colors[a]+m.colors[b])*0.5); }
                         i
                     })
                 };
                 let ab = midpoint(a, b);
                 let bc = midpoint(b, c);
                 let ca = midpoint(c, a);
+                if let Some(&material)=old_materials.get(face) { m.triangle_materials.extend([material;4]); }
                 m.indices
                     .extend([[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]]);
             }
@@ -128,6 +131,7 @@ mod tests {
             normals: vec![Vec3::Y; 3],
             uvs: vec![[0., 0.], [1., 0.], [0., 1.]],
             indices: vec![[0, 2, 1]],
+            ..Default::default()
         };
         let d = Displacement {
             object: 0,

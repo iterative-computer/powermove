@@ -23,7 +23,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
   const materialOptions: StudioSceneDescription['material_options'] = [], materials: StudioMaterial[] = [];
   for (let o = 0; o < input.materials.length; o += 32) {
     const m = input.materials;
-    materials.push({ base: vec(m, o), metallic: m[o + 3]!, roughness: m[o + 4]!, coat: m[o + 5]!, coat_roughness: m[o + 6]!, transmission: m[o + 7]!, emission: vec(m, o + 8), screen: false, subsurface: m[o + 11]!, ior: m[o + 12]!, specular: m[o + 13]!, anisotropy: m[o + 15]!, sheen: m[o + 20]!, film_nm: m[o + 21]!, dispersion: m[o + 22]!, droplets: m[o + 23]! });
+    materials.push({ base: vec(m, o), metallic: m[o + 3]!, roughness: m[o + 4]!, coat: m[o + 5]!, coat_roughness: m[o + 6]!, transmission: m[o + 7]!, emission: vec(m, o + 8), screen: false, subsurface: m[o + 11]!, procedural:m[o+27]!, ior: m[o + 12]!, specular: m[o + 13]!, anisotropy: m[o + 15]!, sheen: m[o + 20]!, film_nm: m[o + 21]!, dispersion: m[o + 22]!, droplets: m[o + 23]! });
     materialOptions.push({ opacity: m[o + 14]!, ambient_response: input.materialPolicies?.[o / 32]?.ambientResponse ?? 1, double_sided: input.materialPolicies?.[o / 32]?.doubleSided ?? true, unlit:(m[o+25]! & 8)!==0, appears_in_reflections:(m[o+25]! & 32)===0, alpha_test: input.materialPolicies?.[o / 32]?.alphaTest ?? 0, maps: [m[o + 16]!, m[o + 17]!, m[o + 28]!, m[o + 29]!, m[o + 19]!, m[o + 30]!] });
   }
   const coloredMaterials=new Map<string,number>();
@@ -124,22 +124,30 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
   const materials = document.scene.materials.map((m, i) => {
     const p = document.material_options[i];
     const material = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(m.base.x, m.base.y, m.base.z), roughness: m.roughness, metalness: m.metallic, clearcoat: m.coat, clearcoatRoughness: m.coat_roughness, transmission: m.transmission, ior: m.ior, specularIntensity: m.specular, emissive: new THREE.Color(m.emission.x, m.emission.y, m.emission.z), emissiveIntensity: 1, opacity: p?.opacity ?? 1, transparent: (p?.opacity ?? 1) < 1, side: p?.double_sided === false ? THREE.FrontSide : THREE.DoubleSide, sheen: m.sheen, iridescence: m.film_nm > 0 ? 1 : 0, iridescenceThicknessRange: [100, m.film_nm] });
-    material.userData = { subsurface: m.subsurface, anisotropy: m.anisotropy, studioDispersion: m.dispersion, droplets: m.droplets, studioUnlit:p?.unlit ?? false, materialAmbientUniform: { value: p?.ambient_response ?? 1 } };
+    material.userData = { subsurface: m.subsurface, studioProcedural:m.procedural??0, anisotropy: m.anisotropy, studioDispersion: m.dispersion, droplets: m.droplets, studioUnlit:p?.unlit ?? false, materialAmbientUniform: { value: p?.ambient_response ?? 1 } };
     const slots = ['map', 'emissiveMap', 'roughnessMap', 'metalnessMap', 'normalMap', 'aoMap'] as const;
     slots.forEach((slot, j) => { material[slot] = textures[p?.maps[j] ?? -1] ?? null; });
     return material;
   });
   document.scene.objects.forEach((o, i) => {
+    if(o.mesh.colors?.length && o.mesh.colors.length!==o.mesh.positions.length)throw new Error('Invalid Studio vertex colors');
+    if(o.mesh.triangle_materials?.length && (o.mesh.triangle_materials.length!==o.mesh.indices.length || o.mesh.triangle_materials.some(m=>!Number.isInteger(m) || m<0 || !materials[m])))throw new Error('Invalid Studio triangle materials');
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(o.mesh.positions.flatMap(p => tuple(p)), 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(o.mesh.normals.flatMap(p => tuple(p)), 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(o.mesh.uvs.flat(), 2)); g.setIndex(o.mesh.indices.flat());
-    const colors=document.object_ids[i]?.vertex_colors;
+    const colors=document.object_ids[i]?.vertex_colors ?? o.mesh.colors?.map(c=>[c.x,c.y,c.z,1]);
     if(colors)g.setAttribute('color',new THREE.Float32BufferAttribute(colors.flat(),4));
     const material=materials[o.material]!.clone();material.userData.studioReflections=document.material_options[o.material]?.appears_in_reflections!==false;material.vertexColors=!!colors;
+    let meshMaterial:THREE.MeshPhysicalMaterial|THREE.MeshPhysicalMaterial[]=material;
+    if(o.mesh.triangle_materials?.length){
+      meshMaterial=materials.map((m,index)=>{const copy=m.clone();copy.vertexColors=!!colors;copy.userData.studioReflections=document.material_options[index]?.appears_in_reflections!==false;return copy;});material.dispose();
+      const faces=o.mesh.triangle_materials;let start=0;
+      for(let face=1;face<=faces.length;face++)if(face===faces.length || faces[face]!==faces[start]){g.addGroup(start*3,(face-start)*3,faces[start]);start=face;}
+    }
     const placements=document.scene.instances?.length?document.scene.instances.filter(p=>p.object===i):null;
-    if(placements?.length===0){g.dispose();material.dispose();return;}
-    const mesh=placements?new THREE.InstancedMesh(g,material,placements.length):new THREE.Mesh(g,material);
+    if(placements?.length===0){g.dispose();for(const m of Array.isArray(meshMaterial)?meshMaterial:[meshMaterial])m.dispose();return;}
+    const mesh=placements?new THREE.InstancedMesh(g,meshMaterial,placements.length):new THREE.Mesh(g,meshMaterial);
     if(placements){placements.forEach((p,j)=>(mesh as THREE.InstancedMesh).setMatrixAt(j,instanceMatrix(p)));mesh.userData.studioInstanceLayerNames=placements.map(p=>p.layer==null?null:document.layer_ids[p.layer]);}
     mesh.userData.sceneId = document.object_ids[i]?.layer ?? document.layer_ids[document.scene.layers[i]!] ?? `object-${i}`;
     mesh.userData.studioPart = document.object_ids[i]?.part ?? null;mesh.userData.studioPrimaryVisible=document.object_ids[i]?.primary_visible!==false;

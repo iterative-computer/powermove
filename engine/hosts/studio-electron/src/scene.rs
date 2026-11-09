@@ -124,6 +124,10 @@ impl ResidentScene {
         let instance_layers=if scene.instances.is_empty(){vec![None;scene.objects.len()]}else{scene.instances.iter().map(|i|i.layer).collect()};
         let top_nodes = object_indices.len().max(1) + 1;
         let mut prepared = scene.clone_without_objects().prepare();
+        for o in &scene.objects {if !o.mesh.colors.is_empty() {
+            prepared.materials[o.material].policy[1]=(prepared.materials[o.material].policy[1] as u32|16) as f32;
+            for &m in &o.mesh.triangle_materials {prepared.materials[m].policy[1]=(prepared.materials[m].policy[1] as u32|16) as f32;}
+        }}
         prepared.positions.clear();
         prepared.tris.clear();
         prepared.nodes = vec![bvh::WideNode::default(); top_nodes];
@@ -386,12 +390,14 @@ pub fn validate(s: &Scene) -> Result<(), String> {
             || m.indices.is_empty()
             || m.normals.len() != m.positions.len()
             || m.uvs.len() != m.positions.len()
+            || !m.colors.is_empty() && m.colors.len()!=m.positions.len()
+            || !m.triangle_materials.is_empty() && (m.triangle_materials.len()!=m.indices.len() || m.triangle_materials.iter().any(|&i|i>=s.materials.len()))
         {
             return Err("invalid mesh attributes or material index".into());
         }
         if m.positions
             .iter()
-            .chain(m.normals.iter())
+            .chain(m.normals.iter()).chain(m.colors.iter())
             .any(|p| !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite())
             || m.indices
                 .iter()

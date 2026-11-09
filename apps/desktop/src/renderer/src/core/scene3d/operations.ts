@@ -1,3 +1,4 @@
+import {BUILTIN_NATURE} from './nature-defaults';
 import { worldSchema,materialOptionsSchema } from './environment-data';
 import { extrusionEligible, parseExtrusion } from './extrusion-data';
 import { extrusionCommands } from './extrusion-operations';
@@ -64,6 +65,12 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     if(role==='object'){
       if(node.world && (PM.curComp?.() || PM.proj).layers.some((l:any)=>l.d?.data?.object?.world))throw new Error('A composition has one World layer');
       if(node.scatter){
+        const builtin=BUILTIN_NATURE.find(n=>n.id===node.scatter.model);
+        if(builtin){
+          const species=builtin.id.slice(7),existing=(PM.curComp?.() || PM.proj).layers.find((l:any)=>l.d?.data?.object?.source?.nature===species);
+          const model=existing?.id || add('object',{name:builtin.name,source:{nature:species,seed:1},useSourceMaterials:true,p:{visible:false}});
+          node={...node,scatter:{...node.scatter,model}};
+        }
         const pending=(id:string)=>commands.find(c=>c.type==='add_layer' && c.id===id)?.content?.data?.object;
         const model={d:{data:{object:PM.L?.(node.scatter.model)?.d?.data?.object || pending(node.scatter.model)}}},surface={d:{data:{object:PM.L?.(node.scatter.surface)?.d?.data?.object || pending(node.scatter.surface)}}};
         if(!model?.d?.data?.object || model.d.data.object.scatter || model.d.data.object.fog || model.d.data.object.world)throw new Error('Scatter needs a model layer');

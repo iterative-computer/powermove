@@ -12,6 +12,12 @@ pub struct Mesh {
     pub normals: Vec<Vec3>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<[u32; 3]>,
+    /// Optional linear vertex tint; empty means white.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub colors: Vec<Vec3>,
+    /// Optional material per triangle, for shared multi-material nature meshes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triangle_materials: Vec<usize>,
 }
 
 impl Mesh {
@@ -29,6 +35,8 @@ impl Mesh {
             normals: self.normals.iter().map(|&n| g(n).normalize()).collect(),
             uvs: self.uvs.clone(),
             indices: self.indices.clone(),
+            colors: self.colors.clone(),
+            triangle_materials: self.triangle_materials.clone(),
         }
     }
 

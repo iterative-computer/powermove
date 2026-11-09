@@ -249,6 +249,7 @@ fn metre_scenes_keep_millimetre_surface_hits() {
             normals: vec![v3(0., 0., 1.); 3],
             uvs: vec![[0., 0.]; 3],
             indices: vec![[0, 1, 2]],
+            ..Default::default()
         },
         material: 0,
     });

@@ -33,6 +33,7 @@ const primitiveParams = z.object({
   detail: z.number().int().min(0).max(5).optional()
 }).strict();
 export const sourceSchema = z.union([
+  z.object({nature:z.enum(['conifer','broadleaf','birch','bush','grass','rock']),seed:z.number().int().min(0).max(4294967295).default(1)}).strict(),
   z.object({ primitive: z.enum(['box','roundedBox','sphere','plane','cylinder','cone','torus','capsule','icosahedron']), parameters: primitiveParams.optional() }).strict(),
   z.object({ assetId: z.string().min(1).max(160) }).strict(),
   z.object({ mesh: z.object({
@@ -169,6 +170,7 @@ export function parseScene(raw: unknown): Scene3D {
     }
     if(object.terrain){vertices+=(Math.round(object.terrain.p.resolution!.v)+1)**2;continue;}
     if(object.world || object.fog || object.scatter)continue;
+    if ('nature' in object.source)vertices+=object.source.nature==='conifer'?56000:object.source.nature==='grass'?400:object.source.nature==='rock'?350:15000;
     if ('primitive' in object.source) {
       const source=object.source,s=source.parameters?.segments || 48;
       vertices+=source.primitive==='box'?24:source.primitive==='roundedBox'?6*(2*(source.parameters?.segments ?? 6)+1)**2:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)

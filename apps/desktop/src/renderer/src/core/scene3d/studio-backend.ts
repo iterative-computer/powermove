@@ -13,12 +13,13 @@ export type StudioVec3 = { x: number; y: number; z: number };
 export type StudioMesh = {
   positions: StudioVec3[]; normals: StudioVec3[];
   uvs: [number, number][]; indices: [number, number, number][];
+  colors?: StudioVec3[]; triangle_materials?: number[];
 };
 export type StudioMaterial = {
   base: StudioVec3; metallic: number; roughness: number; coat: number;
   coat_roughness: number; transmission: number; ior: number; specular: number;
   emission: StudioVec3; screen: boolean; sheen: number; film_nm: number;
-  dispersion: number; droplets: number; anisotropy: number; subsurface: number;
+  dispersion: number; droplets: number; anisotropy: number; subsurface: number; procedural?:number;
 };
 export type StudioCameraDescription = {
   position: StudioVec3; target: StudioVec3; fov: number; f_stop: number;

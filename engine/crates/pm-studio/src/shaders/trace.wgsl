@@ -734,7 +734,9 @@ fn fresnel_dielectric_base(m: Material, c: f32) -> f32 { return m.extra.y * fres
 
 struct Lobes { coat: f32, spec: f32, diff: f32, trans: f32 }
 
+fn thin_leaf(m:Material)->bool {return m.policy.w==4. || m.policy.w==5.;}
 fn lobe_probs(m: Material, nv: f32) -> Lobes {
+  if(thin_leaf(m)){return Lobes(0.,0.,0.65,0.35);}
   let metallic = m.base.w;
   let tr = m.spec.w * (1.0 - metallic);
   let fc = m.spec.y * fresnel_dielectric(nv, 1.5);
@@ -879,6 +881,9 @@ fn sheen_layer_weight(m:Material,nv:f32,nl:f32)->f32 {
 
 // BSDF × cos for reflection (coat over specular + diffuse).
 fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
+  // A two-sided thin Lambert sheet: reflection + diffuse transmission sum to
+  // the leaf albedo. It has no fictitious solid-glass interior or random walk.
+  if(thin_leaf(m)){return m.base.xyz * abs(dot(n,l))/PI * select(0.35,0.65,dot(n,l)>=0.);}
   let nl = dot(n, l);
   let nv = dot(n, v);
   if (nl <= 0.0 || nv <= 0.0) { return vec3f(0.0); }
@@ -1011,6 +1016,7 @@ fn sheen(m: Material, nh: f32, nl: f32, nv: f32) -> vec3f {
 }
 
 fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
+  if(thin_leaf(m)){return abs(dot(n,l))/PI * select(0.35,0.65,dot(n,l)>=0.);}
   let nl = dot(n, l);
   let nv = dot(n, v);
   if (nl <= 0.0 || nv <= 0.0) { return 0.0; }
@@ -1129,7 +1135,7 @@ fn sample_one_light(li:u32,p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, 
   if (all(f <= vec3f(0.0))) { return vec3f(0.0); }
   // With shadows off (the environment's switch), every light reaches every surface.
   var t = vec3f(1.0);
-  if (P.opts.y == 0u && l.u.w >= 0.0 && (floor_hit || (u32(m.policy.y) & 2u) != 0u)) { t = transmittance(p, s.dir, s.dist); }
+  if (P.opts.y == 0u && l.u.w >= 0.0 && (floor_hit || (u32(m.policy.y) & 2u) != 0u)) { t = transmittance(p-select(vec3f(0.),n*ray_epsilon()*2.,thin_leaf(m) && dot(n,s.dir)<0.), s.dir, s.dist); }
   if (all(t <= vec3f(0.0))) { return vec3f(0.0); }
   let pl = s.pdf * light_selection_pdf(li,p);
   let mis = pl * pl / (pl * pl + pb * pb);
@@ -1142,7 +1148,7 @@ fn sample_environment(p:vec3f,n:vec3f,v:vec3f,m:Material,w:Lobes)->vec3f {
   let f=eval_reflect(m,n,v,d);let pb=pdf_reflect(m,w,n,v,d);
   if(pe<=0. || all(f<=vec3f(0.))){return vec3f(0.);}
   var tr=vec3f(1.);
-  if(P.opts.y==0u && (u32(m.policy.y)&2u)!=0u){tr=transmittance(p,d,BIG);}
+  if(P.opts.y==0u && (u32(m.policy.y)&2u)!=0u){tr=transmittance(p-select(vec3f(0.),n*ray_epsilon()*2.,thin_leaf(m) && dot(n,d)<0.),d,BIG);}
   return f*tr*environment(d)*(pe/(pe*pe+pb*pb));
 }
 
@@ -1188,6 +1194,13 @@ fn map_texel(layer: f32, uv: vec2f) -> vec4f {
   return textureSampleLevel(maps, map_samp, fract(uv), i32(layer), 0.0);
 }
 
+// Continuous object-space noise, shared by native Metal and portable WebGPU.
+// Fine bump fades below a pixel footprint to avoid sparkling while orbiting.
+fn nature_hash(p:vec3i)->f32 {return f32(pcg((bitcast<u32>(p.x)*1597334677u) ^ (bitcast<u32>(p.y)*3812015801u) ^ (bitcast<u32>(p.z)*2798796415u)))*(1./4294967296.);}
+fn nature_noise(p:vec3f)->f32 {
+  let i=vec3i(floor(p));let f=fract(p);let u=f*f*(3.-2.*f);
+  return mix(mix(mix(nature_hash(i),nature_hash(i+vec3i(1,0,0)),u.x),mix(nature_hash(i+vec3i(0,1,0)),nature_hash(i+vec3i(1,1,0)),u.x),u.y),mix(mix(nature_hash(i+vec3i(0,0,1)),nature_hash(i+vec3i(1,0,1)),u.x),mix(nature_hash(i+vec3i(0,1,1)),nature_hash(i+vec3i(1,1,1)),u.x),u.y),u.z);
+}
 struct Surface { p: vec3f, n: vec3f, ng: vec3f, uv: vec2f, m: Material, object: u32 }
 
 // The hit's position, normals and material with its texture maps applied.
@@ -1237,6 +1250,34 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     let bt = cross(n, tg) * t.tangent.w;
     let mapped = normalize(tg * tn.x + bt * tn.y + n * tn.z);
     if (dot(mapped, ng) > 0.0) { n = mapped; }
+  }
+  if(m.policy.w>0.){
+    let local=to_object(h.inst,p,1.);let kind=u32(m.policy.w);
+    let footprint=length(p-P.cam_pos.xyz)*2.*P.cam_up.w/max(f32(P.dims.y),1.);
+    if(kind==1u){m.spec.x=clamp(uv.x,.02,1.);m.base.w=clamp(uv.y,0.,1.);}
+    if(kind==1u || kind==2u){
+      let broad=nature_noise(local*0.65);let grain_fade=1.-smoothstep(.04,.3,footprint);var grain=.5;if(grain_fade>0.){grain=mix(.5,nature_noise(local*13.),grain_fade);}
+      m.base=vec4f(m.base.xyz*mix(0.72,1.22,broad)*mix(0.86,1.12,grain),m.base.w);
+      m.spec.x=clamp(m.spec.x+(grain-.5)*.15,.02,1.);
+      let fade=1.-smoothstep(.015,.12,footprint);
+      if(fade>0. && P.opts.x==0u){
+        let q=local*38.;let h0=nature_noise(q);
+        let grad=vec3f(nature_noise(q+vec3f(.08,0.,0.))-h0,nature_noise(q+vec3f(0.,.08,0.))-h0,nature_noise(q+vec3f(0.,0.,.08))-h0);
+        let o=inst_base(h.inst)+3u;let bump=vec3f(dot(sdata[o].xyz,grad),dot(sdata[o+1u].xyz,grad),dot(sdata[o+2u].xyz,grad));let candidate=normalize(n-(bump-n*dot(n,bump))*1.8*fade);
+        if(dot(candidate,ng)>0.){n=candidate;}
+      }
+    }else if(kind==3u || kind==6u){
+      let grooves=nature_noise(vec3f(local.x*48.,local.y*2.,local.z*48.));
+      var bark=mix(.48,1.18,grooves);
+      if(kind==6u){let stripe=nature_noise(vec3f(local.x*9.,local.y*65.,local.z*9.));bark=mix(.12,1.08,smoothstep(.25,.48,stripe));}
+      m.base=vec4f(m.base.xyz*bark,m.base.w);
+    }else if(kind==4u || kind==5u){
+      let midrib=1.-smoothstep(.012,.045,abs(uv.x-.5));
+      let veins=pow(max(0.,cos((uv.y+abs(uv.x-.5)*.7)*80.)),12.)*.09;
+      m.base=vec4f(m.base.xyz*(.84+.22*uv.y+veins+midrib*.12),m.base.w);
+    }
+    // Procedural tint must remain a bounded surface reflectance (including snow).
+    m.base=vec4f(clamp(m.base.xyz,vec3f(0.),vec3f(1.)),m.base.w);
   }
   if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w); }
   m.spec.x = max(m.spec.x, 0.002);
@@ -1494,6 +1535,11 @@ fn path(px: vec2f) -> Sample {
       let q = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 0.95);
       if (rnd() > q) { return s; }
       tp /= q;
+    }
+    if(thin_leaf(m)){
+      let through=rnd()<0.35;rd=cosine_dir(select(n,-n,through),rnd2());
+      tp*=m.base.xyz;last_pdf=abs(dot(n,rd))/PI*select(0.65,0.35,through);
+      ro=sf.p+select(ng,-ng,through)*ray_epsilon();chain=0;continue;
     }
     let pick = rnd();
     if (pick < w.trans) {
