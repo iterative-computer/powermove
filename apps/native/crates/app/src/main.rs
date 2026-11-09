@@ -342,6 +342,7 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--appearance" => Some("PM_NATIVE_APPEARANCE"),
         "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
         "--open" => Some("PM_NATIVE_REVIEW_OPEN"),
+        "--draw-occluded" => Some("PM_NATIVE_DRAW_OCCLUDED"),
         _ => None,
     }
 }
@@ -371,7 +372,12 @@ mod review_override_tests {
     #[test]
     fn release_builds_reject_the_review_overrides() {
         use std::ffi::OsStr;
-        for arg in ["--appearance", "--accessibility", "--open"] {
+        for arg in [
+            "--appearance",
+            "--accessibility",
+            "--open",
+            "--draw-occluded",
+        ] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
         }
