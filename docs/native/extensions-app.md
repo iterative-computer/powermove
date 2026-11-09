@@ -227,8 +227,10 @@ window is open is shown in it.
   the same gathering path as tab menus (`Controller::extension_menu`: v4 items off the
   main thread, then v1–3's within the 150 ms deadline), with v1's contexts: a layer
   gathers both `layer:context` and its surface's location (`kind: "layer"`).
-- Contributed layer types render and label their timeline row, but their parameters
-  have no Properties rows until per-kind controls are designed.
+- A contributed layer type's parameters (`api.layers.register` `params`) are Properties
+  rows in Content, labelled by its definition, editing the animatable `x.<key>` channels
+  in `d.params` as main's `ExtensionLayerParams` does (numbers with their range, colours,
+  toggles, selects). Its mesh asset and version notes are not shown yet.
 - Layout reads are synchronous (`remote-dom.md`). With the engine's faces the page
   measures the font the engine draws, but WebKit lays a variable system face out at
   its automatic optical size while the face the engine draws carries `opsz` 17 (probably the cause), so SF text

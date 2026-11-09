@@ -70,7 +70,27 @@ impl Properties {
             // The model decides applicability; this adapter only maps authored
             // labels and supported control descriptors to frozen v4 rows.
             for field in model.fields().map_err(|e| e.to_string())? {
+                let definition = model
+                    .layer(&layer)
+                    .ok()
+                    .and_then(|l| l.get("d")?.get("definition")?.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let contributed = match &field.binding {
+                    Binding::Property(id) => id
+                        .path
+                        .strip_prefix("x.")
+                        .and_then(|key| model.layer_param(&definition, key))
+                        .cloned(),
+                    _ => None,
+                };
+                let row_id = contributed.as_ref().map(|p| format!("content.x.{}", p.key));
                 let (id, label, unit) = match &field.binding {
+                    // A contributed layer type's parameter, labelled by its definition.
+                    Binding::Property(_) if contributed.is_some() => (
+                        row_id.as_deref().unwrap_or_default(),
+                        contributed.as_ref().map_or("", |p| p.label.as_str()),
+                        "",
+                    ),
                     Binding::Content { field, .. } => match field.as_str() {
                         "text" => ("content.text", "Text", ""),
                         "font" => ("content.font", "Font", ""),
@@ -196,6 +216,12 @@ impl Properties {
                                 json!(options)
                             }
                             "content.align" => json!(["left", "center", "right"]),
+                            _ if contributed.is_some() => json!(
+                                contributed
+                                    .iter()
+                                    .flat_map(|p| p.options.iter().map(super::data::wire))
+                                    .collect::<Vec<_>>()
+                            ),
                             "layer.parent" | "layer.matteSource" => {
                                 let ids = if id == "layer.parent" {
                                     model.parent_candidates(&layer)

@@ -178,6 +178,27 @@ impl Backend {
             return Ok(());
         }
         let registries = state.registries.clone();
+        // Contributed layer types' parameters, for their Properties rows.
+        let layer_types = state
+            .registries
+            .get("layerTypes")
+            .into_iter()
+            .flatten()
+            .map(|registration| {
+                let d = wire(&registration.definition);
+                let params = d["params"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(layer_param)
+                    .collect();
+                (registration.id.clone(), params)
+            })
+            .collect();
+        self.model
+            .as_mut()
+            .ok_or("No open project")?
+            .set_layer_types(layer_types);
         let mut latest = BTreeMap::new();
         for registration in state.registries.get("effects").into_iter().flatten() {
             latest.insert(registration.id.clone(), wire(&registration.definition));
@@ -765,4 +786,40 @@ pub(crate) fn kind_label(kind: &str) -> &'static str {
         "camera" => "Camera",
         _ => "Layer",
     }
+}
+
+/// One contributed layer type parameter in main's schema: `type` color, toggle
+/// or select, else a number with `min`, `max` and `step`.
+fn layer_param(param: &Value) -> Option<pm_panel_inspector::LayerParam> {
+    use pm_panel_inspector::FieldType;
+    let key = param["k"].as_str()?.to_owned();
+    let kind = match param["type"].as_str() {
+        Some("color") => FieldType::Color,
+        Some("toggle") => FieldType::Boolean,
+        Some("select") => FieldType::Choice,
+        Some("number") | None => {
+            let (min, max) = (param["min"].as_f64(), param["max"].as_f64());
+            FieldType::Number(pm_panel_inspector::input::NumericSpec {
+                step: param["step"].as_f64().unwrap_or(match (min, max) {
+                    (Some(a), Some(b)) if a != b => (b - a) / 200.0,
+                    _ => 0.01,
+                }),
+                min,
+                max,
+                ..Default::default()
+            })
+        }
+        Some(_) => return None,
+    };
+    Some(pm_panel_inspector::LayerParam {
+        label: param["label"].as_str().unwrap_or(&key).to_owned(),
+        key,
+        kind,
+        options: param["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|o| model(o).ok())
+            .collect(),
+    })
 }
