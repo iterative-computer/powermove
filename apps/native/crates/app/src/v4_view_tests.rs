@@ -648,7 +648,11 @@ fn focus_text_waits_for_the_text_row_of_its_own_layer(cx: &mut TestAppContext) {
     };
     let project = project_json(1).replace(
         r#""layers":["#,
-        &format!(r#""layers":[{}{}"#, text("t1", "Hello"), text("t2", "Other")),
+        &format!(
+            r#""layers":[{}{}"#,
+            text("t1", "Hello"),
+            text("t2", "Other")
+        ),
     );
     let rig = rig_project("inspector", &project);
     let select = |id: &str| {
@@ -690,7 +694,9 @@ fn focus_text_waits_for_the_text_row_of_its_own_layer(cx: &mut TestAppContext) {
     };
     publish(&view, &mut vcx);
     let check = view.clone();
-    settle(cx, move |cx| check.read_with(cx, |v, _| v.focus_text_row().is_some()));
+    settle(cx, move |cx| {
+        check.read_with(cx, |v, _| v.focus_text_row().is_some())
+    });
     // Asked and never shown: forgotten after a moment, not applied later.
     select("l0");
     publish(&view, &mut vcx);

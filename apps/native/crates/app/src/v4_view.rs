@@ -740,7 +740,9 @@ impl SurfaceView {
         {
             self.focus_text = None;
         }
-        let Some(field) = self.focus_text_row().and_then(|id| self.fields.get(&id).cloned())
+        let Some(field) = self
+            .focus_text_row()
+            .and_then(|id| self.fields.get(&id).cloned())
         else {
             return;
         };

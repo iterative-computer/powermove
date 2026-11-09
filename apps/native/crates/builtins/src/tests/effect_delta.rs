@@ -770,7 +770,9 @@ fn effect_controls_and_the_inspector_service_share_one_app_clipboard() {
             .unwrap()
             .get("layer-effects")
             .unwrap()
-            .eval(format!("__pmBuiltin.command('panel.effect-controls',{args})"))
+            .eval(format!(
+                "__pmBuiltin.command('panel.effect-controls',{args})"
+            ))
             .unwrap(),
     );
     assert_eq!(clipboard.len(), 1);
@@ -783,7 +785,13 @@ fn effect_controls_and_the_inspector_service_share_one_app_clipboard() {
     let fx = |p: &pm_kernel::Published, id: &str| {
         let root = p.snapshot.root().unwrap();
         let loc = pm_kernel::model::find_layer(root, id).unwrap();
-        data::wire(&pm_kernel::model::layer_at(root, &loc).unwrap().get("fx").unwrap().to_value())
+        data::wire(
+            &pm_kernel::model::layer_at(root, &loc)
+                .unwrap()
+                .get("fx")
+                .unwrap()
+                .to_value(),
+        )
     };
     let pasted = fx(&p, "b");
     assert_eq!(pasted.as_array().unwrap().len(), 1);
@@ -796,8 +804,15 @@ fn effect_controls_and_the_inspector_service_share_one_app_clipboard() {
         first.effect_desk().run("copy").unwrap(),
         json!({"copied": 1})
     );
-    assert_eq!(desk.run("copy").unwrap(), json!({"copied": 0}), "no Effect Controls");
+    assert_eq!(
+        desk.run("copy").unwrap(),
+        json!({"copied": 0}),
+        "no Effect Controls"
+    );
     desk.run("clear").unwrap();
     assert!(clipboard.is_empty());
-    assert_eq!(first.effect_desk().run("paste").unwrap(), json!({"empty": true}));
+    assert_eq!(
+        first.effect_desk().run("paste").unwrap(),
+        json!({"empty": true})
+    );
 }

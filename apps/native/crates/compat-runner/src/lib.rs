@@ -1063,7 +1063,10 @@ mod tests {
                         expected_revision: None,
                     };
                     kernel
-                        .call_blocking(PROJECT, pm_kernel::Request::new(pm_kernel::Caller::native(), rename))
+                        .call_blocking(
+                            PROJECT,
+                            pm_kernel::Request::new(pm_kernel::Caller::native(), rename),
+                        )
                         .map_err(|e| e.to_string())?;
                     json!({"pasted": 2})
                 }

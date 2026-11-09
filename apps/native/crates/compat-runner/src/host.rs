@@ -3088,20 +3088,33 @@ mod tests {
             encoder.set_depth(png::BitDepth::Eight);
             let px = [revision as u8, (frame.time * 10.).round() as u8, 0, 255];
             let pixels = px.repeat((frame.width * frame.height) as usize);
-            encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
             Ok(png)
         });
-        let fixture =
-            Fixture::start_full(root, crate::initial()["document"].clone(), None, frames.into());
+        let fixture = Fixture::start_full(
+            root,
+            crate::initial()["document"].clone(),
+            None,
+            frames.into(),
+        );
         fixture.until("activation", |host| host.is_ready());
         let heard = |count: usize| {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                let heard = fixture.kernel.state().settings.get("ext.presenter").map(|v| {
-                    serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(v))
-                        .unwrap()["heard"]
-                        .clone()
-                });
+                let heard = fixture
+                    .kernel
+                    .state()
+                    .settings
+                    .get("ext.presenter")
+                    .map(|v| {
+                        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(v))
+                            .unwrap()["heard"]
+                            .clone()
+                    });
                 if let Some(Value::Array(heard)) = heard
                     && heard.len() >= count
                 {
@@ -3235,16 +3248,30 @@ mod tests {
         ));
         let live = fixture.kernel.published("window").unwrap().revision();
         let started = Instant::now();
-        fixture.host.raster_inbox().ask(5, needs(&fixture), json!({"revision": live}));
+        fixture
+            .host
+            .raster_inbox()
+            .ask(5, needs(&fixture), json!({"revision": live}));
         // t1's override captured a frame of the realm's own project, its t1
         // answered inline by the waiting realm, and then drew itself.
         assert_eq!(answer_of(&answered, 5, Duration::from_secs(20)), json!(6));
-        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
         let rendered = rendered.lock().unwrap().clone();
         assert_eq!(rendered.len(), 1);
-        assert_eq!(rendered[0].0, rendered[0].1, "the frame is the realm's revision");
+        assert_eq!(
+            rendered[0].0, rendered[0].1,
+            "the frame is the realm's revision"
+        );
         assert!(
-            answered.lock().unwrap().iter().any(|(b, a)| *b >= 80 && *a == json!(6)),
+            answered
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(b, a)| *b >= 80 && *a == json!(6)),
             "the capture's t1 was drawn by the waiting realm"
         );
     }

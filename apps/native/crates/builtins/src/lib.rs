@@ -6,8 +6,8 @@ pub use agent_host::NoticeSink;
 mod agent_tasks;
 mod chrome;
 pub use agent_host::AgentCarry;
-pub use pm_panel_inspector::EffectClipboard;
 pub use models::APPLICATION_AGENT_STORE;
+pub use pm_panel_inspector::EffectClipboard;
 pub use settings::{RESOLUTIONS, set_notification_status};
 #[cfg(test)]
 mod agent_tests;
@@ -266,7 +266,14 @@ impl EffectDesk {
                 };
                 let count = clipboard.len() * targets;
                 if let pm_kernel::Call::Transact { label, .. } = &mut request.call {
-                    *label = Some(if count == 1 { "Paste Effect" } else { "Paste Effects" }.into());
+                    *label = Some(
+                        if count == 1 {
+                            "Paste Effect"
+                        } else {
+                            "Paste Effects"
+                        }
+                        .into(),
+                    );
                 }
                 let ack = self
                     .0

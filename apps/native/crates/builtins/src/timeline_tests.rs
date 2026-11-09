@@ -365,7 +365,13 @@ fn the_graph_intent_sets_the_panels_view_as_asked() {
         let entry = panels.broker.entry("timeline").unwrap();
         let entry = entry.lock().unwrap();
         let backend = entry.backend.lock().unwrap();
-        backend.native.timeline.as_ref().unwrap().model.graph_display
+        backend
+            .native
+            .timeline
+            .as_ref()
+            .unwrap()
+            .model
+            .graph_display
     };
     let ask = |intent: Value| {
         finish(panels.timeline_action(intent).unwrap());
