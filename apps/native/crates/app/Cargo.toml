@@ -57,6 +57,9 @@ gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gp
 pm-panel-media = { path = "../panel-media" }
 pm-first-launch = { path = "../first-launch" }
 pm-services = { path = "../services" }
+pm-update-policy = { path = "../update-policy" }
+pm-panel-agentpanel = { path = "../panel-agentpanel" }
+objc2-user-notifications = "0.3"
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
 pm-panel-timeline = { path = "../panel-timeline" }
 

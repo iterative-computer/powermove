@@ -229,6 +229,12 @@ pub fn choose_paths(
     rx
 }
 
+/// This process's bundle identifier; none for a bare binary.
+pub fn bundle_id() -> Option<String> {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+}
 /// Selects `path` in Finder.
 pub fn reveal(path: &std::path::Path) {
     use objc2_app_kit::NSWorkspace;
@@ -306,7 +312,7 @@ define_class!(
             }
             // The sender hears the outcome: quit, or cancelled (-128) when the
             // person cancels a save prompt (`QuitDelegate::resolve_quit_events`).
-            let id: *mut std::ffi::c_void =
+            let id: *mut Suspension =
                 unsafe { msg_send![apple_events(), suspendCurrentAppleEvent] };
             if !id.is_null() {
                 self.ivars().suspended.borrow_mut().push(id as usize);
@@ -357,7 +363,7 @@ impl QuitDelegate {
         const ERROR_NUMBER: u32 = u32::from_be_bytes(*b"errn");
         const USER_CANCELED: i32 = -128;
         for id in self.ivars().suspended.borrow_mut().drain(..) {
-            let id = id as *mut std::ffi::c_void;
+            let id = id as *mut Suspension;
             unsafe {
                 let manager = apple_events();
                 if cancelled {
@@ -376,6 +382,18 @@ impl QuitDelegate {
             }
         }
     }
+}
+/// `NSAppleEventManagerSuspensionID`. Debug builds check message encodings,
+/// and a plain `void *` made every Quit Apple Event (Dock, logout) abort.
+#[repr(C)]
+pub struct Suspension {
+    _opaque: [u8; 0],
+}
+unsafe impl objc2::RefEncode for Suspension {
+    const ENCODING_REF: objc2::Encoding = objc2::Encoding::Pointer(&objc2::Encoding::Struct(
+        "__NSAppleEventManagerSuspension",
+        &[],
+    ));
 }
 fn apple_events() -> *mut AnyObject {
     unsafe { msg_send![objc2::class!(NSAppleEventManager), sharedAppleEventManager] }

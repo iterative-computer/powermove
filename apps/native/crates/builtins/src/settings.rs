@@ -94,7 +94,7 @@ impl Backend {
     /// Live subscription rows. These replace the catalogue's disabled ones by id.
     pub(crate) fn account_rows(&self) -> Vec<Value> {
         let Some(accounts) = self.native.agent_link.accounts() else {
-            return vec![];
+            return vec![notification_row()];
         };
         [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")]
             .into_iter()
@@ -134,6 +134,7 @@ impl Backend {
                 }
                 row
             })
+            .chain([notification_row()])
             .collect()
     }
     /// Settings › Media: proxy preferences and storage, from the host's
@@ -564,6 +565,13 @@ impl Backend {
                 ))
             }
             Some("extensions.retry") => Ok(NativeCommand::Value(self.settings_snapshot()?)),
+            Some("row") if action["action"] == "notifications.open-settings" => {
+                self.native.platform.push((
+                    "command".into(),
+                    json!({"name": "openNotificationSettings"}),
+                ));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // Keychain consent belongs to the app: it asks before anything is read.
             Some("row") if action["action"] == "account.bring-sign-ins" => {
                 self.native
@@ -691,6 +699,41 @@ fn protected_folders_row(folders: &Value) -> Option<Value> {
         "actionLabel":action,"disabled":false,"detail":detail.join(" ")}),
     )
 }
+/// macOS's answer about agent notifications (S114), as the app last read it.
+static NOTIFICATIONS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// The app records the notification center's answer whenever it changes.
+pub fn set_notification_status(status: pm_services::surface_backing::authorization::Authorization) {
+    use pm_services::surface_backing::authorization::Authorization::*;
+    let code = match status {
+        NotDetermined => 0,
+        Authorized | Provisional => 1,
+        Denied => 2,
+        _ => 3,
+    };
+    NOTIFICATIONS.store(code, std::sync::atomic::Ordering::Release);
+}
+/// Settings › General › Notifications: the outcome, and the way to change it.
+fn notification_row() -> Value {
+    use pm_services::surface_backing::{authorization::Authorization, copy::notification_detail};
+    let code = NOTIFICATIONS.load(std::sync::atomic::Ordering::Acquire);
+    let status = match code {
+        1 => Authorization::Authorized,
+        2 => Authorization::Denied,
+        _ => Authorization::NotDetermined,
+    };
+    let mut row = json!({"id":"notifications.agent","section":"general","group":"Notifications",
+        "label":"Agent Notifications","detail":notification_detail(status)});
+    if status == Authorization::Denied {
+        row["control"] = json!("action");
+        row["action"] = json!("notifications.open-settings");
+        row["actionLabel"] = json!("Open System Settings…");
+    } else {
+        row["control"] = json!("status");
+        row["value"] = json!(if code == 1 { "Allowed" } else { "Not Set Up" });
+    }
+    row
+}
+
 #[cfg(test)]
 mod protected_folders_tests {
     use super::protected_folders_row;

@@ -167,6 +167,21 @@ fn real_pipe_question_answer_background_stream_and_reopen_preserve_receipts() {
     }
     assert!(runs.is_empty());
     assert_eq!(panel.active_id(), "other");
+    // S114: the host hears the send, the question and the finished turn.
+    let notices = runs.take_notices();
+    assert_eq!(
+        notices.first(),
+        Some(&pm_panel_agentpanel::runtime::Notice::Sent { thread: "t".into() })
+    );
+    assert!(notices.iter().any(|n| matches!(
+        n,
+        pm_panel_agentpanel::runtime::Notice::Question { thread, .. } if thread == "t"
+    )));
+    assert!(notices.iter().any(|n| matches!(
+        n,
+        pm_panel_agentpanel::runtime::Notice::Finished { thread, stopped: false, .. } if thread == "t"
+    )));
+    assert!(runs.take_notices().is_empty());
     let archived = panel.raw_archive().clone();
     let receipts = archived["threads"]
         .as_array()

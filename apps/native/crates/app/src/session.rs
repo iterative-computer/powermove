@@ -71,6 +71,7 @@ pub struct Controller {
     /// The open project keeps HDR light.
     pub project_hdr: bool,
     pub scopes: crate::colour::Scopes,
+    pub perf: crate::perf_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -170,6 +171,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| panels::library(v, id, bounds, cx))
                 .or_else(|| v.extension_panel(id, bounds, cx))
                 .or_else(|| panels::scopes(v, id, cx))
+                .or_else(|| crate::perf_panel::panel(v, id, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -395,6 +397,7 @@ impl Controller {
             quality: Default::default(),
             project_hdr: false,
             scopes: Default::default(),
+            perf: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -433,7 +436,7 @@ impl Controller {
             nudge_idle: None,
         }
     }
-    pub fn initialize(&mut self, launch: Option<PathBuf>, cx: &mut Context<Self>) {
+    pub fn initialize(&mut self, opening: Option<crate::entry::Pending>, cx: &mut Context<Self>) {
         self.load_recent(cx);
         let cache = crate::media::cache_root(&self.profile);
         cx.background_executor()
@@ -443,10 +446,12 @@ impl Controller {
                 }
             })
             .detach();
-        if let Some(path) = launch {
-            self.open_file(path, cx);
-        } else {
-            self.reopen_restored(cx);
+        match opening {
+            Some(crate::entry::Pending::File(path)) => self.open_file(path, cx),
+            Some(crate::entry::Pending::Adopt { reply, name, file }) => {
+                self.adopt_reply(*reply, name, file, cx)
+            }
+            None => self.reopen_restored(cx),
         }
     }
     /// A window restored at launch reopens its project when that project has
