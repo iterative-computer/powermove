@@ -42,6 +42,9 @@ pub struct Host {
     generations: BTreeMap<String, u64>,
     requests: VecDeque<PlatformRequest>,
     pub windows: BTreeMap<String, AnyWindowHandle>,
+    /// The size each panel window was opened at (the Agent popover's, for the
+    /// MCP panel tools).
+    pub window_sizes: BTreeMap<String, (f32, f32)>,
     opening_windows: BTreeSet<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
@@ -717,6 +720,9 @@ impl Controller {
             ),
             _ => (m.sheet_width_wide, m.settings_height, WindowKind::Dialog),
         };
+        self.builtins
+            .window_sizes
+            .insert(id.into(), (width, height));
         // The agent popover hangs from the toolbar's trailing Agent button;
         // other panel windows cascade from the editor's top-left corner.
         let editor = window.bounds();
