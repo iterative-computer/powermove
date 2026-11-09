@@ -10,6 +10,16 @@ fn main() {
         "cargo:rerun-if-changed={}",
         source.join("bun.lock").display()
     );
+    // `powermove/ui` re-exports the frozen v1-3 control math.
+    for file in ["arith.ts", "color-space.ts"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            source
+                .join("../compat/src/frozen/reference/controls")
+                .join(file)
+                .display()
+        );
+    }
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("builtins.js");
     let status = Command::new("bun")
         .current_dir(&source)
