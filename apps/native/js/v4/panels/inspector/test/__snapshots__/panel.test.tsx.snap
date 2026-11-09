@@ -5154,7 +5154,7 @@ accessibility
 {"decrement":false,"disabled":false,"expanded":null,"id":32,"increment":false,"label":"Opacity","role":"Label","step":null,"toggled":null,"value":null}
 {"decrement":false,"disabled":false,"expanded":null,"id":33,"increment":false,"label":null,"role":"GenericContainer","step":null,"toggled":null,"value":null}
 {"decrement":true,"disabled":false,"expanded":null,"id":34,"increment":true,"label":"Opacity","role":"NumberInput","step":1,"toggled":null,"value":"100 percent"}
-{"decrement":false,"disabled":false,"expanded":null,"id":35,"increment":false,"label":"Enter a number.","role":"Label","step":null,"toggled":null,"value":null}
+{"decrement":false,"disabled":false,"expanded":null,"id":35,"increment":false,"label":"Enter a number.","role":"Status","step":null,"toggled":null,"value":null}
 {"decrement":false,"disabled":false,"expanded":null,"id":36,"increment":false,"label":"Enter a number.","role":"Label","step":null,"toggled":null,"value":null}
 {"focus":[6,7,16,24,30,34],"requests":[]}"
 `;
