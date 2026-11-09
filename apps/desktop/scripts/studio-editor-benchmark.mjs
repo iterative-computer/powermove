@@ -176,7 +176,7 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
  if(!config.diagnostic)assert(initial.quiet,`Quiet-machine gate blocked by ${initial.active.map(p=>`${p.pid} ${p.name}`).join(', ')}`);
  const temporary=await mkdtemp(path.join(os.tmpdir(),'pm-p4-editor-')),profile=path.join(temporary,'profile');await mkdir(profile);await writeFile(path.join(profile,'onboarding-v1.json'),'{"version":1}\n');
  const env={...process.env,POWERMOVE_USER_DATA:profile,POWERMOVE_BACKGROUND_TEST:'0',POWERMOVE_DEVTOOLS:'0'};for(const k of ['ELECTRON_RUN_AS_NODE','POWERMOVE_STUDIO_HOST','PM_STUDIO_TEST_WEBGPU','STUDIO_LIVE_SCALE','STUDIO_ADAPTIVE_LIVE','STUDIO_NO_RT','STUDIO_NO_RIS','STUDIO_NO_METALFX','STUDIO_NO_SHARED_TEXTURE'])delete env[k];
- let app,memoryTimer,memoryPending,watchdog,lastProgress=Date.now();const save=()=>{lastProgress=Date.now();return writeFile(path.join(config.evidence,'editor-results.json'),JSON.stringify(report,null,2)+'\n');};
+ let app,ownedProcess,memoryTimer,memoryPending,watchdog,lastProgress=Date.now();const save=()=>{lastProgress=Date.now();return writeFile(path.join(config.evidence,'editor-results.json'),JSON.stringify(report,null,2)+'\n');};
  try {
   let launchSource=source;
   if(!config.dev){
@@ -186,9 +186,10 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
     report.inspectorEnabledInDisposableCopy=true;
   }
   app=await _electron.launch({...(config.dev?{args:[path.join(desktop,'out/main/index.js')],cwd:desktop}:{executablePath:path.join(launchSource,'Contents/MacOS/Powermove')}),env,timeout:60000});
-  watchdog=setInterval(()=>{if(Date.now()-lastProgress>180000){report.errors.push('Editor benchmark made no progress for three minutes');app.process().kill('SIGTERM');}},1000);
-  app.process().stderr?.on('data',data=>{const message=String(data);void writeFile(path.join(config.evidence,'main-stderr.log'),message,{flag:'a'});if(/PM_STUDIO_BENCHMARK_FATAL|Could not release Studio surface/.test(message))report.errors.push(message.trim());});
-  const pid=app.process().pid;report.hostSha256=createHash('sha256').update(await readFile(path.join(config.dev?path.join(desktop,'resources'):path.join(launchSource,'Contents/Resources'),'studio/pm-studio-host'))).digest('hex');
+  ownedProcess=app.process();
+  watchdog=setInterval(()=>{if(Date.now()-lastProgress>180000){report.errors.push('Editor benchmark made no progress for three minutes');ownedProcess.kill('SIGTERM');}},1000);
+  ownedProcess.stderr?.on('data',data=>{const message=String(data);void writeFile(path.join(config.evidence,'main-stderr.log'),message,{flag:'a'});if(/PM_STUDIO_BENCHMARK_FATAL|Could not release Studio surface/.test(message))report.errors.push(message.trim());});
+  const pid=ownedProcess.pid;report.hostSha256=createHash('sha256').update(await readFile(path.join(config.dev?path.join(desktop,'resources'):path.join(launchSource,'Contents/Resources'),'studio/pm-studio-host'))).digest('hex');
   report.addonSha256=createHash('sha256').update(await readFile(path.join(config.dev?path.join(desktop,'resources'):path.join(launchSource,'Contents/Resources'),'studio/studio-surface.node'))).digest('hex');
   await app.evaluate(({BrowserWindow,Menu,sharedTexture,dialog,app})=>{
    process.prependListener('uncaughtException',error=>{process.stderr.write(`PM_STUDIO_BENCHMARK_FATAL ${String(error)}\n`);app.exit(1);});
@@ -311,7 +312,7 @@ export async function runEditorBenchmark(source=path.join(desktop,'dist/mac-arm6
   clearInterval(watchdog);
   clearInterval(memoryTimer);
   const hostPids=new Set((report.memory??[]).flatMap(s=>s.processes.filter(p=>p.name.endsWith('/pm-studio-host')).map(p=>p.pid)));
-  if(app){await app.evaluate(async({BrowserWindow})=>{for(const w of BrowserWindow.getAllWindows())await w.webContents.executeJavaScript('window.PM?.prepareToClose?.({flush:true})');}).catch(()=>{});const p=app.process(),timer=setTimeout(()=>p.kill('SIGKILL'),6000);try{await app.close({timeout:10000});}catch{p.kill('SIGKILL');}clearTimeout(timer);}
+  if(app){await app.evaluate(async({BrowserWindow})=>{for(const w of BrowserWindow.getAllWindows())await w.webContents.executeJavaScript('window.PM?.prepareToClose?.({flush:true})');}).catch(()=>{});const p=ownedProcess,timer=setTimeout(()=>p?.kill('SIGKILL'),6000);try{await app.close({timeout:10000});}catch{p?.kill('SIGKILL');}clearTimeout(timer);}
   report.orphanedHostPids=processes().filter(p=>hostPids.has(p.pid)).map(p=>p.pid);if(report.gates&&report.stress)report.gates.stress=report.acceptanceEligible&&config.stressWarmupMinutes>=5&&report.errors.length===0&&!report.stress.error&&report.stress.elapsedMinutes>=30&&report.stress.measuredCycles>=200&&report.stress.trend?.pass&&report.orphanedHostPids.length===0;report.finished=Date.now();await save();await rm(temporary,{recursive:true,force:true});
  }
  console.log(`Evidence: ${path.join(config.evidence,'editor-results.json')}`);
