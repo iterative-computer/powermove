@@ -103,6 +103,8 @@ const BIG: f32 = 1e30;
 var<private> seed: u32;
 // The shading tangent of the surface being lit (anisotropic highlights follow it).
 var<private> shade_t: vec3f;
+// Randomly rotated three-sample wavelength strata, set by the camera kernel.
+var<private> spectral_band: i32;
 fn pcg(v: u32) -> u32 {
   let s = v * 747796405u + 2891336453u;
   let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
@@ -364,8 +366,12 @@ fn sample_hg(axis:vec3f,g:f32)->vec3f {
 }
 fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
   var e=vec3f(0.);
-  if(P.counts.x>0u){let li=choose_light(p);let l=sample_light(light_at(li),p);
-    if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li,p));}}
+  let samples=light_sample_count();
+  for(var i=0u;i<samples;i++){
+    var li=i;if(samples==1u){li=choose_light(p);}
+    let l=sample_light(light_at(li),p);
+    if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li,p));}
+  }
   if(map_count()>0u){let d=sample_environment_direction();let pdf=environment_pdf(d);
     if(pdf>0.){e+=environment(d)*transmittance(p,d,BIG)*phase_hg(dot(rd,d),g)/pdf;}}
   return e;
@@ -472,7 +478,15 @@ fn light_tree_left_probability(index:u32,p:vec3f)->f32 {
   // Uniform mixture avoids starvation due to a loose bound or rounding.
   return clamp(a/(a+b),0.001,0.999);
 }
+// Small Final rigs stratify over emitters rather than randomly choosing one.
+// Every emitter gets one NEE sample, so its MIS density has no selection PMF.
+// Live and large light hierarchies retain the single-light estimator.
+fn light_sample_count()->u32 {
+  if(P.opts.x==0u && P.counts.x<=8u){return P.counts.x;}
+  return min(P.counts.x,1u);
+}
 fn light_selection_pdf(i:u32,p:vec3f)->f32 {
+  if(light_sample_count()>1u){return 1.;}
   if(!world_on()){return 1./max(f32(P.counts.x),1.);}
   let c=world_row(4u);let leaf=world_row(u32(c.z)+i);
   if(c.w<=0.){return leaf.y;}
@@ -794,7 +808,7 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let vh = max(dot(v, h), 0.0);
   let metallic = m.base.w;
   let a = m.spec.x * m.spec.x;
-  let F = thin_film(fresnel_base(m, vh), vh, m.layers.y);
+  let F = thin_film(m, vh);
   var spec = F * ggx_d(nh, a) * smith_g2(nv, nl, a) / (4.0 * nv);
   if (m.extra.w != 0.0) {
     let fr = aniso_frame(n);
@@ -812,17 +826,97 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   return vec3f(coat) + (spec + diff + sheen(m, nh, nl, nv)) * atten;
 }
 
-// Thin-film interference (iridescent coatings): the reflected color cycles
-// with the film's optical path, per RGB wavelength.
-fn thin_film(F: vec3f, cosv: f32, nm: f32) -> vec3f {
-  if (nm <= 0.0) { return F; }
-  let n_film = 1.38;
-  let s2 = (1.0 - cosv * cosv) / (n_film * n_film);
-  let cost = sqrt(max(0.0, 1.0 - s2));
-  let path = 2.0 * n_film * nm * cost;
-  let phase = 2.0 * PI * path / vec3f(650.0, 532.0, 460.0);
-  let interference = 0.5 + 0.5 * cos(phase);
-  return clamp(F * (0.35 + 1.3 * interference), vec3f(0.0), vec3f(1.0));
+// Thin-film interference integrates polarized Airy reflectance over the
+// visible spectrum. RGB metals infer a complex IOR
+// from F0 and the existing Schlick grazing reflectance. This is not measured
+// optical data, but preserves interface energy, phase and spectral bandwidth
+// instead of multiplying RGB by a cosine.
+// Rec.709 quadrature weights: Wyman et al., JCGT 2(2), 2013 analytic CIE fits.
+const FILM_RESPONSE = array<vec3f,20>(
+  vec3f(-0.000785372, 0.000024754, 0.004430319),
+  vec3f(0.008359184, -0.006727168, 0.044917621),
+  vec3f(0.027950585, -0.036934153, 0.303418314),
+  vec3f(0.027306534, -0.038623185, 0.388818358),
+  vec3f(-0.025350407, 0.007193522, 0.279132034),
+  vec3f(-0.071348804, 0.076281823, 0.092398008),
+  vec3f(-0.124250028, 0.182756270, 0.013058868),
+  vec3f(-0.131489187, 0.290440893, -0.025214430),
+  vec3f(-0.019964978, 0.284182402, -0.034767330),
+  vec3f(0.163316562, 0.203133470, -0.030655314),
+  vec3f(0.334370610, 0.086687405, -0.020228530),
+  vec3f(0.386906991, -0.006059439, -0.009520296),
+  vec3f(0.269381002, -0.027796940, -0.003544440),
+  vec3f(0.117376535, -0.013459821, -0.001368065),
+  vec3f(0.032273448, -0.002069502, -0.000589651),
+  vec3f(0.005448043, 0.000541457, -0.000216115),
+  vec3f(0.000498633, 0.000334740, -0.000057101),
+  vec3f(0.000006038, 0.000080239, -0.000010662),
+  vec3f(-0.000004679, 0.000011974, -0.000001442),
+  vec3f(-0.000000710, 0.000001258, -0.000000146),
+);
+
+fn conductor_fresnel(c:f32,n:vec3f,k:vec3f)->vec3f {
+  let c2=c*c;let s2=1.-c2;
+  let t=n*n-k*k-s2;
+  let ab=sqrt(t*t+4.*n*n*k*k);
+  let ar=sqrt(max(vec3f(0.),0.5*(ab+t)));
+  let t1=ab+c2;let t2=2.*c*ar;
+  let rs=(t1-t2)/max(t1+t2,vec3f(1e-8));
+  let t3=c2*ab+s2*s2;let t4=t2*s2;
+  return 0.5*rs*(vec3f(1.)+(t3-t4)/max(t3+t4,vec3f(1e-8)));
+}
+fn film_airy(r1:f32,re:vec3f,im:vec3f,phase:f32)->vec3f {
+  let x=re*cos(phase)-im*sin(phase);
+  let y=re*sin(phase)+im*cos(phase);
+  return ((r1+x)*(r1+x)+y*y)/max((1.+r1*x)*(1.+r1*x)+r1*r1*y*y,vec3f(1e-8));
+}
+fn thin_film(m:Material,cosv:f32)->vec3f {
+  let F=fresnel_base(m,cosv);let nm=m.layers.y;
+  if(nm<=0.){return F;}
+  let f0=clamp(fresnel_base(m,1.),vec3f(1e-5),vec3f(0.9999));
+  let root=sqrt(f0);
+  var eta=(vec3f(1.)+root)/(vec3f(1.)-root);
+  var extinction=vec3f(0.);
+  if(m.base.w>0.5){
+    // RGB F0 alone has no unique complex IOR. Preserve its Schlick reflectance
+    // at 82 degrees as the second constraint, solving exact conductor Fresnel.
+    // This defines phase shifts without introducing a new material parameter.
+    var lo=(vec3f(1.)-root)/(vec3f(1.)+root);var hi=eta;
+    let grazing=schlick(f0,1./7.);
+    for(var j=0u;j<12u;j++){
+      let n=0.5*(lo+hi);
+      let k=sqrt(max(vec3f(0.),(f0*(n+1.)*(n+1.)-(n-1.)*(n-1.))/(1.-f0)));
+      let value=conductor_fresnel(1./7.,n,k);
+      lo=select(lo,n,value>grazing);hi=select(n,hi,value>grazing);
+    }
+    eta=0.5*(lo+hi);
+    extinction=sqrt(max(vec3f(0.),(f0*(eta+1.)*(eta+1.)-(eta-1.)*(eta-1.))/(1.-f0)));
+  }
+  let c1=max(cosv,1e-5);let sin2=1.-c1*c1;let nf=1.38;
+  let c2=sqrt(max(0.,1.-sin2/(nf*nf)));
+  // Complex Snell law: q = sqrt((n+ik)^2 - sin(theta)^2).
+  let nr=eta*eta-extinction*extinction;let ni=2.*eta*extinction;
+  let t=nr-sin2;let mag=sqrt(t*t+ni*ni);
+  let qr=sqrt(max(vec3f(0.),0.5*(mag+t)));
+  let qi=sqrt(max(vec3f(0.),0.5*(mag-t)));
+  // s-polarized reflection at film/substrate.
+  let ar=vec3f(nf*c2)-qr;let ai=-qi;let br=vec3f(nf*c2)+qr;let bi=qi;
+  let sd=max(br*br+bi*bi,vec3f(1e-8));
+  let sr=(ar*br+ai*bi)/sd;let si=(ai*br-ar*bi)/sd;
+  // p-polarized reflection, multiplied through by the complex bulk IOR.
+  let pr=nr*c2-nf*qr;let pi=ni*c2-nf*qi;
+  let dr=nr*c2+nf*qr;let di=ni*c2+nf*qi;
+  let pd=max(dr*dr+di*di,vec3f(1e-8));
+  let tr=(pr*dr+pi*di)/pd;let ti=(pi*dr-pr*di)/pd;
+  let rs=(c1-nf*c2)/(c1+nf*c2);let rp=(nf*c1-c2)/(nf*c1+c2);
+  let bare=0.5*(film_airy(rs,sr,si,0.)+film_airy(rp,tr,ti,0.));
+  var result=vec3f(0.);
+  for(var i=0u;i<20u;i++){
+    let wavelength=390.+20.*f32(i);let phase=4.*PI*nf*nm*c2/wavelength;
+    let reflectance=0.5*(film_airy(rs,sr,si,phase)+film_airy(rp,tr,ti,phase));
+    result+=FILM_RESPONSE[i]*reflectance;
+  }
+  return clamp(result*F/max(bare,vec3f(1e-6)),vec3f(0.),vec3f(1.));
 }
 
 // Sheen (fabric, soft-touch): the "Charlie" distribution with a soft
@@ -929,9 +1023,15 @@ fn cosine_dir(n: vec3f, u: vec2f) -> vec3f {
 
 // One light sample with MIS against the BSDF.
 fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit: bool) -> vec3f {
-  let count = P.counts.x;
-  if (count == 0u) { return vec3f(0.0); }
-  let li = choose_light(p);
+  let samples=light_sample_count();
+  var result=vec3f(0.);
+  for(var i=0u;i<samples;i++){
+    var li=i;if(samples==1u){li=choose_light(p);}
+    result+=sample_one_light(li,p,n,v,m,w,floor_hit);
+  }
+  return result;
+}
+fn sample_one_light(li:u32,p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit: bool) -> vec3f {
   let l = light_at(li);
   let s = sample_light(l, p);
   if (s.pdf <= 0.0 || all(s.radiance <= vec3f(0.0))) { return vec3f(0.0); }
@@ -1312,7 +1412,7 @@ fn path(px: vec2f) -> Sample {
       var ior = m.extra.x;
       if (m.layers.z > 0.0) {
         if (band < 0) {
-          band = min(i32(rnd() * 3.0), 2);
+          band = spectral_band;
           var pick_w = vec3f(0.0);
           pick_w[band] = 3.0;
           tp *= pick_w;
@@ -1406,6 +1506,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // Four-sample batches cover all pixel quadrants. Thin artwork and live
     // texture edges must not disappear because every ray landed on one side.
     if (P.dims.w == 4u) { jitter = (vec2f(f32(i & 1u), f32((i >> 1u) & 1u)) + jitter) * 0.5; }
+    // Exactly one of each RGB wavelength per three paths. Each stratum gets
+    // an independent random cyclic rotation, preserving each path's uniform
+    // marginal while removing channel-count noise in dispersive highlights.
+    let path_index=(P.dims.z-1u)*P.dims.w+i;
+    let rotation=pcg(idx ^ pcg(path_index/3u+0xa511e9b3u))%3u;
+    spectral_band=i32((path_index%3u+rotation)%3u);
     var smp = path(vec2f(f32(gid.x), f32(gid.y)) + jitter);
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }

@@ -9,6 +9,11 @@ import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
+# The concrete replay script lives beside its render. Copy these pure helpers
+# inline when run.py writes it, so replay never depends on a checkout path.
+# BEGIN MAPPING HELPERS
+# END MAPPING HELPERS
+
 
 def vector(p):
     return Vector((p['x'], p['y'], p['z']))
@@ -66,6 +71,7 @@ def build(out, samples):
     warnings = []
     screen = bpy.data.images.load(str(out / 'screen.png'))
     materials = []
+    dispersive = []
     for i, m in enumerate(data['materials']):
         mat = bpy.data.materials.new(f'material-{i}')
         mat.use_nodes = True
@@ -80,15 +86,46 @@ def build(out, samples):
         n.inputs['Coat IOR'].default_value = 1.5
         n.inputs['Sheen Roughness'].default_value = m['roughness']
         n.inputs['Sheen Tint'].default_value = (1, 1, 1, 1)
-        n.inputs['Anisotropic'].default_value = abs(m['anisotropy'])
+        # Studio stores GGX alpha_x=r²(1+k), alpha_y=r²(1-k).
+        # Principled preserves their product instead. Convert the widths and
+        # explicitly use the UV tangent (an unconnected input can be isotropic).
+        k = abs(m['anisotropy'])
+        if k:
+            roughness, anisotropic = anisotropic_widths(m['roughness'],m['anisotropy'])
+            n.inputs['Roughness'].default_value = roughness
+            requested_anisotropic = 2*k / (0.9*(1+k))
+            if requested_anisotropic > 1:
+                warnings.append(f'material {i}: Principled anisotropy caps width ratio at 10; Studio requests {(1+k)/(1-k):.3f}')
+            n.inputs['Anisotropic'].default_value = min(anisotropic, 1)
+            tangent = mat.node_tree.nodes.new('ShaderNodeTangent')
+            tangent.direction_type = 'UV_MAP'
+            tangent.uv_map = 'UVMap'
+            mat.node_tree.links.new(tangent.outputs['Tangent'], n.inputs['Tangent'])
         n.inputs['Anisotropic Rotation'].default_value = 0.25 if m['anisotropy'] < 0 else 0
         if m['film_nm']:
             if 'Thin Film Thickness' in n.inputs:
                 n.inputs['Thin Film Thickness'].default_value = m['film_nm']
                 n.inputs['Thin Film IOR'].default_value = 1.38
-            warnings.append(f'material {i}: RGB cosine film differs from Cycles interference')
+            if m['metallic'] == 1 and m['coat'] == 0 and m['anisotropy'] == 0:
+                metal = mat.node_tree.nodes.new('ShaderNodeBsdfMetallic')
+                metal.fresnel_type = 'PHYSICAL_CONDUCTOR'
+                metal.distribution = 'GGX'
+                optical = [conductor_ior(c) for c in vector(m['base'])]
+                metal.inputs['IOR'].default_value = [q[0] for q in optical]
+                metal.inputs['Extinction'].default_value = [q[1] for q in optical]
+                metal.inputs['Roughness'].default_value = m['roughness']
+                metal.inputs['Thin Film Thickness'].default_value = m['film_nm']
+                metal.inputs['Thin Film IOR'].default_value = 1.38
+                mat.node_tree.links.new(metal.outputs[0],mat.node_tree.nodes.get('Material Output').inputs['Surface'])
+                warnings.append(f'material {i}: physical conductor uses Studio F0/F82-derived complex IOR; spectral integration/Fresnel approximations remain')
+            else:
+                warnings.append(f'material {i}: layered/anisotropic film remains a Principled approximation')
+        if m['transmission'] > 0.999 and m['metallic'] == 0:
+            # Principled applies sqrt(Base Color) at each glass interface.
+            n.inputs['Base Color'].default_value = (*(c*c for c in vector(m['base'])), 1)
         if m['dispersion']:
-            warnings.append(f'material {i}: Cycles Principled has no matching RGB dispersion; IOR is central channel')
+            dispersive.append((n,m))
+            warnings.append(f'material {i}: three full RGB-channel IOR renders reproduce Studio dispersion; not a spectral Abbe model')
         if m['droplets']:
             warnings.append(f'material {i}: procedural Studio droplet normals unsupported by Principled mapping')
         if m['subsurface']:
@@ -363,11 +400,34 @@ def build(out, samples):
     scene.render.image_settings.color_depth = '32'
     scene.render.filepath = str(out / 'cycles.exr')
     start = time.perf_counter()
-    bpy.ops.render.render(write_still=True)
-    image = bpy.data.images.load(str(out / 'cycles.exr'), check_existing=False)
-    rgba = np.asarray(image.pixels[:], dtype=np.float32).reshape(meta['size'][1], meta['size'][0], 4)[::-1]
+    if dispersive:
+        # Wavelength channels do not exchange energy in this RGB contract.
+        # Render each at its own IOR, then retain that channel. Adding three
+        # colored BSDF closures would inject unnecessary channel-selection noise.
+        rgba = np.zeros((meta['size'][1],meta['size'][0],4),dtype=np.float32)
+        scene.render.use_persistent_data = True
+        for band in range(3):
+            for node,material in dispersive:
+                node.inputs['IOR'].default_value = material['ior'] + material['dispersion']*.04*(band-1)
+            path = out / f'cycles-band-{band}.exr'
+            scene.render.filepath = str(path)
+            bpy.ops.render.render(write_still=True)
+            image = bpy.data.images.load(str(path),check_existing=False)
+            part = np.asarray(image.pixels[:],dtype=np.float32).reshape(meta['size'][1],meta['size'][0],4)[::-1]
+            rgba[...,band] = part[...,band]
+            rgba[...,3] += part[...,3]/3
+            bpy.data.images.remove(image)
+        image = bpy.data.images.new('Combined RGB reference',width=meta['size'][0],height=meta['size'][1],alpha=True,float_buffer=True)
+        image.pixels.foreach_set(rgba[::-1].ravel())
+        image.filepath_raw = str(out / 'cycles.exr')
+        image.file_format = 'OPEN_EXR'
+        image.save()
+    else:
+        bpy.ops.render.render(write_still=True)
+        image = bpy.data.images.load(str(out / 'cycles.exr'), check_existing=False)
+        rgba = np.asarray(image.pixels[:], dtype=np.float32).reshape(meta['size'][1], meta['size'][0], 4)[::-1]
     np.save(out / 'cycles.npy', rgba)
-    result = dict(blender=bpy.app.version_string, device=[d.name for d in devices], samples=samples,
+    result = dict(blender=bpy.app.version_string, device=[d.name for d in devices], samples=samples, channel_renders=3 if dispersive else 1,
                   seconds=time.perf_counter()-start, warnings=warnings,
                   sky_reference='Studio-baked map; tests transport, not independent sky accuracy')
     (out / 'cycles-meta.json').write_text(json.dumps(result, indent=2))

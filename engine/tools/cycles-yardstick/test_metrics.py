@@ -45,6 +45,38 @@ class MetricsTests(unittest.TestCase):
         shader = Path(__file__).resolve().parents[2]/'crates/pm-studio/src/shaders/trace.wgsl'
         self.assertIn(text(),shader.read_text())
 
+    def test_film_quadrature_matches_generator_and_preserves_neutral_spectra(self):
+        from pathlib import Path
+        from generate_film_response import text, response
+        shader = Path(__file__).resolve().parents[2]/'crates/pm-studio/src/shaders/trace.wgsl'
+        self.assertIn(text(),shader.read_text())
+        np.testing.assert_allclose(response().sum(axis=0),[1,1,1],atol=1e-12)
+
+    def test_reference_conductor_preserves_both_reflectance_constraints(self):
+        from mapping import conductor_ior
+        for f0 in [.04,.3,.6,.9]:
+            n,k = conductor_ior(f0)
+            eta = complex(n,k)
+            normal = abs((1-eta)/(1+eta))**2
+            self.assertAlmostEqual(normal,f0,places=8)
+            c = 1/7
+            q = (eta*eta-(1-c*c))**.5
+            value = (abs((c-q)/(c+q))**2 + abs((eta*eta*c-q)/(eta*eta*c+q))**2)/2
+            self.assertAlmostEqual(value,f0+(1-f0)*(6/7)**5,delta=5e-4)
+
+    def test_reference_anisotropy_preserves_both_ggx_widths(self):
+        from mapping import anisotropic_widths
+        for k in [.1,.5,.8]:
+            roughness, anisotropic = anisotropic_widths(.3,k)
+            aspect = (1-.9*anisotropic)**.5
+            self.assertAlmostEqual(roughness**2/aspect,.3**2*(1+k))
+            self.assertAlmostEqual(roughness**2*aspect,.3**2*(1-k))
+
+    def test_replay_script_contains_pure_mapping_helpers(self):
+        from run import exporter_script
+        self.assertIn('def conductor_ior(',exporter_script())
+        compile(exporter_script(),'render_cycles.py','exec')
+
     def test_absent_blender_skips_without_building(self):
         import run
         with patch('sys.argv',['run.py']), patch.object(run,'blender_path',return_value=None), patch('subprocess.run') as child:

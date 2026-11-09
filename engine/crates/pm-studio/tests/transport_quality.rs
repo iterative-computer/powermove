@@ -254,3 +254,101 @@ fn photon_irradiance_is_unchanged_by_an_index_matched_sheet() {
         );
     }
 }
+
+#[test]
+fn small_colored_light_rigs_keep_low_sample_direct_light_stable() {
+    let mut scene = receiver();
+    let unit = std::f32::consts::PI * 0.00465f32.sin().powi(2);
+    scene.extra_lights = [v3(1., 0., 0.), v3(0., 2., 0.), v3(0., 0., 4.)]
+        .into_iter()
+        .map(|color| GpuLight::sun(Vec3::Y, 0.00465, color / unit))
+        .collect();
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(4, 2, true, 1000000);
+    let pixels = r.linear_beauty();
+    for (channel, irradiance) in [1., 2., 4.].into_iter().enumerate() {
+        let expected = 0.7 * irradiance / std::f32::consts::PI;
+        let rms = ((8..16)
+            .flat_map(|y| (8..16).map(move |x| (y * 24 + x) * 4 + channel))
+            .map(|i| (pixels[i] - expected).powi(2))
+            .sum::<f32>()
+            / 64.)
+            .sqrt();
+        eprintln!("colored rig channel {channel}: rms {rms}");
+        assert!(
+            rms < 0.003,
+            "each emitter must be sampled without light-selection noise: {rms}"
+        );
+    }
+}
+
+#[test]
+fn rgb_dispersion_does_not_add_channel_count_noise_in_a_white_furnace() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.objects[0].mesh = pm_studio::mesh::sphere(Vec3::ZERO, 1., 32, 64);
+    scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 70., 0.);
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 8,
+        height: 4,
+        pixels: vec![Vec3::splat(1.); 32],
+        ..Default::default()
+    });
+    scene.materials[0] = Material {
+        dispersion: 1.,
+        ..Material::glass(Vec3::splat(1.), 0.)
+    };
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(12, 8, true, 1000000);
+    let pixels = r.linear_beauty();
+    let rms = ((8..16)
+        .flat_map(|y| (8..16).flat_map(move |x| (0..3).map(move |c| (y * 24 + x) * 4 + c)))
+        .map(|i| (pixels[i] - 1.).powi(2))
+        .sum::<f32>()
+        / (64. * 3.))
+        .sqrt();
+    eprintln!("dispersive white furnace RGB rms: {rms}");
+    assert!(
+        rms < 0.04,
+        "wavelength strata should preserve neutral light: {rms}"
+    );
+}
+
+#[test]
+fn a_lossless_filmed_metal_cannot_absorb_a_white_furnace() {
+    let mut scene = receiver();
+    scene.extra_lights.clear();
+    scene.objects[0].mesh = pm_studio::mesh::sphere(Vec3::ZERO, 1., 32, 64);
+    scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 70., 0.);
+    scene.world.hdri = Some(pm_studio::environment::EnvironmentMap {
+        width: 8,
+        height: 4,
+        pixels: vec![Vec3::splat(1.); 32],
+        ..Default::default()
+    });
+    scene.materials[0] = Material {
+        film_nm: 520.,
+        ..Material::metal(Vec3::splat(1.), 0.08)
+    };
+    let mut r = Renderer::new(24, 24).expect("GPU");
+    r.hardware_rt = false;
+    r.set_scene(&scene, &scene.prepare());
+    r.trace(256, 4, true, 1000000);
+    let pixels = r.linear_beauty();
+    for channel in 0..3 {
+        let actual = (8..16)
+            .flat_map(|y| (8..16).map(move |x| (y * 24 + x) * 4 + channel))
+            .map(|i| pixels[i])
+            .sum::<f32>()
+            / 64.;
+        eprintln!("lossless thin-film channel {channel}: {actual}");
+        assert!(
+            (actual - 1.).abs() < 0.025,
+            "a lossless film on a perfect metal must return white: {actual}"
+        );
+    }
+}
