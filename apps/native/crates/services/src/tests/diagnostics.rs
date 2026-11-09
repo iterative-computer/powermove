@@ -132,3 +132,68 @@ fn recovered_document_name_is_local_durable_and_omitted_from_bundles() {
     assert!(!bundle.to_string().contains("Synthetic Film"));
     assert_eq!(bundle["crashes"][0]["recovered"], true);
 }
+#[test]
+fn error_log_rows_persist_in_order_and_clear_hides_older_rows() {
+    let (_temp, mut storage) = test_storage();
+    let mut omit = diagnostics::OmitText;
+    struct Keep;
+    impl diagnostics::LogRedactor for Keep {
+        fn redact(&mut self, text: &str) -> String {
+            text.into()
+        }
+    }
+    for text in ["one", "two", "three"] {
+        diagnostics::Diagnostics::log(
+            &mut storage,
+            &mut Keep,
+            diagnostics::Level::Error,
+            "Project",
+            text,
+        )
+        .unwrap();
+    }
+    let rows = diagnostics::Diagnostics::recent(&storage, 2).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+        ["two", "three"]
+    );
+    assert!(rows.iter().all(|r| r.at_ms > 0 && r.code == "Project"));
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    diagnostics::Diagnostics::clear(&mut storage).unwrap();
+    assert!(
+        diagnostics::Diagnostics::recent(&storage, 10)
+            .unwrap()
+            .is_empty()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    diagnostics::Diagnostics::log(
+        &mut storage,
+        &mut omit,
+        diagnostics::Level::Warn,
+        "Open",
+        "x",
+    )
+    .unwrap();
+    let rows = diagnostics::Diagnostics::recent(&storage, 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "[text omitted]");
+}
+#[test]
+fn crash_index_lists_each_crash_once_for_the_bundle() {
+    let (_temp, mut storage) = test_storage();
+    let crash = |id: &str| diagnostics::CrashRecord {
+        id: id.into(),
+        process: "shell".into(),
+        reason: "unknown".into(),
+        recovered: false,
+        recovered_document: Some("Launch Film".into()),
+    };
+    diagnostics::Diagnostics::crash(&mut storage, crash("a")).unwrap();
+    diagnostics::Diagnostics::crash(&mut storage, crash("b")).unwrap();
+    diagnostics::Diagnostics::crash(&mut storage, crash("a")).unwrap();
+    let ids = diagnostics::Diagnostics::crashes(&storage).unwrap();
+    assert_eq!(ids, ["a", "b"]);
+    let bundle =
+        String::from_utf8(diagnostics::Diagnostics::bundle(&storage, &ids).unwrap()).unwrap();
+    assert!(bundle.contains("\"shell\"") && !bundle.contains("Launch Film"));
+}

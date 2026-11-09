@@ -28,6 +28,17 @@ impl Controller {
             "bringSignIns" => self.bring_sign_ins(cx),
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
+            // Settings › General › Agent Notifications, when macOS says no.
+            "openNotificationSettings" => {
+                let id = crate::platform::bundle_id().unwrap_or_default();
+                crate::platform::open_url(&format!(
+                    "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={id}"
+                ));
+            }
+            "checkForUpdates" => {
+                let window = self.host.borrow().window.clone();
+                crate::updates::check_now(self.profile.clone(), window, cx)
+            }
             "backgroundTasks" => self.open_tasks_window(cx),
             _ => return false,
         }
@@ -40,7 +51,18 @@ impl Controller {
         let this = cx.entity().downgrade();
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
-                Outbound::Opened { reply, name, file } => v.adopt_reply(*reply, name, file, cx),
+                Outbound::Opened {
+                    reply,
+                    name,
+                    file,
+                    new_window: true,
+                } => crate::entry::open_in_new_window(
+                    crate::entry::Pending::Adopt { reply, name, file },
+                    cx,
+                ),
+                Outbound::Opened {
+                    reply, name, file, ..
+                } => v.adopt_reply(*reply, name, file, cx),
                 Outbound::FocusProject(id) => v.focus_project(&id, cx),
                 Outbound::Message(text) => {
                     v.message = text;

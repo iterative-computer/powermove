@@ -96,6 +96,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             "Powermove",
             vec![
                 Item::role("About Powermove", "orderFrontStandardAboutPanel:", ""),
+                Item::command("Check for Updates…", "checkForUpdates", ""),
                 sep(),
                 m("settings"),
                 sep(),

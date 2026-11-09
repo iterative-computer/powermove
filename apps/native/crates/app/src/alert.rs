@@ -84,6 +84,14 @@ impl<A> Alert<A> {
 impl<A: Clone + 'static> Alert<A> {
     /// Shows the alert as a sheet on `window`. Main thread only.
     pub fn sheet(&self, window: &NSWindow) -> async_channel::Receiver<Option<A>> {
+        self.sheet_with(window, |_| {})
+    }
+    /// As `sheet`, after `configure` adds to the alert (an accessory view).
+    pub fn sheet_with(
+        &self,
+        window: &NSWindow,
+        configure: impl FnOnce(&NSAlert),
+    ) -> async_channel::Receiver<Option<A>> {
         let mtm = MainThreadMarker::new().expect("NSAlert must be presented on main");
         let native = NSAlert::new(mtm);
         native.setMessageText(&NSString::from_str(&self.message));
@@ -117,6 +125,7 @@ impl<A: Clone + 'static> Alert<A> {
                 .window()
                 .setDefaultButtonCell(default_cell.as_deref());
         }
+        configure(&native);
         let (tx, rx) = async_channel::bounded(1);
         let actions: Vec<A> = self.buttons.iter().map(|b| b.action.clone()).collect();
         let retained: Retained<NSAlert> = native.clone();

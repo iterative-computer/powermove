@@ -36,7 +36,10 @@ pub(crate) struct AgentLink {
     /// The last whole-text draft typing set, by thread: typing that arrives
     /// after an unrelated republish still applies while the draft is unchanged.
     typed: Mutex<Option<(String, String)>>,
+    /// The window's notification policy (S114), told on the delivery worker.
+    notices: Mutex<Option<Arc<NoticeSink>>>,
 }
+pub type NoticeSink = dyn Fn(pm_panel_agentpanel::runtime::Notice) + Send + Sync;
 impl Default for AgentLink {
     fn default() -> Self {
         Self {
@@ -46,6 +49,7 @@ impl Default for AgentLink {
             closing: AtomicBool::new(false),
             sequence: AtomicU64::new(1),
             typed: Mutex::default(),
+            notices: Mutex::default(),
         }
     }
 }
@@ -67,6 +71,19 @@ impl AgentLink {
         *self.accounts.lock().unwrap() = Some(accounts.clone());
         accounts.refresh(Provider::Chatgpt);
         accounts.refresh(Provider::Claude);
+    }
+    pub fn set_notices(&self, sink: Arc<NoticeSink>) {
+        *self.notices.lock().unwrap() = Some(sink);
+    }
+    fn tell(&self, notices: Vec<pm_panel_agentpanel::runtime::Notice>) {
+        if notices.is_empty() {
+            return;
+        }
+        if let Some(sink) = self.notices.lock().unwrap().clone() {
+            for notice in notices {
+                sink(notice);
+            }
+        }
     }
     pub fn add_realm(&self, realm: Realm) {
         self.realms.lock().unwrap().push(realm);
@@ -546,6 +563,7 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
             }
             let saved = state.panel.save_error.clone();
             let polled = state.runs.poll(&mut state.panel, &mut store, now(), 64);
+            link.tell(state.runs.take_notices());
             let tasks = crate::agent_tasks::Tasks::poll(state, &link, now());
             let mut failed = polled.is_err();
             if state.runs.is_empty() && state.panel.unsaved() && closed.is_some() {

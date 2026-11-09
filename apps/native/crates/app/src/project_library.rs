@@ -25,6 +25,7 @@ pub enum Outbound {
         reply: Box<ShellReply>,
         name: String,
         file: Option<std::path::PathBuf>,
+        new_window: bool,
     },
     /// The project is open: bring forward the window that shows it.
     FocusProject(String),
@@ -121,7 +122,10 @@ impl ProjectLibrary {
             }
             HostEffect::Reveal(path) => crate::platform::reveal(&path),
             HostEffect::OpenEditor {
-                reply, name, file, ..
+                reply,
+                name,
+                file,
+                new_window,
             } => {
                 if let Some(sheet) = self.sheet.borrow_mut().take() {
                     sheet.close();
@@ -131,6 +135,7 @@ impl ProjectLibrary {
                         reply: Box::new(reply),
                         name,
                         file,
+                        new_window,
                     },
                     cx,
                 );
@@ -397,6 +402,26 @@ impl ProjectLibrary {
         });
     }
 }
+/// Development builds: an on-screen review runs a row's context-menu choice
+/// (the NSMenu callback's body) without pressing a menu item.
+#[cfg(debug_assertions)]
+impl ProjectLibrary {
+    pub fn review_row_menu(&mut self, name: &str, label: &str, cx: &mut Context<Self>) {
+        let Some(row) = self.controller.rows.iter().find(|r| r.name == name) else {
+            return;
+        };
+        let id = row.id.clone();
+        if let Some(action) = context_menu(row)
+            .into_iter()
+            .flatten()
+            .find(|a| a.label() == label)
+        {
+            let _ = self.controller.select(&id);
+            let _ = self.controller.menu(&id, action);
+            self.pump(cx);
+        }
+    }
+}
 const PRESET_COUNT: usize = pm_builtins::RESOLUTIONS.len();
 /// Hover key for a sidebar section, row or button.
 fn key(name: &str) -> u64 {
@@ -596,7 +621,9 @@ impl Render for ProjectLibrary {
                         cx.listener(move |v, event: &ClickEvent, _, cx| {
                             let _ = v.controller.select(&id);
                             if event.click_count() >= 2 {
-                                let _ = v.controller.double_click(&id, false);
+                                // ⌥-double-click is Open in New Window.
+                                let option = event.modifiers().alt;
+                                let _ = v.controller.double_click(&id, option);
                             }
                             v.pump(cx);
                         })
