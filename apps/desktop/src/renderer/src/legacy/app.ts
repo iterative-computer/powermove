@@ -312,16 +312,19 @@ function* hydrateSteps(p: any): Generator<void, any> {
     });
     return source;
   };
-  const sanitizeJson = (value: any, seen = new WeakSet<object>(), depth = 0): any => {
+  const sanitizeJson = (value: any, seen = new WeakSet<object>(), depth = 0, numericArrayLimit = 10_000): any => {
     if (value == null || typeof value === 'string' || typeof value === 'boolean') return value;
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
     if (typeof value !== 'object' || depth > 32 || seen.has(value)) return null;
     seen.add(value);
-    if (Array.isArray(value)) return value.slice(0, 10_000).map((item) => sanitizeJson(item, seen, depth + 1));
+    if (Array.isArray(value)) {
+      const limit = numericArrayLimit > 10_000 && value.every(item => typeof item === 'number') ? numericArrayLimit : 10_000;
+      return value.slice(0, limit).map((item) => sanitizeJson(item, seen, depth + 1, numericArrayLimit));
+    }
     const out: any = {};
     for (const [key, item] of Object.entries(value).slice(0, 10_000)) {
       if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue;
-      out[key] = sanitizeJson(item, seen, depth + 1);
+      out[key] = sanitizeJson(item, seen, depth + 1, numericArrayLimit);
     }
     return out;
   };
@@ -424,7 +427,11 @@ function* hydrateSteps(p: any): Generator<void, any> {
         if (!isProperty(L.d.w)) L.d.w = PM.clamp(num(L.d.w, container.w), 1, 16384);
         if (!isProperty(L.d.h)) L.d.h = PM.clamp(num(L.d.h, container.h), 1, 16384);
         L.d.params = sanitizeLooseParams(L.d.params, minKeyTime);
-        L.d.data = sanitizeJson(L.d.data) || {};
+        // Studio's validated mesh contract permits 300,000 numeric entries.
+        // The generic 10,000-item cap cut valid xyz/triangle buffers mid-face
+        // when reopening a project. Other extension data retains that cap.
+        const studioGeometry = ['powermove.3d.object', 'powermove.3d.scene'].includes(L.d.definition);
+        L.d.data = sanitizeJson(L.d.data, new WeakSet(), 0, studioGeometry ? 300_000 : 10_000) || {};
       }
       if (L.type === 'captions') L.d = normalizeCaptionsContent(L.d);
       migrateTextAnimatorTiming(L);

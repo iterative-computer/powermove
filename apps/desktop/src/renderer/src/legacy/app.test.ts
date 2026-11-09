@@ -452,6 +452,19 @@ describe('legacy app install', () => {
     expect(Object.hasOwn(layer.d.data, 'constructor')).toBe(false);
   });
 
+  it('preserves supported Studio mesh buffers while retaining generic extension array limits', () => {
+    const positions=Array.from({length:18_000},(_,i)=>i%3===0?i/3:0);
+    const normals=positions.map((_,i)=>i%3===1?1:0);
+    const indices=Array.from({length:12_000},(_,i)=>i%6000);
+    const layer=(id:string,definition:string)=>({id,type:'extension',from:0,dur:1,
+      d:{definition,data:{object:{source:{mesh:{positions,normals,indices}}}}}});
+    const {PM}=appRegistry(true,{id:'mesh-project',name:'Mesh',w:640,h:360,fps:30,dur:1,
+      layers:[layer('studio','powermove.3d.object'),layer('generic','vendor.mesh')],comps:{},assets:{}});
+    const mesh=PM.proj.layers[0].d.data.object.source.mesh;
+    expect(mesh.positions).toEqual(positions);expect(mesh.normals).toEqual(normals);expect(mesh.indices).toEqual(indices);
+    expect(PM.proj.layers[1].d.data.object.source.mesh.positions).toHaveLength(10_000);
+  });
+
   it('closes an unchanged project without a file or a save prompt', async () => {
     const { PM } = appRegistry();
     const confirmProjectClose = vi.fn(async () => 'cancel');
