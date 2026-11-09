@@ -151,10 +151,11 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Playing and scrubbed viewer frames draw a late raster-override layer from its nearest answered frame (playing: nothing when it has none) and redraw exact when the answer lands; paused frames and exports still wait (plan 3.6.4).
 - The viewer keeps one raster batch in flight per document; playback asks ahead by the realm's measured cost, about 0.1 s of realm time per batch.
 - Code-cache keys hash the V8 version, snapshot and flags once per isolate (was: the whole snapshot on every eval).
-- The D11 watchdog counts JavaScript time only (engine and kernel calls excluded) and names the extension innermost on the stack; Stop turns that extension off, whatever task hung.
-- Quit while an extension isn't responding stops that window's realm without a restart and quits; the app handles the Quit Apple Event itself because AppKit drops it while a sheet is attached.
+- The D11 watchdog counts JavaScript time only (engine and kernel calls excluded) and names the extension innermost on the stack; Stop turns that extension off for this run only (never the saved preference; Settings shows it off and can turn it on); only restarts nobody can name count toward the realm's restart limit.
+- Quit while an extension isn't responding stops that window's realm without a restart and quits; a cancelled quit restores extensions after the cancelling update. The app handles the Quit Apple Event itself (AppKit drops it under a sheet), suspends it, and answers -128 when the quit is cancelled.
 - Realm layout reads are synchronous: the realm's worker waits (bounded) for the page's measurement of the current document; the trusted page exists whenever the trusted realm runs, not only when a panel shows.
-- An export's frozen project stays in Rust; the realm reads it one layer at a time (`RasterHooks::pinned_layer`, additive in compat-runner).
+- An export's overrides answer only while the realm is at the export's revision (behind: ask again; past: the export fails by name); no project copy is held in the realm.
+- Sync layout reads keep page answers that arrive before their read waits (`Measures`).
 
 ## Extension authoring (moat lane, 2026-11-07)
 

@@ -196,14 +196,7 @@ pub struct RasterHooks {
     /// Whether a `raster` override is registered, and the generation of
     /// wrappers answering (it changes whenever they do).
     pub producing: Arc<dyn Fn(bool, u64) + Send + Sync>,
-    /// One layer of an export's frozen project (`job`, composition, layer
-    /// id), read from the document the export pinned: the realm never holds
-    /// a second copy of a project.
-    pub pinned_layer: PinnedLayer,
 }
-/// `(job, composition, layer)` → that layer of the export's frozen project.
-pub type PinnedLayer =
-    Arc<dyn Fn(&str, &str, &str) -> std::result::Result<Option<Value>, String> + Send + Sync>;
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
     Arc<dyn Fn(&FrameRequest) -> std::result::Result<Vec<u8>, String> + Send + Sync>;
@@ -640,11 +633,6 @@ mod tests {
         let producing = Arc::new(std::sync::Mutex::new(vec![]));
         let (p, a, o) = (painted.clone(), answered.clone(), producing.clone());
         runner.host.set_rasters(Some(crate::RasterHooks {
-            // The export froze `t1` before an edit.
-            pinned_layer: Arc::new(|job, _, layer| {
-                Ok((job == "job-1" && layer == "t1")
-                    .then(|| json!({"id":"t1","type":"text","name":"T1","d":{"text":"frozen"}})))
-            }),
             base: Arc::new(move |request: crate::BaseRasterRequest| {
                 p.lock().unwrap().push(json!([
                     request.layer,
@@ -819,7 +807,7 @@ mod tests {
         assert!(!painted.iter().any(|p| p[0] == "same" || p[0] == "nested"));
     }
     #[test]
-    fn exports_read_their_frozen_project_and_wrappers() {
+    fn exports_answer_only_at_their_revision_and_with_their_wrappers() {
         let (runner, painted, answered, producing) = raster_runner();
         let manifest =
             json!({"id":"spy","name":"Spy","version":"1.0.0","apiVersion":3,"entry":"index.js"});
@@ -835,24 +823,38 @@ mod tests {
         runner
             .eval("__compat.realm.PM.proj.layers.push({id:'t1',type:'text',name:'T1',d:{text:'edited'}})")
             .unwrap();
-        // The export froze the project before the edit.
+        // An export reads the project only at its own revision: at it, the
+        // live project is the export's; past it (an edit during the export),
+        // the frame fails rather than mix revisions; behind it, ask again.
+        let ask = |batch: u32, job: &str| {
+            format!(
+                "__compat.answerRasters({batch},[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'{job}',epoch:{epoch}}});"
+            )
+        };
         runner
             .eval(&format!(
-                "__compat.pinProject('job-1',-1);
-                 __compat.answerRasters(1,[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'job-1',epoch:{epoch}}});
-                 globalThis.out=globalThis.seen.slice()"
+                "const r=__compat.realm.revision;__compat.pinProject('job-1',r);__compat.pinProject('job-2',r-1);__compat.pinProject('job-3',r+1);
+                 {}{}{}globalThis.out=globalThis.seen.slice()",
+                ask(1, "job-1"),
+                ask(2, "job-2"),
+                ask(3, "job-3")
             ))
             .unwrap();
-        assert_eq!(runner.json("out").unwrap(), json!(["frozen"]));
-        assert_eq!(answered.lock().unwrap()[0], json!([1, "native"]));
+        assert_eq!(runner.json("out").unwrap(), json!(["edited"]));
+        let answers = answered.lock().unwrap().clone();
+        assert_eq!(answers[0], json!([1, "native"]));
+        assert_eq!(answers[1][1], "failed");
+        assert!(
+            answers[1][2]
+                .as_str()
+                .unwrap()
+                .contains("changed during the export")
+        );
+        assert_eq!(answers[2], json!([3, "retry"]));
         // A reload mid-export: its frames fail rather than mix wrappers.
         runner.eval("reload()").unwrap();
-        runner
-            .eval(&format!(
-                "__compat.answerRasters(2,[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'job-1',epoch:{epoch}}})"
-            ))
-            .unwrap();
-        let second = answered.lock().unwrap()[1].clone();
+        runner.eval(&ask(4, "job-1")).unwrap();
+        let second = answered.lock().unwrap()[3].clone();
         assert_eq!(second[1], "failed");
         assert!(
             second[2]
@@ -863,9 +865,9 @@ mod tests {
         assert!(painted.lock().unwrap().is_empty());
         // The viewer asks at a revision this realm has not seen: ask again.
         runner
-            .eval("__compat.answerRasters(3,[{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}],{revision:1e9})")
+            .eval("__compat.answerRasters(5,[{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}],{revision:1e9})")
             .unwrap();
-        assert_eq!(answered.lock().unwrap()[2], json!([3, "retry"]));
+        assert_eq!(answered.lock().unwrap()[4], json!([5, "retry"]));
     }
     #[test]
     fn a_capture_asks_its_waiting_realm_for_overrides_inline() {

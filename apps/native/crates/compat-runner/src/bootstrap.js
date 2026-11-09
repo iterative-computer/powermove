@@ -203,28 +203,22 @@ globalThis.__compat = {
      * reads its frozen project and the wrappers it started with. */
     this.answerRasters = (batch, needs, ask = {}) => {
       const realm = this.realm;
-      // An export reads the live project while it is at the frozen revision,
-      // and each frozen layer from the host once the project moves on.
+      // An export's overrides read the project (`PM.proj`, any record) as the
+      // export froze it: only while this realm is at the export's revision.
+      // Behind it, ask again; past it (an edit during the export), the
+      // export fails rather than mix revisions.
       const pinned = ask.job ? realm.pinnedRevision(ask.job) : undefined;
-      const live = !ask.job || pinned === realm.revision;
-      const layerOf = (need) =>
-        live
-          ? layerIn(realm.PM.proj, need.composition, need.layer)
-          : realm.frozenLayer(ask.job, need.composition, need.layer, () =>
-              call("compat.pinnedLayer", {
-                job: ask.job,
-                composition: need.composition,
-                layer: need.layer,
-              }),
-            );
       const answers = needs.map((need) => {
         // This realm has not seen the viewer's revision yet: ask again.
         if (ask.revision !== undefined && ask.revision > realm.revision) return { retry: true };
         if (ask.job && pinned === undefined) return { error: "The export's project is not available to its extensions" };
+        if (ask.job && pinned > realm.revision) return { retry: true };
+        if (ask.job && pinned < realm.revision)
+          return { error: "The project changed during the export. Export it again." };
         if (ask.epoch !== undefined && ask.epoch !== realm.rasterGeneration)
           return { error: "The extension that draws this layer changed during the export" };
         try {
-          const layer = layerOf(need);
+          const layer = layerIn(realm.PM.proj, need.composition, need.layer);
           if (!layer) return { native: true };
           realm.rasterContext = { composition: need.composition, job: ask.job, layer };
           const result = realm.PM.raster(

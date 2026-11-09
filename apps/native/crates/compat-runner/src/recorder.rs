@@ -1477,16 +1477,6 @@ impl EngineProxy for NativeHost {
                 return Ok(Value::Null);
             }
             "compat.answers" => return self.raster_answers(input),
-            "compat.pinnedLayer" => {
-                let hooks = self.rasters.lock().unwrap().clone();
-                let Some(hooks) = hooks else {
-                    return Ok(Value::Null);
-                };
-                let text = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
-                return (hooks.pinned_layer)(&text("job"), &text("composition"), &text("layer"))
-                    .map(Option::unwrap_or_default)
-                    .map_err(Error::Host);
-            }
             "extension.health" => {
                 self.events
                     .health(input["id"].as_str().unwrap_or_default(), &input["health"]);

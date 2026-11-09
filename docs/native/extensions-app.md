@@ -66,8 +66,9 @@ JavaScript (time blocked in engine or kernel calls doesn't count) gets the D11 s
 on the running stack (read by a V8 interrupt inside the task, so any hang is named: a
 raster override, an event, a timer, a command), else the one activating or whose
 command runs. The task keeps running meanwhile. Stop terminates it, turns that
-extension off in state (so the rebuilt realm doesn't run into the same hang) and
-rebuilds the realm. Two restarts in one session stop the realm until the project
+extension off for this run (every window; Settings shows it off, and turning it on
+runs it again; the next launch runs it; the saved preference never changes) and
+rebuilds the realm. Two restarts nobody can name stop the realm until the project
 reopens. The rebuild is a new writer generation: the old one is sealed
 (`RealmFailed`), and its page is replaced and its open panels reopened. A panel whose
 extension reloads is parked (`panel:park`) and returns to its tab. The host's owner
@@ -76,9 +77,10 @@ on the owner, which keeps handling Stop and Close.
 
 Quit while the sheet is up ends the sheet and stops that window's realm without a
 restart (its open entry is sealed; acknowledged kernel edits stay), then quits as
-usual; a cancelled quit starts the window's extensions again. AppKit drops the Quit
-Apple Event while a sheet is attached, so the app handles `kAEQuitApplication`
-itself and sends it to the same quit path.
+usual; a cancelled quit starts the window's extensions again once the cancelling
+update has ended. AppKit drops the Quit Apple Event while a sheet is attached, so
+the app handles `kAEQuitApplication` itself: the event waits for the quit's outcome
+and a cancelled quit answers the sender with user-cancelled (-128).
 
 The trusted realm queues fetches that do not fit its external-memory budget
 (`Limits::queue_fetches`) and always leaves room for one synchronous engine reply,
@@ -175,11 +177,12 @@ window is open is shown in it.
   until an edit or new wrappers; an export fails with the extension's message).
   Answers are per document (kernel `doc_id`) and per wrapper generation (any
   registration, removal or `PM.raster` change forgets them). An export pins its
-  frozen snapshot: the realm reads the live project while it is at the frozen
-  revision and each frozen layer from the app's pinned document once it moves on
-  (`compat.pinnedLayer`; the realm never holds a second copy of a project, which
-  aborted the app on a 238 MB project); base rasters paint from that document, and
-  the export fails if its wrappers change mid-run. A capture
+  frozen revision: its overrides answer only while the realm is at it, so every
+  project read they make is the export's project (behind it the export asks again;
+  past it, after an edit, the export fails rather than mix revisions). The realm
+  never holds a copy of a project (copying a 238 MB one aborted the app); base
+  rasters paint from the export's document, and the export fails if its wrappers
+  change mid-run. A capture
   (`renderFrameTo`, snapshot) of the realm's own project answers the overrides it
   needs inline while the realm waits (`render.continue`). Cancelling an export or
   closing its window ends any wait at once; pixel files carry the job id. Override

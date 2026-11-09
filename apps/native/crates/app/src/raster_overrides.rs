@@ -193,24 +193,10 @@ impl Overrides {
                 }),
             );
         });
-        let pins = self.pins.clone();
-        let pinned_layer = Arc::new(move |job: &str, composition: &str, layer: &str| {
-            let document = pins
-                .lock()
-                .unwrap()
-                .documents
-                .get(job)
-                .cloned()
-                .ok_or("The export's project is not available to its extensions")?;
-            Ok(document
-                .root()
-                .and_then(|root| frozen_layer(root, composition, layer)))
-        });
         RasterHooks {
             base,
             answers,
             producing,
-            pinned_layer,
         }
     }
     /// An export frame's need: asked of the realm against the export's frozen
@@ -243,8 +229,6 @@ impl Overrides {
                     }
                 }
             }
-            let (tx, rx) = std::sync::mpsc::channel();
-            let batch = batches.lock().unwrap().open(Asker::Export(tx));
             let wire: Vec<Value> = needs
                 .iter()
                 .map(|n| {
@@ -252,28 +236,39 @@ impl Overrides {
                     "seconds": n.seconds, "scale": n.scale})
                 })
                 .collect();
-            realm.ask(
-                batch,
-                Value::Array(wire),
-                json!({"job": pin.job, "epoch": pin.epoch}),
-            );
             let deadline = Instant::now() + EXPORT_WAIT;
+            // A realm still behind the export's revision answers "again": it
+            // is asked again once it has caught up.
             let answers = loop {
-                if pin.cancel.load(Ordering::Acquire) {
-                    batches.lock().unwrap().open.remove(&batch);
-                    return Err("cancelled".into());
-                }
-                match rx.recv_timeout(Duration::from_millis(50)) {
-                    Ok(answers) => break answers,
-                    Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
-                    Err(RecvTimeoutError::Timeout) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let batch = batches.lock().unwrap().open(Asker::Export(tx));
+                realm.ask(
+                    batch,
+                    Value::Array(wire.clone()),
+                    json!({"job": pin.job, "epoch": pin.epoch}),
+                );
+                let answers = loop {
+                    if pin.cancel.load(Ordering::Acquire) {
                         batches.lock().unwrap().open.remove(&batch);
-                        return Err("The extension did not draw the layer in time".into());
+                        return Err("cancelled".into());
                     }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        return Err("The project's extensions stopped during the export".into());
+                    match rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(answers) => break answers,
+                        Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+                        Err(RecvTimeoutError::Timeout) => {
+                            batches.lock().unwrap().open.remove(&batch);
+                            return Err("The extension did not draw the layer in time".into());
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            return Err("The project's extensions stopped during the export".into());
+                        }
                     }
+                };
+                let behind = answers.iter().any(|a| matches!(a, RasterAnswer::Retry));
+                if !behind || Instant::now() >= deadline {
+                    break answers;
                 }
+                std::thread::sleep(Duration::from_millis(20));
             };
             answers
                 .into_iter()
@@ -282,7 +277,7 @@ impl Overrides {
                     RasterAnswer::Hidden => Ok(CompatReply::Hidden),
                     RasterAnswer::Failed(error) => Err(error),
                     RasterAnswer::Retry => {
-                        Err("The extension answered for another revision".into())
+                        Err("The project's extensions did not reach the export's revision".into())
                     }
                     RasterAnswer::Raster {
                         width,
@@ -342,30 +337,6 @@ impl Drop for Overrides {
         *self.realm.lock().unwrap() = None;
         self.batches.lock().unwrap().open.clear();
     }
-}
-/// A layer of a stored project tree, as the realm's `layerIn` finds it: in
-/// `composition`'s layers (the open composition's are among them, stored),
-/// else the root's. Only that layer is copied out of the tree.
-fn frozen_layer(root: &pm_model::Node, composition: &str, layer: &str) -> Option<Value> {
-    let id_of = |node: &pm_model::Node| node.get("id").map(|id| id.to_value());
-    let items = |list: Option<&pm_model::Node>| {
-        let list = list.cloned();
-        (0..).map_while(move |i| list.as_ref().and_then(|l| l.at(i)).cloned())
-    };
-    let wanted = pm_model::Value::from(composition);
-    let nested = root.get("comps").and_then(|comps| {
-        comps
-            .get(composition)
-            .cloned()
-            .or_else(|| items(Some(comps)).find(|c| id_of(c).as_ref() == Some(&wanted)))
-    });
-    let wanted = pm_model::Value::from(layer);
-    items(nested.as_ref().and_then(|c| c.get("layers")))
-        .chain(items(root.get("layers")))
-        .find(|l| id_of(l).as_ref() == Some(&wanted))
-        .and_then(|l| {
-            serde_json::from_str(&pm_model::json::to_canonical_string(&l.to_value())).ok()
-        })
 }
 /// A new publication: frames are drawn at its revision, and asked ahead a
 /// frame of its open composition at a time.

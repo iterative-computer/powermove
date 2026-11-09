@@ -821,39 +821,22 @@ export class CompatRealm {
    * for an export, the job whose frozen project it reads.
    */
   rasterContext: { composition?: string; job?: string; layer?: object } | null = null;
-  /** Layers of the frozen projects exports read (see `pinProject`). */
-  private pinnedLayers = new WeakSet<object>();
-  /** Each running export's frozen revision, and the frozen layers it read. */
-  private pins = new Map<string, { revision: number; layers: Map<string, object | null> }>();
+  /** Each running export's frozen revision (see `pinProject`). */
+  private pins = new Map<string, number>();
   /**
-   * An export froze the project at `revision`: the overrides answering its
-   * frames read the live project while it is at that revision, and the
-   * frozen layer (from the document the export pinned, one layer at a time)
-   * once it moves on, so edits made while it runs never reach it and no
-   * second copy of a project is ever held here. The few most recent jobs
-   * are kept.
+   * An export froze the project at `revision`: its overrides answer only
+   * while this realm is at that revision, so every project read they make
+   * (`PM.proj`, layers, settings) is the export's project. No copy of a
+   * project is held. The few most recent jobs are kept.
    */
   pinProject(job: string, revision: number): void {
     this.pins.delete(job);
-    this.pins.set(job, { revision, layers: new Map() });
+    this.pins.set(job, revision);
     while (this.pins.size > PINNED_PROJECTS) this.pins.delete(this.pins.keys().next().value!);
   }
   /** The revision an export froze; `undefined`: the job is not pinned. */
   pinnedRevision(job: string): number | undefined {
-    return this.pins.get(job)?.revision;
-  }
-  /** A frozen layer of an export, read once through `fetch` (the host). */
-  frozenLayer(job: string, composition: string, id: string, fetch: () => unknown): object | null {
-    const pin = this.pins.get(job);
-    if (!pin) return null;
-    const key = `${composition}\u0000${id}`;
-    if (!pin.layers.has(key)) {
-      const layer = fetch();
-      const own = layer && typeof layer === "object" ? (layer as object) : null;
-      if (own) this.pinnedLayers.add(own);
-      pin.layers.set(key, own);
-    }
-    return pin.layers.get(key) ?? null;
+    return this.pins.get(job);
   }
   /**
    * Whether `value` is the base raster of exactly `need`'s layer, frame, scale
@@ -904,9 +887,9 @@ export class CompatRealm {
     if (!layer || typeof layer !== "object") return null;
     const context = this.rasterContext;
     // The project's own record: a view of it, the exact layer this answer
-    // is for, or a layer of an export's frozen project.
+    // is for.
     const own =
-      isProjectView(layer) || layer === context?.layer || this.pinnedLayers.has(layer);
+      isProjectView(layer) || layer === context?.layer;
     const id = String(layer.id ?? "");
     const composition = context?.composition ?? this.compositionOf(id);
     const spec: Data = {
