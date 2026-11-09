@@ -637,6 +637,7 @@ impl Engine {
                 }
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
+                let work = pm_perf::snapshot();
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
@@ -650,6 +651,7 @@ impl Engine {
                     let mut t = trace.lock().unwrap();
                     t.render_submitted = now();
                     t.render_cpu_ms = crate::trace::thread_cpu_ms() - cpu_start;
+                    t.work = pm_perf::snapshot().since(&work);
                 }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);
