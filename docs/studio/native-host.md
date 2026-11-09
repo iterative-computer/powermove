@@ -57,7 +57,7 @@ The receiver follows Electron's
 The MetalFX output is initialized once through wgpu before Metal writes it;
 otherwise wgpu's first sampled read would clear an externally written texture.
 
-## Measurements
+## Hidden-host measurements (historical diagnostic)
 
 Apple M5, 16 GB, macOS 27.3, Electron 44.0.0, 1920 × 1080 output.
 Measured 2026-11-09. These are wall times, not GPU timestamp estimates.
@@ -140,6 +140,226 @@ The integration script also killed the live native process deliberately.
 Scene replay into WebGPU produced verified pixels in **38–52 ms** in two runs.
 The same script verifies a populated → empty scene transition, including the
 change from hardware queries to portable guide traversal.
+
+<!-- lane-p4-measurements:start -->
+### Row (c): P4 measured editor performance
+
+**FAIL — not ready to ship.** Functional passes do not waive the measured
+Live, Final or retention failures below. The million-triangle preparation
+regression is fixed; the full stress loop still contains tasks over 50 ms.
+
+| Gate | Before P4 | After P4 | Status |
+| --- | --- | --- | --- |
+| Million-triangle preparation task | 119 ms | No detected task ≥50 ms; ready 1,053 ms | PASS for this regression |
+| Sustained Live, completed product cases | No comparable full-editor baseline | Playback p95 17.2–33.4 ms; 47.4–59.4 fps | FAIL |
+| Input → completed image | Quiet/loaded historical diagnostics only | Worst completed-case p95 59.8 ms versus 50 ms target | FAIL |
+| Main thread across 3D edits | 119 ms preparation task | Hot intervals have no detected ≥50 ms task; cold back setup 186 ms, stress 84 ms | FAIL |
+| Refine timing, completed products | No comparable full-editor baseline | 1080p 32-sample OIDN 1.40–3.16 s versus 2 s target | FAIL; visual review OPEN |
+| Final, completed products | No comparable 64-sample baseline | Median 1.72–4.81 s; p95 1.75–4.85 s versus 1 s target | FAIL |
+| 30-minute retained memory | Not established | +59.8%, 28.3 MiB/min over 1,152 measured cycles | FAIL; fixed-set repeat OPEN |
+| Peak memory, measured workloads | Not established | Worst app 4.54 GiB; host 2.12 GiB; measured stress swap −192 MiB, zero orphans | PASS for measured workloads; full matrix OPEN |
+
+The completed cases use the built dev editor and bundled release native host on
+Apple M5 / 16 GiB, macOS 27.3, Electron 44.0.0, AC power, Low Power Mode off,
+no reported thermal/performance warning, and the 120.0006 Hz internal display.
+The ordinary visible window is 1440×900 logical points on a 1512×982 display
+at DPR 2. Its fitted viewer is recorded per case; the composition/capture is
+1920×1080. No renderer/resolution test overrides are set. Every measured pane
+asserts `native-studio`; shared-texture transfers and nonblank output are
+required. The phase checks found no competing lane's Playwright/Electron/
+Cargo/rustc process; idle crash reporters are excluded. Other desktop apps
+were left open. These are quiet-lane measurements, not a rebooted machine.
+
+The initial run completed hero, edge and macro before an uncaught native
+surface-release error opened Electron's fatal modal during back playback.
+Only those first three cases are retained as valid acceptance data; their
+gates are reconstructed from saved summaries because the original controller
+did not reach its final aggregation. Their main-thread coverage is PARTIAL:
+it omitted the task containing phase start and did not record cold setup.
+The interrupted back interval and unstarted cases are excluded, not passed.
+The follow-up completed back using the ownership fix and corrected task
+coverage. Chrome stopped after two valid pairs when another lane's Cargo
+build became active; those partial results do not pass a full gate. A later
+Playwright run and a falling shared disk reserve blocked further acceptance
+launches. The resource guard was verified to refuse launch below 6.1 GB; the shared
+container later fell below the required 6 GB reserve. Further acceptance launches were stopped.
+The unmeasured scenes and fixed-project stress remain OPEN, not passed.
+Cold-setup and refinement tasks count toward the main-thread gate as well as
+hot drag/playback tasks.
+
+Initial runtime code is `4709cb7be`, controller `46774d779`. The ownership
+fix is `22a19387e`; crash-safe controller cleanup is `f0023e2c2`. The first matrix's documentation edits were pending; its loaded
+controller and compiled editor/native binaries stayed unchanged throughout.
+Later reports also fingerprint their controller and list pending file paths.
+The initial host SHA-256 is
+`5c8f661c86f418f0b373eeb5b264702b22bb93f84cd21c4c77fa286e5b76e8fb`.
+The ordinary native build before the follow-up uses the same engine source
+and `oidn,metalfx`, without the fixture-export `yardstick` feature:
+`857f203eb6c260b16fc980881bf9b99bc10a9e84d619c21eddba2c1ef417a036`.
+The rebuilt surface addon SHA-256 is
+`2d700450e0a97b9c97151066a1f94f94d5e0695681fa387b04967e1e6ba80c10`.
+The final controller `f32346be0` also samples competing processes and disk
+space every two seconds, rejects a launch below 6.1 GB, stops before the
+reserve reaches 6.05 GB, and writes lossless `.json.gz` timing traces.
+Raw samples, console traces and synthetic PNGs remain under
+`/tmp/pm-shots/studio3d/laneP4/`; none are committed.
+
+Rows suffixed `-partial` or `-short` are diagnostic only: chrome has two
+accepted 30-second pairs before the third was rejected for contention; the
+landscape/four-view check has one two-second pair and one warm Final frame.
+Those rows cannot pass the full protocol. Remaining normal-density cases
+without a completed row are OPEN.
+
+Each completed case has three 30-second drag and 30-second playback intervals,
+each after at least 30 actual warm native presentations. Table percentiles are
+the worst run percentiles, not percentiles of percentiles. FPS is the min–max
+across runs; dropped counts sum the 60 fps presentation deficits. Separate
+>33.3 ms percentages and maximum gaps expose stalls. Input latency ends at an
+asynchronously polled WebGL2 completion fence on a matching native image;
+polling adds up to one display interval. Display scanout is not measured.
+The long-task observer reports only tasks of at least 50 ms, so zero entries
+does not mean zero main-thread work. Values are rounded only for display.
+
+Refine lists release-to-displayed 32-sample OIDN at the fitted viewer and an
+explicit 1080p/32-sample OIDN capture. Final is native 1080p/64-sample OIDN,
+8 bounces, 30 advancing warm frames plus a separately reported cold frame.
+These scenes have motion blur disabled; the production shutter path is still
+covered by the passing deterministic Final/motion-blur e2e tests. Render times
+exclude PNG encoding and video encoding. Refine/Final algorithms and quality
+settings were not reduced. All eleven bounded Cycles scenes still pass. Refine PASS below refers to the
+time component only; a complete clean/no-ghosting visual review remains OPEN.
+Nonblank output is checked automatically; only hero and macro received
+additional manual image inspection in this lane.
+
+| Run | Code SHA | Dirty | Start UTC | Finish UTC | Peak app MiB | Host MiB | Metal MiB | Swap Δ MiB | Orphans |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| first three cases; later aborted | 46774d779 | True | 2026-11-09T21:29:28.158Z | aborted | — | — | — | — | not finalized |
+| back valid; later stopped for contention | f0023e2c2 | True | 2026-11-09T22:14:48.594Z | 2026-11-09T22:23:13.243000+00:00 | — | — | — | — | 0 |
+
+| Scene | Start UTC | Viewer px | Unique triangles | Instances | Lights | Scatter candidates | Native panes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| hero | 2026-11-09T21:29:29.453Z | 1394×784 | 4196 | 6 | 4 | 0 | 1 |
+| edge | 2026-11-09T21:33:54.276Z | 1394×784 | 3860 | 5 | 4 | 0 | 1 |
+| macro | 2026-11-09T21:38:07.360Z | 1394×784 | 3860 | 5 | 4 | 0 | 1 |
+| back | 2026-11-09T22:14:49.598Z | 1394×784 | 3860 | 5 | 5 | 0 | 1 |
+
+| Scene | Drag fps min–max | Drag ms p50/p95/p99 | Play fps min–max | Play ms p50/p95/p99 | Dropped drag/play | Long-task count; ms p50/p95/p99/max |
+| --- | --- | --- | --- | --- | --- | --- |
+| hero | 91.5–94.5 | 8.5/16.7/17.4 | 56.5–57.9 | 16.7/33.2/33.5 | 0/257 | 0 (none ≥50 ms) |
+| edge | 91.8–105.2 | 8.5/16.8/17.1 | 58.8–59.4 | 16.7/17.2/33.3 | 0/76 | 0 (none ≥50 ms) |
+| macro | 51.4–55.6 | 16.9/25.1/25.6 | 47.4–47.5 | 16.9/33.4/33.7 | 559/1130 | 0 (none ≥50 ms) |
+| back | 58.5–60.6 | 16.7/18.0/25.4 | 51.1–54.3 | 16.8/33.1/40.9 | 68/646 | 0 (none ≥50 ms) |
+| chrome-partial | 59.7–60.2 | 16.7/25.0/41.3 | 48.9–53.1 | 16.8/34.2/42.1 | 7/542 | 0 (none ≥50 ms) |
+| landscape-short | 31.1–31.1 | 25.1/33.6/421.1 | 36.9–36.9 | 32.9/33.7/181.1 | 58/46 | 0 (none ≥50 ms) |
+| 4view-short | 116.9–116.9 | 8.3/8.7/16.5 | 59.4–59.4 | 16.7/17.3/17.9 | 0/1 | 0 (none ≥50 ms) |
+
+Frame/latency percentiles below are the worst run percentiles, not percentiles of percentiles. Dropped counts sum all runs.
+
+| Scene | Pointer → GPU ms p50/p95/p99 | Time → GPU ms p50/p95/p99 | Matched/total inputs | Host p95 max ms |
+| --- | --- | --- | --- | --- |
+| hero | 27.3/35.2/35.9 | 25.8/42.3/42.6 | 16053/16064 | 11.0 |
+| edge | 27.3/35.0/35.8 | 25.9/26.4/42.6 | 16059/16070 | 11.0 |
+| macro | 43.3/52.5/59.9 | 50.7/59.8/68.4 | 16037/16054 | 19.7 |
+| back | 42.4/44.5/51.9 | 42.7/59.7/68.4 | 16017/16033 | 17.7 |
+| chrome-partial | 42.6/52.0/67.9 | 51.4/59.9/68.3 | 10620/10629 | 19.4 |
+| landscape-short | 61.3/85.5/400.6 | 68.9/85.3/165.8 | 312/318 | 27.2 |
+| 4view-short | 18.0/18.7/26.3 | 26.0/26.9/27.4 | 356/358 | 8.3 |
+
+| Scene | Cold scene s | Refine viewer/1080p s | Cold Final s | Warm Final median/p95 s | Warm frames | Peak app/host/GPU MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| hero | 1.43 | 1.08 / 1.66 | 2.14 | 2.05 / 2.08 | 30 | 3810.8 / 2143.9 / 533.4 |
+| edge | 0.35 | 0.96 / 1.40 | 1.77 | 1.72 / 1.75 | 30 | 3589.2 / 2143.3 / 533.2 |
+| macro | 0.36 | 2.05 / 3.16 | 5.03 | 4.81 / 4.85 | 30 | 3475.2 / 2124.0 / 533.2 |
+| back | 0.61 | 1.60 / 2.43 | 3.54 | 3.28 / 3.35 | 30 | 2730.0 / 2061.7 / 533.2 |
+| chrome-partial | 1.17 | — / — | — | — / — | 0 | 1931.4 / 1362.6 / 533.2 |
+| landscape-short | 2.54 | 7.10 / 9.57 | 17.72 | 17.99 / 17.99 | 1 | 3000.2 / 2175.8 / 601.7 |
+| 4view-short | 0.86 | 0.40 / 1.65 | 2.14 | 2.07 / 2.07 | 1 | 2943.4 / 1629.8 / 614.7 |
+
+| Scene | Native | Live | Input | Main thread | Refine | Final |
+| --- | --- | --- | --- | --- | --- | --- |
+| hero | PASS | FAIL | PASS | PARTIAL | PASS | FAIL |
+| edge | PASS | FAIL | PASS | PARTIAL | PASS | FAIL |
+| macro | PASS | FAIL | FAIL | PARTIAL | FAIL | FAIL |
+| back | PASS | FAIL | FAIL | FAIL | FAIL | FAIL |
+| chrome-partial | PASS | PARTIAL | PARTIAL | FAIL | PARTIAL | PARTIAL |
+| landscape-short | PASS | PARTIAL | PARTIAL | PARTIAL | PARTIAL | PARTIAL |
+| 4view-short | PASS | PARTIAL | PARTIAL | PARTIAL | PARTIAL | PARTIAL |
+
+
+| Scene | Worst >33.3 ms % drag/play | Max warm gap ms | Worst input match % | Native host/trace/post p95 ms | Cold; Refine-view long-task count/max ms |
+| --- | --- | --- | --- | --- | --- |
+| hero | 0.4/3.2 | 86.6 | 99.9 | 11.0/5.2/6.3 | —; 0/— |
+| edge | 0.4/1.0 | 126.8 | 99.9 | 11.0/5.2/6.5 | —; 0/— |
+| macro | 0.4/6.4 | 151.2 | 99.9 | 19.7/13.1/7.6 | —; 0/— |
+| back | 0.6/3.8 | 83.8 | 99.8 | 17.7/10.4/9.1 | 2/186.0; 0/— |
+
+The earlier two-second camera-only four-view diagnostic is excluded from
+acceptance: unchanged side panes can cache pixels, so their low native-update
+counts alone do not prove a slow view. The implemented moving-product workload requires new images in all four panes
+and also plays the timeline during orbit; its full measurement remains OPEN.
+Its per-pane gate prevents staggered updates
+from being added into a false 60 fps claim. Density diagnostics, when present,
+use one five-second interval per phase and no Final frames; they cannot pass
+the full-duration gates. Room/street and extra-density Refine/Final have no
+specified time target and are still unmeasured.
+
+Peak app RSS is sampled every two seconds over the whole app/host/helper tree.
+Host kernel RSS high-water and Metal `currentAllocatedSize` supplement those
+samples where available. Metal allocation overlaps unified RSS and is not
+added to RSS as an independent total. Driver/OS allocations are not separately
+attributed. Memory figures are measured diagnostics, not allocation estimates.
+
+| Measurement | Code SHA | Start UTC | Machine state | Start free disk | Start swap used |
+| --- | --- | --- | --- | --- | --- |
+| full hero/edge/macro | 46774d779 | 2026-11-09T21:29:28.158Z | quiet; AC; low-power off; no thermal warning | 7.9 GB | 4860.44M |
+| full back; partial chrome | f0023e2c2 | 2026-11-09T22:14:48.594Z | quiet; AC; low-power off; no thermal warning | 7.5 GB | 4524.38M |
+| short landscape/four-view | 4709cb7be | 2026-11-09T20:40:10.337Z | quiet; AC; low-power off; no thermal warning | 8.8 GB | 4541.12M |
+| 30-minute growing-catalog stress | 46774d779 | 2026-11-09T20:52:10.133Z | quiet; AC; low-power off; no thermal warning | 9.4 GB | 4509.12M |
+
+| Required case / follow-up | Coverage and status |
+| --- | --- |
+| Hero, edge, macro, back | Full-duration measurements above; Live and Final FAIL. |
+| Chrome | Two accepted pairs; full Live/Refine/Final OPEN. Cold main-thread task 119 ms: FAIL. |
+| Materials, caustics, wet | Full editor measurements OPEN. |
+| Default Landscape | Two-second diagnostic only; full acceptance OPEN. |
+| Room interior, street with many lights | Full editor measurements OPEN. |
+| Four-view with all panes changing | Workload implemented; full acceptance OPEN. Earlier camera-only check is diagnostic. |
+| Landscape at 2× density; 100k-tree/54k-ground-cover forest | Full editor stress measurements OPEN; historical hidden-host forest number is not comparable. |
+| Fixed two-project working set | 30-minute retention measurement OPEN. Growing-catalog workload below FAILS. |
+| Refine clean/no-ghosting review | Complete visual quality gate OPEN, independently of timing failures. |
+
+
+| Stress workload | Measured min | Cycles | Retained app MiB | Growth | Slope MiB/min | Peak app/host/Metal MiB | Swap Δ MiB | Long tasks count; p50/p95/p99/max ms | Orphans | Retention gate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| growing catalog | 30.01 | 1152 | 1537.6 → 2457.0 | 59.8% | 28.3 | 4650.4/222.7/238.5 | -192.0 | 96; 52.0/78.0/84.0/84.0 | 0 | FAIL |
+
+The implemented stress modes use a fixed five-minute warmup, real project open/save/close,
+FBX import/delete, default-scatter reseeding, window resize, and same-phase
+closed-tab GC/idle samples. Growing-catalog stress retains fresh file identities:
+its catalog reached 1,355 projects. Post-measurement diagnostics counted
+1,165,307 DOM nodes / 44,365 listeners with 1,690 attached elements. This flags
+retained UI/resources for investigation; the growing catalog also needs to be
+separated from a fixed working set. The fixed-project mode remains unmeasured; it asserts a stable catalog and closed
+tabs, keeps Undo history, and does not destroy saved projects to obtain a pass.
+Stress long tasks include open/save/close and forced GC; no stack attribution
+is claimed for the worst task. All raw machine/phase checks remain in evidence.
+
+Before P4, the comparable million-triangle edit regression recorded a 119 ms
+preparation task; after P4 it detects no task ≥50 ms (first draw 1 ms, ready
+1,053 ms versus 1,204 ms). The original hidden-host product timings of
+7–13 ms Live, ~15 ms quiet / 32.4 ms loaded input p95, and the different
+100,000-tree/54,000-ground-cover forest's 37.8 ms Live are historical
+**diagnostics**, not full-editor before/after measurements at these settings.
+No earlier full-editor 1080p/64-sample Final or 30-minute retention baseline
+was established. Default Add ▸ Terrain remains 18,620 scatter candidates;
+it was not reduced to improve a result.
+
+Remaining work: eliminate full-editor playback/presentation misses and dense
+landscape GPU cost, bring 64-sample Final within its targets, bound retained
+renderer/catalog resources, attribute and remove the remaining >50 ms tasks,
+and finish the separate synchronous skinned-pose and physical-device-loss gates.
+
+<!-- lane-p4-measurements:end -->
 
 ## Scene and process protocol
 
@@ -265,16 +485,18 @@ notarization and publication were not run.
 
 ## Limits and remaining gates
 
-- The product corpus meets the measured frame-time target in the lower-load
-  run above. Consistent full-editor 60 fps, concurrent-load performance and
-  environment/Cycles quality remain open gates. No Cycles comparison was made.
+- The product corpus meets the hidden-host frame-time target in the lower-load
+  run above. That experiment did not compare Cycles. P4 separately passes the
+  bounded eleven-scene Cycles regression; the full reference yardstick and
+  full-editor performance targets remain separate acceptance gates.
 - Live's first frame is noisy; temporal history improves it over subsequent
   frames. Glass, mirror edges and floor shadows still show artifacts before
   Refine. MetalFX is not used to judge Final/export parity.
 - Object movement resets denoiser history; camera motion has reprojection.
   Per-object motion-vector reprojection is not implemented.
-- A single packet and a single storage binding bound very large scenes.
-  There is no out-of-core mesh/texture paging or mesh LOD in this host.
+- Prepared geometry uses chunked uploads, while storage-binding and aggregate
+  allocation limits still bound very large scenes. There is no out-of-core
+  mesh/texture paging or mesh LOD in this host.
 - Output is SDR RGBA8, up to 4096 pixels on an axis and 8,847,360 output pixels.
 - Metal BLAS builds are submitted and completed separately. Batched builds
   dropped the intermediate glass-sphere BLAS on this M5/SDK; a hardware/BVH
@@ -342,5 +564,5 @@ and profiles are removed. The harness prepares the normal close/save barrier;
 for the known Electron 44 macOS native teardown stall, it reaps a process only
 after its successful Node exit marker. The ordinary smoke process is separately
 bounded and discarded. This is functional acceptance, not an editor performance
-benchmark: the [production checklist](production-readiness.md) defines the
-unmeasured M5 timing/memory gates and the later benchmark lane's entry point.
+benchmark: the [production checklist](production-readiness.md#performance-acceptance-base-m5--16-gb)
+defines the M5 timing/memory gates and the visible-editor benchmark entry point.
