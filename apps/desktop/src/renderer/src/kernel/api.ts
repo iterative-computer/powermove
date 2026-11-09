@@ -413,6 +413,8 @@ export interface Scene3DAPI {
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
+  /** After Effects' Front, Back, Left, Right, Top and Bottom views: the Free View looks along that axis. The shot's camera is unchanged. */
+  lookFrom(side:'front'|'back'|'left'|'right'|'top'|'bottom'):void;
   getNavigationMode():'select'|'orbit'|'pan'|'dolly';
   setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
   onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;

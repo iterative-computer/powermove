@@ -49,3 +49,16 @@ export function applyViewportPose(PM:any,pose:ViewPose):void {
   entry.camera!.position.copy(pose.position);entry.camera!.zoom=pose.zoom;
   entry.camera!.lookAt(pose.target);entry.camera!.updateProjectionMatrix();entry.camera!.updateMatrixWorld(true);changed(PM);
 }
+
+export type ViewSide='front'|'back'|'left'|'right'|'top'|'bottom';
+const SIDES:Record<ViewSide,[number,number,number]>={front:[0,0,1],back:[0,0,-1],left:[-1,0,0],right:[1,0,0],top:[0,1,0],bottom:[0,-1,0]};
+/** After Effects' Front, Left, Top… views: the Free View looks straight along
+    an axis at what it was looking at, from the same distance. The shot's
+    camera is unchanged. */
+export function lookFrom(PM:any,side:ViewSide):void {
+  const axis=SIDES[side];if(!axis)throw new Error('Unknown view side');
+  const pose=viewportPose(PM),distance=Math.max(.01,pose.position.distanceTo(pose.target));
+  // Straight up/down needs a hair of depth so the view keeps a stable "up".
+  const direction=new THREE.Vector3(...axis);if(side==='top'||side==='bottom')direction.z=1e-4;
+  applyViewportPose(PM,{target:pose.target,position:pose.target.clone().addScaledVector(direction.normalize(),distance),zoom:pose.zoom});
+}

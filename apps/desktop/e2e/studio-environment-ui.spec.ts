@@ -159,3 +159,29 @@ test('A Terrain in an empty composition arrives lit and framed, in one Undo', as
   expect(undo.found).toBe('Add Terrain');
   await expect.poll(async () => (await objects(page)).length).toBe(0);
 });
+
+test('The Free View looks from the Front, Top or Right like After Effects 3D views', async ({ session }) => {
+  test.setTimeout(90_000);
+  await session.openEditor();
+  const page = session.page;
+  await page.evaluate(() => {
+    const PM = (window as any).PM; PM.pause();
+    const api = PM.Kernel.api('look-from-e2e');
+    api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 3, y: 2, z: 5 } } });
+    api.scene3d.edit({ operation: 'add_object', object: { name: 'Box', source: { primitive: 'box' }, material: { p: { color: '#D9822B' } } } });
+    api.scene3d.edit({ operation: 'add_object', object: { name: 'Ball', source: { primitive: 'sphere' }, p: { x: 1.4 }, material: { p: { color: '#2F80ED' } } } });
+    api.scene3d.edit({ operation: 'add_light', light: { type: 'area', p: { x: 2, y: 3, z: 3, intensity: 3 } } });
+    PM.selectLayers([]);
+  });
+  const view = () => page.evaluate(() => (window as any).PM.Kernel.api('look-from-e2e').scene3d.getView());
+  expect(await view()).toBe('camera');
+  for (const side of ['Top', 'Front', 'Right']) {
+    const nav = page.getByLabel('3D navigation', { exact: true }).first();
+    await nav.locator('xpath=..').click();
+    await page.locator('.pm-menu [role="option"], .pm-menu .di, .pm-menu button').filter({ hasText: new RegExp(`^${side}$`) }).first().click();
+    expect(await view()).toBe('editor');
+    await shot(page, `14-view-${side.toLowerCase()}`);
+  }
+  await page.getByRole('tab', { name: 'Active Camera', exact: true }).click();
+  expect(await view()).toBe('camera');
+});
