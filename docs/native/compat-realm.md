@@ -1,8 +1,9 @@
 # v1–3 compatibility realm bundle
 
 P2 package 9 lives in `apps/native/js/compat` as `@powermove/compat-realm`.
-The production entry is `src/index.ts`; `bun run build` produces the
-`PowermoveCompat` IIFE in ignored `dist/compat-realm.js`. It has no runtime
+The production entry is `src/index.ts`; `bun run build` writes the bundles the
+app embeds (`compat.js`, `store.js`, `page.js` and the runtime module list) to
+ignored `dist/`, as compat-runner's build script does. They have no runtime
 package dependencies, Node/Bun imports, Chromium, or required DOM global.
 Bun, TypeScript, Happy DOM, jsdom, Prettier and the Svelte compiler are development/test tools only. The shared Svelte runtime is injected by the embedder.
 
