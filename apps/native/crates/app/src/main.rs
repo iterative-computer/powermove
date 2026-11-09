@@ -187,7 +187,7 @@ fn main() -> Result<()> {
             backup_root: Some(worker_profile.join("backups")),
             ..Default::default()
         });
-        let (mcp_host, _changes) = mcp::Host::new(actor.handle(), worker_profile.clone());
+        let mcp_host = mcp::Host::new(actor.handle(), worker_profile.clone());
         let gpu = pm_gpu::Gpu::new("powermove-native")?;
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
             gpu,
@@ -250,8 +250,16 @@ fn main() -> Result<()> {
                 panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);
+                // Each window owns its project: MCP's slot for this window, and
+                // the window wakes only when MCP changes that slot.
+                let key = window.window_handle().window_id().as_u64();
+                let rx = mcp_host.attach_window(key);
+                entity.update(cx, |v, cx| {
+                    v.window_key = key;
+                    let host = v.mcp.clone();
+                    cx.on_release(move |_, _| host.detach_window(key)).detach();
+                });
                 let weak = entity.downgrade();
-                let rx = mcp_host.subscribe();
                 cx.spawn(async move |cx| {
                     while rx.recv().await.is_ok() {
                         if weak.update(cx, |v, cx| v.follow_mcp(cx)).is_err() {

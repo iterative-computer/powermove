@@ -41,6 +41,7 @@ impl Controller {
             let _ = this.update(cx, |v, cx| match outbound {
                 Outbound::Opened { reply, name, file } => v.adopt_reply(*reply, name, file, cx),
                 Outbound::Focus => v.host.borrow().window.makeKeyAndOrderFront(None),
+                Outbound::FocusProject(id) => v.focus_project(&id, cx),
                 Outbound::Message(text) => {
                     v.message = text;
                     cx.notify();

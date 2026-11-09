@@ -163,6 +163,10 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
     entity.update(cx, |v, cx| {
         v.close_window = Some(window.window_handle());
         cx.observe_window_activation(window, |v, window, _| {
+            // The key window is where MCP acts.
+            if window.is_window_active() {
+                v.mcp.activate_window(v.window_key);
+            }
             if window.is_window_active()
                 && !v.close_pending
                 && !v.opening
@@ -170,7 +174,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
                     .as_ref()
                     .is_some_and(|s| v.kernel.published(&s.project).is_some())
             {
-                v.mcp.bind(v.session.clone());
+                v.mcp.bind_window(v.window_key, v.session.clone());
             }
         })
         .detach();
@@ -225,7 +229,7 @@ impl Controller {
         {
             self.session = None;
         }
-        self.mcp.bind(self.session.clone());
+        self.mcp.bind_window(self.window_key, self.session.clone());
         cancel_quit(cx);
         self.mcp.closing.store(false, Ordering::Release);
         cx.notify();
@@ -334,7 +338,7 @@ impl Controller {
             let _ = this.update(cx, |v, cx| match result {
                 Ok(()) => {
                     v.session = None;
-                    v.mcp.bind(None);
+                    v.mcp.bind_window(v.window_key, None);
                     v.complete_close(intent, cx);
                 }
                 Err(e) => {
@@ -345,7 +349,7 @@ impl Controller {
                     {
                         v.session = p.session.as_ref().map(|s| s.handle.clone());
                     }
-                    v.mcp.bind(v.session.clone());
+                    v.mcp.bind_window(v.window_key, v.session.clone());
                     v.cancel_close(cx);
                 }
             });
@@ -396,7 +400,7 @@ impl Controller {
                     v.host
                         .borrow()
                         .set_document_metadata("Untitled", "", false, None);
-                    v.mcp.bind(None);
+                    v.mcp.bind_window(v.window_key, None);
                     v.close_operation.take();
                     if intent == Intent::Quit {
                         v.message = "Closed. Finishing quit…".into();

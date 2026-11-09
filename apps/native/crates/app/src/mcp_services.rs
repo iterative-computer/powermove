@@ -78,7 +78,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             backup_root: Some(profile.join("backups")),
             ..Default::default()
         });
-        let (host, _) = crate::mcp::Host::new(actor.handle(), profile.clone());
+        let host = crate::mcp::Host::new(actor.handle(), profile.clone());
         crate::mcp::attach(&host.kernel, &profile)?;
         if let Some(path) = launch {
             host.open(

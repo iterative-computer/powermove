@@ -85,6 +85,8 @@ pub struct Controller {
     pub keyframes: usize,
     pub recovery_pending: bool,
     pub mcp: Arc<crate::mcp::Host>,
+    /// This window's slot in `mcp`: the project it shows is its own.
+    pub window_key: u64,
     pub close_pending: bool,
     pub close_window: Option<gpui::AnyWindowHandle>,
     pub close_operation: Option<crate::mcp::Operation>,
@@ -382,6 +384,7 @@ impl Controller {
             keyframes: 0,
             recovery_pending: false,
             mcp,
+            window_key: 0,
             close_pending: false,
             close_window: None,
             close_operation: None,
@@ -1114,6 +1117,11 @@ impl Controller {
                         }
                         v.load_recent(cx);
                     }
+                    // Already open in a window: that window comes forward.
+                    Some(Err(KernelFailure::AlreadyOpen(project))) => {
+                        v.message = String::new();
+                        v.focus_project(&project, cx);
+                    }
                     Some(Err(error)) => v.report_open_failure(&name, path, &error, cx),
                     Some(Ok(ShellReply::RecoveryRequired { .. })) => {
                         v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
@@ -1124,6 +1132,24 @@ impl Controller {
             });
         })
         .detach();
+    }
+    /// Brings forward the window that shows `project` (this one, or another).
+    /// Opening a project that's already open does this, as on every Mac app.
+    pub fn focus_project(&mut self, project: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.mcp.window_of(project) else {
+            return;
+        };
+        if key == self.window_key {
+            self.host.borrow().window.makeKeyAndOrderFront(None);
+            return;
+        }
+        if let Some(window) = cx
+            .windows()
+            .into_iter()
+            .find(|w| w.window_id().as_u64() == key)
+        {
+            let _ = window.update(cx, |_, w, _| w.activate());
+        }
     }
     /// S004: an alert naming the file, with Show in Finder when it still exists.
     fn report_open_failure(
@@ -1197,7 +1223,7 @@ impl Controller {
                 .unwrap_or(0.);
             self.seek(time);
         }
-        self.mcp.bind(self.session.clone());
+        self.mcp.bind_window(self.window_key, self.session.clone());
     }
     fn bind_composition(&mut self) {
         if let Some(viewer) = self.viewer.take() {
@@ -1244,18 +1270,36 @@ impl Controller {
         }
         self.apply_extension_resources();
     }
+    /// MCP placed a project in this window (open_project, create_project): show
+    /// it, then close the one shown before, as opening from the window does.
+    /// Other windows' projects are theirs; this never follows them.
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
-        let current = self.mcp.current();
-        if self.opening || self.close_pending || current == self.session {
+        let placed = self.mcp.window_session(self.window_key);
+        if self.opening || self.close_pending || placed == self.session {
             return;
         }
-        let Some(session) = current else {
+        let Some(session) = placed else {
             return;
         };
         if self.kernel.published(&session.project).is_none() {
             return;
         }
+        let old = self.session.clone();
         self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
+        if let Some(old) = old.filter(|old| self.mcp.session_of(&old.project).is_none()) {
+            let closing = self.kernel.shell(ShellCall::Close(old));
+            cx.spawn(async move |this, cx| {
+                if !matches!(closing.await, Some(Ok(ShellReply::Closed { .. }))) {
+                    let _ = this.update(cx, |v, cx| {
+                        v.message =
+                            "The previous project couldn’t be saved; its recovery journal is kept."
+                                .into();
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
         cx.notify();
     }
     pub fn load_recent(&mut self, cx: &mut Context<Self>) {
@@ -1689,14 +1733,24 @@ impl Controller {
     }
 }
 /// The wire code the open alert's copy is keyed on.
+/// The service code `documents::open_error` words (its snake_case wire codes).
 fn open_failure_code(error: &KernelFailure) -> &'static str {
-    let text = format!("{error:?}").to_lowercase();
-    if text.contains("permission") {
-        "permissionDenied"
-    } else if text.contains("not found") || text.contains("no such file") {
-        "notFound"
-    } else {
-        "invalidData"
+    match error {
+        KernelFailure::NoProject(_) => "not_found",
+        // Unsaved work can't be protected without its journal: say so.
+        KernelFailure::Journal(_) => "journal",
+        KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
+            let text = error.to_string().to_lowercase();
+            if text.contains("permission") {
+                "permission_denied"
+            } else if text.contains("not found") || text.contains("no such file") {
+                "not_found"
+            } else if text.contains("no space") {
+                "disk_full"
+            } else {
+                "invalid_data"
+            }
+        }
     }
 }
 pub const SAVING: &str = "Saving…";
@@ -1790,5 +1844,48 @@ mod save_note_tests {
         assert_eq!(save_note(true, false, false, "Saved"), None);
         assert_eq!(save_note(true, false, false, "Edit failed"), None);
         assert_eq!(save_note(false, false, false, "Opened"), None);
+    }
+}
+
+#[cfg(test)]
+mod open_failure_tests {
+    use super::*;
+    /// A window's open failure always says what went wrong: never the generic
+    /// "operation couldn't be completed" (the codes once missed the wire names).
+    #[::core::prelude::v1::test]
+    fn window_open_failures_are_worded() {
+        for (failure, words) in [
+            (KernelFailure::NoProject("p".into()), "can’t be found"),
+            (KernelFailure::Journal("disk".into()), "couldn’t be opened"),
+            (
+                KernelFailure::Storage("Permission denied (os error 13)".into()),
+                "permission",
+            ),
+            (
+                KernelFailure::Storage("No such file or directory".into()),
+                "can’t be found",
+            ),
+            (
+                KernelFailure::Storage("No space left on device".into()),
+                "disk space",
+            ),
+            (
+                KernelFailure::Storage("unexpected end of input".into()),
+                "couldn’t be read",
+            ),
+        ] {
+            let alert =
+                crate::surfaces::documents::open_error("Film", open_failure_code(&failure), false);
+            assert!(
+                !alert.message.contains("operation couldn’t be completed"),
+                "{failure:?}: {}",
+                alert.message
+            );
+            assert!(
+                alert.message.contains(words),
+                "{failure:?}: {}",
+                alert.message
+            );
+        }
     }
 }

@@ -27,6 +27,8 @@ pub enum Outbound {
         file: Option<std::path::PathBuf>,
     },
     Focus,
+    /// The project is open: bring forward the window that shows it.
+    FocusProject(String),
     Message(String),
 }
 pub type Sink = Rc<dyn Fn(Outbound, &mut App)>;
@@ -147,7 +149,8 @@ impl ProjectLibrary {
                     cx,
                 );
             }
-            HostEffect::FocusProject(_) | HostEffect::SaveAs(_) => (self.sink)(Outbound::Focus, cx),
+            HostEffect::FocusProject(id) => (self.sink)(Outbound::FocusProject(id), cx),
+            HostEffect::SaveAs(_) => (self.sink)(Outbound::Focus, cx),
             HostEffect::Banner(text) => (self.sink)(Outbound::Message(text.into()), cx),
             HostEffect::Announce { text, .. } => {
                 if let Some(window) = self.parent(cx) {

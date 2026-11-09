@@ -365,7 +365,7 @@ fn project(
         journal_root: Some(profile.join("journals")),
         ..Default::default()
     });
-    let (host, _) = app_mcp::Host::new(actor.handle(), profile.clone());
+    let host = app_mcp::Host::new(actor.handle(), profile.clone());
     app_mcp::attach(&host.kernel, &profile)?;
     if !attempt(work, "open", || {
         let reply = host
@@ -386,7 +386,7 @@ fn project(
                 if matches!(decision, pm_kernel::locks::OpenDecision::AsCopy(_)) {
                     result(work, "open_mode", "as-copy")?;
                 }
-                host.bind(Some(session));
+                host.bind_window(0, Some(session));
                 Ok(())
             }
             other => anyhow::bail!("kernel open requires recovery: {other:?}"),
