@@ -700,14 +700,21 @@ globalThis.__compat = {
     // Main's overlay pass: the viewer clears its canvas, then listeners draw.
     // The presenter canvas fills from the engine, its crop drawn from a
     // frame of the whole composition at the crop's scale (at most 8192 px).
-    const presenter = { canvas: null, viewport: null };
-    this.present = () => {
+    // It shows `frame`, the viewer's last frame this realm drew: its time,
+    // from the publication the realm holds (captures draw that one), which
+    // is the frame's revision. Before any frame, or once the project moved
+    // past it (init, resize), the playhead now.
+    const presenter = { canvas: null, viewport: null, frame: null };
+    this.presenting = () => !!(presenter.canvas?.width && presenter.canvas?.height);
+    this.present = (frame = presenter.frame) => {
       const canvas = presenter.canvas;
       const PM = this.realm.PM;
-      if (!canvas?.width || !canvas?.height) return;
+      if (!this.presenting()) return;
+      if (frame) presenter.frame = frame;
+      const time = frame?.version === this.realm.revision ? frame.time : PM.time;
       const crop = presenter.viewport;
       if (!crop) {
-        PM.renderFrameTo(PM.time, canvas.width, canvas.height, {}, canvas);
+        PM.renderFrameTo(time, canvas.width, canvas.height, {}, canvas);
         return;
       }
       const project = PM.proj;
@@ -716,7 +723,7 @@ globalThis.__compat = {
         8192 / Math.max(project.w, project.h),
       );
       const whole = PM.renderFrameTo(
-        PM.time,
+        time,
         Math.max(1, Math.round(project.w * scale)),
         Math.max(1, Math.round(project.h * scale)),
       );
@@ -1069,7 +1076,16 @@ globalThis.__compat = {
    * overlay pass that follows each compositor frame. */
   presented(frame) {
     this.realm.task(() => {
-      this.present();
+      // A bound presenter shows this frame's pixels before anyone hears of
+      // it. Behind the frame, the realm takes the newer publication first;
+      // a frame it still can't draw (the project moved past it) is dropped,
+      // as playback drops frames.
+      if (this.presenting()) {
+        if (frame.version > this.realm.revision)
+          this.realm.receive(runtime.engine("kernel.publication", {}));
+        if (frame.version !== this.realm.revision) return this.overlay();
+        this.present(frame);
+      }
       this.realm.PM.bus.emit("preview:presented", {
         time: frame.time,
         viewport: this.realm.PM.GL.previewViewport,

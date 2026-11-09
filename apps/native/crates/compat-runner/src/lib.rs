@@ -1090,8 +1090,8 @@ mod tests {
                 const bound=[gl.init({}),gl.init(canvas),PM.GL.canvas===canvas,px(0),px(3)];
                 const resized=[gl.resize(4,2),gl.resize(8,2),canvas.width];
                 let heard=null;api.events.on('frame:rendered',()=>{heard=px(7)});
-                __compat.presented({time:0,version:1,quality:1});
-                const cropped=gl.resize(8,2,{x:160,y:0,width:160,height:180});__compat.presented({time:0,version:2,quality:1});
+                const v=__compat.realm.revision;__compat.presented({time:0,version:v,quality:1});
+                const cropped=gl.resize(8,2,{x:160,y:0,width:160,height:180});__compat.presented({time:0,version:v,quality:1});
                 return [bound,resized,heard,cropped,px(0),gl.previewViewport.x]})()"#)
             .unwrap();
         assert_eq!(

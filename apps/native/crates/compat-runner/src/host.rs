@@ -3046,6 +3046,101 @@ mod tests {
         assert_eq!(*rendered.lock().unwrap(), vec![frozen.revision()]);
         cancel.store(true, Ordering::Release);
     }
+    /// D7 through the host: each `frame:rendered` a bound presenter hears
+    /// carries the pixels of that frame (its time, its revision), not of the
+    /// playhead or a newer project; a realm behind the frame catches up
+    /// first, and a frame the project moved past is dropped.
+    #[test]
+    fn presenter_frames_carry_the_pixels_of_the_frame_they_name() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "presenter",
+            &[(
+                "index.ts",
+                "export default function activate(api: any){
+                  const canvas: any = document.createElement('canvas'); canvas.width = 2; canvas.height = 1;
+                  api.render.gl.init(canvas);
+                  const heard: any[] = [];
+                  api.events.on('frame:rendered', (f: any) => {
+                    const p = canvas.getContext('2d').getImageData(1, 0, 1, 1).data;
+                    heard.push([f.time, f.version, p[0], p[1]]);
+                    api.storage.set('heard', heard) }) }",
+            )],
+        );
+        // Each frame is filled with (revision, time × 10): what it was drawn from.
+        let drawn: Arc<Mutex<Vec<(u64, f64)>>> = Arc::default();
+        let log = drawn.clone();
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let revision = frame.published.as_ref().ok_or("no publication")?.revision();
+            log.lock().unwrap().push((revision, frame.time));
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, frame.width, frame.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let px = [revision as u8, (frame.time * 10.).round() as u8, 0, 255];
+            let pixels = px.repeat((frame.width * frame.height) as usize);
+            encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+            Ok(png)
+        });
+        let fixture =
+            Fixture::start_full(root, crate::initial()["document"].clone(), None, frames.into());
+        fixture.until("activation", |host| host.is_ready());
+        let heard = |count: usize| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let heard = fixture.kernel.state().settings.get("ext.presenter").map(|v| {
+                    serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(v))
+                        .unwrap()["heard"]
+                        .clone()
+                });
+                if let Some(Value::Array(heard)) = heard
+                    && heard.len() >= count
+                {
+                    return heard;
+                }
+                assert!(Instant::now() < deadline, "{count} frames heard");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let first = fixture.kernel.published("window").unwrap().revision();
+        // Playing: the frame's time, not the playhead's (0).
+        fixture
+            .host
+            .frame_presented(json!({"time": 1.5, "version": first, "quality": 1}));
+        assert_eq!(heard(1)[0], json!([1.5, first, first, 15]));
+        // An edit the realm has not received: the frame is of the new revision.
+        let edit = pm_kernel::Call::Transact {
+            label: Some("Set Work Area".into()),
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                pm_kernel::CompCommand::SetWorkArea {
+                    comp: None,
+                    start: Some(0.5),
+                    end: None,
+                },
+            )]),
+            expected_revision: None,
+        };
+        fixture
+            .kernel
+            .call_blocking("window", Request::new(pm_kernel::Caller::native(), edit))
+            .unwrap();
+        let next = fixture.kernel.published("window").unwrap().revision();
+        assert!(next > first);
+        fixture
+            .host
+            .frame_presented(json!({"time": 2.0, "version": next, "quality": 1}));
+        assert_eq!(heard(2)[1], json!([2, next, next, 20]));
+        // A frame the viewer drew before the edit, presented after it: dropped.
+        fixture
+            .host
+            .frame_presented(json!({"time": 2.5, "version": first, "quality": 1}));
+        fixture
+            .host
+            .frame_presented(json!({"time": 3.0, "version": next, "quality": 1}));
+        assert_eq!(heard(3)[2], json!([3, next, next, 30]));
+        assert!(!drawn.lock().unwrap().iter().any(|(_, t)| *t == 2.5));
+    }
     /// A window realm's capture draws the publication the realm holds, so
     /// an edit the kernel takes while the realm waits never leaves it asked
     /// for a revision it cannot reach (it used to retry to the 60 s deadline,
