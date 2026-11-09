@@ -1595,6 +1595,8 @@ fn build(client: &TimelineClient, tokens: &Tokens) -> Option<Built> {
         model: Arc::new(client.model.clone()),
     })
 }
+/// The frame the canvas prepared, and where, for the clips' accessible elements.
+type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
 impl Render for TimelineSurface {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity().downgrade();
@@ -1611,7 +1613,7 @@ impl Render for TimelineSurface {
         let weak = this.clone();
         // The canvas prepaints before the list's children are written: it
         // leaves the frame it prepared here for the clips' accessible elements.
-        let shown: Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>> = Rc::default();
+        let shown: Shown = Rc::default();
         let prepared = shown.clone();
         div()
             .id("native-timeline")

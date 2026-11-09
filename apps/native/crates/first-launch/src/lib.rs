@@ -670,7 +670,9 @@ fn media(
         }
     }
     let captured = |key: &str| {
-        batches.iter().any(|(_, rs)| rs.iter().any(|r| r.key == key))
+        batches
+            .iter()
+            .any(|(_, rs)| rs.iter().any(|r| r.key == key))
             || disk_records.iter().any(|r| r.key == key)
     };
     for r in &closure.references {

@@ -342,7 +342,10 @@ fn an_offline_clip_refuses_by_name_unless_the_export_goes_without_it() {
     let message = refused.error.unwrap().message;
     assert!(message.contains("1 clip is offline: gone.png"), "{message}");
     // The Export sheet offers Export Without Them on exactly this refusal.
-    assert!(pm_engine_service::jobs::is_offline_refusal(&message), "{message}");
+    assert!(
+        pm_engine_service::jobs::is_offline_refusal(&message),
+        "{message}"
+    );
     let mut without = request_for(&project, dir.path().join("without"), 1);
     without.without_offline = true;
     let done = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), without)

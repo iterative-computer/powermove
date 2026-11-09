@@ -1989,8 +1989,7 @@ mod keyboard_tests {
                     assert!(v.shell_command(&format!("panel:group:{id}:inspector"), cx));
                 }
                 let (d, g, _) = v.layout.find("inspector").unwrap();
-                let tab = |v: &Editor, id: &str| v.layout.find(id).unwrap().2;
-                v.layout.docks[d].groups[g].active = tab(v, "inspector");
+                v.layout.docks[d].groups[g].active = v.layout.find("inspector").unwrap().2;
                 let showing = |v: &Editor| {
                     let stack = &v.layout.docks[d].groups[g];
                     stack.tabs[stack.active].clone()

@@ -993,7 +993,7 @@ fn clips_are_accessible_elements_that_a_press_selects(cx: &mut TestAppContext) {
     let layers: Vec<String> = published
         .selection
         .layers()
-        .into_iter()
+        .iter()
         .map(|l| l.to_string())
         .collect();
     assert_eq!(layers, ["l1"]);
