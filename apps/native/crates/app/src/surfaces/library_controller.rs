@@ -438,12 +438,9 @@ impl<P: LibraryPort> LibraryController<P> {
             let request = self.mutation.take().expect("matching request");
             match completion.result {
                 Ok(outcome) => {
-                    match &request.command {
-                        Command::Create(_) => {
-                            self.form = None;
-                            self.effects.push_back(HostEffect::CloseNewProject);
-                        }
-                        _ => {}
+                    if let Command::Create(_) = &request.command {
+                        self.form = None;
+                        self.effects.push_back(HostEffect::CloseNewProject);
                     }
                     match outcome {
                         Outcome::Duplicated(id) => self.pending_duplicate = Some(id),

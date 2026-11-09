@@ -659,7 +659,7 @@ impl Layout {
                 }
                 anyhow::ensure!(
                     stacks(id)
-                        && !(stack && !self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id)))
+                        && (!stack || self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id)))
                         && dest.tabs.iter().all(|id| stacks(id)),
                     "Viewer cannot join a tab stack"
                 );

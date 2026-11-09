@@ -855,9 +855,7 @@ impl Builtins {
     /// it: same realm identity, routes and host operations, the fork's code.
     /// Waits for the old isolate to close, so call it off the main thread.
     pub fn replace(&self, panel: &str, fork: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
-        if !builtin_panel(panel).is_some()
-            || (self.broker.application && !matches!(panel, "settings" | "agent"))
-        {
+        if builtin_panel(panel).is_none_or(|p| self.broker.application && !p.application) {
             return Err(Error::Invalid("unregistered built-in"));
         }
         self.retire(panel);
@@ -1449,7 +1447,7 @@ impl Broker {
     }
     fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
         let id = Self::realm_id(generation).ok_or(Error::Invalid("not a v4 built-in realm"))?;
-        if !builtin_panel(id).is_some() && !self.extensions.lock().unwrap().contains(id) {
+        if builtin_panel(id).is_none() && !self.extensions.lock().unwrap().contains(id) {
             return Err(Error::Invalid("unknown panel"));
         }
         Ok(id)

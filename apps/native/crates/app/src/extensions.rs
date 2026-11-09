@@ -58,8 +58,6 @@ thread_local! {
 }
 /// A theme's patches for dark and for light windows.
 type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
-/// Keys this window's list of contributed panels in the shell.
-
 /// Page messages enter here on AppKit's main thread, so this only enqueues.
 struct PageEvents {
     host: Arc<Mutex<Option<std::sync::mpsc::Sender<Value>>>>,
