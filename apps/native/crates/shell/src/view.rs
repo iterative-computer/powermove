@@ -345,7 +345,7 @@ impl Editor {
         let panels = self.panels(cx);
         let result = match (kind, verb) {
             ("panel", "toggle") => {
-                if self.layout.open_panels().contains(&rest) && rest != "viewer" {
+                if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
                     self.layout.close_panel(rest)
                 } else {
                     self.layout.show_panel(rest, &panels)
@@ -923,7 +923,7 @@ impl Editor {
             .find(|d| d.groups.iter().any(|g| g.tabs.iter().any(|t| t == id)))
             .map(|d| d.id.as_str());
         let mut items = vec![];
-        if id != "viewer" {
+        if layout::closable(id) {
             items.push(MenuEntry::item(
                 format!("Close {title}"),
                 format!("panel:close:{id}"),
@@ -950,7 +950,8 @@ impl Editor {
                 .open_panels()
                 .into_iter()
                 .filter(|target| {
-                    *target != id && (verb != "group" || (id != "viewer" && *target != "viewer"))
+                    *target != id
+                        && (verb != "group" || (layout::stacks(id) && layout::stacks(target)))
                 })
                 .map(|target| {
                     MenuEntry::item(panels.title(target), format!("panel:{verb}:{id}:{target}"))
@@ -1516,7 +1517,7 @@ impl Render for Editor {
                     let selected = ti == active;
                     let ghost = dragged.as_deref() == Some(tab.as_str());
                     let close_id = tab.clone();
-                    let closable = tab != "viewer" && multi;
+                    let closable = layout::closable(tab) && multi;
                     let tab_group: SharedString = format!("tab-{tab}").into();
                     let title = panels.title(tab).to_string();
                     let mut cell = div()

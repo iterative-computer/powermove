@@ -283,7 +283,7 @@ impl Layout {
             }
         }
         anyhow::ensure!(
-            ids.contains(&"viewer".to_string()),
+            ids.iter().any(|id| *id == VIEWER),
             "Viewer must remain in workspace"
         );
         Ok(())
@@ -549,7 +549,7 @@ impl Layout {
         let g = &self.docks[p.dock].groups[p.group];
         let header_end = (r.y + t.metrics.header).min(r.y + r.h);
         let relative = (y - header_end) / (r.y + r.h - header_end).max(1.);
-        let groupable = !g.tabs.iter().any(|id| id == "viewer");
+        let groupable = g.tabs.iter().all(|id| stacks(id));
         if groupable && (y < header_end || (0.3..=0.7).contains(&relative)) {
             let n = g.tabs.len();
             let index = if y < header_end {
@@ -603,12 +603,7 @@ impl Layout {
         {
             return None;
         }
-        if (id == "viewer"
-            || (stack
-                && self.docks[di].groups[gi]
-                    .tabs
-                    .iter()
-                    .any(|id| id == "viewer")))
+        if (!stacks(id) || (stack && !self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id))))
             && matches!(preview.target, DropTarget::Tab { .. })
         {
             // An ungroupable source still offers above/below zones.
@@ -663,13 +658,9 @@ impl Layout {
                     };
                 }
                 anyhow::ensure!(
-                    id != "viewer"
-                        && !(stack
-                            && self.docks[di].groups[gi]
-                                .tabs
-                                .iter()
-                                .any(|id| id == "viewer"))
-                        && !dest.tabs.iter().any(|id| id == "viewer"),
+                    stacks(id)
+                        && !(stack && !self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id)))
+                        && dest.tabs.iter().all(|id| stacks(id)),
                     "Viewer cannot join a tab stack"
                 );
             }
@@ -785,7 +776,7 @@ impl Layout {
     }
     /// Closes a panel. The viewer cannot be closed.
     pub fn close_panel(&mut self, id: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(id != "viewer", "The viewer cannot be closed");
+        anyhow::ensure!(closable(id), "The viewer cannot be closed");
         let (di, gi, ti) = self
             .find(id)
             .ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
@@ -1123,6 +1114,16 @@ fn builtin_title(id: &str) -> &str {
         "scopes" => "Scopes",
         _ => id,
     }
+}
+/// The viewer is the one panel always open; it keeps its stack to itself.
+pub const VIEWER: &str = "viewer";
+/// A panel the person can close, park or hide.
+pub fn closable(id: &str) -> bool {
+    id != VIEWER
+}
+/// A panel that can share a tab stack with others.
+pub fn stacks(id: &str) -> bool {
+    id != VIEWER
 }
 /// Every built-in panel, in Window ▸ Panels order.
 pub const PANELS: [&str; 12] = [

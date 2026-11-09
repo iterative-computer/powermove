@@ -1964,7 +1964,7 @@ impl Host {
         choices.retain(|c| !state.disabled.contains(&c.command));
         for (id, title) in &state.panels {
             let open = state.open.contains(id);
-            if open && id == "viewer" {
+            if open && !crate::layout::closable(id) {
                 continue;
             }
             choices.push(Choice {
