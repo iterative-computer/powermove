@@ -1,29 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { FOUNDATION_TOKENS, resolveScheme, translateTheme } from "../index.mjs";
-
-test("all native token destinations exist in the read-only pm-design API", () => {
-  const rust = readFileSync(
-    new URL("../../../crates/design/src/lib.rs", import.meta.url),
-    "utf8",
-  );
-  const structs = {
-    colors: "Colors",
-    metrics: "Metrics",
-    typography: "TypeScale",
-  };
-  for (const spec of Object.values(FOUNDATION_TOKENS)) {
-    for (const target of spec.native ?? []) {
-      const [group, field] = target.split(".");
-      const body = rust.match(
-        new RegExp(`pub struct ${structs[group]} \\{([^}]+)\\}`),
-      )[1];
-      assert.match(body, new RegExp(`pub ${field}: (u32|f32),`), target);
-    }
-  }
-});
+import { resolveScheme, translateTheme } from "../index.mjs";
 
 test("scheme and token layer results match actual frozen v1.2.0 function bodies", () => {
   const source = execFileSync(

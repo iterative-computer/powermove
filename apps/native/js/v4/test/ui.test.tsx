@@ -2,7 +2,6 @@ import { test, expect } from "bun:test";
 import { recorder } from "./helpers";
 import * as UI from "../src/ui";
 import * as Kit from "../src/components";
-import { parseArithmetic } from "../src/arithmetic";
 import { json } from "../src/protocol";
 test("all tagged public controls and new compositional controls export native semantic trees", async () => {
   const { root } = recorder();
@@ -105,10 +104,10 @@ test("menu navigation skips disabled entries and activates typed callback", asyn
   expect(selected).toEqual(["c"]);
 });
 test("numeric parser retains tagged arithmetic intent and rejects code/nonfinite input", () => {
-  expect(parseArithmetic("(2+3)*4")).toBe(20);
-  expect(parseArithmetic("-2")).toBe(-2);
+  expect(UI.parseArithmetic("(2+3)*4")).toBe(20);
+  expect(UI.parseArithmetic("-2")).toBe(-2);
   for (const value of ["alert(1)", "1/0", "1e309", "1;2", ""])
-    expect(Number.isNaN(parseArithmetic(value))).toBe(true);
+    expect(Number.isNaN(UI.parseArithmetic(value))).toBe(true);
 });
 test("JSON serializer rejects nonfinite, cyclic data, accessors and class instances", () => {
   let touched = false;

@@ -4,8 +4,10 @@ import { useContext, useId, useState } from "preact/hooks";
 import type { SurfaceProps } from "./jsx-runtime";
 import { Label } from "./label";
 import type { Json, SurfaceEvent } from "./protocol";
-export * from "./color-space";
-export { parseArithmetic } from "./arithmetic";
+// The v1-3 control math, frozen at the tagged revision: v4 fields parse and
+// convert exactly as the controls users already know.
+export * from "../../compat/src/frozen/reference/controls/color-space";
+export { parseArithmetic } from "../../compat/src/frozen/reference/controls/arith";
 
 export interface ControlProps extends SurfaceProps {
   value: Json;

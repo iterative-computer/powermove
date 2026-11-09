@@ -3,8 +3,6 @@ import {
   createRoot,
   h,
   HostClient,
-  compilerAliases,
-  compilerOptions,
   type Commit,
   type HostAck,
   type HostRequest,
@@ -351,13 +349,6 @@ test("host rejects in-flight ack after retirement", async () => {
   client.retire();
   resolve(ack(request));
   await expect(pending).rejects.toThrow("Stale");
-});
-test("compiler aliases are explicit and exclude production Refresh", () => {
-  expect(compilerAliases["powermove/ui"]).toBe("powermove-v4/ui");
-  expect(compilerOptions.jsxImportSource).toBe("powermove-v4");
-  expect(
-    Object.values(compilerAliases).some((v) => v.includes("refresh")),
-  ).toBe(false);
 });
 // Declaration-only regressions: no index signature quietly accepts native capabilities.
 const valid: JSX.IntrinsicElements["anchored"] = {

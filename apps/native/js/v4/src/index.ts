@@ -10,7 +10,6 @@ export * from "./protocol";
 export type { Selector, StyleRule } from "./styles";
 export * from "./host-api";
 export type { RootOptions, RecoveryAdapter } from "./renderer";
-export { compilerAliases, compilerOptions } from "./compiler";
 export type {
   PrimitiveProps,
   ResourceHandle,

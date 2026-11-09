@@ -395,6 +395,13 @@ mod tests {
     }
     #[test]
     fn actual_bundle_executes_without_node_or_chromium() {
+        let host = regex::Regex::new(
+            r#"(?:^|[^.A-Za-z0-9_])require\(\s*["']|from\s*["'](?:node:|bun:)|process\.|Bun\.|node_modules/happy-dom"#,
+        )
+        .unwrap();
+        for bundle in [COMPAT_BUNDLE, STORE_BUNDLE, PAGE_BUNDLE] {
+            assert_eq!(host.find(bundle).map(|m| m.as_str()), None);
+        }
         let runner = runner();
         assert_eq!(
             runner

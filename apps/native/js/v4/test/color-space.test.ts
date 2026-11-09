@@ -9,7 +9,7 @@ import {
   parseColor,
   storedHex,
   toOklch,
-} from "../src/color-space";
+} from "../src/ui";
 
 describe("color space", () => {
   it("parses the notations a person pastes, with their alpha", () => {

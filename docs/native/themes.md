@@ -223,8 +223,8 @@ Integration requested outside this lane:
 ## Design token mapping and additions
 
 `tokens.mjs::FOUNDATION_TOKENS` is the exhaustive machine-readable map.
-**27 of 82** foundation names map to existing native fields. The source-oracle
-test checks that every destination still exists in `crates/design/src/lib.rs`.
+**27 of 82** foundation names map to existing native fields. `crates/design/tests/spec.rs`
+checks every destination against `Tokens::PATCHABLE`.
 Opaque sRGB colours project to the current `u32` fields; nonnegative px metrics
 and supported arithmetic project to `f32`. No alpha is flattened or composited
 onto a guessed background. The other **55** tokens receive typed v4 destinations
