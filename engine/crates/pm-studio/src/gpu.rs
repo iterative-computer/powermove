@@ -81,7 +81,7 @@ struct Rt {
     photons: wgpu::ComputePipeline,
     group: Option<wgpu::BindGroup>,
     tlas: Option<wgpu::Tlas>,
-    blas: Option<wgpu::Blas>,
+    blas: Vec<wgpu::Blas>,
 }
 
 /// Guide images for the Final denoiser (aov.wgsl), bound as group 1 here;
@@ -98,6 +98,13 @@ struct PostParams {
     cameras: [[f32; 4]; 8],
 }
 
+/// One resident native acceleration structure per mesh.
+#[derive(Clone, Debug)]
+pub struct RtGeometry { pub first_vertex: u32, pub vertex_count: u32 }
+/// Metal/wgpu row-major 3×4 object-to-world transform and global triangle offset.
+#[derive(Clone, Debug)]
+pub struct RtPlacement { pub geometry: usize, pub transform: [f32;12], pub triangle_offset: u32 }
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -109,6 +116,7 @@ pub struct Renderer {
     compose: wgpu::ComputePipeline,
     atrous: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
+    temporal: wgpu::ComputePipeline,
     photons: wgpu::ComputePipeline,
     aovs: wgpu::ComputePipeline,
     aov_layout: wgpu::BindGroupLayout,
@@ -124,12 +132,19 @@ pub struct Renderer {
     grid: wgpu::Buffer,
     display: [wgpu::Buffer; 2],
     packed: wgpu::Buffer,
+    history: [wgpu::Buffer; 2],
+    history_index: usize,
+    history_valid: bool,
+    previous_camera: [[f32;4];4],
     readback: wgpu::Buffer,
     screen: wgpu::Texture,
     sampler: wgpu::Sampler,
     trace_group: Option<wgpu::BindGroup>,
     scene_buffers: Vec<wgpu::Buffer>,
     light_count: u32,
+    instance_count: u32,
+    output_layer: Option<u32>,
+    output_include_void: bool,
     base: Params,
     exposure: f32,
     backdrop: [f32; 4],
@@ -250,7 +265,7 @@ impl Renderer {
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("studio post"),
-            entries: &[uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true)],
+            entries: &[uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false)],
         });
         let pipeline = |module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str| {
             let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(entry), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
@@ -270,6 +285,7 @@ impl Renderer {
         let compose = pipeline(&post_src, &post_layout, "compose");
         let atrous = pipeline(&post_src, &post_layout, "atrous");
         let pack = pipeline(&post_src, &post_layout, "pack");
+        let temporal = pipeline(&post_src, &post_layout, "temporal");
         let photons = pipeline(&trace_src, &trace_layout, "photons");
         let rt = rt_ok.then(|| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -293,7 +309,7 @@ impl Renderer {
                     cache: None,
                 })
             };
-            Rt { trace: make("main"), photons: make("photons"), layout, group: None, tlas: None, blas: None }
+            Rt { trace: make("main"), photons: make("photons"), layout, group: None, tlas: None, blas: Vec::new() }
         });
         let aov_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("studio aov"), entries: &[storage(0, false)] });
         let aov_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -343,6 +359,8 @@ impl Renderer {
             aov: buf("aov", pixels * 32, rw),
             display: [buf("display a", pixels * 16, rw), buf("display b", pixels * 16, rw)],
             packed: buf("packed", pixels * 4, rw),
+            history: [buf("history a", pixels * 32, rw), buf("history b", pixels * 32, rw)],
+            history_index: 0, history_valid: false, previous_camera: [[0.;4];4],
             readback: buf("readback", pixels * 4, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
             device,
             queue,
@@ -353,6 +371,7 @@ impl Renderer {
             compose,
             atrous,
             pack,
+            temporal,
             photons,
             aovs,
             aov_layout,
@@ -363,6 +382,8 @@ impl Renderer {
             trace_group: None,
             scene_buffers: Vec::new(),
             light_count: 0,
+            instance_count: 1,
+            output_layer: None, output_include_void: true,
             base: bytemuck::Zeroable::zeroed(),
             exposure: 1.0,
             backdrop: [1.0; 4],
@@ -404,8 +425,10 @@ impl Renderer {
         let extra = if self.rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let init = |label: &str, data: &[u8]| {
             let data: Vec<u8> = if data.is_empty() { vec![0u8; 64] } else { data.to_vec() };
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE | extra })
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | extra })
         };
+        self.history_valid = false;
+        self.instance_count = 1;
         self.scene_buffers = vec![
             init("tris", bytemuck::cast_slice(&prepared.tris)),
             init("nodes", bytemuck::cast_slice(&prepared.nodes)),
@@ -429,6 +452,70 @@ impl Renderer {
         let radius = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-3) * 0.5;
         self.bounds = [centre[0], centre[1], centre[2], radius];
         self.set_camera(scene);
+    }
+
+    /// Native host upload. Geometry stays resident across camera/transform edits.
+    /// `top_nodes` is the mutable TLAS prefix; BLAS nodes and triangles are immutable.
+    pub fn set_instanced_scene(&mut self, scene: &Scene, prepared: &Prepared,
+        geometries: &[RtGeometry], placements: &[RtPlacement], top_nodes: usize,
+        geometry_changed: bool) {
+        if geometry_changed || self.scene_buffers.is_empty() {
+            self.set_scene(scene, prepared);
+        } else {
+            self.queue.write_buffer(&self.scene_buffers[1], 0, bytemuck::cast_slice(&prepared.nodes[..top_nodes]));
+            self.queue.write_buffer(&self.scene_buffers[2], 0, bytemuck::cast_slice(&prepared.materials));
+            self.queue.write_buffer(&self.scene_buffers[3], 0, bytemuck::cast_slice(&prepared.sdata));
+            self.light_count = prepared.lights.len() as u32;
+            self.set_camera(scene);
+        }
+        self.instance_count = placements.len() as u32;
+        self.build_instanced_rt(geometries, placements, geometry_changed);
+    }
+
+    fn build_instanced_rt(&mut self, geometries: &[RtGeometry], placements: &[RtPlacement], rebuild: bool) {
+        let Some(rt) = self.rt.as_mut() else { return };
+        if geometries.is_empty() || placements.is_empty() { rt.group = None; return; }
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let sizes: Vec<_> = geometries.iter().map(|g| wgpu::BlasTriangleGeometrySizeDescriptor {
+            vertex_format: wgpu::VertexFormat::Float32x3, vertex_count: g.vertex_count,
+            index_format: None, index_count: None, flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+        }).collect();
+        if rebuild || rt.blas.len() != geometries.len() {
+            rt.blas = sizes.iter().map(|size| self.device.create_blas(
+                &wgpu::CreateBlasDescriptor { label: Some("studio mesh blas"),
+                    flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build },
+                wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: vec![size.clone()] },
+            )).collect();
+            let entries: Vec<_> = rt.blas.iter().zip(sizes.iter()).zip(geometries.iter()).map(|((blas, size), g)| wgpu::BlasBuildEntry {
+                blas, geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
+                    size, vertex_buffer: &self.scene_buffers[4], first_vertex: g.first_vertex,
+                    vertex_stride: 16, index_buffer: None, first_index: None, transform_buffer: None, transform_buffer_offset: None,
+                }]),
+            }).collect();
+            enc.build_acceleration_structures(&entries, std::iter::empty::<&wgpu::Tlas>());
+        }
+        let mut tlas = self.device.create_tlas(&wgpu::CreateTlasDescriptor {
+            label: Some("studio instances"), max_instances: placements.len() as u32,
+            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+        });
+        for (i, p) in placements.iter().enumerate() {
+            tlas[i] = Some(wgpu::TlasInstance::new(&rt.blas[p.geometry], p.transform, p.triangle_offset, 0xff));
+        }
+        enc.build_acceleration_structures(std::iter::empty::<&wgpu::BlasBuildEntry<'_>>(), [&tlas]);
+        self.queue.submit([enc.finish()]);
+        rt.group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("studio rt"), layout: &rt.layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: tlas.as_binding() }],
+        }));
+        rt.tlas = Some(tlas);
+    }
+
+    /// Update the already serialized camera basis, keeping the editor's camera roll.
+    pub fn set_view(&mut self, camera: [[f32; 4]; 4], ground: [f32;4], shadows: bool, bounds: [f32;4]) {
+        self.base.cam_pos = camera[0]; self.base.cam_fwd = camera[1];
+        self.base.cam_right = camera[2]; self.base.cam_up = camera[3];
+        self.base.ground = ground; self.base.opts[1] = u32::from(!shadows);
+        self.base.bounds = bounds; self.bounds = bounds; self.samples = 0;
     }
 
     /// Camera, backdrop and environment only (no geometry upload).
@@ -479,7 +566,7 @@ impl Renderer {
         let Some(rt) = self.rt.as_mut() else { return };
         rt.group = None;
         rt.tlas = None;
-        rt.blas = None;
+        rt.blas.clear();
         if vertices < 3 {
             return;
         }
@@ -514,7 +601,7 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: tlas.as_binding() }],
         }));
         rt.tlas = Some(tlas);
-        rt.blas = Some(blas);
+        rt.blas = vec![blas];
     }
 
     fn trace_group(&mut self) -> &wgpu::BindGroup {
@@ -556,7 +643,7 @@ impl Renderer {
         let start = Instant::now();
         // Seeds follow the sample index, so a scene and view render the same every time.
         if reset {
-            self.frame = 0;
+            if !self.live { self.frame = 0; }
             self.photons_emitted = 0.0;
         }
         let photons = self.caustics && !self.live && self.light_count > 0;
@@ -568,7 +655,7 @@ impl Renderer {
             let mut p = self.base;
             p.dims = [w, h, self.frame, n];
             p.counts = [self.light_count, bounces, if reset && first { 1 } else { 0 }, clamp];
-            p.opts = [u32::from(self.live), 0, 1, 0];
+            p.opts = [u32::from(self.live), self.base.opts[1], self.instance_count, 0];
             let group = self.trace_group().clone();
             let mut enc = self.device.create_command_encoder(&Default::default());
             if photons {
@@ -633,6 +720,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 5, resource: self.display[dst].as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: self.packed.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: self.ebuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: self.history[self.history_index].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: self.history[1-self.history_index].as_entire_binding() },
             ],
         })
     }
@@ -708,7 +797,7 @@ impl Renderer {
     /// reference renderers.
     pub fn radiance(&mut self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
-        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, 0.0, 0.0], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), if self.output_include_void {1.}else{0.}], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
         self.queue.write_buffer(&self.post_params[0], 0, bytemuck::bytes_of(&params));
         let group = self.post_group(0, 1, 0);
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -749,7 +838,7 @@ impl Renderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut slot = 0;
         let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, src: usize, dst: usize, step: u32, slot: &mut usize| {
-            let params = PostParams { dims: [w, h, step, 0], k: [self.exposure, 1.6, 0.0, 0.0], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), if self.output_include_void {1.}else{0.}], backdrop: self.backdrop, cameras: [self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]] };
             self.queue.write_buffer(&self.post_params[*slot], 0, bytemuck::bytes_of(&params));
             let group = self.post_group(*slot, src, dst);
             *slot += 1;
@@ -769,7 +858,7 @@ impl Renderer {
             });
             let mut p = self.base;
             p.dims = [w, h, 0, 1];
-            p.opts = [0, 0, 1, 0];
+            p.opts = [0, self.base.opts[1], self.instance_count, 0];
             p.counts = [self.light_count, 6, 1, 64];
             self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
             let trace_group = self.trace_group.clone().expect("traced before finishing");
@@ -804,6 +893,10 @@ impl Renderer {
             }
         }
         let mut cur = 0;
+        if self.live {
+            run(&mut enc, &self.temporal, cur, 1-cur, 1, &mut slot);
+            cur = 1-cur;
+        }
         for i in 0..passes.min(5) {
             run(&mut enc, &self.atrous, cur, 1 - cur, 1 << i, &mut slot);
             cur = 1 - cur;
@@ -839,12 +932,14 @@ impl Renderer {
             }
             self.queue.submit([enc.finish()]);
             self.wait();
+            self.advance_history();
             return (Vec::new(), start.elapsed().as_secs_f64() * 1000.0);
         }
         run(&mut enc, &self.pack, cur, 1 - cur, 1, &mut slot);
         if !readback {
             self.queue.submit([enc.finish()]);
             self.wait();
+            self.advance_history();
             return (Vec::new(), start.elapsed().as_secs_f64() * 1000.0);
         }
         enc.copy_buffer_to_buffer(&self.packed, 0, &self.readback, 0, (w * h * 4) as u64);
@@ -855,7 +950,33 @@ impl Renderer {
         let gpu_ms = start.elapsed().as_secs_f64() * 1000.0;
         let pixels = slice.get_mapped_range().expect("mapped readback").to_vec();
         self.readback.unmap();
+        self.advance_history();
         (pixels, gpu_ms)
+    }
+
+    fn advance_history(&mut self) {
+        if self.live { self.history_index=1-self.history_index; self.history_valid=true;
+            self.previous_camera=[self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up]; }
+        else { self.history_valid=false; }
+    }
+    pub fn set_output_mask(&mut self, layer: Option<u32>, include_void: bool) {
+        self.output_layer=layer;self.output_include_void=include_void;
+    }
+    pub fn invalidate_history(&mut self) { self.history_valid=false; }
+
+    /// Texture-array data uses the same layer indices as Rust GpuMaterial.maps.
+    pub fn set_maps(&mut self, rgba:&[u8], width:u32, height:u32, layers:u32) {
+        self.screen=self.device.create_texture_with_data(&self.queue,&wgpu::TextureDescriptor {
+            label:Some("studio material maps"),size:wgpu::Extent3d{width,height,depth_or_array_layers:layers},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::COPY_DST,view_formats:&[],
+        },wgpu::util::TextureDataOrder::LayerMajor,rgba);
+        self.trace_group=None;self.samples=0;self.history_valid=false;
+    }
+    pub fn update_map(&mut self, rgba:&[u8], width:u32, height:u32, layer:u32) {
+        self.queue.write_texture(wgpu::TexelCopyTextureInfo{texture:&self.screen,mip_level:0,origin:wgpu::Origin3d{x:0,y:0,z:layer},aspect:wgpu::TextureAspect::All},
+            rgba,wgpu::TexelCopyBufferLayout{offset:0,bytes_per_row:Some(width*4),rows_per_image:Some(height)},wgpu::Extent3d{width,height,depth_or_array_layers:1});
+        self.samples=0;self.history_valid=false;
     }
 
     pub fn size(&self) -> (u32, u32) {

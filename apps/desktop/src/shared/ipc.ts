@@ -725,6 +725,7 @@ export type NativeMenuRequest = {
 export interface RemoteMediaInfo { token: string; size: number; name: string; type: string; kind: 'image' | 'video' | 'audio' }
 
 export interface PowermoveBridge {
+  studioNative?: import('./studio-native').StudioNativeBridge;
   onInputKey?(cb: (input: SandboxInputKey) => void): () => void;
   sandboxFocus?(focus: { focused: boolean; field: boolean; extensionId: string }): void;
   /** Kills the OS processes that run only this extension's sandbox (never an editor's); resolves to how many. */

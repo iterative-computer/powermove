@@ -2,7 +2,7 @@
 # workspace for now; it joins the native engine's workspace in Phase 1.
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "hosts/studio-electron"]
 
 [workspace.package]
 version = "0.1.0"

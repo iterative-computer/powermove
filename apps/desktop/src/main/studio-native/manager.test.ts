@@ -1,0 +1,78 @@
+import { describe, expect, it } from 'vitest';
+import { StudioHostManager } from './manager';
+import { StudioPacketDecoder, studioPacket } from './protocol';
+
+// An actual child process with the same framing. It can exit in the middle of a
+// render, exercising pending promise cleanup and a fresh generation on restart.
+const fixture = String.raw`
+let input=Buffer.alloc(0);
+process.stdin.on('data',chunk=>{
+ input=Buffer.concat([input,chunk]);
+ while(input.length>=12){
+  const j=input.readUInt32LE(4),b=input.readUInt32LE(8);if(input.length<12+j+b)return;
+  const q=JSON.parse(input.subarray(12,12+j));input=input.subarray(12+j+b);
+  if(q.crash)process.exit(9);
+  const result=q.op==='hello'?{protocol:1}:{op:q.op,runAsNode:process.env.ELECTRON_RUN_AS_NODE??null};
+  const json=Buffer.from(JSON.stringify({id:q.id,ok:true,result}));const h=Buffer.alloc(12);
+  h.write('PMS1');h.writeUInt32LE(json.length,4);h.writeUInt32LE(4,8);
+  process.stdout.write(Buffer.concat([h,json,Buffer.from([1,2,3,255])]));
+ }
+});`;
+const manager = () => new StudioHostManager({ executable: process.execPath, args: ['-e', fixture], env: { ELECTRON_RUN_AS_NODE: '1' }, timeoutMs: 1000 });
+
+describe('native Studio process', () => {
+  it('exchanges binary packets without exposing Electron launch flags', async () => {
+    const host = manager();
+    try {
+      const reply = await host.request({ op: 'bounds' });
+      expect(reply.result).toEqual({ op: 'bounds', runAsNode: null });
+      expect([...reply.binary]).toEqual([1, 2, 3, 255]);
+      expect(host.status().running).toBe(true);
+      expect(reply.roundTripMs).toBeGreaterThan(0);
+    } finally { host.dispose(); }
+  });
+  it('rejects a crashed render and restarts with a fresh generation', async () => {
+    const host = manager();
+    try {
+      const before = await host.request({ op: 'bounds' });
+      await expect(host.request({ op: 'render', crash: true })).rejects.toThrow('Native Studio exited');
+      expect(host.status().running).toBe(false);
+      await new Promise(resolve => setTimeout(resolve, 120));
+      const after = await host.request({ op: 'bounds' });
+      expect(after.generation).toBeGreaterThan(before.generation);
+      expect(host.status().failure).toBe(null);
+    } finally { host.dispose(); }
+  });
+  it('lets the caller choose WebGPU when the native binary is missing', async () => {
+    const host = new StudioHostManager({ executable: null });
+    const chosen = await host.connect().then(() => 'native', () => 'webgpu');
+    expect(chosen).toBe('webgpu');
+    expect(host.status().available).toBe(false);
+    host.dispose();
+  });
+  it('handles spawn failures and refuses requests after disposal', async () => {
+    const host = new StudioHostManager({ executable: '/nonexistent/powermove-studio-host' });
+    await expect(host.connect()).rejects.toThrow();
+    expect(host.status().running).toBe(false);
+    host.dispose();
+    await expect(host.request({ op: 'hello' })).rejects.toThrow('closed');
+  });
+});
+
+describe('native Studio framing', () => {
+  it('decodes split headers and several binary packets in one chunk', () => {
+    const encode = (id: number) => {
+      const [header, json, binary] = studioPacket(id, { ok: true, result: { id } }, new Uint8Array([0, 255]));
+      return Buffer.concat([header!, json!, binary!]);
+    };
+    const bytes = Buffer.concat([encode(1), encode(2)]), decoder = new StudioPacketDecoder();
+    const packets = [...decoder.push(bytes.subarray(0, 7)), ...decoder.push(bytes.subarray(7, 21)), ...decoder.push(bytes.subarray(21))];
+    expect(packets.map(p => p.json.id)).toEqual([1, 2]);
+    expect([...packets[1]!.binary]).toEqual([0, 255]);
+  });
+  it('rejects invalid and oversized headers before allocating a body', () => {
+    expect(() => new StudioPacketDecoder().push(Buffer.alloc(12))).toThrow('magic');
+    const header = Buffer.alloc(12); header.write('PMS1'); header.writeUInt32LE(0xffffffff, 4);
+    expect(() => new StudioPacketDecoder().push(header)).toThrow('size limit');
+  });
+});

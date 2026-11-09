@@ -1,3 +1,5 @@
+import { registerStudioNativeIpc } from './studio-native/ipc';
+import { studioHostExecutable } from './studio-native/manager';
 import { createEditorClosePreparation } from './editor-close';
 import { registerFontsIpc } from './fonts';
 import { registerAgentNotifications } from './agent-notifications';
@@ -1122,6 +1124,8 @@ if (!hasSingleInstanceLock) {
     registerSaveIpc(ipcMain, { ...ctx, projects, recoveryProjects });
     registerProjectOpenPathIpc(ipcMain, { ...ctx, projects });
     registerCaptureIpc(ipcMain, ctx);
+    const disposeStudioNative = registerStudioNativeIpc(ipcMain, studioHostExecutable(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined), isTrustedSender);
+    app.once('will-quit', disposeStudioNative);
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);

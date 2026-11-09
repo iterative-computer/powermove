@@ -1,0 +1,390 @@
+//! Fast path for a scene already prepared by Studio's shared TS extractor.
+//! This is the binary layout of Rust's Prepared scene, not a second renderer model.
+use crate::{protocol::Range, scene::Identity};
+use glam::{Mat4, Vec3};
+use pm_studio::{
+    bvh::WideNode,
+    gpu::{RtGeometry, RtPlacement},
+    math::{Vec3 as V, v3},
+    scene::{Camera, GpuMaterial, GpuTri, Prepared, Scene},
+};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraBasis {
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub tan_y: f32,
+    pub aspect: f32,
+    pub lens_radius: f32,
+    pub focus: f32,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Environment {
+    pub zenith: [f32; 3],
+    pub horizon: [f32; 3],
+    pub ground: [f32; 3],
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct View {
+    pub camera: CameraBasis,
+    pub exposure: f32,
+    pub backdrop: [f32; 3],
+    pub backdrop_opaque: bool,
+    pub shadow_catcher: bool,
+    pub shadows: bool,
+    pub floor_y: f32,
+    pub environment: Environment,
+    pub bounds: [f32; 4],
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Upload {
+    pub key: String,
+    pub positions: Range,
+    pub tris: Range,
+    pub nodes: Range,
+    pub materials: Range,
+    pub sdata: Range,
+    pub top_nodes: usize,
+    pub instance_count: usize,
+    pub light_count: usize,
+    pub objects: Vec<Identity>,
+    pub view: View,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Patch {
+    pub key: String,
+    pub top: Range,
+    pub sdata: Range,
+    pub materials: Range,
+    pub view: View,
+}
+
+pub struct PackedScene {
+    pub key: String,
+    pub prepared: Prepared,
+    pub geometries: Vec<RtGeometry>,
+    pub placements: Vec<RtPlacement>,
+    pub top_nodes: usize,
+    pub view: View,
+    pub objects: Vec<Identity>,
+}
+fn v(a: [f32; 3]) -> V {
+    v3(a[0], a[1], a[2])
+}
+impl View {
+    pub fn scene(&self) -> Scene {
+        let c = &self.camera;
+        let pos = v(c.position);
+        Scene {
+            objects: vec![],
+            materials: vec![],
+            lights: vec![],
+            camera: Camera {
+                position: pos,
+                target: pos + v(c.forward) * c.focus.max(1.),
+                fov: 2. * c.tan_y.atan().to_degrees(),
+                f_stop: 0.,
+                focus: None,
+                focal_mm: 50.,
+            },
+            backdrop: v(self.backdrop),
+            environment: (v(self.environment.zenith), v(self.environment.horizon)),
+            exposure: self.exposure,
+            shadow_catcher: self.shadow_catcher,
+            extra_lights: vec![],
+            layers: None,
+        }
+    }
+    pub fn basis(&self) -> [[f32; 4]; 4] {
+        let c = &self.camera;
+        [
+            v(c.position).to4(c.lens_radius),
+            v(c.forward).to4(c.focus),
+            v(c.right).to4(c.tan_y * c.aspect),
+            v(c.up).to4(c.tan_y),
+        ]
+    }
+    pub fn ground(&self) -> [f32; 4] {
+        v(self.environment.ground).to4(self.floor_y)
+    }
+    fn validate(&self) -> Result<(), String> {
+        let c = &self.camera;
+        if !self.exposure.is_finite()
+            || self.exposure < 0.
+            || !c.tan_y.is_finite()
+            || c.tan_y <= 0.
+            || !c.aspect.is_finite()
+            || c.aspect <= 0.
+            || c.position
+                .iter()
+                .chain(c.forward.iter())
+                .chain(c.up.iter())
+                .chain(c.right.iter())
+                .chain(self.bounds.iter())
+                .any(|x| !x.is_finite())
+        {
+            return Err("invalid native camera/view".into());
+        }
+        Ok(())
+    }
+}
+impl PackedScene {
+    pub fn new(u: Upload, binary: &[u8]) -> Result<Self, String> {
+        u.view.validate()?;
+        let positions = u.positions.typed::<[f32; 4]>(binary)?;
+        let tris = u.tris.typed::<GpuTri>(binary)?;
+        let nodes = u.nodes.typed::<WideNode>(binary)?;
+        let materials = u.materials.typed::<GpuMaterial>(binary)?;
+        let sdata = u.sdata.typed::<[f32; 4]>(binary)?;
+        if u.key.len() > 65536
+            || positions.len() != tris.len() * 3
+            || materials.is_empty()
+            || u.top_nodes == 0
+            || u.top_nodes > nodes.len()
+            || u.instance_count > 65535
+            || u.light_count > 65535
+            || sdata.len() != u.light_count * 4 + u.instance_count * 9
+        {
+            return Err("invalid prepared scene buffer sizes".into());
+        }
+        if positions
+            .iter()
+            .flatten()
+            .chain(bytemuck::cast_slice::<GpuTri, f32>(&tris))
+            .chain(bytemuck::cast_slice::<GpuMaterial, f32>(&materials))
+            .chain(sdata.iter().flatten())
+            .any(|x| !x.is_finite())
+        {
+            return Err("prepared scene contains non-finite data".into());
+        }
+        for t in &tris {
+            if t.uv2m[2] < 0.
+                || t.uv2m[2] as usize >= materials.len()
+                || t.uv2m[3] < 0.
+                || t.uv2m[3] as usize >= u.objects.len()
+            {
+                return Err("prepared triangle has invalid material/object index".into());
+            }
+        }
+        let lights = sdata[..u.light_count * 4]
+            .chunks_exact(4)
+            .map(|s| pm_studio::scene::GpuLight {
+                pos: s[0],
+                u: s[1],
+                v: s[2],
+                radiance: s[3],
+            })
+            .collect();
+        let prepared = Prepared {
+            positions,
+            tris,
+            nodes,
+            materials,
+            lights,
+            sdata,
+        };
+        let (geometries, placements) = placements(&prepared, u.instance_count)?;
+        Ok(Self {
+            key: u.key,
+            prepared,
+            geometries,
+            placements,
+            top_nodes: u.top_nodes,
+            view: u.view,
+            objects: u.objects,
+        })
+    }
+    pub fn patch(&mut self, p: Patch, binary: &[u8]) -> Result<(), String> {
+        if self.key != p.key {
+            return Err("native geometry key is stale; upload scene again".into());
+        }
+        p.view.validate()?;
+        let nodes = p.top.typed::<WideNode>(binary)?;
+        let sdata = p.sdata.typed::<[f32; 4]>(binary)?;
+        let materials = p.materials.typed::<GpuMaterial>(binary)?;
+        if nodes.len() != self.top_nodes
+            || sdata.len() != self.prepared.sdata.len()
+            || materials.len() != self.prepared.materials.len()
+        {
+            return Err("prepared patch changes buffer sizes; upload scene again".into());
+        }
+        if sdata
+            .iter()
+            .flatten()
+            .chain(bytemuck::cast_slice::<GpuMaterial, f32>(&materials))
+            .any(|x| !x.is_finite())
+        {
+            return Err("patch contains non-finite data".into());
+        }
+        let old = std::mem::replace(&mut self.prepared.sdata, sdata);
+        let count = self.placements.len();
+        let (_, placements) = match placements(&self.prepared, count) {
+            Ok(p) => p,
+            Err(e) => {
+                self.prepared.sdata = old;
+                return Err(e);
+            }
+        };
+        // Geometry order is sorted by BLAS root, so transforms never reorder Metal BLAS.
+        self.placements = placements;
+        self.prepared.nodes[..self.top_nodes].copy_from_slice(&nodes);
+        self.prepared.materials = materials;
+        self.view = p.view;
+        for (i, l) in self.prepared.lights.iter_mut().enumerate() {
+            let s = &self.prepared.sdata[i * 4..i * 4 + 4];
+            l.pos = s[0];
+            l.u = s[1];
+            l.v = s[2];
+            l.radiance = s[3];
+        }
+        Ok(())
+    }
+    pub fn pick(&self, x: f32, y: f32, w: u32, h: u32) -> Option<serde_json::Value> {
+        let c = &self.view.camera;
+        let eye = Vec3::from(c.position);
+        let direction = (Vec3::from(c.forward)
+            + Vec3::from(c.right) * ((x + 0.5) / w as f32 * 2. - 1.) * c.tan_y * c.aspect
+            - Vec3::from(c.up) * ((y + 0.5) / h as f32 * 2. - 1.) * c.tan_y)
+            .normalize();
+        let mut best = f32::MAX;
+        let mut found = None;
+        for placement in &self.placements {
+            let a = placement.transform;
+            let world = Mat4::from_cols_array(&[
+                a[0], a[4], a[8], 0., a[1], a[5], a[9], 0., a[2], a[6], a[10], 0., a[3], a[7],
+                a[11], 1.,
+            ]);
+            let inv = world.inverse();
+            let ro = inv.transform_point3(eye);
+            let rd = inv.transform_vector3(direction);
+            let geometry = &self.geometries[placement.geometry];
+            for t in placement.triangle_offset as usize
+                ..(placement.triangle_offset + geometry.vertex_count / 3) as usize
+            {
+                let pos = &self.prepared.positions[t * 3..t * 3 + 3];
+                let a = Vec3::from_slice(&pos[0]);
+                let e1 = Vec3::from_slice(&pos[1]) - a;
+                let e2 = Vec3::from_slice(&pos[2]) - a;
+                let p = rd.cross(e2);
+                let det = e1.dot(p);
+                if det.abs() < 1e-10 {
+                    continue;
+                }
+                let tv = ro - a;
+                let u = tv.dot(p) / det;
+                if !(0.0..=1.0).contains(&u) {
+                    continue;
+                }
+                let q = tv.cross(e1);
+                let vv = rd.dot(q) / det;
+                if vv < 0. || u + vv > 1. {
+                    continue;
+                }
+                let d = e2.dot(q) / det;
+                if d <= 0. || d >= best {
+                    continue;
+                }
+                best = d;
+                let tri = &self.prepared.tris[t];
+                let n = Vec3::from_slice(&tri.n[0]) * (1. - u - vv)
+                    + Vec3::from_slice(&tri.n[1]) * u
+                    + Vec3::from_slice(&tri.n[2]) * vv;
+                let n = inv.transpose().transform_vector3(n).normalize();
+                let oi = tri.uv2m[3] as usize;
+                let identity = &self.objects[oi];
+                found = Some(
+                    serde_json::json!({"layer":identity.layer,"part":identity.part,"object":oi,"point":(eye+direction*d).to_array(),"normal":n.to_array(),"distance":d}),
+                );
+            }
+        }
+        found
+    }
+}
+fn placements(p: &Prepared, count: usize) -> Result<(Vec<RtGeometry>, Vec<RtPlacement>), String> {
+    let start = p.lights.len() * 4;
+    let mut roots = BTreeMap::<u32, (u32, u32)>::new();
+    for i in 0..count {
+        let root = p.sdata[start + i * 9 + 3][3];
+        if root < 0. || root.fract() != 0. {
+            return Err("invalid instance root".into());
+        }
+        let root = root as u32;
+        if let std::collections::btree_map::Entry::Vacant(e) = roots.entry(root) {
+            e.insert(triangle_range(&p.nodes, root, p.tris.len())?);
+        }
+    }
+    let geometries = roots
+        .values()
+        .map(|&(lo, hi)| RtGeometry {
+            first_vertex: lo * 3,
+            vertex_count: (hi - lo) * 3,
+        })
+        .collect::<Vec<_>>();
+    let index = roots
+        .keys()
+        .enumerate()
+        .map(|(i, &r)| (r, i))
+        .collect::<BTreeMap<_, _>>();
+    let mut out = Vec::new();
+    for i in 0..count {
+        let rows = &p.sdata[start + i * 9..start + i * 9 + 9];
+        let root = rows[3][3] as u32;
+        let inv = Mat4::from_cols_array(&[
+            rows[0][0], rows[1][0], rows[2][0], 0., rows[0][1], rows[1][1], rows[2][1], 0.,
+            rows[0][2], rows[1][2], rows[2][2], 0., rows[0][3], rows[1][3], rows[2][3], 1.,
+        ]);
+        if !inv.is_finite() || inv.determinant().abs() < 1e-12 {
+            return Err("invalid instance transform".into());
+        }
+        let m = inv.inverse().to_cols_array_2d();
+        out.push(RtPlacement {
+            geometry: index[&root],
+            triangle_offset: roots[&root].0,
+            transform: [
+                m[0][0], m[1][0], m[2][0], m[3][0], m[0][1], m[1][1], m[2][1], m[3][1], m[0][2],
+                m[1][2], m[2][2], m[3][2],
+            ],
+        });
+    }
+    Ok((geometries, out))
+}
+fn triangle_range(nodes: &[WideNode], root: u32, triangles: usize) -> Result<(u32, u32), String> {
+    let mut stack = vec![root];
+    let mut visited = std::collections::HashSet::new();
+    let (mut lo, mut hi) = (u32::MAX, 0);
+    while let Some(i) = stack.pop() {
+        if !visited.insert(i) {
+            return Err("cyclic/duplicate BLAS node".into());
+        }
+        let n = nodes
+            .get(i as usize)
+            .ok_or("BLAS root outside node buffer")?;
+        for (child, count) in [(n.left, n.lcount), (n.right, n.rcount)] {
+            if count == u32::MAX {
+                continue;
+            }
+            if count == 0 {
+                stack.push(child);
+            } else {
+                let end = child.checked_add(count).ok_or("triangle range overflow")?;
+                if end as usize > triangles {
+                    return Err("BLAS triangle range outside buffer".into());
+                }
+                lo = lo.min(child);
+                hi = hi.max(end);
+            }
+        }
+    }
+    if lo >= hi {
+        return Err("empty BLAS".into());
+    }
+    Ok((lo, hi))
+}

@@ -8,7 +8,7 @@ use crate::mesh::{self, Mesh};
 /// The layered material (an OpenPBR subset): base metal/dielectric, specular
 /// GGX, a clear coat, transmission, and emission (optionally from the screen
 /// texture).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Material {
     pub base: Vec3,
     pub metallic: f32,
@@ -62,7 +62,7 @@ impl Material {
 
 /// A rectangular softbox: `center`, two half-extent vectors spanning its face,
 /// emitting toward `u × v`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Softbox {
     pub center: Vec3,
     pub u: Vec3,
@@ -104,7 +104,7 @@ impl Softbox {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     pub position: Vec3,
     pub target: Vec3,
@@ -122,11 +122,13 @@ impl Camera {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Object {
     pub mesh: Mesh,
     pub material: usize,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Scene {
     pub objects: Vec<Object>,
     pub materials: Vec<Material>,
@@ -159,7 +161,7 @@ pub struct Prepared {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct GpuTri {
     pub n: [[f32; 4]; 3],
     /// uv0.xy, uv1.xy
@@ -171,7 +173,7 @@ pub struct GpuTri {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct GpuMaterial {
     pub base: [f32; 4],  // rgb, metallic
     pub spec: [f32; 4],  // roughness, coat, coat roughness, transmission
@@ -182,7 +184,7 @@ pub struct GpuMaterial {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct GpuLight {
     pub pos: [f32; 4], // softbox centre, kind 0
     pub u: [f32; 4],   // half extent, area

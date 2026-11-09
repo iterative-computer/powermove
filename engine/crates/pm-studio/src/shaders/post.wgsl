@@ -149,7 +149,12 @@ fn atrous(@builtin(global_invocation_id) g: vec3u) {
 fn pack(@builtin(global_invocation_id) g: vec3u) {
   if (g.x >= Q.dims.x || g.y >= Q.dims.y) { return; }
   let i = g.y * Q.dims.x + g.x;
-  let c = clamp(src[i], vec4f(0.0), vec4f(1.0));
+  var c = clamp(src[i], vec4f(0.0), vec4f(1.0));
+  // Optional native output mask. The shared trace still includes every layer's
+  // occlusion/reflections; only presentation is separated for the compositor.
+  if (Q.k.z > 0.0 && u32(gbuf[i].z + 0.5) != u32(Q.k.z)) {
+    if (gbuf[i].z > 0.5 || Q.k.w < 0.5) { c = vec4f(0.0); }
+  }
   let q = vec4u(c * 255.0 + 0.5);
   packed[i] = q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);
 }
