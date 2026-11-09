@@ -1,4 +1,5 @@
 use super::{controller::*, form::*, kernel, model::*};
+use crate::alert::{Alert, Key};
 use pm_services::ServiceErrorCode;
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -84,7 +85,7 @@ fn ready() -> LibraryController<Port> {
 fn effects(c: &mut LibraryController<Port>) -> Vec<HostEffect> {
     c.take_effects()
 }
-fn alert(c: &mut LibraryController<Port>) -> (u64, Alert) {
+fn alert(c: &mut LibraryController<Port>) -> (u64, Alert<bool>) {
     effects(c)
         .into_iter()
         .find_map(|effect| {
@@ -278,12 +279,13 @@ fn delete_is_critical_archival_copy_and_cancel_is_default() {
     let (serial, prompt) = alert(&mut c);
     assert_eq!(prompt.message, "Delete “Unused” immediately?");
     assert_eq!(
-        prompt.detail,
+        prompt.informative,
         "The project is archived in Powermove’s storage and can’t be opened from the Library again."
     );
-    assert_eq!(prompt.buttons, vec!["Cancel", "Delete"]);
-    assert_eq!(prompt.default, 0);
-    assert_eq!(prompt.destructive, Some(1));
+    assert_eq!(prompt.labels(), ["Cancel", "Delete"]);
+    assert!(prompt.buttons[0].default);
+    assert_eq!(prompt.buttons[0].key, Key::Escape);
+    assert!(prompt.buttons[1].destructive && !prompt.buttons[0].destructive);
     assert!(prompt.critical);
     let count = c.port.sent.len();
     c.answer(serial, None).unwrap();
@@ -295,8 +297,7 @@ fn stale_alert_response_and_abort_never_mutate_the_wrong_target() {
     let mut c = ready();
     c.menu("a", MenuAction::Trash).unwrap();
     let (serial, _) = alert(&mut c);
-    assert_eq!(c.answer(serial + 1, Some(0)), Err(Failure::Stale));
-    assert_eq!(c.answer(serial, Some(9)), Err(Failure::Stale));
+    assert_eq!(c.answer(serial + 1, Some(true)), Err(Failure::Stale));
     c.answer(serial, None).unwrap();
     assert!(
         c.port
@@ -304,7 +305,7 @@ fn stale_alert_response_and_abort_never_mutate_the_wrong_target() {
             .iter()
             .all(|r| !matches!(r.command, Command::Trash(_)))
     );
-    assert_eq!(c.answer(serial, Some(0)), Err(Failure::Stale));
+    assert_eq!(c.answer(serial, Some(true)), Err(Failure::Stale));
 }
 
 #[test]
@@ -457,7 +458,7 @@ fn create_failure_keeps_sheet_and_draft_then_retry_closes_after_success() {
     assert!(!c.form.as_ref().unwrap().submitting);
     let (serial, prompt) = alert(&mut c);
     assert_eq!(prompt.message, "There isn’t enough disk space.");
-    c.answer(serial, Some(0)).unwrap();
+    c.answer(serial, Some(false)).unwrap();
     c.create().unwrap();
     let serial = c.port.sent.last().unwrap().serial;
     complete(&mut c, serial, Ok(Outcome::Changed));
@@ -524,10 +525,10 @@ fn service_errors_use_spec_sentences_and_never_show_diagnostics() {
         ),
     ];
     for (code, message, detail) in cases {
-        let alert = Alert::error(code, "Launch Film");
+        let alert = error_alert(code, "Launch Film");
         assert_eq!(alert.message, message);
-        assert_eq!(alert.detail, detail);
-        assert_eq!(alert.buttons, vec!["OK"]);
+        assert_eq!(alert.informative, detail);
+        assert_eq!(alert.labels(), ["OK"]);
         assert!(!alert.critical);
     }
 }
@@ -543,7 +544,7 @@ fn disconnected_service_and_unsupported_operations_are_not_successes() {
     let mut c = ready();
     c.menu("c", MenuAction::DeleteImmediately).unwrap();
     let (serial, _) = alert(&mut c);
-    c.answer(serial, Some(1)).unwrap();
+    c.answer(serial, Some(true)).unwrap();
     let serial = c.port.sent.last().unwrap().serial;
     complete(
         &mut c,
@@ -977,12 +978,16 @@ fn trash_requires_confirmation() {
     c.menu("a", MenuAction::Trash).unwrap();
     let (serial, prompt) = alert(&mut c);
     assert_eq!(prompt.message, "Move “Launch Film” to the Trash?");
-    assert_eq!(prompt.detail, "You can put it back from Recently Deleted.");
-    assert_eq!(prompt.buttons, vec!["Move to Trash", "Cancel"]);
-    assert_eq!(prompt.default, 0);
+    assert_eq!(
+        prompt.informative,
+        "You can put it back from Recently Deleted."
+    );
+    assert_eq!(prompt.labels(), ["Move to Trash", "Cancel"]);
+    assert!(prompt.buttons[0].default);
+    assert_eq!(prompt.buttons[1].key, Key::Escape);
     assert!(!prompt.critical);
     assert_eq!(c.port.sent.len(), count);
-    c.answer(serial, Some(0)).unwrap();
+    c.answer(serial, Some(true)).unwrap();
     assert_eq!(
         c.port.sent.last().unwrap().command,
         Command::Trash("a".into())

@@ -1077,7 +1077,7 @@ impl Controller {
                         }
                         v.recovery_pending = true;
                         v.mcp.awaiting_recovery(Some(name.clone()));
-                        crate::surfaces::recovery::sheet(&recovery.alert, &v.host.borrow().window)
+                        recovery.alert.sheet(&v.host.borrow().window)
                     });
                     let response = match answer {
                         Ok(rx) => rx.recv().await.ok().flatten(),
@@ -1171,19 +1171,12 @@ impl Controller {
     ) {
         use crate::surfaces::documents::{self, Action};
         let exists = path.as_ref().is_some_and(|p| p.exists());
-        let alert = documents::open_error(name, open_failure_code(error), exists);
+        let alert = documents::open_error(name, open_failure(error), exists);
         self.errors.borrow_mut().push("Project", &alert.message);
         self.message = String::new();
-        let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
-        let rx = platform::choice(
-            &self.host.borrow().window,
-            &alert.message,
-            &alert.informative,
-            &labels,
-        );
+        let rx = alert.sheet(&self.host.borrow().window);
         cx.spawn(async move |_, _| {
-            let choice = rx.recv().await.ok();
-            if alert.action_at(choice) == Some(Action::ShowInFinder)
+            if rx.recv().await.ok().flatten() == Some(Action::ShowInFinder)
                 && let Some(path) = path
             {
                 platform::reveal(&path);
@@ -1748,26 +1741,27 @@ impl Controller {
         true
     }
 }
-/// The wire code the open alert's copy is keyed on.
-/// The service code `documents::open_error` words (its snake_case wire codes).
-fn open_failure_code(error: &KernelFailure) -> &'static str {
-    match error {
-        KernelFailure::NoProject(_) => "not_found",
+/// Why the open failed, in the words the open alert has for it.
+fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailure {
+    use crate::surfaces::documents::OpenFailure;
+    use pm_services::ServiceErrorCode::*;
+    OpenFailure::Service(match error {
+        KernelFailure::NoProject(_) => NotFound,
         // Unsaved work can't be protected without its journal: say so.
-        KernelFailure::Journal(_) => "journal",
+        KernelFailure::Journal(_) => return OpenFailure::Journal,
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
             if text.contains("permission") {
-                "permission_denied"
+                PermissionDenied
             } else if text.contains("not found") || text.contains("no such file") {
-                "not_found"
+                NotFound
             } else if text.contains("no space") {
-                "disk_full"
+                DiskFull
             } else {
-                "invalid_data"
+                InvalidData
             }
         }
-    }
+    })
 }
 pub const SAVING: &str = "Saving…";
 /// `fpsRational`, else the stored float snapped to its exact rate: a project
@@ -1906,7 +1900,7 @@ mod open_failure_tests {
             ),
         ] {
             let alert =
-                crate::surfaces::documents::open_error("Film", open_failure_code(&failure), false);
+                crate::surfaces::documents::open_error("Film", open_failure(&failure), false);
             assert!(
                 !alert.message.contains("operation couldn’t be completed"),
                 "{failure:?}: {}",

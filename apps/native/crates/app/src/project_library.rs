@@ -5,7 +5,7 @@
 //! by name, so the native collection scaffold is gone.
 use crate::{
     library_surface::{
-        appkit::{new_project_sheet, present_alert},
+        appkit::new_project_sheet,
         controller::{Content, HostEffect, LibraryController},
         form::Format,
         kernel::KernelLibraryPort,
@@ -106,7 +106,7 @@ impl ProjectLibrary {
                 let Some(window) = self.parent(cx) else {
                     return;
                 };
-                let rx = present_alert(&window, &alert);
+                let rx = alert.sheet(&window);
                 cx.spawn(async move |this, cx| {
                     let answer = rx.recv().await.ok().flatten();
                     let _ = this.update(cx, |v, cx| {

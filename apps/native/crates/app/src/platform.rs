@@ -229,37 +229,6 @@ pub fn choose_paths(
     rx
 }
 
-/// Button index, starting at zero. Closing a sheet always chooses cancellation.
-pub fn choice(
-    window: &NSWindow,
-    title: &str,
-    detail: &str,
-    buttons: &[&str],
-) -> async_channel::Receiver<usize> {
-    let mtm = MainThreadMarker::new().unwrap();
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(title));
-    alert.setInformativeText(&NSString::from_str(detail));
-    for (index, b) in buttons.iter().enumerate() {
-        let button = alert.addButtonWithTitle(&NSString::from_str(b));
-        if *b == "Cancel" {
-            button.setKeyEquivalent(&NSString::from_str("\u{1b}"));
-        } else if index == 0 {
-            button.setKeyEquivalent(&NSString::from_str("\r"));
-        }
-        if *b == "Don’t Save" {
-            button.setKeyEquivalent(&NSString::from_str("d"));
-            button.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
-        }
-    }
-    let (tx, rx) = async_channel::bounded(1);
-    let done = block2::RcBlock::new(move |r: NSModalResponse| {
-        let _ = tx.try_send(choice_index(r));
-    });
-    alert.beginSheetModalForWindow_completionHandler(window, Some(&done));
-    rx
-}
-
 /// Selects `path` in Finder.
 pub fn reveal(path: &std::path::Path) {
     use objc2_app_kit::NSWorkspace;
@@ -269,36 +238,6 @@ pub fn reveal(path: &std::path::Path) {
             .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
     }
 }
-/// A one-button alert as a sheet on the key window.
-pub fn note(title: &str, detail: &str) {
-    let mtm = MainThreadMarker::new().unwrap();
-    let Some(window) = objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() else {
-        return;
-    };
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(title));
-    alert.setInformativeText(&NSString::from_str(detail));
-    alert.addButtonWithTitle(&NSString::from_str("OK"));
-    alert.beginSheetModalForWindow_completionHandler(&window, None);
-}
-
-fn choice_index(response: NSModalResponse) -> usize {
-    usize::try_from(response - NSAlertFirstButtonReturn).unwrap_or(usize::MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn alert_buttons_keep_their_order_and_aborted_sheets_never_choose_save_or_recover() {
-        assert_eq!(choice_index(NSAlertFirstButtonReturn), 0);
-        assert_eq!(choice_index(NSAlertSecondButtonReturn), 1);
-        assert_eq!(choice_index(NSAlertThirdButtonReturn), 2);
-        assert_eq!(choice_index(NSModalResponseAbort), usize::MAX);
-        assert_eq!(choice_index(NSModalResponseCancel), usize::MAX);
-    }
-}
-
 pub fn history_labels(undo: Option<&str>, redo: Option<&str>) {
     let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
     let Some(root) = app.mainMenu() else { return };

@@ -15,7 +15,7 @@ impl ReportWindow {
             "copy_report" => copy_text(&report_text(&self.report)),
             "about_native_files" => {
                 let view = about_native_files();
-                crate::platform::note(&view.title, &view.line);
+                crate::alert::note(&view.title, &view.line);
             }
             _ => {}
         }
@@ -147,7 +147,7 @@ pub fn open(profile: PathBuf, cx: &mut App) {
                         .borrow_mut()
                         .push("Library", UNREADABLE);
                 });
-                crate::platform::note(UNREADABLE, "Your library wasn’t changed.");
+                crate::alert::note(UNREADABLE, "Your library wasn’t changed.");
                 return;
             }
         };

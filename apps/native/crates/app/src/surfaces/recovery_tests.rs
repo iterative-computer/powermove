@@ -1,13 +1,18 @@
 use super::*;
 
-fn labels(a: &Alert) -> Vec<&str> {
-    a.buttons.iter().map(|b| b.label).collect()
+use crate::alert::Key;
+
+fn labels(a: &Alert<Action>) -> Vec<&str> {
+    a.labels()
 }
-fn on_return(a: &Alert) -> Option<Action> {
+fn on_return(a: &Alert<Action>) -> Option<Action> {
     a.buttons.iter().find(|b| b.default).map(|b| b.action)
 }
-fn on_escape(a: &Alert) -> Option<Action> {
-    a.buttons.iter().find(|b| b.escape).map(|b| b.action)
+fn on_escape(a: &Alert<Action>) -> Option<Action> {
+    a.buttons
+        .iter()
+        .find(|b| b.key == Key::Escape)
+        .map(|b| b.action)
 }
 #[test]
 fn ask_exact_copy_and_safe_keyboard() {

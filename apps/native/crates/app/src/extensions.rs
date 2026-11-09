@@ -468,10 +468,19 @@ impl Controller {
                 let title = request["title"].as_str().unwrap_or_default();
                 let body = request["body"].as_str().unwrap_or_default();
                 let shell = self.host.borrow();
-                let answer = crate::platform::choice(&shell.window, title, body, &["OK", "Cancel"]);
+                use crate::alert::{Alert, Button};
+                let answer = Alert::new(
+                    title,
+                    body,
+                    vec![
+                        Button::new("OK", true).default(),
+                        Button::new("Cancel", false).cancel(),
+                    ],
+                )
+                .sheet(&shell.window);
                 drop(shell);
                 cx.spawn(async move |this, cx| {
-                    let confirmed = answer.recv().await == Ok(0);
+                    let confirmed = answer.recv().await == Ok(Some(true));
                     let _ = this.update(cx, |v, _| {
                         if let Some(host) = &v.extensions.host {
                             host.answer(token, confirmed.into());
@@ -499,12 +508,20 @@ impl Controller {
                     ),
                 };
                 let shell = self.host.borrow();
-                let answer =
-                    crate::platform::choice(&shell.window, &title, &body, &["Wait", "Stop"]);
+                use crate::alert::{Alert, Button};
+                let answer = Alert::new(
+                    title,
+                    body,
+                    vec![
+                        Button::new("Wait", false).default(),
+                        Button::new("Stop", true),
+                    ],
+                )
+                .sheet(&shell.window);
                 drop(shell);
                 self.extensions.unresponsive = Some(execution);
                 cx.spawn(async move |this, cx| {
-                    let stop = answer.recv().await == Ok(1);
+                    let stop = answer.recv().await == Ok(Some(true));
                     let _ = this.update(cx, |v, _| {
                         if v.extensions.unresponsive == Some(execution) {
                             v.extensions.unresponsive = None;

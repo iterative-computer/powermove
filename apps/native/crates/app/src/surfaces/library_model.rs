@@ -1,4 +1,5 @@
 //! Immutable presentation; values come from the kernel, dates from the host.
+use crate::alert::{Alert, Button};
 use pm_services::ServiceErrorCode;
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -171,83 +172,39 @@ pub fn context_menu(row: &Row) -> Vec<Option<MenuAction>> {
     items
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Alert {
-    pub message: String,
-    pub detail: String,
-    pub buttons: Vec<&'static str>,
-    pub default: usize,
-    pub destructive: Option<usize>,
-    pub critical: bool,
+/// Library alerts answer `true` for their action, `false` to cancel or acknowledge.
+pub fn trash_alert(name: &str) -> Alert<bool> {
+    Alert::new(
+        format!("Move “{name}” to the Trash?"),
+        "You can put it back from Recently Deleted.",
+        vec![
+            Button::new("Move to Trash", true).default(),
+            Button::new("Cancel", false).cancel(),
+        ],
+    )
 }
-impl Alert {
-    pub fn trash(name: &str) -> Self {
-        Self {
-            message: format!("Move “{name}” to the Trash?"),
-            detail: "You can put it back from Recently Deleted.".into(),
-            buttons: vec!["Move to Trash", "Cancel"],
-            default: 0,
-            destructive: None,
-            critical: false,
-        }
-    }
-    pub fn delete(name: &str) -> Self {
-        Self {
-        message: format!("Delete “{name}” immediately?"),
-        detail: "The project is archived in Powermove’s storage and can’t be opened from the Library again.".into(),
-        buttons: vec!["Cancel", "Delete"], default: 0, destructive: Some(1), critical: true,
-    }
-    }
-    pub fn error(code: ServiceErrorCode, name: &str) -> Self {
-        // Use the approved generic error for a vanished, unnamed target.
-        let code = if name.is_empty()
-            && !matches!(code, ServiceErrorCode::Offline | ServiceErrorCode::DiskFull)
-        {
-            ServiceErrorCode::Unavailable
-        } else {
-            code
-        };
-        let item = format!("“{name}”");
-        let (message, detail) = match code {
-            ServiceErrorCode::Offline => (
-                "Powermove can’t connect.".into(),
-                "Check your internet connection and try again.",
-            ),
-            ServiceErrorCode::NotFound => (
-                format!("{item} can’t be found."),
-                "It may have been moved or deleted.",
-            ),
-            ServiceErrorCode::TooLarge => (format!("{item} is too large to open."), ""),
-            ServiceErrorCode::InvalidProject => (
-                format!("{item} can’t be opened because it isn’t a Powermove project."),
-                "",
-            ),
-            ServiceErrorCode::PermissionDenied => (
-                format!("You don’t have permission to open {item}."),
-                "Check its sharing and permissions in Finder.",
-            ),
-            ServiceErrorCode::DiskFull => (
-                "There isn’t enough disk space.".into(),
-                "Free some space and try again.",
-            ),
-            ServiceErrorCode::InvalidInput | ServiceErrorCode::InvalidData => (
-                format!("{item} couldn’t be read."),
-                "The file may be damaged.",
-            ),
-            ServiceErrorCode::Unavailable | ServiceErrorCode::Unknown => (
-                "The operation couldn’t be completed.".into(),
-                "Try again. If it keeps happening, choose Window ▸ Error Log for details.",
-            ),
-        };
-        Self {
-            message,
-            detail: detail.into(),
-            buttons: vec!["OK"],
-            default: 0,
-            destructive: None,
-            critical: false,
-        }
-    }
+pub fn delete_alert(name: &str) -> Alert<bool> {
+    Alert::new(
+        format!("Delete “{name}” immediately?"),
+        "The project is archived in Powermove’s storage and can’t be opened from the Library again.",
+        vec![
+            Button::new("Cancel", false).default().cancel(),
+            Button::new("Delete", true).destructive(),
+        ],
+    )
+    .critical()
+}
+pub fn error_alert(code: ServiceErrorCode, name: &str) -> Alert<bool> {
+    // Use the approved generic error for a vanished, unnamed target.
+    let code = if name.is_empty()
+        && !matches!(code, ServiceErrorCode::Offline | ServiceErrorCode::DiskFull)
+    {
+        ServiceErrorCode::Unavailable
+    } else {
+        code
+    };
+    let (message, detail) = crate::surfaces::documents::service_copy(code, name);
+    Alert::new(message, detail, vec![Button::new("OK", false).default()])
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

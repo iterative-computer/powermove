@@ -96,15 +96,19 @@ impl Controller {
             electron_profile,
             native_profile: self.profile.clone(),
         };
-        let rx = crate::platform::choice(
-            &self.host.borrow().window,
+        use crate::alert::{Alert, Button};
+        let rx = Alert::new(
             "Keep Your Sign-Ins",
             secrets::PROMPT,
-            &["Continue", "Not Now"],
-        );
+            vec![
+                Button::new("Continue", true).default(),
+                Button::new("Not Now", false),
+            ],
+        )
+        .sheet(&self.host.borrow().window);
         let kernel = self.kernel.clone();
         cx.spawn(async move |this, cx| {
-            if rx.recv().await.ok() != Some(0) {
+            if rx.recv().await != Ok(Some(true)) {
                 return;
             }
             let result = cx

@@ -1629,18 +1629,22 @@ impl crate::session::Controller {
             return;
         }
         let window = self.host.borrow().window.clone();
-        let rx = crate::platform::choice(
-            &window,
+        use crate::alert::{Alert, Button};
+        let rx = Alert::new(
             if crate::panels::askable(&folders) {
                 "Allow Access to Your Media"
             } else {
                 "Check Folder Access Again"
             },
-            &crate::panels::folder_access_prompt(&folders),
-            &["Continue", "Not Now"],
-        );
+            crate::panels::folder_access_prompt(&folders),
+            vec![
+                Button::new("Continue", true).default(),
+                Button::new("Not Now", false),
+            ],
+        )
+        .sheet(&window);
         cx.spawn(async move |this, cx| {
-            if rx.recv().await != Ok(0) {
+            if rx.recv().await != Ok(Some(true)) {
                 return;
             }
             let paths: Vec<_> = folders.iter().map(|f| f.path.clone()).collect();
@@ -1709,12 +1713,16 @@ impl crate::session::Controller {
             Some("media.reveal") => crate::platform::reveal(&self.pro_media.location()),
             Some("media.folders") => self.allow_waiting_folders(cx),
             Some("media.clear") => {
-                let rx = crate::platform::choice(
-                    &window,
+                use crate::alert::{Alert, Button};
+                let rx = Alert::new(
                     "Clear generated media?",
                     "Proxies, optimized media and renders the open project doesn’t use are removed. Originals, attached proxies and this project’s media stay. Powermove can make them again.",
-                    &["Clear", "Cancel"],
-                );
+                    vec![
+                        Button::new("Clear", true).default(),
+                        Button::new("Cancel", false).cancel(),
+                    ],
+                )
+                .sheet(&window);
                 let pro_media = self.pro_media.clone();
                 let project = self
                     .session
@@ -1723,7 +1731,7 @@ impl crate::session::Controller {
                     .unwrap_or_default();
                 let pinned = self.project_assets();
                 cx.spawn(async move |this, cx| {
-                    if rx.recv().await != Ok(0) {
+                    if rx.recv().await != Ok(Some(true)) {
                         return;
                     }
                     let freed = pro_media.clear(project, pinned).recv().await.unwrap_or(0);

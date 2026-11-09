@@ -1,5 +1,6 @@
 //! ID-driven reducer and nonblocking host/service seams.
 use super::{form::*, model::*};
+use crate::alert::Alert;
 use pm_services::ServiceErrorCode;
 use std::collections::VecDeque;
 
@@ -66,7 +67,7 @@ pub enum HostEffect {
     CloseNewProject,
     Alert {
         serial: u64,
-        alert: Alert,
+        alert: Alert<bool>,
     },
     Reveal(std::path::PathBuf),
     FocusProject(String),
@@ -90,7 +91,7 @@ enum PromptAction {
 #[derive(Clone, Debug)]
 struct Prompt {
     serial: u64,
-    alert: Alert,
+    alert: Alert<bool>,
     action: PromptAction,
 }
 
@@ -256,11 +257,11 @@ impl<P: LibraryPort> LibraryController<P> {
                 })?;
             }
             MenuAction::Trash => {
-                self.prompt(Alert::trash(&row.name), PromptAction::Trash(id.into()))
+                self.prompt(trash_alert(&row.name), PromptAction::Trash(id.into()))
             }
             MenuAction::PutBack => self.send(Command::PutBack(id.into()))?,
             MenuAction::DeleteImmediately => {
-                self.prompt(Alert::delete(&row.name), PromptAction::Archive(id.into()))
+                self.prompt(delete_alert(&row.name), PromptAction::Archive(id.into()))
             }
         }
         Ok(())
@@ -318,7 +319,7 @@ impl<P: LibraryPort> LibraryController<P> {
         self.form.as_mut().expect("form").submitting = true;
         Ok(())
     }
-    fn prompt(&mut self, alert: Alert, action: PromptAction) {
+    fn prompt(&mut self, alert: Alert<bool>, action: PromptAction) {
         let serial = self.serial();
         if self.prompts.is_empty() {
             self.effects.push_back(HostEffect::Alert {
@@ -334,21 +335,18 @@ impl<P: LibraryPort> LibraryController<P> {
     }
     /// Serial and button index are required: delayed callbacks cannot answer a
     /// different alert. Closing/aborting always cancels (None).
-    pub fn answer(&mut self, serial: u64, button: Option<usize>) -> Result<(), Failure> {
+    pub fn answer(&mut self, serial: u64, confirmed: Option<bool>) -> Result<(), Failure> {
         let front = self.prompts.front().ok_or(Failure::Stale)?;
         if front.serial != serial {
             return Err(Failure::Stale);
         }
-        if button.is_some_and(|i| i >= front.alert.buttons.len()) {
-            return Err(Failure::Stale);
-        }
-        if self.mutation.is_some() && button.is_some_and(|i| front.alert.buttons[i] != "Cancel") {
+        if self.mutation.is_some() && confirmed == Some(true) {
             return Err(Failure::Busy);
         }
         let prompt = self.prompts.pop_front().expect("front");
-        let result = match (prompt.action, button) {
-            (PromptAction::Trash(id), Some(0)) => self.send(Command::Trash(id)),
-            (PromptAction::Archive(id), Some(1)) => self.send(Command::Archive(id)),
+        let result = match (prompt.action, confirmed) {
+            (PromptAction::Trash(id), Some(true)) => self.send(Command::Trash(id)),
+            (PromptAction::Archive(id), Some(true)) => self.send(Command::Archive(id)),
             _ => Ok(()),
         };
         if let Some(next) = self.prompts.front() {
@@ -490,7 +488,7 @@ impl<P: LibraryPort> LibraryController<P> {
                     } else {
                         ServiceErrorCode::Unavailable
                     };
-                    let alert = Alert::error(code, &name);
+                    let alert = error_alert(code, &name);
                     self.effects
                         .push_back(HostEffect::Announce(alert.message.clone()));
                     self.prompt(alert, PromptAction::Error);

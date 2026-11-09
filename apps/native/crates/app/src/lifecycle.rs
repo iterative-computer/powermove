@@ -86,17 +86,10 @@ pub fn begin_quit(cx: &mut App) {
     };
     // S002: two or more dirty projects get one question before any per-project sheet.
     use crate::surfaces::documents::{Action, review_quit};
-    let alert = review_quit(dirty.len());
-    let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
-    let rx = crate::platform::choice(
-        &first.read(cx).host.borrow().window,
-        &alert.message,
-        &alert.informative,
-        &labels,
-    );
+    let rx = review_quit(dirty.len()).sheet(&first.read(cx).host.borrow().window);
     cx.spawn(async move |cx| {
-        let choice = rx.recv().await.ok();
-        cx.update(|cx| match alert.action_at(choice) {
+        let choice = rx.recv().await.ok().flatten();
+        cx.update(|cx| match choice {
             Some(Action::ReviewChanges) => next_quit(cx),
             Some(Action::DiscardChanges) => {
                 cx.global_mut::<QuitCoordinator>().discard = true;
@@ -346,17 +339,10 @@ impl Controller {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "Untitled".into());
-        let alert = unsaved(&name);
-        let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
-        let rx = crate::platform::choice(
-            &self.host.borrow().window,
-            &alert.message,
-            &alert.informative,
-            &labels,
-        );
+        let rx = unsaved(&name).sheet(&self.host.borrow().window);
         cx.spawn(async move |this, cx| {
-            let choice = rx.recv().await.ok();
-            let _ = this.update(cx, |v, cx| match alert.action_at(choice) {
+            let choice = rx.recv().await.ok().flatten();
+            let _ = this.update(cx, |v, cx| match choice {
                 Some(Action::Save) => {
                     v.close_after_save = Some(intent);
                     v.save(None, cx);

@@ -1,3 +1,4 @@
+mod alert;
 mod builtins;
 #[cfg(test)]
 mod builtins_tests;
