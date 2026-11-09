@@ -4,7 +4,7 @@ import { exportEffects, type EffectRef } from './export-effects';
 // that property too: a replacement under the same owner can use time.
 export const staticEffectSupported = (id: unknown): id is string =>
   exportEffects.supports(id) && !['grain', 'displace'].includes(id);
-export type StaticMaskProgram = 'masks' | 'maskApply' | 'pathMaskApply';
+export type StaticMaskProgram = 'masks' | 'maskApply' | 'pathMaskApply' | 'trackMatte';
 
 /** Live checks for one export, without retaining programs beyond its lifetime. */
 export function trackStaticEffects(PM: any) {
