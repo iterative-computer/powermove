@@ -97,12 +97,33 @@ fn open_folder(profile: &Path, id: &str) -> Result<File, String> {
     );
     match folder {
         Ok(folder) => Ok(folder),
-        Err(e)
-            if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) =>
+        // Only for the sentence: the open above already refused it.
+        Err(_)
+            if std::fs::symlink_metadata(profile.join("extensions").join(id))
+                .is_ok_and(|m| m.file_type().is_symlink()) =>
         {
             Err("This extension’s folder is a link. Only a real folder can be published.".into())
         }
         Err(_) => Err(UNREADABLE.into()),
+    }
+}
+/// An entry's type without following it, when the directory didn't say.
+fn kind_at(dir: &File, entry: &CString) -> u8 {
+    // SAFETY: `stat` is plain data filled by the call.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let found = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            entry.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    match stat.st_mode & libc::S_IFMT {
+        _ if found != 0 => libc::DT_UNKNOWN,
+        libc::S_IFDIR => libc::DT_DIR,
+        libc::S_IFREG => libc::DT_REG,
+        _ => libc::DT_LNK,
     }
 }
 /// The names in an open directory.
@@ -142,6 +163,11 @@ fn read_folder(root: &File) -> Result<Vec<Input>, String> {
             }
             let path = format!("{prefix}{entry}");
             let c = name(&entry)?;
+            let kind = if kind == libc::DT_UNKNOWN {
+                kind_at(dir, &c)
+            } else {
+                kind
+            };
             if kind == libc::DT_DIR {
                 walk(
                     &open_at(dir, &c, libc::O_RDONLY | libc::O_DIRECTORY)?,
