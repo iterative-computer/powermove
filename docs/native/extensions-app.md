@@ -201,8 +201,8 @@ window is open is shown in it.
   palette commands with shortcuts (`commands.register`). It cannot yet slot into
   part of another panel (a viewer overlay or timeline column without a fork), add
   menus or toolbar items; v1–3 extensions can add menus through the compat realm.
-- Each window reserves 64 MiB per isolate for up to 64 isolates, so many windows
-  can together reserve past the shared 4 GB cage; idle isolates are not parked.
+- Every window's isolates reserve from one account inside the shared 4 GB cage
+  (`Admission::cage`): a slice at start, more on demand, given back when idle.
 - Store panels have no recorder canvases, and `ui.*` from a helper is not attached.
 
 ## v4 parity with v1–3 (2026-11-08)
@@ -215,7 +215,7 @@ What a v1–3 extension could change and where v4 stands, without forking:
 | Themes: tokens and CSS (`theme.register`, `theme.activate`) | `themes.register` / `themes.activate` (tokens). v1–3 CSS themes reach native chrome through the translator, and the timeline surface (track, gutter, accent, text, line, surface order); other surface rules aren't applied natively yet. |
 | Context menus (`menus.contribute`) | `menus.contribute` for panel, layer, timeline and viewer; `titlebar:right` accepted and not shown, as on main |
 | Viewer overlays (drawing on `ViewerService.ov` or the stage DOM) | `overlays.viewer` (display only) |
-| Timeline chrome (`workspace.chrome.timeline`: rows, gutter, ruler, keys, columns) | `timeline.chrome`; the native timeline follows rows, gutter, ruler, key size, clip radius and surface order. Layer numbers, type badges and toolbar density aren't drawn yet (v4 refuses them) |
+| Timeline chrome (`workspace.chrome.timeline`: rows, gutter, ruler, keys, columns) | `timeline.chrome`; the native timeline follows rows, gutter, ruler, key size, clip radius, surface order and layer numbers. Type badges and toolbar density are stored and draw nothing, as on main |
 | Timeline painting (`TimelineService.cv`) | `timeline.paint` (shapes per clip; TL-PAINT-1 p95 0.11 ms for 1,000 clips) |
 | Titlebar/toolbar items | None on main either: tool strips are panels |
 

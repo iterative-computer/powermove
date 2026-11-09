@@ -320,6 +320,14 @@ pub enum WorkspaceCall {
         next: Value,
         threw: Option<String>,
     },
+    /// Writes `next` only while the workspace still equals `expected` (what
+    /// the caller read), so another writer between that read and this write
+    /// is never overwritten. Replies with the workspace as it now stands,
+    /// which equals `next` only when the swap applied.
+    Replace {
+        expected: Value,
+        next: Value,
+    },
 }
 
 macro_rules! into_call {
@@ -1904,6 +1912,12 @@ impl Project {
                     ),
                     None => self.ack(txid, None, None, Reply::Workspace(self.workspace.clone())),
                 }
+            }
+            WorkspaceCall::Replace { expected, next } => {
+                if self.workspace == expected {
+                    self.workspace = next;
+                }
+                self.ack(txid, None, None, Reply::Workspace(self.workspace.clone()))
             }
         }
     }

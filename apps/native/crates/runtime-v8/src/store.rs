@@ -624,6 +624,8 @@ fn limits_read(v: &Value) -> Result<Limits> {
     };
     Ok(Limits {
         heap_bytes: number(v, "heap")? as usize,
+        // A helper has its own cage: it takes its whole ceiling at start.
+        initial_heap_bytes: number(v, "heap")? as usize,
         external_bytes: number(v, "external")? as usize,
         max_source_bytes: number(v, "source")? as usize,
         max_host_ops: number(v, "host_ops")? as usize,

@@ -28,6 +28,10 @@ pub enum Reach {
     /// `assets.importUrl`, as the shipped app downloads media: public HTTPS
     /// only, across at most five redirects, without credentials.
     Media,
+    /// The app's reads of one service (the Store): that origin only, at the
+    /// request and before every redirect hop, so a foreign hop is never
+    /// contacted and a scheme downgrade is refused.
+    Origin(&'static str),
 }
 /// Media downloads follow at most this many redirects.
 const MEDIA_REDIRECTS: usize = 5;
@@ -64,6 +68,16 @@ fn local(ip: IpAddr) -> bool {
 fn admit(url: &str, reach: Reach) -> Result<()> {
     if reach == Reach::Open {
         return Ok(());
+    }
+    if let Reach::Origin(origin) = reach {
+        let origin = Url::parse(origin).map_err(|_| Error::Invalid("origin"))?;
+        return match Url::parse(url) {
+            Ok(url) if url.origin() == origin.origin() => Ok(()),
+            _ => Err(Error::Host(format!(
+                "A request to {} was sent elsewhere",
+                origin.origin().ascii_serialization()
+            ))),
+        };
     }
     let refused = || Error::Host(format!("Extensions cannot reach {url}"));
     let parsed = Url::parse(url).map_err(|_| Error::Invalid("request URL"))?;
@@ -393,6 +407,15 @@ pub fn fetch(request: FetchRequest, reach: Reach, _: Cancellation) -> Result<Box
 pub fn get(url: &str, max_bytes: usize, seconds: u64) -> Result<FetchResponse> {
     request(url, max_bytes, seconds, Reach::Open)
 }
+/// Worker-only: a read that may not leave `origin`, even by redirect.
+pub fn get_within(
+    origin: &'static str,
+    url: &str,
+    max_bytes: usize,
+    seconds: u64,
+) -> Result<FetchResponse> {
+    request(url, max_bytes, seconds, Reach::Origin(origin))
+}
 /// Worker-only: `assets.importUrl`'s download (`Reach::Media`).
 pub fn download(url: &str, max_bytes: usize, seconds: u64) -> Result<FetchResponse> {
     request(url, max_bytes, seconds, Reach::Media)
@@ -513,6 +536,46 @@ mod tests {
         assert_eq!(reply.body, b"ok");
         assert!(server.join().unwrap()[0].contains("Bearer synthetic"));
         assert!(!target_server.join().unwrap()[0].contains("Bearer synthetic"));
+    }
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+    #[test]
+    fn origin_reads_follow_redirects_only_within_the_origin() {
+        // A hop to another origin is refused before it is contacted.
+        let (foreign, foreign_server) = serve(vec![]);
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{foreign}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (port, server) = serve(vec![redirect.into_bytes()]);
+        let origin = leak(format!("http://127.0.0.1:{port}"));
+        let refused = get_within(origin, &format!("{origin}/v1/store/a"), 1024, 10);
+        assert!(
+            matches!(&refused, Err(Error::Host(m)) if m.contains("sent elsewhere")),
+            "{refused:?}"
+        );
+        server.join().unwrap();
+        drop(foreign_server);
+        // A chain that stays on the origin is followed.
+        let (port, server) = serve(vec![
+            b"HTTP/1.1 302 Found\r\nLocation: /v1/store/b\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+        ]);
+        let origin = leak(format!("http://127.0.0.1:{port}"));
+        let reply = get_within(origin, &format!("{origin}/v1/store/a"), 1024, 10).unwrap();
+        assert_eq!(reply.body, b"ok");
+        server.join().unwrap();
+        // A start elsewhere, or the same host on another scheme or port, is refused.
+        let store = "https://store.example";
+        for url in [
+            "http://store.example/v1/store/a",
+            "https://store.example:8443/v1/store/a",
+            "https://other.example/v1/store/a",
+            "https://store.example.evil/v1/store/a",
+        ] {
+            assert!(admit(url, Reach::Origin(store)).is_err(), "{url}");
+        }
+        assert!(admit("https://store.example/v1/store/a", Reach::Origin(store)).is_ok());
     }
     #[test]
     fn confined_requests_stay_on_public_https() {

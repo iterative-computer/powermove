@@ -1,5 +1,5 @@
 use crate::{
-    vm::{self, Vm},
+    vm::{self, HEAP_FULL, HeapPlan, Vm},
     *,
 };
 use serde_json::{Value, json};
@@ -314,45 +314,116 @@ pub struct Config {
     /// Shared admission account must include all pools and retained generations.
     pub admission: Admission,
 }
+/// Heap admission: what every isolate's current heap limit adds up to. An
+/// isolate reserves its initial slice at start, takes more from V8's
+/// near-heap-limit callback only while the account has room, gives back what
+/// it grew past its live size when it idles, and returns the rest when it is
+/// disposed on its owner, so `used` is exact at every step.
 #[derive(Clone)]
 pub struct Admission {
     used: Arc<AtomicUsize>,
+    /// The most `used` has been, and how many isolates hold a reservation.
+    peak: Arc<AtomicUsize>,
+    isolates: Arc<AtomicUsize>,
     budget: usize,
 }
+/// In-process isolates share one 4 GB pointer-compression cage (plan §3.5.1);
+/// a quarter stays for V8's code and read-only spaces, the grace a failing
+/// isolate unwinds in, and allocator overheads.
+pub const CAGE_ADMISSION: usize = 3 * 1024 * 1024 * 1024;
 impl Admission {
     pub fn new(budget: usize) -> Self {
         Self {
             used: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            isolates: Arc::new(AtomicUsize::new(0)),
             budget,
         }
+    }
+    /// The process's one account: every window's built-ins, v4 extensions,
+    /// compat realm and compiler reserve from it.
+    pub fn cage() -> Self {
+        static CAGE: std::sync::OnceLock<Admission> = std::sync::OnceLock::new();
+        CAGE.get_or_init(|| Admission::new(CAGE_ADMISSION)).clone()
     }
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
     }
-    fn reserve(&self, bytes: usize) -> Result<Reservation> {
-        self.used
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::Acquire)
+    }
+    pub fn isolates(&self) -> usize {
+        self.isolates.load(Ordering::Acquire)
+    }
+    fn take(&self, bytes: usize) -> bool {
+        let taken = self
+            .used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes).filter(|n| *n <= self.budget)
-            })
-            .map_err(|_| Error::Quota("isolate admission"))?;
+            });
+        if let Ok(before) = taken {
+            self.peak.fetch_max(before + bytes, Ordering::AcqRel);
+        }
+        taken.is_ok()
+    }
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation> {
+        if !self.take(bytes) {
+            return Err(Error::Quota("isolate admission"));
+        }
+        self.isolates.fetch_add(1, Ordering::AcqRel);
         Ok(Reservation {
             account: self.clone(),
-            bytes,
+            bytes: AtomicUsize::new(bytes),
         })
     }
 }
-struct Reservation {
+/// One isolate's share of its account. Only its owner thread changes it.
+pub(crate) struct Reservation {
     account: Admission,
-    bytes: usize,
+    bytes: AtomicUsize,
+}
+impl Reservation {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
+    }
+    /// More heap, only while the account has room.
+    pub(crate) fn grow(&self, bytes: usize) -> bool {
+        let taken = self.account.take(bytes);
+        if taken {
+            self.bytes.fetch_add(bytes, Ordering::AcqRel);
+        }
+        taken
+    }
+    /// The grace a terminating isolate unwinds in: taken even past the
+    /// budget (the cage keeps room for it), and given back at disposal.
+    pub(crate) fn grace(&self, bytes: usize) {
+        let before = self.account.used.fetch_add(bytes, Ordering::AcqRel);
+        self.account
+            .peak
+            .fetch_max(before + bytes, Ordering::AcqRel);
+        self.bytes.fetch_add(bytes, Ordering::AcqRel);
+    }
+    pub(crate) fn shrink(&self, bytes: usize) {
+        let bytes = bytes.min(self.bytes());
+        self.bytes.fetch_sub(bytes, Ordering::AcqRel);
+        self.account.used.fetch_sub(bytes, Ordering::AcqRel);
+    }
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.account.used.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.account.isolates.fetch_sub(1, Ordering::AcqRel);
+        self.account
+            .used
+            .fetch_sub(*self.bytes.get_mut(), Ordering::AcqRel);
     }
 }
 impl RuntimePool {
     pub fn new(scope: impl Into<String>, config: Config) -> Result<Self> {
         if config.limits.heap_bytes < 16 * 1024 * 1024
+            || config.limits.initial_heap_bytes > config.limits.heap_bytes
             || config.limits.queue_capacity == 0
             || config.limits.max_host_ops == 0
             || config.watchdog.prompt < config.watchdog.notice
@@ -387,7 +458,7 @@ impl RuntimePool {
         let reservation = self
             .config
             .admission
-            .reserve(self.config.limits.heap_bytes)?;
+            .reserve(HeapPlan::new(&self.config.limits).initial())?;
         let (tx, rx) = mpsc::sync_channel(self.config.limits.queue_capacity);
         let control = Arc::new(Control {
             active: Mutex::new(None),
@@ -566,7 +637,6 @@ struct Live {
     hot: Value,
     pins: Arc<()>,
     requests: Vec<Request>,
-    _reservation: Reservation,
     next_wake: Option<Instant>,
 }
 impl Live {
@@ -580,12 +650,11 @@ impl Live {
     ) -> Result<Self> {
         let vm = Vm::new(
             kind.snapshot_kind(),
-            config.limits.clone(),
+            config,
             &storage,
             &hot,
-            config.cache.clone(),
             generation.clone(),
-            config.engine.clone(),
+            reservation,
         )?;
         Ok(Self {
             vm,
@@ -594,7 +663,6 @@ impl Live {
             hot,
             pins: Arc::new(()),
             requests: vec![],
-            _reservation: reservation,
             next_wake: None,
         })
     }
@@ -684,12 +752,17 @@ impl Live {
                 }
             }
         }
+        let mut bodies = Vec::new();
         self.requests.retain_mut(|request|{
             let result=if aborted.contains(&request.id)||Instant::now()>=request.deadline {request.cancel.cancel();request.job.cancel();Some(Err(Error::Host("Aborted or timed out".into())))}else{request.job.poll()};
             if let Some(result)=result {
                 retired+=1;
                 let data=match result {
-                    Ok(response) if response.body.len()<=config.limits.max_response_bytes && response.headers.iter().map(|(a,b)|a.len()+b.len()).sum::<usize>()<=config.limits.max_op_bytes =>json!({"status":response.status,"url":response.url,"headers":response.headers,"body":response.body}),
+                    Ok(response) if response.body.len()<=config.limits.max_response_bytes && response.headers.iter().map(|(a,b)|a.len()+b.len()).sum::<usize>()<=config.limits.max_op_bytes =>{
+                        // The body goes over as bytes (`__body`), not JSON.
+                        bodies.push((request.id,response.body));
+                        json!({"status":response.status,"url":response.url,"headers":response.headers,"body":request.id})
+                    },
                     Ok(_)=>{request.cancel.cancel();request.job.cancel();json!({"error":"Host response quota"})},
                     Err(error)=>json!({"error":error.to_string()})
                 };completed.push(json!([request.id,data]));false
@@ -703,8 +776,12 @@ impl Live {
                 .saturating_sub(retired * config.limits.max_response_bytes);
             // Room that just came free goes to waiting fetches; the next pump starts them.
             n.admit_deferred();
+            n.bodies.extend(bodies);
         }
-        self.vm.pump(json!(completed))
+        let pumped = self.vm.pump(json!(completed));
+        // A body JS didn't take (its request was gone) is dropped here.
+        self.vm.native.lock().unwrap().bodies.clear();
+        pumped
     }
     fn run(
         &mut self,
@@ -830,17 +907,46 @@ fn worker(
         .and_then(|storage| Live::new(generation, &kind, &config, storage, json!({}), reservation));
     let mut current = initial;
     let mut retained: HashMap<u64, Live> = HashMap::new();
+    // Set after work that grew a heap: an isolate idle this long gives back
+    // what it grew past its live size.
+    let mut trim_at: Option<Instant> = None;
     while !control.closing.load(Ordering::Acquire) {
         retained.retain(|_, live| Arc::strong_count(&live.pins) > 1);
+        let grown = current.as_ref().is_ok_and(|live| live.vm.grown())
+            || retained.values().any(|live| live.vm.grown());
+        if !grown {
+            trim_at = None;
+        } else if trim_at.is_none() {
+            trim_at = Some(Instant::now() + IDLE_TRIM);
+        }
         let wake = current.as_ref().ok().and_then(|live| live.next_wake);
-        let received = match wake {
-            Some(wake) => rx.recv_timeout(wake.saturating_duration_since(Instant::now())),
+        let deadline = match (wake, trim_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let received = match deadline {
+            Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
             None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
+        if received.is_ok() && trim_at.is_some() {
+            trim_at = Some(Instant::now() + IDLE_TRIM);
+        }
         let command = match received {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                if trim_at.is_some_and(|at| at <= Instant::now()) {
+                    trim_at = None;
+                    if let Ok(live) = &mut current {
+                        live.vm.trim();
+                    }
+                    for live in retained.values_mut() {
+                        live.vm.trim();
+                    }
+                }
+                if wake.is_none_or(|wake| wake > Instant::now()) {
+                    continue;
+                }
                 if let Ok(live) = &mut current {
                     // Timers and pending host operations run without a submitted task.
                     let guard = Guard::new(
@@ -934,7 +1040,7 @@ fn worker(
                     if matches!(
                         result,
                         Err(Error::Terminated
-                            | Error::Quota("heap" | "external memory")
+                            | Error::Quota(HEAP_FULL | "heap" | "external memory")
                             | Error::Closed)
                     ) {
                         fail_generation(live, &config);
@@ -965,7 +1071,9 @@ fn worker(
                 }
                 let result = (|| -> Result<(Live, String)> {
                     let old = current.as_ref().map_err(Clone::clone)?;
-                    let reservation = config.admission.reserve(config.limits.heap_bytes)?;
+                    let reservation = config
+                        .admission
+                        .reserve(HeapPlan::new(&config.limits).initial())?;
                     let generation = Generation {
                         realm: name.clone(),
                         number: next_generation(),
@@ -1054,7 +1162,7 @@ fn worker(
                 let mut failed = matches!(
                     result,
                     Err(Error::Terminated
-                        | Error::Quota("heap" | "external memory")
+                        | Error::Quota(HEAP_FULL | "heap" | "external memory")
                         | Error::Closed)
                 );
                 if result.is_err() && !failed {
@@ -1105,6 +1213,8 @@ fn worker(
     }
     control.disposed.store(true, Ordering::Release);
 }
+/// How long an isolate that grew waits without work before it trims.
+const IDLE_TRIM: Duration = Duration::from_secs(5);
 fn next_generation() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -1114,7 +1224,9 @@ fn recover(name: &str, kind: &RealmKind, config: &Config) -> Result<Live> {
         realm: name.into(),
         number: next_generation(),
     };
-    let reservation = config.admission.reserve(config.limits.heap_bytes)?;
+    let reservation = config
+        .admission
+        .reserve(HeapPlan::new(&config.limits).initial())?;
     let storage = config.kernel.load_storage(name)?;
     Live::new(generation, kind, config, storage, json!({}), reservation)
 }

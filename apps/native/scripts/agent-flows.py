@@ -4,7 +4,7 @@ see its effect, revert it, see it gone. Synthetic extensions only.
 
 usage: agent-flows.py <powermove-native> <profile> [flow ...]
        (pm-gui launch <lane> <project> first; the profile is the lane's)
-Flows: v4-theme, v4-overlay, v1-timeline, v4-timeline, v4-painter, v1-theme (default: all). Exit status 1 on any failure.
+Flows: v4-theme, v4-overlay, v1-timeline, v4-timeline, v4-layer-numbers, v4-painter, v1-theme (default: all). Exit status 1 on any failure.
 """
 import base64, json, os, shutil, subprocess, sys, tempfile, time, zlib
 
@@ -137,6 +137,12 @@ def timeline_purple(mcp):
                for row in rows for x in range(width))
 
 
+def layer_numbers(mcp):
+    """Whether the timeline's layer column shows its first layer number."""
+    state = json.loads(mcp.tool("get_panel_state", {"panelId": "timeline"})[0]["text"])
+    return "01" in state["text"].splitlines()
+
+
 def viewer_centre(mcp):
     """The viewer capture's centre: the composition's middle."""
     content = mcp.tool("capture_panel", {"panelId": "viewer"})
@@ -194,6 +200,12 @@ EXTENSIONS = {
                     "import { jsx } from 'powermove/jsx-runtime';\n"
                     "export function activate({ timeline }) { timeline.chrome({ gutterWidth: 340 }); }\n"
                     "export function view() { return jsx('text', { children: 'Flow timeline' }); }\n"),
+    "v4-layer-numbers": ({"id": "agent-flow-v4-layer-numbers", "name": "Flow Layer Numbers",
+                          "version": "1.0.0", "apiVersion": 4, "entry": "index.tsx", "author": "agent"},
+                         "index.tsx",
+                         "import { jsx } from 'powermove/jsx-runtime';\n"
+                         "export function activate({ timeline }) { timeline.chrome({ showLayerNumbers: false }); }\n"
+                         "export function view() { return jsx('text', { children: 'Flow numbers' }); }\n"),
     "v4-painter": ({"id": "agent-flow-v4-painter", "name": "Flow Painter", "version": "1.0.0",
                     "apiVersion": 4, "entry": "index.tsx", "author": "agent"},
                    "index.tsx",
@@ -215,12 +227,13 @@ EXTENSIONS = {
 
 
 PROBES = {"v4-overlay": viewer_centre, "v1-timeline": clip_left, "v4-timeline": clip_left,
-          "v4-painter": timeline_purple}
+          "v4-painter": timeline_purple, "v4-layer-numbers": layer_numbers}
 # (visible?, reverted?) given the probe before and now; colours by default.
 CHECKS = {
     "v1-timeline": (lambda before, now: now is not None and now >= 410,
                     lambda before, now: now is not None and abs(now - before) <= 3),
     "v4-painter": (lambda before, now: now is True, lambda before, now: now is False),
+    "v4-layer-numbers": (lambda before, now: now is False, lambda before, now: now is True),
     "v4-timeline": (lambda before, now: now is not None and abs(now - 341) <= 3,
                     lambda before, now: now is not None and abs(now - before) <= 3),
 }

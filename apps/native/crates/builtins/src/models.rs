@@ -237,6 +237,7 @@ impl Backend {
         let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
             .map_err(|e| e.to_string())?;
         let fps = client.model.index.fps;
+        let numbers = layer_numbers(&p);
         let mut display = vec![];
         let editor_field = format!(
             "builtin:{}:{}:edit",
@@ -253,6 +254,9 @@ impl Backend {
             }
             let layer = row["layer"].as_str().ok_or("row layer")?.to_owned();
             if row["kind"] == "layer" {
+                if !numbers {
+                    row["index"] = Value::Null;
+                }
                 let l = client.model.index.layer(&layer).ok_or("layer")?;
                 row["accessibilityLabel"] = json!(format!(
                     "{}, {}",
@@ -1366,6 +1370,18 @@ fn readout(value: f64) -> String {
     } else {
         text.into()
     }
+}
+
+/// `workspace.chrome.timeline.showLayerNumbers` (v1–3 and v4
+/// `timeline.chrome`): only an explicit false hides the timeline's layer
+/// numbers. v1's shipped workspaces all write true; v1.2.0 showed them when
+/// the field was missing.
+pub(crate) fn layer_numbers(p: &Published) -> bool {
+    p.workspace
+        .get("chrome")
+        .and_then(|c| c.get("timeline"))
+        .and_then(|t| t.get("showLayerNumbers"))
+        .is_none_or(|v| *v != pm_model::Value::Bool(false))
 }
 
 #[cfg(test)]

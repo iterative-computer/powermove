@@ -1,6 +1,6 @@
 use crate::{
     CacheKey, Cancellation, CodeCache, EngineProxy, Error, FetchRequest, Generation, HostBudget,
-    Limits, Result, SnapshotKind,
+    Limits, Result, SnapshotKind, runtime::Reservation,
 };
 use serde_json::{Value, json};
 use std::{
@@ -17,18 +17,34 @@ use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 pub(crate) const SVELTE: &str = include_str!("../compiler/svelte-5.56.10.js");
 const WEB: &str = include_str!("web.js");
 const MIB: usize = 1024 * 1024;
+/// Every V8 flag the runtime sets, in one place; the code cache keys on it.
+///
+/// - Every kind has its own custom snapshot, but isolates share V8's read-only
+///   heap. Extending it independently per snapshot gives those snapshots
+///   incompatible root offsets when another kind is restored.
+/// - Heaps grow from a slice through the near-heap-limit callback, which only
+///   the isolate's owner thread can run. A background thread that allocates at
+///   the limit while the owner waits for work can't reach it, and V8 then
+///   aborts the whole process. So nothing allocates on the JS heap off the
+///   owner: Sparkplug compiles there, and Maglev builds its code and deopt data
+///   there. (Turbofan allocates its code when it finalizes on the owner;
+///   marking and sweeping never allocate; lazy-compile dispatch and turbolev
+///   are off by default.)
+macro_rules! v8_flags {
+    () => {
+        "--no-extensible-ro-snapshot --no-concurrent-sparkplug \
+         --no-maglev-build-code-on-background --no-maglev-deopt-data-on-background"
+    };
+}
 pub(crate) const FLAGS: &str = if cfg!(feature = "macos-sandbox") {
-    "no-extensible-ro-snapshot;sandbox=true"
+    concat!(v8_flags!(), ";sandbox=true")
 } else {
-    "no-extensible-ro-snapshot;sandbox=false"
+    concat!(v8_flags!(), ";sandbox=false")
 };
 pub(crate) fn initialize() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // Every kind has its own custom snapshot, but isolates share V8's
-        // read-only heap. Extending it independently per snapshot gives those
-        // snapshots incompatible root offsets when another kind is restored.
-        v8::V8::set_flags_from_string("--no-extensible-ro-snapshot");
+        v8::V8::set_flags_from_string(v8_flags!());
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -97,6 +113,9 @@ pub(crate) struct NativeState {
     engine: Option<Arc<dyn EngineProxy>>,
     cancellation: Cancellation,
     sync_calls: usize,
+    /// Fetch response bodies the next `pump` hands to JS by request id; JS
+    /// takes each once with `__body(id)` as one ArrayBuffer.
+    pub bodies: HashMap<u64, Vec<u8>>,
 }
 impl NativeState {
     /// Room a fetch leaves for a synchronous engine reply.
@@ -142,22 +161,140 @@ impl Drop for EngineReservation {
 struct Native(Arc<Mutex<NativeState>>);
 struct Quota {
     handle: v8::IsolateHandle,
+    /// For heap statistics inside the near-limit callback, on the owner.
+    isolate: IsolatePtr,
+    guard: Arc<HeapGuard>,
+    plan: HeapPlan,
+}
+/// An isolate's admission state, shared by the near-limit callback and the
+/// isolate's slot (interrupt and post-task checks).
+struct HeapGuard {
     exceeded: AtomicBool,
+    /// The heap couldn't grow because the shared account was full, not
+    /// because the isolate reached its own ceiling.
+    account_full: AtomicBool,
+    reservation: Reservation,
+}
+impl HeapGuard {
+    /// Its own ceiling is the extension's limit; a full account is the app's
+    /// memory for extensions running out, and names itself so.
+    fn error(&self) -> Error {
+        if self.account_full.load(Ordering::Acquire) {
+            Error::Quota(HEAP_FULL)
+        } else {
+            Error::Quota("heap")
+        }
+    }
+    /// V8 admits one large young object whatever the limit and only meets
+    /// the limit when a collection promotes it. A live heap past the
+    /// reservation gets that collection now, which grows the reservation
+    /// through the near-limit callback or fails the isolate; whatever still
+    /// lies past it after that fails the isolate, charged to the account
+    /// until disposal.
+    fn check(&self, isolate: &mut v8::Isolate) {
+        if self.exceeded.load(Ordering::Acquire)
+            || isolate.get_heap_statistics().used_heap_size() <= self.reservation.bytes()
+        {
+            return;
+        }
+        isolate.memory_pressure_notification(v8::MemoryPressureLevel::Critical);
+        let used = isolate.get_heap_statistics().used_heap_size();
+        let held = self.reservation.bytes();
+        if used > held && !self.exceeded.swap(true, Ordering::AcqRel) {
+            self.reservation.grace(used - held);
+            isolate.terminate_execution();
+        }
+    }
+}
+struct Guarded(Arc<HeapGuard>);
+/// The quota an isolate fails with when the shared account had no room left.
+pub const HEAP_FULL: &str = "extension memory is full";
+/// What a terminating isolate may still allocate while it unwinds, above
+/// what its heap already holds.
+const GRACE: usize = 8 * MIB;
+struct IsolatePtr(v8::UnsafeRawIsolatePtr);
+// SAFETY: only dereferenced in the near-limit callback, which V8 runs on the
+// isolate's locked owner thread while the isolate is alive.
+unsafe impl Send for IsolatePtr {}
+unsafe impl Sync for IsolatePtr {}
+/// An isolate's heap in V8's terms. Admission counts the whole heap limit:
+/// the young generation, fixed from the ceiling, plus the old generation's
+/// current limit, which starts at the initial slice and grows on demand.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HeapPlan {
+    young: usize,
+    initial_old: usize,
+    ceiling_old: usize,
+}
+impl HeapPlan {
+    pub fn new(limits: &Limits) -> Self {
+        let params = v8::CreateParams::default().heap_limits(0, limits.heap_bytes);
+        let young = params.max_young_generation_size_in_bytes();
+        let ceiling_old = params.max_old_generation_size_in_bytes();
+        let initial_old = limits
+            .initial_heap_bytes
+            .saturating_sub(young)
+            .clamp(ceiling_old.min(4 * MIB), ceiling_old);
+        Self {
+            young,
+            initial_old,
+            ceiling_old,
+        }
+    }
+    pub fn initial(&self) -> usize {
+        self.young + self.initial_old
+    }
+    /// The next old-generation limits to ask the account for, largest
+    /// first: doubling (8 to 256 MiB at a time), then 8 MiB, never past the
+    /// ceiling.
+    fn steps(&self, current: usize) -> [usize; 2] {
+        let step = current.clamp(8 * MIB, 256 * MIB);
+        [
+            current.saturating_add(step).min(self.ceiling_old),
+            current.saturating_add(8 * MIB).min(self.ceiling_old),
+        ]
+    }
 }
 unsafe extern "C" fn near_limit(data: *mut c_void, current: usize, _initial: usize) -> usize {
     // Box lives until callback removal, on the same owner thread as this callback.
     let quota = unsafe { &*(data as *const Quota) };
-    if !quota.exceeded.swap(true, Ordering::AcqRel) {
-        quota.handle.terminate_execution();
-        current.saturating_add(8 * MIB)
-    } else {
-        current
+    let guard = &quota.guard;
+    // One allocation can land far past the limit (a large young object is
+    // admitted whatever the limit, then promoted), so a new limit must cover
+    // what the heap holds now: V8 aborts the process if the limit it gets
+    // back is still below the heap.
+    let mut raw = quota.isolate.0;
+    let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw) };
+    let held = isolate.get_heap_statistics().total_heap_size();
+    if !guard.exceeded.load(Ordering::Acquire) {
+        let floor = held.saturating_add(GRACE);
+        let mut refused = false;
+        for next in quota.plan.steps(current) {
+            let next = next.max(floor);
+            if next <= quota.plan.ceiling_old && next > current {
+                if guard.reservation.grow(next - current) {
+                    return next;
+                }
+                refused = true;
+            }
+        }
+        guard.account_full.store(refused, Ordering::Release);
     }
+    // Past its ceiling or the account: the isolate fails. The grace covers
+    // the heap as it stands while it unwinds, charged until disposal.
+    guard.exceeded.store(true, Ordering::Release);
+    quota.handle.terminate_execution();
+    let next = current.max(held).saturating_add(GRACE);
+    guard.reservation.grace(next - current);
+    next
 }
 /// Interrupts never reenter JS. Only read heap statistics and terminate.
 pub(crate) unsafe extern "C" fn check_external(mut raw: v8::UnsafeRawIsolatePtr, _: *mut c_void) {
     // V8 invokes this with the isolate entered, on its currently locked owner.
     let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw) };
+    if let Some(guard) = isolate.get_slot::<Guarded>().map(|g| g.0.clone()) {
+        guard.check(isolate);
+    }
     if let Some(native) = isolate.get_slot::<Native>().cloned() {
         let native = native.0.lock().unwrap();
         if isolate
@@ -328,6 +465,25 @@ fn read_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::R
         (Err(error), _) => throw(s, &error),
         _ => throw(s, "Host read failed"),
     }
+}
+/// A fetch response body, once, as an ArrayBuffer the isolate allocated and
+/// Rust filled (as `__read`): a JSON number array costs dozens of bytes per byte.
+fn body_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let id = a.get(0).number_value(s).unwrap_or(-1.);
+    let state = s.get_slot::<Native>().unwrap().0.clone();
+    let Some(bytes) = (id >= 0.)
+        .then(|| state.lock().unwrap().bodies.remove(&(id as u64)))
+        .flatten()
+    else {
+        throw(s, "No response body");
+        return;
+    };
+    let buffer = v8::ArrayBuffer::new(s, bytes.len());
+    if let Some(data) = buffer.get_backing_store().data() {
+        // SAFETY: a fresh buffer of exactly `bytes.len()` bytes no one else sees yet.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.as_ptr().cast(), bytes.len()) };
+    }
+    rv.set(buffer.into());
 }
 /// The reply as JSON text, serialized once.
 fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<String, String> {
@@ -634,24 +790,39 @@ pub(crate) struct Vm {
 impl Vm {
     pub fn new(
         kind: SnapshotKind,
-        limits: Limits,
+        config: &crate::Config,
         storage: &Value,
         hot: &Value,
-        cache: CodeCache,
         generation: Generation,
-        engine: Option<Arc<dyn EngineProxy>>,
+        reservation: Reservation,
     ) -> Result<Self> {
+        let (limits, cache, engine) = (
+            config.limits.clone(),
+            config.cache.clone(),
+            config.engine.clone(),
+        );
         let blob = snapshot(kind);
+        let plan = HeapPlan::new(&limits);
+        debug_assert_eq!(reservation.bytes(), plan.initial());
         let mut isolate = v8::Isolate::new(
             v8::CreateParams::default()
                 .snapshot_blob(blob.as_ref().clone().into())
-                .heap_limits(0, limits.heap_bytes),
+                .heap_limits(0, limits.heap_bytes)
+                .set_max_old_generation_size_in_bytes(plan.initial_old),
         );
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         let quota = Box::new(Quota {
             handle: isolate.thread_safe_handle(),
-            exceeded: AtomicBool::new(false),
+            // SAFETY: kept only while the isolate lives (see `IsolatePtr`).
+            isolate: IsolatePtr(unsafe { isolate.as_raw_isolate_ptr() }),
+            guard: Arc::new(HeapGuard {
+                exceeded: AtomicBool::new(false),
+                account_full: AtomicBool::new(false),
+                reservation,
+            }),
+            plan,
         });
+        isolate.set_slot(Guarded(quota.guard.clone()));
         isolate.add_near_heap_limit_callback(near_limit, &*quota as *const Quota as *mut c_void);
         let native_state = Arc::new(Mutex::new(NativeState {
             limits: limits.clone(),
@@ -669,6 +840,7 @@ impl Vm {
             engine,
             cancellation: Cancellation::default(),
             sync_calls: 0,
+            bodies: HashMap::new(),
         }));
         isolate.set_slot(Native(native_state.clone()));
         crate::modules::install(&mut isolate);
@@ -682,6 +854,7 @@ impl Vm {
                 ("__clone", v8::Function::new(cs, clone_value).unwrap()),
                 ("__bytes", v8::Function::new(cs, bytes_op).unwrap()),
                 ("__read", v8::Function::new(cs, read_op).unwrap()),
+                ("__body", v8::Function::new(cs, body_op).unwrap()),
                 (
                     "__linkModules",
                     v8::Function::new(cs, crate::modules::link).unwrap(),
@@ -741,7 +914,36 @@ impl Vm {
             fetch_reserved_bytes: native.reserved,
             engine_reserved_bytes: native.engine_reserved,
             snapshot_bytes: self.blob.len(),
+            reserved_heap_bytes: self.quota.guard.reservation.bytes(),
         }
+    }
+    /// True once the isolate holds more than its initial slice.
+    pub fn grown(&self) -> bool {
+        self.quota.guard.reservation.bytes() > self.quota.plan.initial()
+    }
+    /// An idle isolate gives back what it grew past its live size: a full
+    /// collection, then the old-generation limit comes down to half again
+    /// above what lives (never under the initial slice). V8 keeps any limit
+    /// it can't honour, so the account follows V8's own limit, not the ask.
+    pub fn trim(&mut self) {
+        if !self.grown() || self.quota.guard.exceeded.load(Ordering::Acquire) {
+            return;
+        }
+        let quota = &*self.quota as *const Quota as *mut c_void;
+        let mut isolate = self.isolate.as_ref().unwrap().lock();
+        isolate.low_memory_notification();
+        let before = isolate.get_heap_statistics();
+        let used = before.used_heap_size();
+        let target = (used + used / 2 + 4 * MIB)
+            .next_multiple_of(MIB)
+            .max(self.quota.plan.initial_old);
+        isolate.remove_near_heap_limit_callback(near_limit, target);
+        isolate.add_near_heap_limit_callback(near_limit, quota);
+        let after = isolate.get_heap_statistics().heap_size_limit();
+        self.quota
+            .guard
+            .reservation
+            .shrink(before.heap_size_limit().saturating_sub(after));
     }
     pub fn task_cancelled(&self) -> bool {
         self.native.lock().unwrap().cancellation.is_cancelled()
@@ -813,8 +1015,8 @@ impl Vm {
                 return Ok(v8::Global::new(s, value));
             }
         }
-        Err(if self.quota.exceeded.load(Ordering::Acquire) {
-            Error::Quota("heap")
+        Err(if self.quota.guard.exceeded.load(Ordering::Acquire) {
+            self.quota.guard.error()
         } else {
             exception(s)
         })
@@ -827,9 +1029,10 @@ impl Vm {
         let tc = std::pin::pin!(v8::TryCatch::new(cs));
         let s = &mut tc.init();
         s.perform_microtask_checkpoint();
-        if s.is_execution_terminating() {
-            return Err(if self.quota.exceeded.load(Ordering::Acquire) {
-                Error::Quota("heap")
+        self.quota.guard.check(s);
+        if s.is_execution_terminating() || self.quota.guard.exceeded.load(Ordering::Acquire) {
+            return Err(if self.quota.guard.exceeded.load(Ordering::Acquire) {
+                self.quota.guard.error()
             } else {
                 Error::Terminated
             });

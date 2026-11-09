@@ -142,6 +142,11 @@ fn main() -> Result<()> {
     )
     .context("HOME is required when no native profile override is provided")?;
     let profile = plan.profile.clone();
+    // Development builds: a profile holding `cage-report.json` gets the cage
+    // account written there each second, for memory reviews of many windows.
+    if cfg!(debug_assertions) && profile.join("cage-report.json").exists() {
+        cage_report(profile.join("cage-report.json"));
+    }
     anyhow::ensure!(
         profile.is_absolute(),
         "Use an absolute isolated native profile"
@@ -312,6 +317,26 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
         "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
         _ => None,
     }
+}
+
+/// The isolate cage account (`pm_runtime_v8::Admission::cage`), once a second.
+fn cage_report(path: PathBuf) {
+    std::thread::spawn(move || {
+        let cage = pm_runtime_v8::Admission::cage();
+        loop {
+            let _ = std::fs::write(
+                &path,
+                serde_json::json!({
+                    "usedMiB": cage.used() >> 20,
+                    "peakMiB": cage.peak() >> 20,
+                    "budgetMiB": cage.budget() >> 20,
+                    "isolates": cage.isolates(),
+                })
+                .to_string(),
+            );
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    });
 }
 
 #[cfg(test)]

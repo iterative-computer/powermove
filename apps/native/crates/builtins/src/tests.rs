@@ -2314,33 +2314,29 @@ fn overlay_text(panels: &Builtins, overlay: &str, want: &str) {
 fn timeline_chrome_edits_stack_per_extension_and_none_is_lost() {
     let actor = actor();
     let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
-    // Two edits in a row: the second must not replace the first.
+    // Three edits in a row: none replaces another. Main stores layer
+    // numbers, type badges and toolbar density the same way.
     let a = graph_of(
-        "let refused = '';
-        export function activate({ timeline }) {
+        "export function activate({ timeline }) {
             timeline.chrome({ rowHeight: 40 });
             timeline.chrome({ gutterWidth: 340 });
-            try { timeline.chrome({ showTypeBadges: false }); } catch (e) { refused = String(e.message ?? e); }
+            timeline.chrome({ showLayerNumbers: false, showTypeBadges: false, toolbarDensity: 'normal' });
         }
-        export const view = () => jsx('text', { children: 'Refused ' + refused });",
+        export const view = () => jsx('text', { children: 'A' });",
     );
     let b = graph_of(
         "export function activate({ timeline }) { timeline.chrome({ rowHeight: 30, surfaceOrder: 'reversed' }); }
         export const view = () => jsx('text', { children: 'B' });",
     );
     finish(panels.mount_extension("chrome-a", &a, None).unwrap());
-    assert!(
-        text_of(&panels, "chrome-a")
-            .iter()
-            .any(|t| t.contains("aren't drawn by the native timeline")),
-        "fields the native timeline can't draw are refused"
-    );
     chrome_when(&actor, |c| {
-        c["timeline"] == json!({"rowHeight":40,"gutterWidth":340})
+        c["timeline"]
+            == json!({"rowHeight":40,"gutterWidth":340,"showLayerNumbers":false,"showTypeBadges":false,"toolbarDensity":"normal"})
     });
     finish(panels.mount_extension("chrome-b", &b, None).unwrap());
     chrome_when(&actor, |c| {
-        c["timeline"] == json!({"rowHeight":30,"gutterWidth":340,"surfaceOrder":"reversed"})
+        c["timeline"]
+            == json!({"rowHeight":30,"gutterWidth":340,"surfaceOrder":"reversed","showLayerNumbers":false,"showTypeBadges":false,"toolbarDensity":"normal"})
             && c["timelineSurfaceOrder"] == "reversed"
     });
     // A leaving under B: B's row height stays; A's gutter goes back.

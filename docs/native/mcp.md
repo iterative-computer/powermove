@@ -46,11 +46,14 @@ window still shows. A windowless host uses slot 0.
   engine's viewer/scopes picture, WebKit extension bodies); WebKit panel
   controls aren't in reads yet. App agents (no project) reach the application
   window and its Agent archive.
+- `store_search`, `store_extension` and `store_source` read the Store's public
+  routes at its production origin over the system HTTP stack
+  (`mcp_services::StoreHttp`); a redirect off that origin fails the read.
 - `thread_list` and `thread_read` read the durable thread archive. In the app,
   `thread_read` adds a live run's trace (`activity`, last 20,000 units) and open
   questions from the window's Agent panel (`Builtins::agent_thread_live`).
 
-Of the 68 tools, 49 have bodies in the app. The other 19 refuse with
+Of the 68 tools, 52 have bodies in the app. The other 16 refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
@@ -60,8 +63,7 @@ the running binary in both directions.
 | `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A window: only the headless `--powermove-mcp` host refuses these. The running app answers them on its main thread (`app/src/panel_bridge.rs`). |
 | `generate_captions`, `transcribe_media` | A local transcription runtime. |
 | `publish_visual_reply` | A safe viewer and its input validator. |
-| `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |
-| `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | The signed Store envelope and install host. |
+| `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | Install and update: the Store serves no release signature yet (`GET /v1/store/releases/<id>/signature`, [store-host.md](store-host.md)), and public hashes come over the same channel as the bytes, so nothing can be verified. Library, uninstall and publish: main's provenance, update checks and publish confirmation aren't ported. |
 | `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_watch`, `thread_unwatch` | Root-owned task records and run watches that resume the calling agent. |
 | `thread_launch`, `thread_send`, `thread_cancel` | A window: only the headless host refuses these. The app runs them on the window's Agent panel (`Builtins::agent_thread_control`). |
 <!-- refused-tools -->
