@@ -1,6 +1,6 @@
 import type { StudioNativeBridge, StudioNativeCommand, StudioNativeReply } from '../../../../shared/studio-native';
 import { patchStudioScene, type StudioBackend, type StudioBounds, type StudioCameraDescription, type StudioCameraOptions, type StudioFrame, type StudioPick, type StudioRenderRequest, type StudioSceneDescription, type StudioScenePatch, type StudioTextureSource } from '../scene3d/studio-backend';
-import { MAP_SIZE, STUDIO_MATERIAL_FLOATS, type StudioScene } from '../studio/extract';
+import { MAP_SIZE, STUDIO_MATERIAL_FLOATS, STUDIO_TRIANGLE_FLOATS, type StudioScene } from '../studio/extract';
 import type { StudioView } from '../studio/gpu';
 import { compileSceneDescription, viewFromDescription } from '../studio/scene-description';
 import { StudioBinaryWriter } from './buffers';
@@ -32,6 +32,7 @@ export class NativeStudioBackend implements StudioBackend {
   private supportsViewPatch=false;
   private geometryKey: string | null = null;
   private uploadedMaps: StudioTextureSource[] = [];
+  private uploadedMapSize=0;
   private mapPixels: Uint8Array[] = [];
   private mapsRevision=0;
   private uploadedMapsRevision=-1;
@@ -64,7 +65,7 @@ export class NativeStudioBackend implements StudioBackend {
       for(const [key,old] of this.textureFrames){if(this.textureFrames.size<=3)break;old.width=0;old.height=0;this.textureFrames.delete(key);}
     })??null;
     const hello = await this.send({ op: 'hello' }); this.generation = hello.generation;this.supportsViewPatch=hello.result?.capabilities?.includes('preparedView')??false;
-    if(hello.result?.layout?.materialBytes!==STUDIO_MATERIAL_FLOATS*4 || hello.result?.layout?.triangleBytes!==96)throw new Error('Native Studio needs a matching renderer build');
+    if(hello.result?.layout?.materialBytes!==STUDIO_MATERIAL_FLOATS*4 || hello.result?.layout?.triangleBytes!==STUDIO_TRIANGLE_FLOATS*4)throw new Error('Native Studio needs a matching renderer build');
   }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription): void {
     this.disposeGraph(); this.prepared = scene; this.maps = maps; this.description = description; this.document = null; this.revision++; this.sceneRevision++; this.mapsRevision++;
@@ -139,22 +140,26 @@ export class NativeStudioBackend implements StudioBackend {
         }
         this.uploadedSceneRevision=sceneRevision;
       }
-      if(mapsRevision!==this.uploadedMapsRevision){await this.uploadTextures(maps);this.uploadedMapsRevision=mapsRevision;}
+      if(mapsRevision!==this.uploadedMapsRevision){await this.uploadTextures(maps,scene.mapSize ?? MAP_SIZE);this.uploadedMapsRevision=mapsRevision;}
     } else { throw new Error('Set a Studio scene before rendering'); }
     this.uploaded = revision;
   }
-  private async uploadTextures(maps: StudioTextureSource[]): Promise<void> {
-    if (!maps.length) { this.uploadedMaps = []; this.mapPixels=[]; return; }
+  private async uploadTextures(maps: StudioTextureSource[],mapSize:number): Promise<void> {
+    if (!maps.length) {
+      // Release a previous large array when a finish/model no longer uses it.
+      if(this.uploadedMaps.length || this.uploadedMapSize!==1)await this.send({op:'textures',width:1,height:1,layers:1},new Uint8Array([255,255,255,255]));
+      this.uploadedMaps=[];this.mapPixels=[];this.uploadedMapSize=1;return;
+    }
     const pixels = (source: StudioTextureSource): Uint8Array => {
       if (source instanceof Uint8Array) return source;
       const context = source.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
       if (!context) throw new Error('Studio texture source has no 2D context');
-      const data = context.getImageData(0, 0, MAP_SIZE, MAP_SIZE).data;
+      const data = context.getImageData(0, 0, mapSize, mapSize).data;
       return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     };
-    if (this.uploadedMaps.length !== maps.length) {
+    if (this.uploadedMaps.length !== maps.length || this.uploadedMapSize!==mapSize) {
       const writer = new StudioBinaryWriter(); this.mapPixels=maps.map(source=>pixels(source).slice()); this.mapPixels.forEach(pixels=>writer.append(pixels));
-      await this.send({ op: 'textures', width: MAP_SIZE, height: MAP_SIZE, layers: maps.length }, writer.finish());
+      await this.send({ op: 'textures', width: mapSize, height: mapSize, layers: maps.length }, writer.finish());
     } else {
       for (let layer = 0; layer < maps.length; layer++) {
         const source = maps[layer]!;
@@ -163,11 +168,11 @@ export class NativeStudioBackend implements StudioBackend {
         let equal=before?.length===bytes.length;
         if(equal){const a=new Uint32Array(bytes.buffer,bytes.byteOffset,bytes.byteLength/4),b=new Uint32Array(before!.buffer);for(let i=0;i<a.length;i++){if(a[i]!==b[i]){equal=false;break;}}}
         if(equal)continue;
-        await this.send({ op: 'textures', width: MAP_SIZE, height: MAP_SIZE, layers: maps.length, layer }, bytes);
+        await this.send({ op: 'textures', width: mapSize, height: mapSize, layers: maps.length, layer }, bytes);
         this.mapPixels[layer]=bytes.slice();
       }
     }
-    this.uploadedMaps = [...maps];
+    this.uploadedMaps = [...maps];this.uploadedMapSize=mapSize;
   }
   render(request: StudioRenderRequest): Promise<StudioFrame> {
     return this.serial(async () => {

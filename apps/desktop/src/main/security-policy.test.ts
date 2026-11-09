@@ -16,11 +16,12 @@ describe('renderer security policy', () => {
     expect(SANDBOX_CONTENT_SECURITY_POLICY).toContain("connect-src 'none'");
   });
 
-  it('confines WebAssembly and eval to the CAD worker, which has no network', () => {
+  it('confines WebAssembly and eval to the model import workers, which have no network', () => {
     expect(directive(CAD_WORKER_CONTENT_SECURITY_POLICY, 'script-src')).toEqual(["'self'", "'unsafe-eval'", "'wasm-unsafe-eval'"]);
     expect(directive(CAD_WORKER_CONTENT_SECURITY_POLICY, 'connect-src')).toEqual(["'self'"]);
     expect(CONTENT_SECURITY_POLICY).not.toContain('wasm-unsafe-eval');
     expect(isCadWorkerScript('assets/cad.worker-sP2-XfP1.js')).toBe(true);
+    expect(isCadWorkerScript('assets/ktx.worker-sP2-XfP1.js')).toBe(true);
     expect(isCadWorkerScript('assets/index-sP2-XfP1.js')).toBe(false);
     expect(isCadWorkerScript('assets/cad.worker-x.js/../index.js')).toBe(false);
   });

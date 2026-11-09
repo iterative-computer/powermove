@@ -1,3 +1,4 @@
+import { STUDIO_MATERIAL_FLOATS } from './layout';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { extractScene } from './extract';
@@ -56,7 +57,7 @@ it('keeps one mesh BVH for a whole imported instance set',()=>{
 it('shares cloned file geometry and identical materials within one model layer',()=>{
  const graph=new THREE.Scene(),g=new THREE.BoxGeometry();
  for(let i=0;i<2;i++){const clone=g.clone();clone.userData.studioGeometryKey=g.uuid;const mesh=new THREE.Mesh(clone,new THREE.MeshStandardMaterial());mesh.userData.sceneId='assembly';mesh.position.x=i*2;graph.add(mesh);}
- const prepared=extractScene(graph,()=>true,env);expect(prepared.instanceCount).toBe(2);expect(prepared.triangles).toBe(12);expect(prepared.materials.length).toBe(32);
+ const prepared=extractScene(graph,()=>true,env);expect(prepared.instanceCount).toBe(2);expect(prepared.triangles).toBe(12);expect(prepared.materials.length).toBe(STUDIO_MATERIAL_FLOATS);
 });
 it('retains imported instance colors without copying mesh triangles',()=>{
  const mesh=new THREE.InstancedMesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial({color:'#ffffff'}),2);mesh.userData.sceneId='colored-instances';mesh.setColorAt(0,new THREE.Color(1,0,0));mesh.setColorAt(1,new THREE.Color(0,0,1));mesh.setMatrixAt(1,new THREE.Matrix4().makeTranslation(2,0,0));

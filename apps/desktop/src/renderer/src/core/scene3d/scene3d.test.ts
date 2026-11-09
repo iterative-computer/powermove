@@ -239,6 +239,18 @@ describe('shared render graph, camera projection and picking',()=>{
     scene.objects[0]!.useSourceMaterials=true;runtime.sync(scene,()=>asset);
     expect(((runtime.objects.get('model')!.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial).color.getHexString()).toBe('ff0000');runtime.dispose();
   });
+  it('clears imported physical maps for a whole-model finish and restores every source extension',()=>{
+    const map=new THREE.DataTexture(new Uint8Array([255,128,64,255]),1,1);
+    const original=new THREE.MeshPhysicalMaterial({clearcoat:.8,clearcoatMap:map,transmission:.6,transmissionMap:map,thickness:.4,attenuationDistance:2,specularColor:new THREE.Color(.2,.4,.6),specularColorMap:map,anisotropy:.5,anisotropyRotation:.7});original.userData.sourceMaterialIndex=0;
+    const source=new THREE.Group();source.add(new THREE.Mesh(new THREE.BoxGeometry(),original));
+    const asset={kind:'model',object3d:source},runtime=new SceneRuntime(),scene=parseScene({objects:[{id:'model',source:{assetId:'asset'},useSourceMaterials:true}]});
+    runtime.sync(scene,()=>asset);scene.objects[0]!.useSourceMaterials=false;runtime.sync(scene,()=>asset);
+    const override=(runtime.objects.get('model')!.children[0] as THREE.Mesh).material as THREE.MeshPhysicalMaterial;
+    expect(override.clearcoatMap).toBeNull();expect(override.transmissionMap).toBeNull();expect(override.specularColorMap).toBeNull();expect(override.specularColor.getHexString()).toBe('ffffff');expect(override.thickness).toBe(0);
+    scene.objects[0]!.useSourceMaterials=true;runtime.sync(scene,()=>asset);
+    const restored=(runtime.objects.get('model')!.children[0] as THREE.Mesh).material as THREE.MeshPhysicalMaterial;
+    expect(restored.clearcoat).toBe(.8);expect(restored.clearcoatMap).toBe(map);expect(restored.transmissionMap).toBe(map);expect(restored.specularColor.toArray()).toEqual([.2,.4,.6]);expect(restored.thickness).toBe(.4);expect(restored.attenuationDistance).toBe(2);expect(restored.anisotropyRotation).toBe(.7);runtime.dispose();map.dispose();original.dispose();
+  });
   it('generates normals and UVs for every procedural primitive',()=>{
     for(const primitive of ['box','roundedBox','sphere','plane','cylinder','cone','torus','capsule','icosahedron'] as const){const g=primitiveGeometry({primitive});expect(g.getAttribute('position').count).toBeGreaterThan(0);expect(g.getAttribute('normal').count).toBeGreaterThan(0);g.dispose();}
   });

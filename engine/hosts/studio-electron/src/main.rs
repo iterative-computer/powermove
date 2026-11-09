@@ -339,9 +339,9 @@ impl Host {
                 layers,
                 layer,
             } => {
-                dimensions(width, height)?;
+                if width==0 || height==0 || width>4096 || height>4096 {return Err("texture dimensions exceed native memory budget".into());}
                 self.history_revision += 1;
-                if layers == 0 || layers > 64 {
+                if layers == 0 || layers > 256 || width as u64*height as u64*layers as u64*4>256*1024*1024 {
                     return Err("texture layer budget exceeded".into());
                 }
                 let stride = width as usize * height as usize * 4;
@@ -900,13 +900,21 @@ mod tests {
         value["objects"] = json!([]);
         value["topNodes"] = json!(1);
         value["positions"]["length"] = json!(48);
-        value["tris"]["length"] = json!(96);
+        value["tris"]["length"] = json!(std::mem::size_of::<pm_studio::scene::GpuTri>());
         value["nodes"]["length"] = json!(64);
         value["sdata"]["length"] = json!(16);
         let empty =
             packed::PackedScene::new(serde_json::from_value(value).unwrap(), &binary).unwrap();
         assert!(empty.bounds(None).is_none());
         assert!(empty.pick(10., 10., 20, 20).is_none());
+    }
+    #[test]
+    fn accepts_4k_material_images_and_rejects_arrays_above_the_memory_budget() {
+        let mut h=Host::new();
+        let pixels=vec![0u8;4096*4096*4];
+        assert!(h.handle(Command::Textures{width:4096,height:4096,layers:1,layer:None},&pixels).is_ok());
+        assert!(h.handle(Command::Textures{width:4096,height:4096,layers:5,layer:None},&[]).is_err());
+        assert!(h.handle(Command::Textures{width:1,height:1,layers:257,layer:None},&[]).is_err());
     }
 
     #[test]

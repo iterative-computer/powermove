@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { defineConfig } from 'electron-vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'node:path';
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 export default defineConfig({
   // A sandboxed preload must be CommonJS; pin the format so a future
@@ -50,6 +50,8 @@ export default defineConfig({
     plugins: [svelte(), {
       name: 'extension-sandbox-document',
       closeBundle() {
+        const assets=path.resolve(__dirname,'out/renderer/assets');mkdirSync(assets,{recursive:true});
+        copyFileSync(path.resolve(__dirname,'assets/licenses/basis-universal.txt'),path.join(assets,'LICENSE-Basis-Universal.txt'));
         const source = path.resolve(__dirname, 'out/renderer/sandbox/ext-sandbox.html');
         if (!existsSync(source)) return;
         const target = path.resolve(__dirname, 'out/renderer/host');

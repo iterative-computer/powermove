@@ -33,10 +33,10 @@ test('bundled variable fonts and Arial extrude without losing the scene', async 
       const data = canvas.getContext('2d').getImageData(0, 0, 640, 360).data;
       let lit = 0;
       for (let i = 0; i < data.length; i += 4) if (Math.max(data[i], data[i + 1], data[i + 2]) > 40) lit++;
-      return { png: canvas.toDataURL('image/png'), lit };
+      return { png: canvas.toDataURL('image/png'), lit, status:PM.Studio.status() };
     }, font);
     await writeFile(`${shots}/font-${font.replaceAll(' ', '-')}.png`, Buffer.from(result.png.split(',')[1], 'base64'));
-    expect(result.lit, font).toBeGreaterThan(600);
+    expect(result.lit, `${font}: ${JSON.stringify(result.status)}`).toBeGreaterThan(600);
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

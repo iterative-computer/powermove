@@ -459,7 +459,7 @@ impl Renderer {
     pub fn set_scene(&mut self, scene: &Scene, prepared: &Prepared) {
         let extra = if self.rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let init = |label: &str, data: &[u8]| {
-            let data: Vec<u8> = if data.is_empty() { vec![0u8; 128] } else { data.to_vec() };
+            let data: Vec<u8> = if data.is_empty() { vec![0u8; std::mem::size_of::<crate::scene::GpuMaterial>()] } else { data.to_vec() };
             self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | extra })
         };
         self.history_valid = false;

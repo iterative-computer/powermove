@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-const fixture = vi.hoisted(() => ({ team:'example-team', badBinary:false, absoluteDependency:false, absoluteRpath:false, cpu:true, materialBytes:128 }));
+const fixture = vi.hoisted(() => ({ team:'example-team', badBinary:false, absoluteDependency:false, absoluteRpath:false, cpu:true, materialBytes:1088,triangleBytes:144 }));
 vi.mock('node:fs/promises', () => ({
   access: vi.fn(async () => {}),
   readdir: vi.fn(async () => ['pm-studio-host','studio-surface.node','libOpenImageDenoise.2.dylib','libtbb.12.dylib',...(fixture.cpu?['libOpenImageDenoise_device_cpu.2.dylib']:[])])
 }));
 vi.mock('node:child_process', () => ({spawnSync:(command:string,args:string[])=>{
   if(command.endsWith('/pm-studio-host')){
-    const json=Buffer.from(JSON.stringify({id:1,ok:true,result:{protocol:1,layout:{materialBytes:fixture.materialBytes,triangleBytes:96,nodeBytes:64,instanceFloats:36}}})),header=Buffer.alloc(12);
+    const json=Buffer.from(JSON.stringify({id:1,ok:true,result:{protocol:1,layout:{materialBytes:fixture.materialBytes,triangleBytes:fixture.triangleBytes,nodeBytes:64,instanceFloats:36}}})),header=Buffer.alloc(12);
     header.write('PMS1');header.writeUInt32LE(json.length,4);
     return {status:0,stdout:Buffer.concat([header,json]),stderr:Buffer.alloc(0)};
   }
@@ -18,7 +18,7 @@ vi.mock('node:child_process', () => ({spawnSync:(command:string,args:string[])=>
   return {status:0,stdout:output,stderr:''};
 }}));
 import { verifyStudioRuntime } from './verify-studio-runtime.mjs';
-beforeEach(()=>Object.assign(fixture,{team:'example-team',badBinary:false,absoluteDependency:false,absoluteRpath:false,cpu:true,materialBytes:128}));
+beforeEach(()=>Object.assign(fixture,{team:'example-team',badBinary:false,absoluteDependency:false,absoluteRpath:false,cpu:true,materialBytes:1088,triangleBytes:144}));
 
 describe('packaged Studio signing gate',()=>{
   it('accepts a complete consistently signed runtime',async()=>{
@@ -44,7 +44,9 @@ describe('packaged Studio signing gate',()=>{
     await expect(verifyStudioRuntime('/test/Powermove.app')).rejects.toThrow('CPU denoiser');
   });
   it('rejects a signed helper copied from an incompatible Cargo build',async()=>{
-    fixture.materialBytes=1088;
+    fixture.materialBytes=128;
+    await expect(verifyStudioRuntime('/test/Powermove.app')).rejects.toThrow('does not match the renderer layout');
+    fixture.materialBytes=1088;fixture.triangleBytes=96;
     await expect(verifyStudioRuntime('/test/Powermove.app')).rejects.toThrow('does not match the renderer layout');
   });
 });

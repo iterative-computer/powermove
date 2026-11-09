@@ -1,3 +1,4 @@
+import { STUDIO_MATERIAL_FLOATS } from './layout';
 import * as THREE from 'three';
 import { describe, expect, it, vi } from 'vitest';
 import { buildBvh } from './bvh';
@@ -38,10 +39,29 @@ describe('Studio BVH', () => {
 });
 
 describe('Studio scene extraction', () => {
-  it.each(['position', 'normal', 'uv', 'material', 'index'] as const)('isolates invalid %s data and logs a layer diagnostic', fault => {
+  it('does not let a bad layer consume the texture budget of valid layers',()=>{
+    const scene=new THREE.Scene(),bad=new THREE.Mesh(new THREE.BoxGeometry(),Array.from({length:16},()=>{
+      const m=new THREE.MeshPhysicalMaterial();m.userData.sourceMaterialIndex=0;
+      for(const slot of ['map','emissiveMap','roughnessMap','metalnessMap','normalMap','aoMap','clearcoatMap','clearcoatRoughnessMap','clearcoatNormalMap','transmissionMap','thicknessMap','specularIntensityMap','specularColorMap','sheenColorMap','sheenRoughnessMap','iridescenceMap','iridescenceThicknessMap','anisotropyMap']) (m as any)[slot]=new THREE.DataTexture(new Uint8Array([255,255,255,255]),1,1);
+      return m;
+    }));bad.userData.sceneId='bad';bad.geometry.getAttribute('position').setX(0,NaN);
+    const good=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial({map:new THREE.DataTexture(new Uint8Array([255,0,0,255]),1,1)}));good.userData.sceneId='good';
+    scene.add(bad,good);const log=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try {const prepared=extractScene(scene,()=>true,env);expect(prepared.instanceCount).toBe(1);expect(prepared.triangles).toBe(12);expect(prepared.maps).toHaveLength(1);expect(prepared.materials).toHaveLength(STUDIO_MATERIAL_FLOATS);}
+    finally {log.mockRestore();bad.geometry.dispose();good.geometry.dispose();for(const m of [...bad.material,good.material]){for(const value of Object.values(m))if(value instanceof THREE.Texture)value.dispose();m.dispose();}}
+  });
+  it('skips an invalid instance color while keeping its healthy sibling',()=>{
+    const scene=new THREE.Scene(),mesh=new THREE.InstancedMesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial(),2);
+    mesh.userData.sceneId='instances';mesh.setColorAt(0,new THREE.Color(NaN,0,0));mesh.setColorAt(1,new THREE.Color(1,0,0));scene.add(mesh);
+    const log=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try {const prepared=extractScene(scene,()=>true,env);expect(prepared.instanceCount).toBe(1);expect([...prepared.sdata].every(Number.isFinite)).toBe(true);expect(log).toHaveBeenCalled();}
+    finally{log.mockRestore();mesh.geometry.dispose();mesh.material.dispose();}
+  });
+  it.each(['position', 'normal', 'uv', 'color', 'material', 'index'] as const)('isolates invalid %s data and logs a layer diagnostic', fault => {
     const scene = new THREE.Scene();
     const good = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()); good.userData.sceneId = 'good';
     const bad = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()); bad.userData.sceneId = 'bad';
+    if(fault==='color')bad.geometry.setAttribute('color',new THREE.Float32BufferAttribute(new Array(bad.geometry.getAttribute('position').count*3).fill(.5),3));
     if (fault === 'material') bad.material.roughness = NaN;
     else if (fault === 'index') bad.geometry.index!.setX(0, 100_000);
     else bad.geometry.getAttribute(fault).setX(0, NaN);
@@ -79,7 +99,7 @@ describe('Studio scene extraction', () => {
     // No maps: -1 layers.
     expect([...s.materials.slice(16, 20)]).toEqual([-1, -1, -1, -1]);
     expect([...s.materials.slice(20, 24)]).toEqual([0, 0, 0, 0]);
-    expect(s.materials.length).toBe(32);
+    expect(s.materials.length).toBe(STUDIO_MATERIAL_FLOATS);
   });
 
   it('turns three lights into Studio lights', () => {

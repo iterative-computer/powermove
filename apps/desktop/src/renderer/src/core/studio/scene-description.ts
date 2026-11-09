@@ -1,7 +1,9 @@
+import { mapCanvas } from './texture-pixels';
 import * as THREE from 'three';
 import { packWorld,worldSun } from './environment';
 import {expandEnvironmentGeometry,instanceMatrix} from './environment-geometry';
-import { MAP_SIZE, extractScene, type StudioScene } from './extract';
+import { MAP_SIZE, extractScene, STUDIO_MATERIAL_FLOATS, STUDIO_TRIANGLE_FLOATS, type StudioScene } from './extract';
+import { restoreImportedMaterial } from './imported-material';
 import type { StudioView } from './gpu';
 import type { StudioCameraDescription, StudioCameraOptions, StudioMaterial, StudioMesh, StudioSceneDescription, StudioTextureSource, StudioVec3 } from '../scene3d/studio-backend';
 
@@ -21,10 +23,10 @@ export function describeCamera(view: StudioView, metersPerUnit=0.1): { camera: S
 export function describePreparedScene(input: StudioScene, view: StudioView, maps: StudioTextureSource[]): StudioSceneDescription {
   const objects: StudioSceneDescription['scene']['objects'] = [], identities: StudioSceneDescription['object_ids'] = [], layers: number[] = [];
   const materialOptions: StudioSceneDescription['material_options'] = [], materials: StudioMaterial[] = [];
-  for (let o = 0; o < input.materials.length; o += 32) {
+  for (let o = 0; o < input.materials.length; o += STUDIO_MATERIAL_FLOATS) {
     const m = input.materials;
     materials.push({ base: vec(m, o), metallic: m[o + 3]!, roughness: m[o + 4]!, coat: m[o + 5]!, coat_roughness: m[o + 6]!, transmission: m[o + 7]!, emission: vec(m, o + 8), screen: false, subsurface: m[o + 11]!, procedural:m[o+27]!, ior: m[o + 12]!, specular: m[o + 13]!, anisotropy: m[o + 15]!, sheen: m[o + 20]!, film_nm: m[o + 21]!, dispersion: m[o + 22]!, droplets: m[o + 23]! });
-    materialOptions.push({ opacity: m[o + 14]!, ambient_response: input.materialPolicies?.[o / 32]?.ambientResponse ?? 1, double_sided: input.materialPolicies?.[o / 32]?.doubleSided ?? true, unlit:(m[o+25]! & 8)!==0, appears_in_reflections:(m[o+25]! & 32)===0, alpha_test: input.materialPolicies?.[o / 32]?.alphaTest ?? 0, maps: [m[o + 16]!, m[o + 17]!, m[o + 28]!, m[o + 29]!, m[o + 19]!, m[o + 30]!] });
+    materialOptions.push({ opacity: m[o + 14]!, ambient_response: input.materialPolicies?.[o / STUDIO_MATERIAL_FLOATS]?.ambientResponse ?? 1, double_sided: input.materialPolicies?.[o / STUDIO_MATERIAL_FLOATS]?.doubleSided ?? true, unlit:(m[o+25]! & 8)!==0, appears_in_reflections:(m[o+25]! & 32)===0, alpha_test: input.materialPolicies?.[o / STUDIO_MATERIAL_FLOATS]?.alphaTest ?? 0, imported: m[o+55]===1?Array.from(m.subarray(o+32,o+STUDIO_MATERIAL_FLOATS)):undefined, maps: [m[o + 16]!, m[o + 17]!, m[o + 28]!, m[o + 29]!, m[o + 19]!, m[o + 30]!] });
   }
   const coloredMaterials=new Map<string,number>();
   const nodes = new Uint32Array(input.blasNodes), baseNode = input.tlasNodes.byteLength / 64;
@@ -41,7 +43,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
         if (count === 0xffffffff) continue;
         if (count === 0) { stack.push(start - baseNode); continue; }
         for (let t = start; t < start + count; t++) {
-          const originalMaterial = input.tris[t * 24 + 18]!, layerTag=Math.floor(Math.max(d[at+19]!,0)/2), layer = layerTag>0?layerTag-1:input.tris[t * 24 + 19]!;
+          const originalMaterial = input.tris[t * STUDIO_TRIANGLE_FLOATS + 18]!, layerTag=Math.floor(Math.max(d[at+19]!,0)/2), layer = layerTag>0?layerTag-1:input.tris[t * STUDIO_TRIANGLE_FLOATS + 19]!;
           let material=originalMaterial;
           if((d[at+19]! & 1)!==0){
             const color=[d[at+27]!,d[at+31]!,d[at+35]!],key=`${originalMaterial}:${color.join(',')}`;
@@ -52,18 +54,22 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
           let mesh = groups.get(material);
           if (!mesh) { mesh = { positions: [], normals: [], uvs: [], indices: [] }; groups.set(material, mesh); }
           const index = mesh.positions.length;
-          const vertexColors=(input.materials[originalMaterial*32+25]! & 16)!==0;
+          const vertexColors=(input.materials[originalMaterial*STUDIO_MATERIAL_FLOATS+25]! & 16)!==0;
           let identity=identities[objects.findIndex(o=>o.mesh===mesh)];
           for (let j = 0; j < 3; j++) {
             const p = new THREE.Vector3().fromArray(input.positions, t * 12 + j * 4).applyMatrix4(world);
-            const n = new THREE.Vector3().fromArray(input.tris, t * 24 + j * 4).applyMatrix3(normal).normalize();
+            const n = new THREE.Vector3().fromArray(input.tris, t * STUDIO_TRIANGLE_FLOATS + j * 4).applyMatrix3(normal).normalize();
             mesh.positions.push({ x: p.x, y: p.y, z: p.z }); mesh.normals.push({ x: n.x, y: n.y, z: n.z });
             if(vertexColors){
-              const packed=new Uint32Array(input.tris.buffer,input.tris.byteOffset,input.tris.length)[t*24+j*4+3]!;
+              const packed=new Uint32Array(input.tris.buffer,input.tris.byteOffset,input.tris.length)[t*STUDIO_TRIANGLE_FLOATS+j*4+3]!;
               if(!identity){identity={layer:input.objects[layer]!,part:input.instancePolicies?.[instance]?.part ?? null,cast_shadow:input.instancePolicies?.[instance]?.castShadow ?? true,receive_shadow:input.instancePolicies?.[instance]?.receiveShadow ?? true,vertex_colors:[]};}
               identity.vertex_colors!.push([packed&255,(packed>>>8)&255,(packed>>>16)&255,(packed>>>24)&255].map(x=>x/255) as [number,number,number,number]);
             }
-            mesh.uvs.push([input.tris[t * 24 + 12 + j * 2]!, input.tris[t * 24 + 13 + j * 2]!]);
+            mesh.uvs.push([input.tris[t * STUDIO_TRIANGLE_FLOATS + 12 + j * 2]!, input.tris[t * STUDIO_TRIANGLE_FLOATS + 13 + j * 2]!]);
+            if(input.tris[t*STUDIO_TRIANGLE_FLOATS+30]!>0){
+              identity ??= {layer:input.objects[layer]!,part:input.instancePolicies?.[instance]?.part ?? null,cast_shadow:input.instancePolicies?.[instance]?.castShadow ?? true,receive_shadow:input.instancePolicies?.[instance]?.receiveShadow ?? true};
+              (identity.secondary_uvs ??= []).push([input.tris[t*STUDIO_TRIANGLE_FLOATS+24+j*2]!,input.tris[t*STUDIO_TRIANGLE_FLOATS+25+j*2]!]);
+            }
           }
           mesh.indices.push([index, index + 1, index + 2]);
           if (mesh.indices.length === 1) {
@@ -91,8 +97,8 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
     layer_ids: [...input.objects], object_ids: identities, material_options: materialOptions, light_options: [...areaOptions, ...extraOptions],
     camera_options: options, environment_options: { backdrop_opaque: view.backdropOpaque, shadows: view.shadows, floor_y: view.floorY, ground: vec(view.environment.ground),ambient:vec(view.ambient ?? [0,0,0]) },
     textures: maps.map((source, index) => {
-      const pixels = source instanceof Uint8Array ? source : (source.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D)!.getImageData(0, 0, MAP_SIZE, MAP_SIZE).data;
-      return { id: `map-${index}`, width: MAP_SIZE, height: MAP_SIZE, rgba: Array.from(pixels) };
+      const pixels = source instanceof Uint8Array ? source : (source.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D)!.getImageData(0, 0, input.mapSize ?? MAP_SIZE, input.mapSize ?? MAP_SIZE).data;
+      return { id: `map-${index}`, width: input.mapSize ?? MAP_SIZE, height: input.mapSize ?? MAP_SIZE, rgba: Array.from(pixels) };
     }),
   };
 }
@@ -127,6 +133,7 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
     material.userData = { subsurface: m.subsurface, studioProcedural:m.procedural??0, anisotropy: m.anisotropy, studioDispersion: m.dispersion, droplets: m.droplets, studioUnlit:p?.unlit ?? false, materialAmbientUniform: { value: p?.ambient_response ?? 1 } };
     const slots = ['map', 'emissiveMap', 'roughnessMap', 'metalnessMap', 'normalMap', 'aoMap'] as const;
     slots.forEach((slot, j) => { material[slot] = textures[p?.maps[j] ?? -1] ?? null; });
+    restoreImportedMaterial(material,p?.imported,textures);
     return material;
   });
   document.scene.objects.forEach((o, i) => {
@@ -136,6 +143,8 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
     g.setAttribute('position', new THREE.Float32BufferAttribute(o.mesh.positions.flatMap(p => tuple(p)), 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(o.mesh.normals.flatMap(p => tuple(p)), 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(o.mesh.uvs.flat(), 2)); g.setIndex(o.mesh.indices.flat());
+    const secondary=document.object_ids[i]?.secondary_uvs;
+    if(secondary)g.setAttribute('uv1',new THREE.Float32BufferAttribute(secondary.flat(),2));
     const colors=document.object_ids[i]?.vertex_colors ?? o.mesh.colors?.map(c=>[c.x,c.y,c.z,1]);
     if(colors)g.setAttribute('color',new THREE.Float32BufferAttribute(colors.flat(),4));
     const material=materials[o.material]!.clone();material.userData.studioReflections=document.material_options[o.material]?.appears_in_reflections!==false;material.vertexColors=!!colors;
@@ -164,10 +173,10 @@ export function compileSceneDescription(document: StudioSceneDescription): { gra
     const index = textures.findIndex(t => 'source' in map && t.image === map.source);
     const t = document.textures[index];
     if(!t)return new Uint8Array(MAP_SIZE*MAP_SIZE*4);
-    if (t.width === MAP_SIZE && t.height === MAP_SIZE) return new Uint8Array(t.rgba);
+    if (t.width === (scene.mapSize ?? MAP_SIZE) && t.height === (scene.mapSize ?? MAP_SIZE)) return new Uint8Array(t.rgba);
     const source = new OffscreenCanvas(t.width, t.height), ctx = source.getContext('2d')!;
     ctx.putImageData(new ImageData(new Uint8ClampedArray(t.rgba), t.width, t.height), 0, 0);
-    const canvas = new OffscreenCanvas(MAP_SIZE, MAP_SIZE); canvas.getContext('2d')!.drawImage(source, 0, 0, MAP_SIZE, MAP_SIZE); return canvas;
+    return mapCanvas(source,false,scene.mapSize ?? MAP_SIZE);
   });
   return { graph, scene, maps };
 }

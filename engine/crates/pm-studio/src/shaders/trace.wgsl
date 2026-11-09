@@ -40,7 +40,7 @@ fn camera_limit(ro:vec3f, rd:vec3f) -> f32 {
 }
 
 // Per-triangle shading data in BVH order (positions live in `pos`).
-struct Tri { n0: vec4f, n1: vec4f, n2: vec4f, uv01: vec4f, uv2m: vec4f, tangent: vec4f }
+struct Tri { n0: vec4f, n1: vec4f, n2: vec4f, uv01: vec4f, uv2m: vec4f, tangent: vec4f, uv01_secondary: vec4f, uv2_secondary: vec4f, tangent_secondary: vec4f }
 struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, right: u32, rmax: vec3f, rcount: u32 }
 // base: rgb, metallic · spec: roughness, coat, coat roughness, transmission
 // emit: rgb, subsurface radius (0: none) · extra: ior, specular, opacity, anisotropy (-1..1)
@@ -48,7 +48,28 @@ struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, rig
 // layers: sheen, thin-film thickness (nm), dispersion, water droplets
 // policy: ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32), alpha test
 // maps2: independent roughness, metalness, AO indices, normal-map scale
-struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f, layers: vec4f, policy: vec4f, maps2: vec4f }
+// Keep the hot BSDF payload at its original 128 bytes. After sampling, maps
+// carry specular color/sheen roughness; policy.z carries film IOR and
+// policy.y bit 64 marks thin transmission. policy.w retains procedural IDs. Sheen color/film weight use private shading state so the hot
+// by-value material payload stays stable across Metal secondary ray queries.
+struct Material { base:vec4f, spec:vec4f, emit:vec4f, extra:vec4f, maps:vec4f, layers:vec4f, policy:vec4f, maps2:vec4f }
+struct Imported { specular_color:vec4f, sheen_color:vec4f, volume:vec4f, physical:vec4f, physical2:vec4f, physical3:vec4f }
+struct TextureMap { info:vec4f, u:vec4f, v:vec4f }
+struct MaterialRecord { base:Material, imported:Imported, physical_maps:array<TextureMap,18> }
+fn imported_defaults(input:Imported,m:Material)->Imported {
+  var p=input;
+  if(p.physical3.w<0.5){
+    p.specular_color=vec4f(1.,1.,1.,m.spec.x);p.sheen_color=vec4f(1.);
+    p.volume=vec4f(1.,1.,1.,0.);p.physical=vec4f(0.,0.,1.38,100.);
+    p.physical2=vec4f(400.,1.,1.,1.);p.physical3=vec4f(1.,0.,0.,0.);
+  }
+  return p;
+}
+fn floor_material()->Material {
+  var m:Material;m.base=vec4f(0.);m.spec=vec4f(1.,0.,1.,0.);m.extra=vec4f(1.5,1.,1.,0.);
+  m.maps=vec4f(1.);m.policy=vec4f(1.,7.,1.38,0.);m.maps2=vec4f(1.);
+  return m;
+}
 // pos.w: kind (0 softbox, 1 sphere, 2 spot, 3 sun).
 // softbox: pos = centre, u/v = half extents (u.w: area); emits along u × v.
 // sphere/spot: pos = centre, u.x = radius; spot: v.xyz = axis, v.w = cos outer, radiance.w = cos inner.
@@ -58,7 +79,7 @@ struct Light { pos: vec4f, u: vec4f, v: vec4f, radiance: vec4f }
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> tris: array<Tri>;
 @group(0) @binding(2) var<storage, read> nodes: array<Node>;
-@group(0) @binding(3) var<storage, read> materials: array<Material>;
+@group(0) @binding(3) var<storage, read> materials: array<MaterialRecord>;
 // Scene data: the lights (4 vec4 each), then the instances (9 vec4 each, in
 // top-level BVH order): rows of world→object (xyz linear, w translation),
 // rows of the normal matrix (n0.w: the instance's BVH root node), rows of the
@@ -104,7 +125,8 @@ const BIG: f32 = 1e30;
 
 var<private> seed: u32;
 // The shading tangent of the surface being lit (anisotropic highlights follow it).
-var<private> shade_t: vec3f;
+struct ShadingState { tangent:vec3f, coat_normal:vec3f, sampled_tangent:vec3f, sampled_coat_normal:vec3f, volume:vec4f, sampled_sheen:vec4f, sheen:vec4f }
+var<private> shading:ShadingState;
 // Randomly rotated three-sample wavelength strata, set by the camera kernel.
 var<private> spectral_band: i32;
 var<private> spectral_seed: u32;
@@ -221,7 +243,7 @@ fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
   return h;
 }
 
-fn tri_material(tri: i32) -> Material { return materials[u32(tris[u32(tri)].uv2m.z)]; }
+fn tri_material(tri: i32) -> Material { return materials[u32(tris[u32(tri)].uv2m.z)].base; }
 
 // How much light gets from `ro` to a point `dist` along `rd`: opaque surfaces
 // block it; glass and partly transparent surfaces tint and dim it.
@@ -728,18 +750,18 @@ fn spec_pdf(nv: f32, nh: f32, a: f32) -> f32 { return smith_g1(nv, a) * ggx_d(nh
 // dielectric's specular weight scales all of it, so specular 0 means no
 // reflection at any angle (OpenPBR).
 fn fresnel_base(m: Material, c: f32) -> vec3f {
-  return mix(vec3f(fresnel_dielectric_base(m, c)), schlick(m.base.xyz, c), m.base.w);
+  return mix(min(m.maps.xyz * (m.extra.y*fresnel_dielectric(c,max(m.extra.x,1e-4))),vec3f(1.)), schlick(m.base.xyz, c), m.base.w);
 }
-fn fresnel_dielectric_base(m: Material, c: f32) -> f32 { return m.extra.y * fresnel_dielectric(c, max(m.extra.x, 1e-4)); }
+fn fresnel_dielectric_base(m: Material, c: f32) -> f32 { return min(1.,max(m.maps.x,max(m.maps.y,m.maps.z))*m.extra.y*fresnel_dielectric(c,max(m.extra.x,1e-4))); }
 
 struct Lobes { coat: f32, spec: f32, diff: f32, trans: f32 }
 
 fn thin_leaf(m:Material)->bool {return m.policy.w==4. || m.policy.w==5.;}
-fn lobe_probs(m: Material, nv: f32) -> Lobes {
+fn lobe_probs(m: Material, nv: f32, coat_nv:f32) -> Lobes {
   if(thin_leaf(m)){return Lobes(0.,0.,0.65,0.35);}
   let metallic = m.base.w;
   let tr = m.spec.w * (1.0 - metallic);
-  let fc = m.spec.y * fresnel_dielectric(nv, 1.5);
+  let fc = m.spec.y * fresnel_dielectric(coat_nv, 1.5);
   let fs = fresnel_base(m, nv);
   let under = 1.0 - fc;
   // A narrow coat above a rough base sees a much spikier incident signal.
@@ -872,10 +894,11 @@ fn sheen_energy(roughness:f32,cosine:f32)->f32 {
 }
 fn sheen_layer_weight(m:Material,nv:f32,nl:f32)->f32 {
   if(m.layers.x<=0.){return 1.;}
-  let q=clamp(m.spec.x,0.,1.)*15.;let index=u32(floor(q));let hi=min(index+1u,15u);
-  let average=m.layers.x*mix(SHEEN_ENERGY_AVG[index],SHEEN_ENERGY_AVG[hi],fract(q))/sheen_normalization(m.spec.x);
-  let incoming=clamp(m.layers.x*sheen_energy(m.spec.x,nl)/sheen_normalization(m.spec.x),0.,1.);
-  let outgoing=clamp(m.layers.x*sheen_energy(m.spec.x,nv)/sheen_normalization(m.spec.x),0.,1.);
+  let q=clamp(m.maps.w,0.,1.)*15.;let index=u32(floor(q));let hi=min(index+1u,15u);
+  let strength=m.layers.x*clamp(max(shading.sheen.x,max(shading.sheen.y,shading.sheen.z)),0.,1.);
+  let average=strength*mix(SHEEN_ENERGY_AVG[index],SHEEN_ENERGY_AVG[hi],fract(q))/sheen_normalization(m.maps.w);
+  let incoming=clamp(strength*sheen_energy(m.maps.w,nl)/sheen_normalization(m.maps.w),0.,1.);
+  let outgoing=clamp(strength*sheen_energy(m.maps.w,nv)/sheen_normalization(m.maps.w),0.,1.);
   return (1.-incoming)*(1.-outgoing)/max(1.-average,1e-6);
 }
 
@@ -905,8 +928,9 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let diff = m.base.xyz * (1.0 - metallic) * (1.0 - tr) * diffuse_layer_weight(m, nv, nl) * nl / PI;
   let ca = m.spec.z * m.spec.z;
   let fc = m.spec.y * fresnel_dielectric(vh, 1.5);
-  let coat = fc * ggx_d(nh, ca) * smith_g2(nv, nl, ca) / (4.0 * nv);
-  let atten = (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * (1.0 - m.spec.y * fresnel_dielectric(nl, 1.5));
+  let cnv=max(dot(shading.coat_normal,v),1e-4);let cnl=max(dot(shading.coat_normal,l),0.);let cnh=max(dot(shading.coat_normal,h),0.);
+  let coat = fc * ggx_d(cnh, ca) * smith_g2(cnv, cnl, ca) / (4.0 * cnv);
+  let atten = (1.0 - m.spec.y * fresnel_dielectric(cnv, 1.5)) * (1.0 - m.spec.y * fresnel_dielectric(cnl, 1.5));
   return vec3f(coat) + (sheen(m, nh, nl, nv) + (spec + diff)*sheen_layer_weight(m,nv,nl)) * atten;
 }
 
@@ -976,7 +1000,7 @@ fn thin_film(m:Material,cosv:f32)->vec3f {
     eta=0.5*(lo+hi);
     extinction=sqrt(max(vec3f(0.),(f0*(eta+1.)*(eta+1.)-(eta-1.)*(eta-1.))/(1.-f0)));
   }
-  let c1=max(cosv,1e-5);let sin2=1.-c1*c1;let nf=1.38;
+  let c1=max(cosv,1e-5);let sin2=1.-c1*c1;let nf=max(m.policy.z,1.0001);
   let c2=sqrt(max(0.,1.-sin2/(nf*nf)));
   // Complex Snell law: q = sqrt((n+ik)^2 - sin(theta)^2).
   let nr=eta*eta-extinction*extinction;let ni=2.*eta*extinction;
@@ -1000,19 +1024,19 @@ fn thin_film(m:Material,cosv:f32)->vec3f {
     let reflectance=0.5*(film_airy(rs,sr,si,phase)+film_airy(rp,tr,ti,phase));
     result+=FILM_RESPONSE[i]*reflectance;
   }
-  return clamp(result*F/max(bare,vec3f(1e-6)),vec3f(0.),vec3f(1.));
+  return mix(F,clamp(result*F/max(bare,vec3f(1e-6)),vec3f(0.),vec3f(1.)),clamp(shading.sheen.w,0.,1.));
 }
 
 // Sheen (fabric, soft-touch): the "Charlie" distribution with a soft
 // visibility term, a white rim that grows at grazing angles.
 fn sheen(m: Material, nh: f32, nl: f32, nv: f32) -> vec3f {
   if (m.layers.x <= 0.0) { return vec3f(0.0); }
-  let r = max(m.spec.x, 0.07);
+  let r = max(m.maps.w, 0.07);
   let inv = 1.0 / r;
   let s2 = max(1.0 - nh * nh, 0.0);
   let d = (2.0 + inv) * pow(s2, inv * 0.5) / (2.0 * PI);
   let vis = 1.0 / (4.0 * (nl + nv - nl * nv));
-  return vec3f(m.layers.x * d * vis * nl / sheen_normalization(m.spec.x));
+  return shading.sheen.xyz * (m.layers.x * d * vis * nl / sheen_normalization(m.maps.w));
 }
 
 fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
@@ -1032,7 +1056,7 @@ fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
     let hl = transpose(fr) * h;
     sp = aniso_g1(vl, ax) * aniso_d(hl, ax) / (4.0 * max(vl.z, 1e-4));
   }
-  return w.coat * spec_pdf(nv, nh, ca) + w.spec * sp + w.diff * nl / PI;
+  return w.coat * spec_pdf(max(dot(shading.coat_normal,v),1e-4),max(dot(shading.coat_normal,h),0.),ca) + w.spec * sp + w.diff * nl / PI;
 }
 
 // ── Subsurface random walk ──
@@ -1068,7 +1092,7 @@ fn random_walk(start: vec3f, dir0: vec3f, m: Material) -> vec4f {
 
 // ── Anisotropic GGX (brushed metal): roughness stretched along the tangent ──
 fn aniso_frame(n: vec3f) -> mat3x3f {
-  var t = shade_t - n * dot(n, shade_t);
+  var t = shading.tangent - n * dot(n, shading.tangent);
   if (dot(t, t) < 1e-8) { return basis(n); }
   t = normalize(t);
   return mat3x3f(t, cross(n, t), n);
@@ -1201,6 +1225,45 @@ fn nature_noise(p:vec3f)->f32 {
   let i=vec3i(floor(p));let f=fract(p);let u=f*f*(3.-2.*f);
   return mix(mix(mix(nature_hash(i),nature_hash(i+vec3i(1,0,0)),u.x),mix(nature_hash(i+vec3i(0,1,0)),nature_hash(i+vec3i(1,1,0)),u.x),u.y),mix(mix(nature_hash(i+vec3i(0,0,1)),nature_hash(i+vec3i(1,0,1)),u.x),mix(nature_hash(i+vec3i(0,1,1)),nature_hash(i+vec3i(1,1,1)),u.x),u.y),u.z);
 }
+fn wrap_imported(value:f32,mode:f32,dimension:f32)->f32 {
+  if(mode<0.5){return fract(value);}
+  let half_pixel=0.5/dimension;
+  if(mode<1.5){return clamp(value,half_pixel,1.-half_pixel);}
+  return clamp(1.-abs(2.*fract(value*0.5)-1.),half_pixel,1.-half_pixel);
+}
+fn imported_texel(material:u32,slot:u32,uv0:vec2f,uv1:vec2f)->vec4f {
+  let map=materials[material].physical_maps[slot];
+  if(map.info.x<0.){return vec4f(1.);}
+  let uv=vec3f(select(uv0,uv1,map.info.y>0.5),1.);
+  let transformed=vec2f(dot(map.u.xyz,uv),dot(map.v.xyz,uv));
+  let dimensions=vec2f(textureDimensions(maps));
+  let at=vec2f(wrap_imported(transformed.x,map.info.z,dimensions.x),wrap_imported(transformed.y,map.info.w,dimensions.y));
+  return textureSampleLevel(maps,map_samp,at,i32(map.info.x),0.);
+}
+fn imported_normal(material:u32,slot:u32,uv0:vec2f,uv1:vec2f,n:vec3f,ng:vec3f,instance:u32,t:Tri,scale:vec2f)->vec3f {
+  let map=materials[material].physical_maps[slot];
+  let raw=select(t.tangent,t.tangent_secondary,map.info.y>0.5);
+  let tangent=vector_to_world(instance,raw.xyz);
+  if(dot(tangent,tangent)<1e-10){return n;}
+  let tg=normalize(tangent-n*dot(n,tangent));let bt=cross(n,tg)*raw.w;
+  let determinant=map.u.x*map.v.y-map.u.y*map.v.x;
+  if(abs(determinant)<1e-10){return n;}
+  let transformed=normalize(tg*map.v.y-bt*map.v.x)*sign(determinant);
+  let bitangent=cross(n,transformed)*raw.w*sign(determinant);
+  let pixel=imported_texel(material,slot,uv0,uv1).xyz*2.-1.;
+  let normal=transformed*pixel.x*scale.x+bitangent*pixel.y*scale.y+n*pixel.z;
+  if(dot(normal,normal)<1e-10){return n;}
+  let mapped=normalize(normal);return select(n,mapped,dot(mapped,ng)>0.);
+}
+
+// Layer overrides share a word with the instance-color flag. Decode in integer
+// space so absent overrides do not require a negative float-to-uint conversion.
+fn hit_object(h:Hit)->u32 {
+  let flags=u32(sdata[inst_base(h.inst)+4u].w);
+  if((flags>>1u)>0u){return (flags>>1u)-1u;}
+  return u32(tris[u32(h.tri)].uv2m.w);
+}
+
 struct Surface { p: vec3f, n: vec3f, ng: vec3f, uv: vec2f, m: Material, object: u32 }
 
 // The hit's position, normals and material with its texture maps applied.
@@ -1215,7 +1278,27 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   var n = normal_to_world(h.inst, t.n0.xyz * w + t.n1.xyz * h.b.x + t.n2.xyz * h.b.y);
   if (dot(n, ng) < 0.0) { n = -n; } // normals and winding may disagree
   let uv = t.uv01.xy * w + t.uv01.zw * h.b.x + t.uv2m.xy * h.b.y;
-  var m = materials[u32(t.uv2m.z)];
+  var m=materials[u32(t.uv2m.z)].base;
+  var imported=imported_defaults(materials[u32(t.uv2m.z)].imported,m);
+  let uv_secondary=t.uv01_secondary.xy*w+t.uv01_secondary.zw*h.b.x+t.uv2_secondary.xy*h.b.y;
+  if(imported.physical3.w>0.5){
+    let mi=u32(t.uv2m.z);
+    let c=imported_texel(mi,0u,uv,uv_secondary);
+    m.base=vec4f(m.base.xyz*decode_srgb(c.rgb),m.base.w);m.extra.z*=c.a;
+    m.emit=vec4f(m.emit.xyz*decode_srgb(imported_texel(mi,1u,uv,uv_secondary).rgb),m.emit.w);
+    m.spec.x*=imported_texel(mi,2u,uv,uv_secondary).g;m.base.w*=imported_texel(mi,3u,uv,uv_secondary).b;
+    m.policy.x*=mix(1.,imported_texel(mi,5u,uv,uv_secondary).r,imported.physical2.w);
+    m.spec.y*=imported_texel(mi,6u,uv,uv_secondary).r;m.spec.z*=imported_texel(mi,7u,uv,uv_secondary).g;
+    m.spec.w*=imported_texel(mi,9u,uv,uv_secondary).r;imported.physical.x*=imported_texel(mi,10u,uv,uv_secondary).g;
+    m.extra.y*=imported_texel(mi,11u,uv,uv_secondary).a;
+    imported.specular_color=vec4f(imported.specular_color.rgb*decode_srgb(imported_texel(mi,12u,uv,uv_secondary).rgb),imported.specular_color.w*imported_texel(mi,14u,uv,uv_secondary).a);
+    imported.sheen_color=vec4f(imported.sheen_color.rgb*decode_srgb(imported_texel(mi,13u,uv,uv_secondary).rgb),imported.sheen_color.w*imported_texel(mi,15u,uv,uv_secondary).r);
+    m.layers.y=select(0.,mix(imported.physical.w,imported.physical2.x,imported_texel(mi,16u,uv,uv_secondary).g),imported.sheen_color.w>0.);
+    if(materials[mi].physical_maps[17u].info.x>=0.){
+      let a=imported_texel(mi,17u,uv,uv_secondary);m.extra.w*=a.b;
+      let direction=a.rg*2.-1.;if(dot(direction,direction)>1e-8){imported.physical.y+=atan2(direction.y,direction.x);}
+    }
+  }else{
   if (m.maps.x >= 0.0) {
     let c = map_texel(m.maps.x, uv);
     m.base = vec4f(m.base.xyz * decode_srgb(c.rgb), m.base.w);
@@ -1230,6 +1313,7 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   if (m.maps2.x >= 0.0) { m.spec.x *= map_texel(m.maps2.x, uv).g; }
   if (m.maps2.y >= 0.0) { m.base.w *= map_texel(m.maps2.y, uv).b; }
   if (m.maps2.z >= 0.0) { m.policy.x *= map_texel(m.maps2.z, uv).r; }
+  }
   if ((u32(m.policy.y) & 16u) != 0u) {
     let c = unpack4x8unorm(bitcast<u32>(t.n0.w)) * w + unpack4x8unorm(bitcast<u32>(t.n1.w)) * h.b.x + unpack4x8unorm(bitcast<u32>(t.n2.w)) * h.b.y;
     m.base = vec4f(m.base.xyz * c.rgb, m.base.w); m.extra.z *= c.a;
@@ -1242,14 +1326,29 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     if((u32(m.policy.y)&8u)!=0u){m.emit=vec4f(m.emit.xyz*color,m.emit.w);}
   }
   if (m.extra.z < m.policy.z) { m.extra.z = 0.0; }
-  let tangent = vector_to_world(h.inst, t.tangent.xyz);
-  if (m.maps.w >= 0.0 && dot(tangent, tangent) > 0.0) {
-    let texnormal = map_texel(m.maps.w, uv).xyz * 2.0 - 1.0;
-    let tn = vec3f(texnormal.xy * m.maps2.w, texnormal.z);
-    let tg = normalize(tangent - n * dot(n, tangent));
-    let bt = cross(n, tg) * t.tangent.w;
-    let mapped = normalize(tg * tn.x + bt * tn.y + n * tn.z);
-    if (dot(mapped, ng) > 0.0) { n = mapped; }
+  var coat_normal=n;
+  var tangent=vector_to_world(h.inst,t.tangent.xyz);
+  if(imported.physical3.w>0.5){
+    let mi=u32(t.uv2m.z);let normal=materials[mi].physical_maps[4u];
+    if(normal.info.x>=0.){n=imported_normal(mi,4u,uv,uv_secondary,n,ng,h.inst,t,vec2f(m.maps2.w,imported.physical3.x));}
+    if(materials[mi].physical_maps[8u].info.x>=0. && m.spec.y>0.){
+      coat_normal=imported_normal(mi,8u,uv,uv_secondary,coat_normal,ng,h.inst,t,imported.physical2.yz);
+    }
+    let anisotropy=materials[mi].physical_maps[17u];
+    if(anisotropy.info.y>0.5){tangent=vector_to_world(h.inst,t.tangent_secondary.xyz);}
+    if(dot(tangent,tangent)>1e-10){
+      let raw=select(t.tangent,t.tangent_secondary,anisotropy.info.y>0.5);
+      tangent=normalize(tangent-n*dot(n,tangent));var handed=raw.w;
+      if(anisotropy.info.x>=0.){
+        let determinant=anisotropy.u.x*anisotropy.v.y-anisotropy.u.y*anisotropy.v.x;
+        if(abs(determinant)>1e-10){tangent=normalize(tangent*anisotropy.v.y-cross(n,tangent)*raw.w*anisotropy.v.x)*sign(determinant);handed*=sign(determinant);}
+      }
+      tangent=tangent*cos(imported.physical.y)+cross(n,tangent)*handed*sin(imported.physical.y);
+    }
+  }else if(m.maps.w>=0. && dot(tangent,tangent)>0.){
+    let texnormal=map_texel(m.maps.w,uv).xyz*2.-1.;let tn=vec3f(texnormal.xy*m.maps2.w,texnormal.z);
+    let tg=normalize(tangent-n*dot(n,tangent));let bt=cross(n,tg)*t.tangent.w;
+    let mapped=normalize(tg*tn.x+bt*tn.y+n*tn.z);if(dot(mapped,ng)>0.){n=mapped;}
   }
   if(m.policy.w>0.){
     let local=to_object(h.inst,p,1.);let kind=u32(m.policy.w);
@@ -1279,10 +1378,16 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     // Procedural tint must remain a bounded surface reflectance (including snow).
     m.base=vec4f(clamp(m.base.xyz,vec3f(0.),vec3f(1.)),m.base.w);
   }
-  if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w); }
+  if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w);coat_normal=droplets(coat_normal,uv,m.layers.w); }
+  if(imported.physical3.w<0.5){coat_normal=n;}
   m.spec.x = max(m.spec.x, 0.002);
-  let layer_override=floor(max(sdata[instance_base+4u].w,0.)*0.5);
-  return Surface(p, n, ng, uv, m, select(u32(t.uv2m.w),u32(max(layer_override-1.,0.)),layer_override>0.));
+  let volume=select(vec4f(1.,1.,1.,0.),imported.volume,imported.physical3.w>0.5 && imported.physical.x>0.);
+  if(imported.physical3.w<0.5){imported.specular_color.w=m.spec.x;}
+  m.maps=imported.specular_color;shading.sampled_sheen=imported.sheen_color;
+  m.policy.z=imported.physical.z;
+  if(imported.physical3.w>0.5 && imported.physical.x<=0.){m.policy.y=f32(u32(m.policy.y)|64u);}
+  shading.sampled_tangent=tangent;shading.sampled_coat_normal=coat_normal;shading.volume=volume;
+  return Surface(p,n,ng,uv,m,hit_object(h));
 }
 
 fn hash2(c: vec2f) -> vec2f {
@@ -1330,7 +1435,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   if (tf < h.t) {
     let q = p + d * tf;
     let n = vec3f(0.0, 1.0, 0.0);
-    let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0), vec4f(1.0, 7.0, 0.0, 0.0), vec4f(-1.0, -1.0, -1.0, 1.0));
+    let dummy = floor_material();
     return sample_lights(q + n * ray_epsilon(), n, -d, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
   }
   let sf = surface(p, d, h);
@@ -1338,8 +1443,10 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   var ng = sf.ng;
   if (dot(d, ng) > 0.0) { n = -n; ng = -ng; }
   let nv = max(dot(n, -d), 1e-4);
-  shade_t = vector_to_world(h.inst, tris[u32(h.tri)].tangent.xyz);
-  return sf.m.emit.xyz + sample_lights(sf.p + ng * ray_epsilon(), n, -d, sf.m, lobe_probs(sf.m, nv), false);
+  let saved_sheen=shading.sheen;shading.sheen=shading.sampled_sheen;
+  shading.tangent=shading.sampled_tangent;shading.coat_normal=select(shading.sampled_coat_normal,-shading.sampled_coat_normal,dot(d,sf.ng)>0.);
+  let result=sf.m.emit.xyz + sample_lights(sf.p + ng * ray_epsilon(), n, -d, sf.m, lobe_probs(sf.m, nv,max(dot(shading.coat_normal,-d),1e-4)), false);
+  shading.sheen=saved_sheen;return result;
 }
 
 // The sun disc as seen along an escaping ray (no MIS: used where light
@@ -1361,7 +1468,7 @@ fn sun_radiance(p:vec3f,d:vec3f,bsdf_pdf:f32)->vec3f {
 }
 fn sun_seen(d:vec3f)->vec3f {return sun_radiance(vec3f(0.),d,0.);}
 
-struct Sample { radiance: vec3f, bg: vec3f, normal: vec3f, depth: f32, void_hit: f32, emit: vec3f, object: u32 }
+struct Sample { radiance:vec3f, bg:vec3f, normal:vec3f, depth:f32, void_hit:f32, emit:vec3f, object:u32 }
 
 fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   let dims = vec2f(f32(P.dims.x), f32(P.dims.y));
@@ -1401,12 +1508,13 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   return array<vec3f, 2>(ro, rd);
 }
 
-fn path(px: vec2f) -> Sample {
-  var s = Sample(vec3f(0.0), vec3f(0.0), vec3f(0.0), -1.0, 0.0, vec3f(0.0), 0u);
+fn path(px: vec2f)->Sample {
+  var s=Sample(vec3f(0.),vec3f(0.),vec3f(0.),-1.,0.,vec3f(0.),0u);
   let ray = camera_ray(px);
   var ro = ray[0];
   var rd = ray[1];
   var tp = vec3f(1.0);
+  var volume_absorption=vec3f(0.);
   var ambient_response = 1.0;
   var last_pdf = 0.0;   // BSDF pdf of the last bounce (0: camera or delta)
   var primary = true;   // still on the camera ray (passes through cut-outs keep it)
@@ -1425,6 +1533,7 @@ fn path(px: vec2f) -> Sample {
     var light_distance=BIG;var seen_light=0u;
     if(!primary){let light_hit=closest_light(ro,rd,min(h.t,tf));light_distance=light_hit.t;seen_light=light_hit.light;}
     let segment=min(min(h.t,tf),light_distance);
+    if(any(volume_absorption>vec3f(0.))){tp*=exp(-volume_absorption*min(max(segment,0.),1e6));}
     if(medium_majorant()>0.){
       if(P.opts.x!=0u){
         let end=tracking_segment(ro,rd,segment).y;let dt=end/2.;
@@ -1477,7 +1586,7 @@ fn path(px: vec2f) -> Sample {
       }
       // A matte floor in reflections: one diffuse bounce, lit by the lights.
       let n = vec3f(0.0, 1.0, 0.0);
-      let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0), vec4f(1.0, 7.0, 0.0, 0.0), vec4f(-1.0, -1.0, -1.0, 1.0));
+      let dummy = floor_material();
       s.radiance += tp * sample_lights(p + n * ray_epsilon(), n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
       if (photons_on) { s.radiance += tp * P.env_horizon.w / PI * caustic_at(p, vec3f(0.,1.,0.)); }
       tp *= P.env_horizon.w;
@@ -1488,8 +1597,10 @@ fn path(px: vec2f) -> Sample {
       continue;
     }
     let sf = surface(ro, rd, h);
+    shading.sheen=shading.sampled_sheen;
+    let tangent=shading.sampled_tangent;let coat_normal=shading.sampled_coat_normal;let volume=shading.volume;
     var m = sf.m;
-    shade_t = vector_to_world(h.inst, tris[u32(h.tri)].tangent.xyz);
+    shading.tangent=tangent;
     // Partly transparent surfaces: pass straight through with 1 − opacity.
     if (m.extra.z < 0.999 && rnd() >= m.extra.z) {
       ro = sf.p + rd * ray_epsilon();
@@ -1501,13 +1612,17 @@ fn path(px: vec2f) -> Sample {
     var n = sf.n;
     var ng = sf.ng;
     if (!front) { n = -n; ng = -ng; }
-    if (primary) { s.normal = n; s.depth = select(distance(sf.p,P.cam_pos.xyz), dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz), (P.opts.w & 1u)!=0u); s.object = sf.object + 1u; }
+    if (primary) {
+      s.object=hit_object(h)+1u;s.normal=n;
+      s.depth=select(distance(sf.p,P.cam_pos.xyz),dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz),(P.opts.w&1u)!=0u);
+    }
     let v = -rd;
+    shading.coat_normal=select(-coat_normal,coat_normal,front);
     var nv = max(dot(n, v), 1e-4);
     // Emission originates below the reflective layers and loses their exiting share.
     if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
-      let sheen_exit=clamp(m.layers.x*sheen_energy(m.spec.x,nv)/sheen_normalization(m.spec.x),0.,1.);
-      let emitted = m.emit.xyz * (1.0 - m.spec.y * fresnel_dielectric(nv, 1.5)) * (1.-sheen_exit);
+      let sheen_exit=clamp(m.layers.x*max(shading.sheen.x,max(shading.sheen.y,shading.sheen.z))*sheen_energy(m.maps.w,nv)/sheen_normalization(m.maps.w),0.,1.);
+      let emitted = m.emit.xyz * (1.0 - m.spec.y * fresnel_dielectric(max(dot(shading.coat_normal,v),1e-4), 1.5)) * (1.-sheen_exit);
       if (primary) { s.emit += tp * emitted; } else { s.radiance += tp * emitted; }
     }
     if ((u32(m.policy.y) & 8u) != 0u) { return s; }
@@ -1516,13 +1631,14 @@ fn path(px: vec2f) -> Sample {
     // Final/Refine follow the full coat BSDF: the shortcut only follows one
     // reflection bounce and omits the incoming coat attenuation of the base.
     if (m.spec.y > 0.0 && m.spec.z < 0.05 && front && primary && P.opts.x != 0u) {
-      let fc = m.spec.y * fresnel_dielectric(nv, 1.5);
-      s.radiance += tp * fc * mirror_radiance(p, reflect(-v, n));
+      let fc = m.spec.y * fresnel_dielectric(max(dot(shading.coat_normal,v),1e-4), 1.5);
+      s.radiance += tp * fc * mirror_radiance(p, reflect(-v, shading.coat_normal));
       tp *= 1.0 - fc;
       m.spec.y = 0.0;
     }
     primary = false;
-    let w = lobe_probs(m, nv);
+    shading.tangent=tangent;shading.coat_normal=select(-coat_normal,coat_normal,front);
+    let w = lobe_probs(m, nv,max(dot(shading.coat_normal,v),1e-4));
     s.radiance += tp*m.base.xyz*(1.-m.base.w)*(1.-m.spec.w)*P.ambient.xyz*m.policy.x;
     // Direct light.
     if (w.trans < 0.999) { s.radiance += tp * (sample_lights(p, n, v, m, w, false)+sample_environment(p,n,v,m,w)); }
@@ -1571,9 +1687,14 @@ fn path(px: vec2f) -> Sample {
         rd = reflect(-v, hm);
         ro = sf.p + ng * ray_epsilon();
       } else {
-        let r = refract(-v, hm, 1.0 / eta);
+        let r = select(refract(-v, hm, 1.0 / eta),-v,(u32(m.policy.y)&64u)!=0u);
         if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * ray_epsilon(); }
-        else { rd = r; ro = sf.p - ng * ray_epsilon(); tp *= m.base.xyz; }
+        else {
+          rd = r; ro = sf.p - ng * ray_epsilon(); tp *= m.base.xyz;
+          if(volume.w>0.){
+            volume_absorption=select(vec3f(0.),-log(clamp(volume.rgb,vec3f(1e-6),vec3f(1.)))/volume.w,front);
+          }else if(!front){volume_absorption=vec3f(0.);}
+        }
       }
       if (chain > 0) { chain = 2; }
       last_pdf = 0.0;
@@ -1583,7 +1704,7 @@ fn path(px: vec2f) -> Sample {
     let r = (pick - w.trans) / max(1.0 - w.trans, 1e-6);
     let wr = 1.0 - w.trans;
     if (r < w.coat / wr) {
-      let tb = basis(n);
+      let tb = basis(shading.coat_normal);
       l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.z * m.spec.z, rnd2()));
     } else if (r < (w.coat + w.spec) / wr) {
       if (m.extra.w != 0.0) {
@@ -1659,9 +1780,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let rotation=pcg(idx ^ pcg(path_index/3u+0xa511e9b3u))%3u;
     spectral_band=i32((path_index%3u+rotation)%3u);
     spectral_seed=pcg(idx ^ pcg(path_index/3u+0x63d83595u));
-    var smp = path(vec2f(f32(gid.x), f32(gid.y)) + jitter);
+    var smp=path(vec2f(f32(gid.x),f32(gid.y))+jitter);
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }
+    if(any(smp.emit!=smp.emit) || any(abs(smp.emit)>vec3f(1e20))){smp.emit=vec3f(0.);}
     // Clamp fireflies from tiny bright paths (Live clamps harder).
     let lum = dot(smp.radiance, vec3f(0.2126, 0.7152, 0.0722));
     rad += smp.radiance * min(1.0, f32(P.counts.w) / max(lum, 1e-6));
@@ -1670,8 +1792,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     em += smp.emit;
     bg += smp.bg;
     nbg += smp.void_hit;
-    if (i == 0u && object == 0u) { nd = vec4f(smp.normal, smp.depth); }
-    if (smp.object != 0u && (object == 0u || smp.depth < nd.w)) { nd = vec4f(smp.normal, smp.depth); object = smp.object; }
+    if (i == 0u && object == 0u) { nd = vec4f(smp.normal,smp.depth); }
+    if (smp.object != 0u && (object == 0u || smp.depth < nd.w)) { nd = vec4f(smp.normal,smp.depth); object = smp.object; }
   }
   let n = f32(P.dims.w);
   if (P.counts.z == 1u) {
@@ -1837,6 +1959,8 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
     var ng = sf.ng;
     if (!front) { n = -n; ng = -ng; }
     let v = -rd;
+    shading.sheen=shading.sampled_sheen;
+    shading.coat_normal=select(-shading.sampled_coat_normal,shading.sampled_coat_normal,front);
     let tr = m.spec.w * (1.0 - m.base.w);
     if (tr > 0.5) {
       // Glass: refract or reflect through a sampled microfacet, as camera paths do.

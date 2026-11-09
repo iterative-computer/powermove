@@ -198,6 +198,20 @@ pub struct GpuTri {
     pub uv2m: [f32; 4],
     /// Per-triangle tangent (xyz) and handedness (w), for normal maps.
     pub tangent: [f32; 4],
+    #[serde(default)]
+    pub uv01_secondary: [f32; 4],
+    #[serde(default)]
+    pub uv2_secondary: [f32; 4],
+    #[serde(default)]
+    pub tangent_secondary: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
+pub struct GpuTextureMap {
+    pub info: [f32;4], // layer, UV set, S/T wrap (repeat/clamp/mirror)
+    pub u: [f32;4],
+    pub v: [f32;4],
 }
 
 #[repr(C)]
@@ -211,6 +225,10 @@ pub struct GpuMaterial {
     pub layers: [f32; 4], // sheen, thin-film thickness (nm), dispersion, droplets
     pub policy: [f32; 4], // ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32), alpha test
     pub maps2: [f32; 4], // roughness, metalness, AO texture indices, normal scale
+    #[serde(default)]
+    pub imported: [[f32;4];6],
+    #[serde(default)]
+    pub physical_maps: [GpuTextureMap;18],
 }
 
 #[repr(C)]
@@ -265,6 +283,9 @@ impl Scene {
                     uv01: [m.uvs[a][0], m.uvs[a][1], m.uvs[b][0], m.uvs[b][1]],
                     uv2m: [m.uvs[c][0], m.uvs[c][1], m.triangle_materials.get(face).copied().unwrap_or(o.material) as f32, layer as f32],
                     tangent: tangent([m.positions[a], m.positions[b], m.positions[c]], [m.uvs[a], m.uvs[b], m.uvs[c]]),
+                    uv01_secondary:[m.uvs[a][0],m.uvs[a][1],m.uvs[b][0],m.uvs[b][1]],
+                    uv2_secondary:[m.uvs[c][0],m.uvs[c][1],0.,0.],
+                    tangent_secondary:tangent([m.positions[a],m.positions[b],m.positions[c]],[m.uvs[a],m.uvs[b],m.uvs[c]]),
                 });
             }
         }
@@ -298,6 +319,8 @@ impl Scene {
                 policy: [1.0, if self.objects.iter().any(|o| !o.mesh.colors.is_empty() &&
                     (o.material==index || o.mesh.triangle_materials.contains(&index))) {23.0} else {7.0}, 0.0, m.procedural as f32],
                 maps2: [-1.0, -1.0, -1.0, 1.0],
+                imported:[[0.;4];6],
+                physical_maps:[GpuTextureMap::default();18],
             })
             .collect();
         let lights: Vec<GpuLight> = self
@@ -590,6 +613,8 @@ pub struct ObjectIdentity {
     pub vertex_colors: Option<Vec<[f32; 4]>>,
     #[serde(default)]
     pub primary_visible: Option<bool>,
+    #[serde(default)]
+    pub secondary_uvs: Option<Vec<[f32;2]>>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Texture {
@@ -609,6 +634,8 @@ pub struct MaterialOptions {
     pub unlit: bool,
     /// color, emissive, roughness, metalness, normal, AO; -1 = no map.
     pub maps: [i32; 6],
+    #[serde(default)]
+    pub imported: Option<Vec<f32>>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CameraOptions {

@@ -20,7 +20,7 @@ Main baseline: `d7e9f9205`. Studio source: local `new-3d-system` (`b81b94c66`).
 | glTF/GLB (including mesh instances), OBJ import | Yes | Imported hierarchy converted to triangle instances | Verified |
 | Embedded glTF animation/skinning | Yes, animation mixer at layer time | Evaluate deformed geometry before tracing | Kept |
 | glTF source material names/indexes, vertex colors and six standard texture slots | Yes | Material per geometry group, stable original index | Verified |
-| Extended glTF sampling, texture transforms and physical-material maps | Yes through three.js GLTFLoader/physical materials | Standard color/normal/roughness/metalness/emissive/AO slots work; extra clearcoat/transmission/thickness/sheen/specular/iridescence/anisotropy maps and UV transforms are not yet sampled | Gap |
+| Extended glTF sampling, texture transforms and physical-material maps | Yes through three.js GLTFLoader/physical materials | Eighteen map slots with independent affine UV transforms, UV0/UV1, wrapping, normal scales and physical scalars; LDR KTX2/Basis worker; memory-budgeted images up to 4096² | Verified |
 | Imported parts tree, picking and selection | Yes | Keep main part picking and transport stable part IDs | Verified |
 | Part position/rotation/scale/visibility offsets | Yes, sparse pt.KEY.FIELD channels | Evaluated part world matrices | Verified |
 | Parent/group transforms, anchors, opacity and solo | Yes | Main world matrices and compositor | Verified |
@@ -83,7 +83,7 @@ all of them already exist in Powermove.
 | Front / Bevel / Side / Back | Yes for extruded text/shapes | Distinct materials per triangle group | Verified |
 | Camera depth of field/focus | No | Studio thin lens from source branch | Kept |
 | Camera iris controls | No | Keyframeable blade count, rotation, roundness, aspect; shared uniform aperture sampling | Verified |
-| Multiple views | Single camera/free view, no simultaneous panels | 1/2/4 View layouts; each pane looks through the Active Camera, Front/Left/Top/Back/Right/Bottom or a Custom View; the selected pane is the interactive viewer, the others are Studio Live pictures | Done |
+| Multiple views | Single camera/free view, no simultaneous panels | 1/2/4 View layouts; each pane looks through the Active Camera, Front/Left/Top/Back/Right/Bottom or a Custom View; the selected pane is the interactive viewer, the others are Studio Live pictures | Verified |
 | glTF embedded animation | Yes | Pose evaluation before tracing | Kept |
 | FBX with embedded animation | No | ufbx native worker converts meshes/materials/cameras/lights, skins and baked TRS tracks to durable GLB; existing parts/animation path | Verified |
 | 2D layers casting shadows onto 3D | No; native-plane casts explicitly disabled | Native 3D planes cast alpha shadows and support receiving light/shadows through Material Options | Verified |
@@ -113,12 +113,12 @@ one serial run, plus the two export films in a separate run. The extended film
 uses the corrected Final quality through nested shot compositions. The earlier
 WebGPU baseline also passed its complete 53-case matrix.
 
-Checklist totals: **66 verified**, **4 kept**, **0 pending**, **4 gaps**.
+Checklist totals: **69 verified**, **4 kept**, **0 pending**, **1 gap**.
 
 | Area | Verified | Kept, further visual coverage needed | Gaps |
 |---|---:|---:|---:|
-| Main capabilities (43) | 41 | 1 | 1 |
-| Requested AE targets (19) | 14 | 2 | 3 |
+| Main capabilities (43) | 42 | 1 | 0 |
+| Requested AE targets (19) | 16 | 2 | 1 |
 | Studio features (12) | 11 | 1 | 0 |
 
 - Main 3D, source layers, extrusion, lights, parts, switches, camera, masks and
@@ -153,12 +153,16 @@ Native initialization/rendering failures recover through WebGPU. See
 [native measurements and limits](native-host.md); standalone benchmark rates
 do not establish full-editor 60 fps or Blender Cycles equivalence.
 
-Extended imported-material sampling is a known main-renderer parity gap.
-The six slots exposed by Powermove's Materials UI are covered, but models using
-extra glTF physical-material maps, texture transforms or secondary UV sets can
-look different. The texture-array upload currently samples images at 1024². Standard imported anisotropy and dispersion scalar values are
-retained. The broader glass/coat/sheen/film/dispersion family also needs further
-visual grading; this table does not claim full source-material fidelity.
+Extended glTF import preserves specular/IOR/volume/clearcoat/sheen/iridescence/
+anisotropy/emissive-strength/transmission factors and maps. All eighteen slots
+retain per-map UV0/UV1, affine texture transforms and wrapping; clearcoat has an
+independent normal. Material images reach 4096² within a 256 MB array budget,
+reduced according to device-memory hints and resident geometry. LDR ETC1S/UASTC
+KTX2/Basis images decode in an isolated worker. Whole-model finishes clear the
+source physical settings and maps; source mode restores them. Limits remain
+explicit: UV2+, KTX2 HDR/arrays/cubes and nested volume-medium stacks are not
+implemented. The broader artistic glass/coat/sheen/film/dispersion family still
+needs further visual grading; this table does not claim Cycles equivalence.
 
 The audit's AE targets include features absent on main. They remain explicit
 gaps rather than being counted as regressions. Environment/world, fog, terrain and scatter authoring now have document and

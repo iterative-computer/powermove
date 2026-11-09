@@ -1,3 +1,5 @@
+import { mapCanvas, sizeStudioTexture } from './texture-pixels';
+export { mapCanvas } from './texture-pixels';
 import { attachStudioWorld } from '../scene3d/environment-render';
 import { combineOpaqueDepthSet } from './compositing';
 import { studioGeometryIdle } from './blas';
@@ -62,21 +64,6 @@ function preparingOf(s: State): StudioPending | null { if (!s.preparing.size) re
 export function studioProgress(PM: any): { samples: number; goal: number; refining: boolean; preparing?: StudioPending } | null {
   const s = state(PM), preparing = preparingOf(s); if (preparing) return { samples: 0, goal: REFINE_SAMPLES, refining: false, preparing };
   if (s.preview === 'fast') return null; for (const j of s.jobs.values()) if (!j.slot) return { samples: j.samples, goal: REFINE_SAMPLES, refining: j.refining }; return null;
-}
-export function mapCanvas(source: any, flipY: boolean): OffscreenCanvas {
-  const c = new OffscreenCanvas(MAP_SIZE, MAP_SIZE);
-  {
-    const ctx = c.getContext('2d')!;
-    // three uploads flipY textures bottom row first; match its UVs.
-    if (flipY) { ctx.translate(0, MAP_SIZE); ctx.scale(1, -1); }
-    if (source.data && source.width && source.height) {
-      const image = new OffscreenCanvas(source.width, source.height);
-      const data = source.data instanceof Uint8ClampedArray ? source.data : new Uint8ClampedArray(source.data);
-      image.getContext('2d')!.putImageData(new ImageData(data, source.width, source.height), 0, 0);
-      ctx.drawImage(image, 0, 0, MAP_SIZE, MAP_SIZE);
-    } else ctx.drawImage(source, 0, 0, MAP_SIZE, MAP_SIZE);
-  }
-  return c;
 }
 
 export function cameraOf(camera: THREE.Camera, w: number, h: number): StudioView['camera'] | null {
@@ -286,7 +273,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     attachStudioWorld(extracted,runtime.studioWorld,runtime.metersPerUnit);
     if (!studioBackendFactory() && extracted.tris.byteLength > studioMaxBindingBytes()) throw new Error('This scene exceeds the Studio GPU buffer budget');
     const screens: Job['screens'] = [];
-    const maps = extracted.maps.map((m, layer) => { if ('screen' in m) { screens.push({ layer, comp: m.screen }); return renderScreen?.(m.screen) ?? new Uint8Array(MAP_SIZE * MAP_SIZE * 4); } return mapCanvas(m.source, m.flipY); });
+    const maps = extracted.maps.map((m, layer) => { if ('screen' in m) { screens.push({ layer, comp: m.screen }); return sizeStudioTexture(renderScreen?.(m.screen) ?? new Uint8Array(MAP_SIZE * MAP_SIZE * 4),extracted.mapSize ?? MAP_SIZE); } return mapCanvas(m.source, m.flipY,extracted.mapSize ?? MAP_SIZE); });
     if (!job) {
       const backend = (!synchronous && studioBackendFactory()?.({ invalidate: () => PM.invalidate?.('render') })) || new WebGpuStudioBackend();
       job = { runtime, uid:nextJob++,depthIds:new Set(depthIds),separate:fork, sceneKey: '', viewKey: '', scene: extracted, maps, backend, ready: false, disposed:false, chain: null, frames: new Map(), pending: new Map(), screens, screenKey, changedAt: performance.now(), usedAt: performance.now(), refining: false, samples: 0, refineGoal:0, generation: 0, factoryRevision: studioBackendRevision(), completedGeneration: -1, failure: null, slot };

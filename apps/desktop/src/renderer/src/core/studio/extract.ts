@@ -14,7 +14,10 @@ import { reportLayerFailure } from '../scene3d/layer-diagnostic';
  */
 
 export const MAP_SIZE = 1024;
-export const STUDIO_MATERIAL_FLOATS = 32;
+export { STUDIO_MATERIAL_FLOATS, STUDIO_TRIANGLE_FLOATS } from './layout';
+import { STUDIO_MATERIAL_FLOATS, STUDIO_TRIANGLE_FLOATS } from './layout';
+import { packImportedMaterial } from './imported-material';
+import { planStudioTextures } from './texture-budget';
 
 /** An image map, or a live screen: a composition rendered each frame. */
 export type StudioMap = { source: TexImageSource; flipY: boolean } | { screen: string };
@@ -23,7 +26,7 @@ export type StudioScene = {
   metersPerUnit?:number;
   world?: import('./environment').StudioWorld;
   positions: Float32Array;   // 12 floats per triangle (3 × vec4), model space, per-mesh BVH order
-  tris: Float32Array;        // 24 floats per triangle (6 × vec4)
+  tris: Float32Array;        // 36 floats per triangle (9 × vec4)
   /** Wide nodes: the top level (tlasNodes, fixed capacity) then every mesh's own BVH. */
   tlasNodes: ArrayBuffer;
   blasNodes: ArrayBuffer;
@@ -32,9 +35,10 @@ export type StudioScene = {
   /** Lights (16 floats each) then instances (36 floats each), as trace.wgsl's scene data. */
   sdata: Float32Array;
   instanceCount: number;
-  materials: Float32Array;   // 32 floats per material (8 vec4)
+  materials: Float32Array;   // 272 floats per material (14 scalar vec4 + 18 texture descriptors)
   lightCount: number;
   maps: StudioMap[];         // texture-array layers
+  mapSize?:number;
   /** Scene object id (layer id) of each object index the tracer reports. */
   objects: string[];
   triangles: number;
@@ -93,16 +97,21 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   const materialValues = new Map<string,number>();
   const maps: StudioMap[] = [];
   const mapIndex = new Map<any, number>();
+  const flippedImages=new Map<any,object>();
   const bounds = new THREE.Box3();
 
   const layer = (texture: THREE.Texture | null | undefined): number => {
     const image: any = texture?.image;
-    if (!image || !(image.width || image.videoWidth)) return -1;
-    let i = mapIndex.get(image);
+    if (!image || !(image.width || image.videoWidth) || !(image.height || image.videoHeight)) return -1;
+    if(![image.width || image.videoWidth,image.height || image.videoHeight].every(v=>Number.isFinite(v) && v>0))throw new Error('Texture has invalid image dimensions');
+    let key:any=image;
+    if(texture!.flipY){key=flippedImages.get(image);if(!key){key={image};flippedImages.set(image,key);}}
+    let i = mapIndex.get(key);
     if (i === undefined) {
+      if(maps.length>=256)throw new Error('Studio supports at most 256 unique texture images per scene');
       i = maps.length;
       maps.push({ source: image, flipY: texture!.flipY });
-      mapIndex.set(image, i);
+      mapIndex.set(key, i);
     }
     return i;
   };
@@ -120,7 +129,10 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     if (screen) {
       const key = `screen:${screen}`;
       screenLayer = mapIndex.get(key) ?? -1;
-      if (screenLayer < 0) { screenLayer = maps.length; maps.push({ screen }); mapIndex.set(key, screenLayer); }
+      if (screenLayer < 0) {
+        if(maps.length>=256)throw new Error('Studio supports at most 256 unique texture images per scene');
+        screenLayer = maps.length; maps.push({ screen }); mapIndex.set(key, screenLayer);
+      }
     }
     const basic = (m.isMeshBasicMaterial && !m.userData?.studioLitArtwork) || m.userData?.studioUnlit || m.userData?.studioAcceptsLights===false;
     const metallic = basic ? 0 : m.metalness ?? 0;
@@ -141,6 +153,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0) | (m.userData?.studioReflections===false?32:0), m.alphaTest ?? 0, m.userData?.studioProcedural ?? 0,
       layer(m.roughnessMap), layer(m.metalnessMap), layer(m.aoMap), m.normalScale?.x ?? 1,
     ];
+    values.push(...packImportedMaterial(m,layer,basic,screen?screenLayer:undefined));
     if(!values.every(v=>Number.isFinite(Math.fround(v))))throw new Error('Material contains non-finite values');
     const fingerprint=values.join(',');i=materialValues.get(fingerprint);
     if(i===undefined){i=materials.length/STUDIO_MATERIAL_FLOATS;materials.push(...values);materialValues.set(fingerprint,i);}
@@ -153,6 +166,13 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean; color?:[number,number,number]; layerOverride?:number; primaryVisible:boolean }[] = [];
   let pending = 0, total = 0;
   for (const { mesh, id } of meshes) {
+    const materialStart=materials.length, mapStart=maps.length, blasStart=blases.length, instanceStart=instances.length, previousBounds=bounds.clone();
+    const rollback=()=>{
+      materials.length=materialStart;maps.length=mapStart;blases.length=blasStart;instances.length=instanceStart;bounds.copy(previousBounds);
+      for(const [key,index] of materialIndex)if(index>=materialStart/STUDIO_MATERIAL_FLOATS)materialIndex.delete(key);
+      for(const [key,index] of materialValues)if(index>=materialStart/STUDIO_MATERIAL_FLOATS)materialValues.delete(key);
+      for(const [key,index] of mapIndex)if(index>=mapStart)mapIndex.delete(key);
+    };
     try {
     const g = mesh.geometry as THREE.BufferGeometry;
     const posAttr = g.getAttribute('position');
@@ -206,21 +226,26 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       blasCache.set(mesh, blas);rememberBlas(blas);
     }
     total += blas.triangles;
-    if (!blas.triangles) continue;
+    if (!blas.triangles) {rollback();continue;}
     blases.push(blas);
     let root:THREE.Object3D=mesh;while(root.parent && root.parent!==scene && root.parent.userData.sceneId===id)root=root.parent;
     const part=mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh);
     const instanced=mesh as THREE.InstancedMesh,count=instanced.isInstancedMesh?instanced.count:1;
     for(let instance=0;instance<count;instance++){
       const world=mesh.matrixWorld.clone();if(instanced.isInstancedMesh){const local=new THREE.Matrix4();instanced.getMatrixAt(instance,local);world.multiply(local);}
-      if(!world.elements.every(v=>Number.isFinite(Math.fround(v))) || Math.abs(world.determinant())<1e-20){reportLayerFailure(mesh,id,'instance preparation','Invalid or singular mesh transform');continue;}
+      const inverse=world.clone().invert();
+      if(!world.elements.every(v=>Number.isFinite(Math.fround(v))) || world.determinant()===0 || !inverse.elements.every(v=>Number.isFinite(Math.fround(v)))){reportLayerFailure(mesh,id,'instance preparation','Invalid or singular mesh transform');continue;}
       const color=instanced.isInstancedMesh && instanced.instanceColor?new THREE.Color().fromBufferAttribute(instanced.instanceColor,instance):null;
+      if(color && !color.toArray().every(v=>Number.isFinite(Math.fround(v)))){reportLayerFailure(mesh,id,'instance preparation','Invalid instance color');continue;}
+      const worldBounds=blas.bounds.clone().applyMatrix4(world);
+      if(![...worldBounds.min.toArray(),...worldBounds.max.toArray()].every(v=>Number.isFinite(Math.fround(v)))){reportLayerFailure(mesh,id,'instance preparation','Invalid transformed mesh bounds');continue;}
       const layerName=mesh.userData.studioInstanceLayerNames?.[instance];let layerOverride:number|undefined;
       if(layerName){layerOverride=objectIndex.get(layerName);if(layerOverride===undefined){layerOverride=objects.length;objects.push(layerName);objectIndex.set(layerName,layerOverride);}}
       instances.push({blas,world,part,layerOverride,primaryVisible:!background?.hiddenPrimary?.has(id) && mesh.userData.studioPrimaryVisible!==false,castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,...(color?{color:color.toArray() as [number,number,number]}:{})});
-      bounds.union(blas.bounds.clone().applyMatrix4(world));
+      bounds.union(worldBounds);
     }
-    } catch(error) { reportLayerFailure(mesh,id,'scene extraction',error); }
+    if(instances.length===instanceStart)rollback();
+    } catch(error) { rollback();reportLayerFailure(mesh,id,'scene extraction',error); }
   }
   if (pending) return { pending, total };
   // Geometry in layout order (stable across frames while meshes do not change).
@@ -232,14 +257,14 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     const triangles = unique.reduce((n, b) => n + b.triangles, 0);
     const nodeCount = unique.reduce((n, b) => n + b.nodes.byteLength / 64, 0);
     const positions = new Float32Array(Math.max(1, triangles) * 12);
-    const tris = new Float32Array(Math.max(1, triangles) * 24);
+    const tris = new Float32Array(Math.max(1, triangles) * STUDIO_TRIANGLE_FLOATS);
     const blasNodes = new ArrayBuffer(Math.max(1, nodeCount) * 64);
     const nf = new Float32Array(blasNodes), nu = new Uint32Array(blasNodes);
     const roots = new Map<Blas, number>();
     let triOffset = 0, nodeOffset = 0;
     for (const b of unique) {
       positions.set(b.positions, triOffset * 12);
-      tris.set(b.tris, triOffset * 24);
+      tris.set(b.tris, triOffset * STUDIO_TRIANGLE_FLOATS);
       const src = new Uint32Array(b.nodes), count = b.nodes.byteLength / 64;
       nu.set(src, nodeOffset * 16);
       // Re-base child links: interior → absolute node (after the top level), leaf → absolute triangle.
@@ -327,12 +352,13 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   return {
     positions: geometry.positions, tris: geometry.tris, blasNodes: geometry.blasNodes, tlasNodes, geometryKey,
     sdata, instanceCount: instances.length,
-    materials: new Float32Array(materials.length ? materials : [0,0,0,0,1,0,.03,0,0,0,0,0,1.5,1,1,0,-1,-1,-1,-1,0,0,0,0,1,7,0,0,-1,-1,-1,1]),
+    materials: new Float32Array(materials.length ? materials : [...[0,0,0,0,1,0,.03,0,0,0,0,0,1.5,1,1,0,-1,-1,-1,-1,0,0,0,0,1,7,0,0,-1,-1,-1,1],...new Array(STUDIO_MATERIAL_FLOATS-32).fill(0)]),
     instancePolicies: Array.from(top.order,k=>{const m=instances[k]!;return {part:m.part,castShadow:m.castShadow,receiveShadow:m.receiveShadow,primaryVisible:m.primaryVisible};}),
-    materialPolicies: Array.from({length:materials.length/32},(_,i)=>({ambientResponse:materials[i*32+24]!,doubleSided:(materials[i*32+25]!&4)!==0,alphaTest:materials[i*32+26]!})),
+    materialPolicies: Array.from({length:materials.length/STUDIO_MATERIAL_FLOATS},(_,i)=>({ambientResponse:materials[i*STUDIO_MATERIAL_FLOATS+24]!,doubleSided:(materials[i*STUDIO_MATERIAL_FLOATS+25]!&4)!==0,alphaTest:materials[i*STUDIO_MATERIAL_FLOATS+26]!})),
     lightPolicies,
     lightCount: lights.length / 16,
-    maps, objects, triangles: geometry.triangles, bounds,
+    maps, mapSize:planStudioTextures(maps.map(map=>'source' in map?{width:(map.source as any).videoWidth || (map.source as any).width,height:(map.source as any).videoHeight || (map.source as any).height}:{width:MAP_SIZE,height:MAP_SIZE}),geometry.positions.byteLength+geometry.tris.byteLength+geometry.blasNodes.byteLength+tlasNodes.byteLength+sdata.byteLength+materials.length*4,{memoryGB:(globalThis as any).navigator?.deviceMemory}).size,
+    objects, triangles: geometry.triangles, bounds,
   };
 }
 
@@ -361,6 +387,6 @@ function idOf(o: any): string {
 }
 function blasKey(g: THREE.BufferGeometry, materials: number[], object: number): string {
   const version=(name:string)=>{const a=g.getAttribute(name) as THREE.BufferAttribute;return a?`${a.count}:${a.itemSize}:${a.version ?? (a as any).data?.version ?? 0}`:'-';};
-  const identity=g.userData.studioGeometryKey?[g.userData.studioGeometryKey,...['position','normal','uv','color'].map(version),g.getIndex()?.version ?? 0]:[g.uuid,idOf(g.getAttribute('position')),idOf(g.getAttribute('normal')),idOf(g.getAttribute('uv')),idOf(g.getAttribute('color')),idOf(g.getIndex())];
+  const identity=g.userData.studioGeometryKey?[g.userData.studioGeometryKey,...['position','normal','uv','uv1','color'].map(version),g.getIndex()?.version ?? 0]:[g.uuid,idOf(g.getAttribute('position')),idOf(g.getAttribute('normal')),idOf(g.getAttribute('uv')),idOf(g.getAttribute('uv1')),idOf(g.getAttribute('color')),idOf(g.getIndex())];
   return [...identity, materials.join(','), object, g.groups.map(x => `${x.start}:${x.count}:${x.materialIndex}`).join(';')].join('/');
 }

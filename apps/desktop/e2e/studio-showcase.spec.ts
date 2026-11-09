@@ -10,7 +10,7 @@ import { expect, repoRoot, test } from './helpers/app';
  * PM_SHOWCASE_STILL_MBLUR=1 checks the same two shutter samples as the film.
  * PM_SHOWCASE_BENCHMARK_RANGE='[start,end]' limits any export for a shot repair.
  * Run with --global-timeout=7200000 for a full-resolution export. */
-test('authors and exports the original Studio showcase', async ({ session }) => {
+test('authors and exports the original Studio showcase product film', async ({ session }) => {
   test.skip(!process.env.PM_SHOWCASE, 'Opt-in showcase render');
   test.setTimeout(7_200_000);
   const folder = path.resolve(process.env.PM_SHOWCASE_OUTPUT || path.join(os.homedir(), 'Movies/powermove-studio-3d-film'));

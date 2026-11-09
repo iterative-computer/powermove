@@ -8,7 +8,7 @@ import { expect, test } from './helpers/app';
  * GPU job; outputs live outside the repository.
  * PM_SHOWCASE=stills|mp4; PM_SHOWCASE_ONLY=regex filters stills;
  * PM_SHOWCASE_OUTPUT=folder (default ~/Movies/powermove-studio-3d-film/opus). */
-test('authors and exports the Opus Studio showcase', async ({ session }) => {
+test('authors and exports the Opus Studio showcase product film', async ({ session }) => {
   test.skip(!process.env.PM_SHOWCASE, 'Opt-in showcase render');
   test.setTimeout(3_600_000);
   const folder = path.resolve(process.env.PM_SHOWCASE_OUTPUT || path.join(os.homedir(), 'Movies/powermove-studio-3d-film/opus'));

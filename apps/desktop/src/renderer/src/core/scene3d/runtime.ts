@@ -4,6 +4,7 @@ import { environmentImage,environmentImageKey,terrainSettings,makeTerrain,syncEn
 import { disposeStudioSplats } from '../studio/splat-raster';
 import { buildExtrusionGeometry } from './extrusion-geometry';
 import { reportLayerFailure } from './layer-diagnostic';
+import { IMPORT_MAP_SLOTS } from '../studio/layout';
 import { EXTRUSION_SURFACES } from './extrusion-data';
 import type { ExtrusionMeshSample } from './extrusion-render';
 import { applyMaterialProperties } from './material-properties';
@@ -262,6 +263,12 @@ export class SceneRuntime {
           c.material=new THREE.MeshPhysicalMaterial();
         }
         const material=c.material as THREE.MeshPhysicalMaterial;
+        // A whole-model finish owns the physical response. Source mode creates
+        // a fresh clone, so all original glTF extensions return when restored.
+        for(const slot of IMPORT_MAP_SLOTS.slice(6))(material as any)[slot]=null;
+        delete material.userData.sourceMaterialIndex;delete material.userData.studioImported;
+        material.specularColor.set('#FFFFFF');material.thickness=0;material.attenuationDistance=Infinity;material.attenuationColor.set('#FFFFFF');
+        material.anisotropyRotation=0;material.normalScale.set(1,1);material.clearcoatNormalScale.set(1,1);material.aoMapIntensity=1;
         material.userData.studioAcceptsLights=options?.acceptsLights!==false;material.userData.studioReflections=options?.appearsInReflections!==false;
         material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
         material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;

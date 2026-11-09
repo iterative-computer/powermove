@@ -1,5 +1,6 @@
 import { gatherPayload, type GeometryPayload } from './gather';
 import { buildBvh } from './bvh';
+import { STUDIO_TRIANGLE_FLOATS } from './layout';
 
 /*
  * One mesh's bottom-level BVH: its triangles' corners and shading data in BVH
@@ -10,13 +11,13 @@ import { buildBvh } from './bvh';
 
 export type BlasData = { positions: Float32Array; tris: Float32Array; nodes: ArrayBuffer; triangles: number };
 
-/** `corners`: 9 floats per triangle; `shading`: 24 floats per triangle. */
+/** `corners`: 9 floats per triangle; `shading`: 36 floats per triangle. */
 export function finishBlas(corners: Float32Array, shading: Float32Array): BlasData {
   const triangles = corners.length / 9;
   if (!triangles) return { positions: new Float32Array(0), tris: new Float32Array(0), nodes: new ArrayBuffer(64), triangles: 0 };
   const { nodes, order } = buildBvh(corners);
   const positions = new Float32Array(triangles * 12);
-  const tris = new Float32Array(triangles * 24);
+  const tris = new Float32Array(triangles * STUDIO_TRIANGLE_FLOATS);
   for (let i = 0; i < triangles; i++) {
     const t = order[i]!;
     for (let c = 0; c < 3; c++) {
@@ -24,7 +25,7 @@ export function finishBlas(corners: Float32Array, shading: Float32Array): BlasDa
       positions[i * 12 + c * 4 + 1] = corners[t * 9 + c * 3 + 1]!;
       positions[i * 12 + c * 4 + 2] = corners[t * 9 + c * 3 + 2]!;
     }
-    tris.set(shading.subarray(t * 24, t * 24 + 24), i * 24);
+    tris.set(shading.subarray(t * STUDIO_TRIANGLE_FLOATS, t * STUDIO_TRIANGLE_FLOATS + STUDIO_TRIANGLE_FLOATS), i * STUDIO_TRIANGLE_FLOATS);
   }
   return { positions, tris, nodes, triangles };
 }
@@ -44,7 +45,7 @@ const idle: Worker[] = [];
 let workers = 0;
 const pendingBuilds=new Set<Promise<unknown>>();
 function track<T>(promise:Promise<T>):Promise<T>{const pending=promise.finally(()=>pendingBuilds.delete(pending));pendingBuilds.add(pending);return pending;}
-export async function studioGeometryIdle():Promise<void>{await Promise.all([...pendingBuilds]);}
+export async function studioGeometryIdle():Promise<void>{await Promise.allSettled([...pendingBuilds]);}
 
 const maxWorkers = Math.max(1, Math.min(4, ((globalThis as any).navigator?.hardwareConcurrency ?? 4) - 1));
 

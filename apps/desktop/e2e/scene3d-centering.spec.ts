@@ -28,7 +28,8 @@ test('fresh GLB sets up Studio and implicit old/new camera defaults survive save
     // Removing the automatic rig retains main's implicit-camera capability.
     for(const layer of studioLayers)api.scene3d.edit({operation:'remove',target:layer.id});
     api.scene3d.edit({operation:'update_object',target:id,patch:{p:{x:0,y:0,z:0}}});
-    const capture=()=>{
+    const capture=async()=>{
+      await PM.prepareFrame(0,{mblur:false,width:640,height:360});
       const w=640,h=360,pixels=PM.GL.renderToPixels(0,w,h,{transparent:true,mblur:false});
       const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
       const top=new Uint8ClampedArray(pixels.length);
@@ -36,15 +37,15 @@ test('fresh GLB sets up Studio and implicit old/new camera defaults survive save
       canvas.getContext('2d')!.putImageData(new ImageData(top,w,h),0,0);
       return {png:canvas.toDataURL(),pixels:[...pixels]};
     };
-    const implicit=capture(),scene=api.scene3d.describe(),saved=PM.serialize();
+    const implicit=await capture(),scene=api.scene3d.describe(),saved=PM.serialize();
     const cameraCount=PM.proj.layers.filter((l:any)=>l.d?.definition==='powermove.3d.camera').length;
-    api.scene3d.edit({operation:'add_camera'});const explicit=capture();PM.hist.undo();
-    PM.replaceProject(PM.hydrateProject(PM.deserialize(saved)));const restored=capture();
-    api.scene3d.edit({operation:'update_object',target:id,patch:{p:{x:.5}}});const moved=capture();PM.hist.undo();
-    delete PM.proj.scene3dDefaultsVersion;PM.touch();const legacy=capture(),legacySaved=PM.serialize();
-    PM.replaceProject(PM.hydrateProject(PM.deserialize(legacySaved)));const legacyRestored=capture();
+    api.scene3d.edit({operation:'add_camera'});const explicit=await capture();PM.hist.undo();
+    PM.replaceProject(PM.hydrateProject(PM.deserialize(saved)));const restored=await capture();
+    api.scene3d.edit({operation:'update_object',target:id,patch:{p:{x:.5}}});const moved=await capture();PM.hist.undo();
+    delete PM.proj.scene3dDefaultsVersion;PM.touch();const legacy=await capture(),legacySaved=PM.serialize();
+    PM.replaceProject(PM.hydrateProject(PM.deserialize(legacySaved)));const legacyRestored=await capture();
     const oldCamera=api.scene3d.describe().camera.p;
-    api.scene3d.edit({operation:'add_camera',camera:{p:{x:3,y:2,z:6}}});const legacyExplicit=capture();
+    api.scene3d.edit({operation:'add_camera',camera:{p:{x:3,y:2,z:6}}});const legacyExplicit=await capture();
     const xs:number[]=[],ys:number[]=[];
     for(let y=0;y<360;y++)for(let x=0;x<640;x++)if(implicit.pixels[(y*640+x)*4+3]>127){xs.push(x);ys.push(y);}
     return {autoStudio,png:implicit.png,explicitPng:explicit.png,movedPng:moved.png,legacyPng:legacyRestored.png,

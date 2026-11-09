@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PARTS_ROOT_FLAG } from './model-parts';
+import { StudioKtx2Loader } from './import-ktx';
 
 export const MAX_MODEL_TRIANGLES=10_000_000;
 
@@ -16,7 +17,7 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
     json=JSON.parse(new TextDecoder().decode(bytes.subarray(20,20+length)));
   } else json=JSON.parse(new TextDecoder().decode(data));
   for(const dependency of [...(json.buffers || []),...(json.images || [])]) {
-    if(dependency.uri && !/^data:(?:application\/octet-stream|application\/gltf-buffer|image\/(?:png|jpeg|webp));base64,[a-z0-9+/=\s]+$/i.test(dependency.uri))
+    if(dependency.uri && !/^data:(?:application\/octet-stream|application\/gltf-buffer|image\/(?:png|jpeg|webp|ktx2));base64,[a-z0-9+/=\s]+$/i.test(dependency.uri))
       throw new Error('Use a self-contained GLB with embedded textures and geometry. External glTF files are not loaded.');
   }
   // Budgets sized for CAD assemblies: up to 10M triangles in up to 65,536 parts.
@@ -44,9 +45,11 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
     return blobUrl;
   });
   const loader=new GLTFLoader(manager);
+  const ktx=json.extensionsUsed?.includes('KHR_texture_basisu')?new StudioKtx2Loader(manager):null;
+  if(ktx)loader.setKTX2Loader(ktx as any);
   let result;
   try{result=await loader.parseAsync(data,'');}
-  finally{for(const url of embedded.values())URL.revokeObjectURL(url);}
+  finally{ktx?.dispose();for(const url of embedded.values())URL.revokeObjectURL(url);}
   const scene=result.scene;
   let vertices=0,triangles=0;
   scene.traverse((object:any)=>{
@@ -65,6 +68,9 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   const bounds=new THREE.Box3().setFromObject(scene),center=bounds.getCenter(new THREE.Vector3());
   const radius=bounds.getSize(new THREE.Vector3()).length()/2;
   if(!Number.isFinite(radius)||radius<1e-10){disposeModel(scene);throw new Error('GLB model has no measurable size');}
+  // Volume distances use model units. Apply the same normalization as geometry.
+  const physical=new Set<any>();scene.traverse((object:any)=>{if(object.isMesh)for(const material of Array.isArray(object.material)?object.material:[object.material])physical.add(material);});
+  for(const material of physical){if(Number.isFinite(material.attenuationDistance))material.attenuationDistance/=radius;if(material.thickness>0)material.thickness/=radius;}
   // Parts are addressed by child-index paths under this node.
   scene.userData[PARTS_ROOT_FLAG]=true;
   const normalization=new THREE.Group(),root=new THREE.Group();

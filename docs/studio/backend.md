@@ -54,7 +54,7 @@ pose evaluation, picking and gizmo math.
 
 ## Prepared buffer layout
 
-The material stride is **32 floats / 128 bytes** (8 `vec4`s). The first 24
+The material stride is **272 floats / 1088 bytes**. The first 24
 floats retain the source branch's fields. Offsets 24–27 are ambient response,
 flags, alpha-test threshold, reserved. Flags: Casts Shadows = 1, Accepts Shadows
 = 2, Double Sided = 4, Unlit = 8, Vertex Colors = 16, Hidden Secondary = 32.
@@ -64,7 +64,20 @@ roughness, metalness, AO map indexes, then normal-map scale. Map index -1 means
 absent. The legacy ORM index at offset 18 remains for older prepared scenes;
 independent maps take precedence.
 
-Triangles remain 24 floats / 96 bytes. If Vertex Colors is set, each normal's
+Offsets 32–55 preserve imported specular color, sheen color/roughness,
+iridescence strength/IOR/thickness range, volume color/distance/thickness,
+anisotropy rotation, normal scales and AO intensity. Offset 55 enables this
+imported contract; zero retains legacy defaults. Offsets 56–271 are eighteen
+three-`vec4` map descriptors in `core/studio/layout.ts` order. Each stores image
+layer, UV channel, S/T wrapping, then two affine UV rows (xyz; w reserved).
+An absent image uses layer -1. The JSON boundary carries these optional values
+in `material_options[].imported`; `object_ids[].secondary_uvs` carries UV1.
+
+Triangles are **36 floats / 144 bytes**. The first 24 retain the original
+normal/UV/material/object/tangent fields. Offsets 24–29 hold UV1 for the three
+corners, 30 records whether UV1 exists, 31 is reserved and 32–35 store its
+tangent/handedness. UV0 is the fallback when no second set exists.
+If Vertex Colors is set, each normal's
 unused `w` holds a **bit-cast packed RGBA8 color** (linear RGB). Copy these lanes
 as bytes; do not JSON-encode their float interpretation (it may be NaN). The
 canonical description represents these safely as optional `vertex_colors` in

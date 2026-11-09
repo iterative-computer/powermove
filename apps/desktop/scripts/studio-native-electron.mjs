@@ -26,6 +26,7 @@ const renderer = `
 import * as THREE from 'three';
 import {nativeEnvironment} from './scripts/studio-native-environments';
 import {extractScene} from './src/renderer/src/core/studio/extract';
+import {STUDIO_TRIANGLE_FLOATS} from './src/renderer/src/core/studio/layout';
 import {studioGpuWait,studioGpuFailure} from './src/renderer/src/core/studio/gpu';
 import {NativeStudioBackend} from './src/renderer/src/core/studio-native/backend';
 import {RecoveringStudioBackend} from './src/renderer/src/core/studio-native/recovery';
@@ -38,7 +39,7 @@ window.runStudioNative=async(name,size,frames)=>{
  await bridge.request('corpus',{op:'preset',name});const snapshot=await bridge.request('corpus',{op:'snapshot'});await bridge.release('corpus');
  m=snapshot.result;const b=snapshot.binary;const bytes=r=>b.slice(r.offset,r.offset+r.length);const floats=r=>new Float32Array(bytes(r).buffer);
  const allNodes=bytes(m.nodes);const topBytes=m.topNodes*64;
- scene={positions:floats(m.positions),tris:floats(m.tris),materials:floats(m.materials),sdata:floats(m.sdata),tlasNodes:allNodes.slice(0,topBytes).buffer,blasNodes:allNodes.slice(topBytes).buffer,geometryKey:name,instanceCount:m.instanceCount,lightCount:m.lightCount,objects:m.objects.map(o=>o.layer),triangles:m.tris.length/96,maps:[],bounds:new THREE.Box3(new THREE.Vector3(...m.bounds.min),new THREE.Vector3(...m.bounds.max))};
+ scene={positions:floats(m.positions),tris:floats(m.tris),materials:floats(m.materials),sdata:floats(m.sdata),tlasNodes:allNodes.slice(0,topBytes).buffer,blasNodes:allNodes.slice(topBytes).buffer,geometryKey:name,instanceCount:m.instanceCount,lightCount:m.lightCount,objects:m.objects.map(o=>o.layer),triangles:m.tris.length/(STUDIO_TRIANGLE_FLOATS*4),maps:[],bounds:new THREE.Box3(new THREE.Vector3(...m.bounds.min),new THREE.Vector3(...m.bounds.max))};
  if(m.texture){const t=m.texture,rgba=bytes(t.bytes);const input=new OffscreenCanvas(t.width,t.height);input.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba),t.width,t.height),0,0);const map=new OffscreenCanvas(1024,1024);map.getContext('2d').drawImage(input,0,0,1024,1024);maps=[map];}
  }
  const native=new NativeStudioBackend(bridge);const recovery=new RecoveringStudioBackend(native,()=>new WebGpuStudioBackend(),{invalidate:()=>{}});await recovery.initialize();const description=()=>{throw new Error('binary fast path should not build JSON mesh copies');};recovery.setPreparedScene(scene,maps,description);recovery.setView(m.view);

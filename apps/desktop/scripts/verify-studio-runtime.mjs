@@ -8,8 +8,10 @@ import { fileURLToPath } from 'node:url';
 /** Exercise the real binary, not just its filename or Cargo's cache result. */
 export function verifyStudioHost(executable) {
   const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const materialFloats = /export const STUDIO_MATERIAL_FLOATS\s*=\s*(\d+)/.exec(readFileSync(path.join(desktop, 'src/renderer/src/core/studio/extract.ts'), 'utf8'))?.[1];
-  if (!materialFloats) throw new Error('Cannot determine the Studio renderer layout.');
+  const layout=readFileSync(path.join(desktop,'src/renderer/src/core/studio/layout.ts'),'utf8');
+  const materialFloats=/export const STUDIO_MATERIAL_FLOATS\s*=\s*(\d+)/.exec(layout)?.[1];
+  const triangleFloats=/export const STUDIO_TRIANGLE_FLOATS\s*=\s*(\d+)/.exec(layout)?.[1];
+  if (!materialFloats || !triangleFloats) throw new Error('Cannot determine the Studio renderer layout.');
   const json = Buffer.from(JSON.stringify({id:1,op:'hello'})), header = Buffer.alloc(12);
   header.write('PMS1');header.writeUInt32LE(json.length,4);
   const reply = spawnSync(executable, [], {input:Buffer.concat([header,json]),timeout:10_000,maxBuffer:1024*1024});
@@ -17,7 +19,7 @@ export function verifyStudioHost(executable) {
   const size = reply.stdout.readUInt32LE(4);
   if (size > reply.stdout.length - 12 || reply.stdout.readUInt32LE(8) !== 0) throw new Error('Built Studio host returned an invalid handshake.');
   const result = JSON.parse(reply.stdout.toString('utf8',12,12+size));
-  if (result.id !== 1 || !result.ok || result.result?.protocol !== 1 || result.result.layout?.materialBytes !== Number(materialFloats)*4 || result.result.layout?.triangleBytes !== 96 || result.result.layout?.nodeBytes !== 64 || result.result.layout?.instanceFloats !== 36) throw new Error('Built Studio host does not match the renderer layout; rebuild in the checkout-specific Cargo target.');
+  if (result.id !== 1 || !result.ok || result.result?.protocol !== 1 || result.result.layout?.materialBytes !== Number(materialFloats)*4 || result.result.layout?.triangleBytes !== Number(triangleFloats)*4 || result.result.layout?.nodeBytes !== 64 || result.result.layout?.instanceFloats !== 36) throw new Error('Built Studio host does not match the renderer layout; rebuild in the checkout-specific Cargo target.');
 }
 
 function inspect(command, args) {

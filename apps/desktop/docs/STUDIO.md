@@ -233,10 +233,29 @@ The checklist and verified limitations are in
 requires implementation. Studio does not
 claim Blender Cycles parity.
 
-Imported glTF models using additional physical-material texture maps, texture
-transforms or secondary UV sets still have an appearance-parity gap. The six
-standard image slots exposed in Powermove's Materials UI are supported; the
-extended import cases are listed separately in the checklist.
+Imported glTF/GLB materials retain `KHR_texture_transform`, independent
+TEXCOORD_0/TEXCOORD_1 selection, repeat/clamp/mirror wrapping and all eighteen
+standard/physical texture slots. Supported extension families include specular,
+IOR, volume, clearcoat (including its own normal), sheen, iridescence,
+anisotropy, emission strength and transmission. Source materials keep their
+colors, scalar values, normal scales and per-map sampling when saved/reopened.
+The existing whole-model finish override clears source maps and physical
+settings; switching back restores the source material.
+
+Material images now use up to 4096×4096 texels. Studio chooses a common array
+size from source detail, resident geometry and device-memory hints, with a
+256 MB texture cap and a 512 MB working-set target including geometry. More
+images or larger geometry reduce texture resolution automatically. The native
+host independently enforces the texture dimensions and total byte budget.
+KTX2/Basis LDR ETC1S and UASTC images decode in an isolated worker to RGBA8;
+the decoder is loaded only for imports that need it. Source files stay embedded
+in the saved asset. See [import licenses](../../../docs/studio/import-licenses.md).
+
+Limits: UV sets beyond TEXCOORD_1, KTX2 HDR/array/cubemap textures and a nested
+volume-medium stack are not supported. Volume attenuation uses geometric
+path length in the model's normalized units; thin transmission has no volume
+absorption. These import checks do not establish Blender Cycles equivalence
+for every physical-material combination.
 
 ## Building environments
 

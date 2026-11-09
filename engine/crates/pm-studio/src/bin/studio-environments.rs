@@ -87,9 +87,9 @@ fn main() {
     let total_seconds = start.elapsed().as_secs_f64();
     write_png(&out.join(format!("{name}-final{spp}.png")), w, h, &pixels).unwrap();
     let bytes = prepared.positions.len() * 16
-        + prepared.tris.len() * 96
+        + prepared.tris.len() * std::mem::size_of::<pm_studio::scene::GpuTri>()
         + prepared.nodes.len() * 64
-        + prepared.materials.len() * 128
+        + prepared.materials.len() * std::mem::size_of::<pm_studio::scene::GpuMaterial>()
         + prepared.sdata.len() * 16;
     let instances = prepared
         .instancing

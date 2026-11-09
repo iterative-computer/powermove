@@ -4,7 +4,7 @@ import postSource from '../../../../../../../engine/crates/pm-studio/src/shaders
 import presentSource from '../../../../../../../engine/crates/pm-studio/src/shaders/present.wgsl?raw';
 import aovSource from '../../../../../../../engine/crates/pm-studio/src/shaders/aov.wgsl?raw';
 import denoiseSource from '../../../../../../../engine/crates/pm-studio/src/shaders/denoise.wgsl?raw';
-import { MAP_SIZE, type StudioScene } from './extract';
+import { MAP_SIZE, STUDIO_MATERIAL_FLOATS, type StudioScene } from './extract';
 
 /*
  * The app's WebGPU host for the Studio tracer. Same WGSL as the Rust engine
@@ -271,21 +271,21 @@ export class StudioTarget {
     // Caustics only where something can focus light: glass or polished metal.
     const m = scene.materials;
     this.caustics = false;
-    for (let i = 0; i + 32 <= m.length; i += 32) {
+    for (let i = 0; i + STUDIO_MATERIAL_FLOATS <= m.length; i += STUDIO_MATERIAL_FLOATS) {
       if (m[i + 7]! * (1 - m[i + 3]!) > 0.5 || (m[i + 3]! > 0.5 && m[i + 4]! < 0.25)) { this.caustics = true; break; }
     }
     if (!scene.bounds.isEmpty()) {
       const { min: lo, max: hi } = scene.bounds;
       this.bounds = [(lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2, Math.max(1e-3, Math.hypot(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z) / 2)];
     }
-    const layers = Math.max(1, maps.length);
-    if (!this.mapTexture || this.mapLayers !== layers) {
+    const layers = Math.max(1, maps.length),mapSize=scene.mapSize ?? MAP_SIZE;
+    if (!this.mapTexture || this.mapLayers !== layers || this.mapSize!==mapSize) {
       this.mapTexture?.destroy?.();
       this.mapTexture = device.createTexture({
-        label: 'studio maps', size: [MAP_SIZE, MAP_SIZE, layers], format: 'rgba8unorm',
+        label: 'studio maps', size: [mapSize, mapSize, layers], format: 'rgba8unorm',
         usage: T.TEXTURE_BINDING | T.COPY_DST | T.RENDER_ATTACHMENT,
       });
-      this.mapLayers = layers;
+      this.mapLayers = layers;this.mapSize=mapSize;
     }
     // Maps change with the scene (a live screen's frame, a new texture): always write them.
     maps.forEach((source, layer) => this.writeMap(layer, source));
@@ -295,14 +295,15 @@ export class StudioTarget {
   private geometryKey = '';
   private instanceCount = 0;
   private mapLayers = 0;
+  private mapSize=MAP_SIZE;
 
   /** Replace one texture layer (a live screen's new frame). */
   writeMap(layer: number, source: HTMLCanvasElement | OffscreenCanvas | Uint8Array): void {
     if (!this.mapTexture) return;
     if (source instanceof Uint8Array) {
-      device.queue.writeTexture({ texture: this.mapTexture, origin: [0, 0, layer] }, source, { bytesPerRow: MAP_SIZE * 4, rowsPerImage: MAP_SIZE }, [MAP_SIZE, MAP_SIZE, 1]);
+      device.queue.writeTexture({ texture: this.mapTexture, origin: [0, 0, layer] }, source, { bytesPerRow: this.mapSize * 4, rowsPerImage: this.mapSize }, [this.mapSize, this.mapSize, 1]);
     } else {
-      device.queue.copyExternalImageToTexture({ source }, { texture: this.mapTexture, origin: [0, 0, layer] }, [MAP_SIZE, MAP_SIZE]);
+      device.queue.copyExternalImageToTexture({ source }, { texture: this.mapTexture, origin: [0, 0, layer] }, [this.mapSize, this.mapSize]);
     }
   }
 

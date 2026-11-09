@@ -1,3 +1,4 @@
+import { STUDIO_MATERIAL_FLOATS } from './layout';
 import { compositionRuntime } from '../scene3d/service';
 import { compositionById } from '../scene3d/material-maps';
 import { extractScene,MAP_SIZE } from './extract';
@@ -35,7 +36,7 @@ export async function* renderStudioPasses(PM:any,time:number,width:number,height
         target.trace(Math.max(4,Math.round((runtime as any).raw?.environment?.samples??64)),8,true,64,Math.round(time*9600));target.resolve(0,true);pixels=await target.readBeauty();
         for(let i=0;i<pixels.length;i+=4){const alpha=pixels[i+3]!;if(alpha>0)for(let j=0;j<3;j++)pixels[i+j]!/=alpha;}
       }else pixels=await target.dataPass(STUDIO_PASSES.indexOf(pass)-1,seed);
-      yield {pass,blob:await png16(width,height,pixels,pass==='beauty'),metadata:{depth:{near:camera.near,far:camera.far,encoding:'(distance - near) / (far - near)'},object_ids:scene.objects,material_ids:Array.from({length:scene.materials.length/32},(_,i)=>({id:i+1,base:Array.from(scene.materials.subarray(i*32,i*32+3)),metallic:scene.materials[i*32+3],roughness:scene.materials[i*32+4]})),background_id:0,normal:'world XYZ mapped from [-1,1] to [0,1]',albedo:'linear sRGB',shadow:'fraction of direct analytic illumination occluded; 0 lit, 1 blocked',bit_depth:16}};
+      yield {pass,blob:await png16(width,height,pixels,pass==='beauty'),metadata:{depth:{near:camera.near,far:camera.far,encoding:'(distance - near) / (far - near)'},object_ids:scene.objects,material_ids:Array.from({length:scene.materials.length/STUDIO_MATERIAL_FLOATS},(_,i)=>({id:i+1,base:Array.from(scene.materials.subarray(i*STUDIO_MATERIAL_FLOATS,i*STUDIO_MATERIAL_FLOATS+3)),metallic:scene.materials[i*STUDIO_MATERIAL_FLOATS+3],roughness:scene.materials[i*STUDIO_MATERIAL_FLOATS+4]})),background_id:0,normal:'world XYZ mapped from [-1,1] to [0,1]',albedo:'linear sRGB',shadow:'fraction of direct analytic illumination occluded; 0 lit, 1 blocked',bit_depth:16}};
     }
   }finally{target.destroy();}
 }

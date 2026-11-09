@@ -500,7 +500,7 @@ fn triangle_shading_is_finite(triangle: &GpuTri) -> bool {
     // a floating-point value. Validate only the actual shading coordinates.
     triangle.n.iter().flat_map(|n| n[..3].iter())
         .chain(triangle.uv01.iter()).chain(triangle.uv2m.iter())
-        .chain(triangle.tangent.iter()).all(|v| v.is_finite())
+        .chain(triangle.tangent.iter()).chain(triangle.uv01_secondary.iter()).chain(triangle.uv2_secondary.iter()).chain(triangle.tangent_secondary.iter()).all(|v| v.is_finite())
 }
 fn triangle_range(nodes: &[WideNode], root: u32, triangles: usize) -> Result<(u32, u32), String> {
     let mut stack = vec![(root, 0usize)];
@@ -591,11 +591,13 @@ mod tests {
     use super::*;
     #[test]
     fn packed_vertex_colour_bits_are_not_floating_point_shading() {
-        let good = GpuTri { n: [[0., 1., 0., f32::from_bits(0xffffffff)]; 3], uv01: [0.; 4], uv2m: [0.; 4], tangent: [1., 0., 0., 1.] };
+        let good = GpuTri { n: [[0., 1., 0., f32::from_bits(0xffffffff)]; 3], uv01: [0.; 4], uv2m: [0.; 4], tangent: [1., 0., 0., 1.], uv01_secondary:[0.;4], uv2_secondary:[0.;4], tangent_secondary:[1.,0.,0.,1.] };
         assert!(triangle_shading_is_finite(&good));
         let mut bad = good; bad.n[0][0] = f32::NAN;
         assert!(!triangle_shading_is_finite(&bad));
         let mut bad = good; bad.uv01[0] = f32::INFINITY;
+        assert!(!triangle_shading_is_finite(&bad));
+        let mut bad=good;bad.uv01_secondary[0]=f32::NAN;
         assert!(!triangle_shading_is_finite(&bad));
     }
     #[test]
