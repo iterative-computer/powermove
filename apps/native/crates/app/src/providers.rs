@@ -129,7 +129,7 @@ impl DiscoveryHost for Host {
         Ok(caps)
     }
     fn sort_local(&self, models: &mut [ModelInfo]) {
-        models.sort_by(|a, b| a.id.to_lowercase().cmp(&b.id.to_lowercase()));
+        models.sort_by_key(|m| m.id.to_lowercase());
     }
 }
 impl ConfigureHost for Host {
@@ -262,7 +262,7 @@ pub fn init(profile: PathBuf, cx: &mut App) {
         .spawn(async move { host(profile).saved() });
     cx.spawn(async move |cx: &mut AsyncApp| {
         let saved = read.await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             cx.global_mut::<Provider>().saved = saved;
             changed(cx);
         });
@@ -498,7 +498,7 @@ fn act(action: &str, cx: &mut App) {
             });
             cx.spawn(async move |cx: &mut AsyncApp| {
                 let outcome = task.await;
-                let _ = cx.update(|cx| finish(ticket, outcome, cx));
+                cx.update(|cx| finish(ticket, outcome, cx));
             })
             .detach();
         }
@@ -574,7 +574,7 @@ pub fn disconnect(cx: &mut App) {
         .spawn(async move { host(profile).disconnect() });
     cx.spawn(async move |cx: &mut AsyncApp| {
         if task.await.is_ok() {
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 cx.global_mut::<Provider>().saved = None;
                 changed(cx);
             });

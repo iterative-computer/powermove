@@ -151,12 +151,14 @@ pub struct Yours {
 enum Reply {
     Shelves(u64, Result<Vec<(String, Vec<Listing>)>, String>),
     Catalog(pm_services::surfaces::store::SearchReply),
-    Detail(u64, Result<Detail, String>),
+    Detail(u64, Box<Result<Detail, String>>),
     Library(Vec<Installed>, Vec<Yours>, Option<String>),
-    Prepared(Result<crate::publish::Prepared, String>),
+    Prepared(Box<Result<crate::publish::Prepared, String>>),
     Frozen(
-        crate::publish::Prepared,
-        Result<crate::publish::Frozen, String>,
+        Box<(
+            crate::publish::Prepared,
+            Result<crate::publish::Frozen, String>,
+        )>,
     ),
     Done(String),
 }
@@ -379,7 +381,7 @@ impl StoreWindow {
                 .and_then(|mut c| c.detail(&handle, &slug))
                 .map_err(load_error)
                 .and_then(|value| Detail::from_value(&value).ok_or_else(|| GENERIC.to_owned()));
-            Reply::Detail(generation, detail)
+            Reply::Detail(generation, Box::new(detail))
         });
         cx.notify();
     }
@@ -474,7 +476,7 @@ impl StoreWindow {
             return;
         };
         let rx = Alert::new(
-            &format!("Uninstall {name}?"),
+            format!("Uninstall {name}?"),
             "Its files move to the archive in your Powermove profile, and its settings are kept if you install it again.",
             vec![
                 Button::new("Cancel", false).default().cancel(),
@@ -528,7 +530,7 @@ impl StoreWindow {
             }
             Reply::Detail(generation, result) if generation == self.generation => {
                 if let Some((_, load)) = &mut self.detail {
-                    *load = match result {
+                    *load = match *result {
                         Ok(detail) => Load::Ready(detail),
                         Err(error) => Load::Failed(error),
                     };
@@ -543,7 +545,7 @@ impl StoreWindow {
             }
             Reply::Prepared(result) => {
                 self.busy = None;
-                match result {
+                match *result {
                     Ok(prepared) => match crate::publish::plan_problem(&prepared.plan) {
                         Some(problem) => self.message = Some(problem),
                         None => {
@@ -555,12 +557,12 @@ impl StoreWindow {
                     Err(message) => self.message = Some(message),
                 }
             }
-            Reply::Frozen(prepared, result) => match result {
-                Ok(frozen) => {
+            Reply::Frozen(boxed) => match *boxed {
+                (prepared, Ok(frozen)) => {
                     self.publishing = Some((prepared, None));
                     self.confirm_publish(frozen, cx)
                 }
-                Err(message) => {
+                (_, Err(message)) => {
                     self.busy = None;
                     self.publishing = None;
                     self.message = Some(message);
@@ -597,7 +599,9 @@ impl StoreWindow {
         let healthy = crate::publish::healthy(self.services.kernel.as_ref(), &id);
         self.run(move |_| {
             let mut http = account();
-            Reply::Prepared(crate::publish::prepare(&mut http, &profile, &id, healthy))
+            Reply::Prepared(Box::new(crate::publish::prepare(
+                &mut http, &profile, &id, healthy,
+            )))
         });
         cx.notify();
     }
@@ -715,7 +719,7 @@ impl StoreWindow {
                 self.busy = Some(prepared.plan.local_id.clone());
                 self.run(move |_| {
                     let frozen = crate::publish::freeze(&prepared, &form, now);
-                    Reply::Frozen(prepared, frozen)
+                    Reply::Frozen(Box::new((prepared, frozen)))
                 });
             }
         }

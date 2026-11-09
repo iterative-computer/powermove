@@ -511,15 +511,12 @@ pub fn init(profile: PathBuf, cx: &mut App) {
             let Some((signed, account)) = wait(pending, cx).await else {
                 return;
             };
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let cloud = cx.global_mut::<Cloud>();
                 cloud.signed_in = signed;
-                match account {
-                    Ok(account) => {
-                        cloud.account = account.or(cloud.account.take().filter(|_| signed))
-                    }
-                    // Offline: the cached account stays for display.
-                    Err(_) => {}
+                // Offline: the cached account stays for display.
+                if let Ok(account) = account {
+                    cloud.account = account.or(cloud.account.take().filter(|_| signed));
                 }
                 if !signed {
                     cloud.account = None;
@@ -846,7 +843,7 @@ fn submit(work: CloudWork, step: Step, cx: &mut App) {
         let Some(done) = wait(pending, cx).await else {
             return;
         };
-        let _ = cx.update(|cx| complete(done, step, cx));
+        cx.update(|cx| complete(done, step, cx));
     })
     .detach();
 }
@@ -946,7 +943,7 @@ pub fn delete_account(owner: Retained<NSWindow>, cx: &mut App) {
         if rx.recv().await != Ok(Some(true)) {
             return;
         }
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let pending = cx
                 .global::<Cloud>()
                 .worker
@@ -956,7 +953,7 @@ pub fn delete_account(owner: Retained<NSWindow>, cx: &mut App) {
             };
             cx.spawn(async move |cx| {
                 let result = wait(pending, cx).await;
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     let cloud = cx.global_mut::<Cloud>();
                     if result.is_some() {
                         cloud.signed_in = false;

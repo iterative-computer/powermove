@@ -139,7 +139,7 @@ pub fn refresh(cx: &mut App) {
         .spawn(async move { system(&profile).map(|r| r.inspect()) });
     cx.spawn(async move |cx: &mut AsyncApp| {
         let info = task.await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let clients = cx.global_mut::<Clients>();
             match info {
                 Ok(info) => clients.info = info,
@@ -185,7 +185,7 @@ pub fn request(id: String, add: bool, window: Retained<NSWindow>, cx: &mut App) 
         .sheet(&window);
         cx.spawn(async move |cx: &mut AsyncApp| {
             let accepted = rx.recv().await == Ok(Some(true));
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 // The answer is recorded once (S070), before any write.
                 let profile = cx.global::<Clients>().profile.clone();
                 let answer = if accepted {
@@ -219,7 +219,7 @@ fn run(id: String, add: bool, cx: &mut App) {
     });
     cx.spawn(async move |cx: &mut AsyncApp| {
         let note = task.await.unwrap_or_else(|e| e);
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let clients = cx.global_mut::<Clients>();
             clients.busy = None;
             clients.notes.insert(id, note);

@@ -168,6 +168,8 @@ fn detail(repo: &str) -> Value {
         .collect();
     value
 }
+/// A published release: (version, commit, tree, parent commit).
+pub type Published = (String, String, String, Option<String>);
 /// The account side of the fixture: one person, sessions by bearer token.
 #[derive(Default)]
 pub struct Account {
@@ -181,7 +183,7 @@ pub struct Account {
     /// Uploaded objects, each inflated and checked against its id.
     pub objects: std::collections::BTreeMap<String, Vec<u8>>,
     /// Published releases by `handle/slug`: (version, commit, tree, parent).
-    pub releases: std::collections::BTreeMap<String, Vec<(String, String, String, Option<String>)>>,
+    pub releases: std::collections::BTreeMap<String, Vec<Published>>,
 }
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
@@ -584,9 +586,11 @@ pub fn serve_with(port: u16, account: Arc<Mutex<Account>>) -> String {
                 let (status, reply) = cloud(method, path, &head, &body, &account)
                     .unwrap_or_else(|| route(method, path, &body));
                 // A redirect's body is where it goes.
-                let location = (status == 302)
-                    .then(|| format!("Location: {}\r\n", String::from_utf8_lossy(&reply)))
-                    .unwrap_or_default();
+                let location = if status == 302 {
+                    format!("Location: {}\r\n", String::from_utf8_lossy(&reply))
+                } else {
+                    String::new()
+                };
                 let kind = if path.ends_with("/tar") {
                     "application/gzip"
                 } else {
@@ -717,10 +721,10 @@ impl pm_services::store::StoreTransport for Loopback {
         })
     }
 }
-fn open<'a>(
-    cx: &'a mut TestAppContext,
+fn open(
+    cx: &mut TestAppContext,
     services: Services,
-) -> (Entity<StoreWindow>, &'a mut VisualTestContext) {
+) -> (Entity<StoreWindow>, &mut VisualTestContext) {
     let tokens = Tokens::new(Scheme::Light, Accessibility::default());
     cx.add_window_view(move |_, cx| StoreWindow::new(services, tokens, cx))
 }
