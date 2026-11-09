@@ -1274,14 +1274,19 @@ impl Controller {
     /// it, then close the one shown before, as opening from the window does.
     /// Other windows' projects are theirs; this never follows them.
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
-        let placed = self.mcp.window_session(self.window_key);
-        if self.opening || self.close_pending || placed == self.session {
+        if self.opening || self.close_pending {
             return;
         }
-        let Some(session) = placed else {
+        // Taken atomically: an MCP open racing this one can't close it now.
+        let Some(session) = self.mcp.claim_placed(self.window_key) else {
             return;
         };
+        if Some(&session) == self.session.as_ref() {
+            return;
+        }
         if self.kernel.published(&session.project).is_none() {
+            // Gone before the window took it: keep showing what it showed.
+            self.mcp.bind_window(self.window_key, self.session.clone());
             return;
         }
         let old = self.session.clone();

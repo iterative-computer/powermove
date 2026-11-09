@@ -34,9 +34,19 @@ struct Windows {
     /// The key editor window: where MCP opens and which project it means by default.
     active: Option<u64>,
 }
+#[derive(Default)]
 struct Slot {
-    session: Option<SessionHandle>,
+    /// What the window shows (it reports it).
+    shown: Option<SessionHandle>,
+    /// What MCP placed there and the window hasn't taken yet.
+    placed: Option<SessionHandle>,
     changed: Option<async_channel::Sender<()>>,
+}
+impl Slot {
+    /// What the window shows, or is about to.
+    fn session(&self) -> Option<&SessionHandle> {
+        self.placed.as_ref().or(self.shown.as_ref())
+    }
 }
 impl Windows {
     fn target(&self) -> u64 {
@@ -50,7 +60,7 @@ impl Windows {
     /// window did).
     fn open_target(&self) -> u64 {
         let target = self.target();
-        let empty = |w: &u64| self.slots.get(w).is_some_and(|s| s.session.is_none());
+        let empty = |w: &u64| self.slots.get(w).is_some_and(|s| s.session().is_none());
         if empty(&target) {
             return target;
         }
@@ -62,10 +72,11 @@ impl Windows {
     }
     fn showing(&self, project: &str) -> Option<(u64, SessionHandle)> {
         self.slots.iter().find_map(|(w, slot)| {
-            slot.session
-                .clone()
-                .filter(|s| s.project == project)
-                .map(|s| (*w, s))
+            [&slot.placed, &slot.shown]
+                .into_iter()
+                .flatten()
+                .find(|s| s.project == project)
+                .map(|s| (*w, s.clone()))
         })
     }
 }
@@ -79,13 +90,7 @@ impl Drop for Operation {
 impl Host {
     pub fn new(kernel: KernelHandle, profile: PathBuf) -> Arc<Self> {
         let mut windows = Windows::default();
-        windows.slots.insert(
-            WINDOWLESS,
-            Slot {
-                session: None,
-                changed: None,
-            },
-        );
+        windows.slots.insert(WINDOWLESS, Slot::default());
         Arc::new(Self {
             kernel,
             profile,
@@ -103,8 +108,8 @@ impl Host {
         windows.slots.insert(
             window,
             Slot {
-                session: None,
                 changed: Some(tx),
+                ..Slot::default()
             },
         );
         windows.active.get_or_insert(window);
@@ -129,17 +134,26 @@ impl Host {
     /// project is its own, and other windows don't follow it.
     pub fn bind_window(&self, window: u64, session: Option<SessionHandle>) {
         if let Some(slot) = self.windows.lock().unwrap().slots.get_mut(&window) {
-            slot.session = session;
+            slot.shown = session;
         }
     }
-    /// The project MCP placed in (or a window reported for) `window`.
+    /// What `window` shows, or MCP placed there for it to show.
     pub fn window_session(&self, window: u64) -> Option<SessionHandle> {
         self.windows
             .lock()
             .unwrap()
             .slots
             .get(&window)
-            .and_then(|s| s.session.clone())
+            .and_then(|s| s.session().cloned())
+    }
+    /// The window takes the project MCP placed for it, before showing it: from
+    /// here on it is the window's, and a later MCP open can't displace it.
+    pub fn claim_placed(&self, window: u64) -> Option<SessionHandle> {
+        let mut windows = self.windows.lock().unwrap();
+        let slot = windows.slots.get_mut(&window)?;
+        let placed = slot.placed.take()?;
+        slot.shown = Some(placed.clone());
+        Some(placed)
     }
     /// The window showing `project`, if one does.
     pub fn window_of(&self, project: &str) -> Option<u64> {
@@ -186,10 +200,12 @@ impl Host {
         windows
             .slots
             .get(&windows.target())
-            .and_then(|s| s.session.clone())
+            .and_then(|s| s.session().cloned())
     }
     /// MCP places `session` in its window (see `open_target`), which then shows
-    /// it and becomes MCP's. Returns the session that window showed before.
+    /// it and becomes MCP's. Returns the session it displaces and nobody shows:
+    /// a windowless host's previous project, or a window's earlier placement it
+    /// never took (two opens before the window caught up).
     fn place(&self, session: SessionHandle) -> (u64, Option<SessionHandle>) {
         let mut windows = self.windows.lock().unwrap();
         let target = windows.open_target();
@@ -197,11 +213,18 @@ impl Host {
             windows.active = Some(target);
         }
         let slot = windows.slots.get_mut(&target).expect("target slot");
-        let old = slot.session.replace(session);
+        let displaced = if target == WINDOWLESS {
+            slot.shown.replace(session.clone())
+        } else {
+            slot.placed.replace(session.clone())
+        };
         if let Some(tx) = &slot.changed {
             let _ = tx.try_send(());
         }
-        (target, old)
+        let displaced = displaced.filter(|old| {
+            old != &session && windows.showing(&old.project).is_none_or(|(_, s)| &s != old)
+        });
+        (target, displaced)
     }
     pub fn shell(&self, call: ShellCall) -> Result<ShellReply> {
         self.kernel
@@ -235,27 +258,26 @@ impl Host {
             return Err(Error::kernel(reply));
         };
         let (target, old) = self.place(session.clone());
-        // Only a windowless host closes the project it replaces; a window
-        // closes its own once it shows the new one.
-        if target == WINDOWLESS
-            && let Some(old) = old.filter(|s| {
-                s != &session
-                    && self
-                        .kernel
-                        .published(&s.project)
-                        .is_some_and(|p| p.session.as_ref().map(|m| &m.handle) == Some(s))
-            })
-        {
+        // A window closes the project it showed once it shows the new one; MCP
+        // closes only what no window shows (see `place`).
+        if let Some(old) = old.filter(|s| {
+            self.kernel
+                .published(&s.project)
+                .is_some_and(|p| p.session.as_ref().map(|m| &m.handle) == Some(s))
+        }) {
             match self.shell(ShellCall::Close(old.clone())) {
                 Ok(ShellReply::Closed {
                     recovery_copy: None,
                 }) => {}
-                other => {
+                other if target == WINDOWLESS => {
                     // Do not strand the newly opened project if replacing the old one fails.
                     self.bind_window(WINDOWLESS, Some(old));
                     let _ = self.shell(ShellCall::DeferClose(session));
                     return Err(Error::kernel(other));
                 }
+                // The displaced placement keeps its recovery journal; the new
+                // project still opens in the window.
+                _ => {}
             }
         }
         let p = self

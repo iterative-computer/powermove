@@ -795,7 +795,8 @@ fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
     // The first window attached is key: MCP's project lands there, and only
     // that window hears about it.
     host.open("alpha".into(), project("alpha")).unwrap();
-    let alpha = host.window_session(1).expect("alpha in window 1");
+    // The window takes it (follow_mcp) and shows it.
+    let alpha = host.claim_placed(1).expect("alpha in window 1");
     assert!(woke(&first));
     assert!(!woke(&second), "window 2 never follows window 1");
     assert_eq!(host.window_session(2), None);
@@ -842,7 +843,7 @@ fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
     let third = host.attach_window(3);
     host.open("delta".into(), project("delta")).unwrap();
     assert!(woke(&third) && !woke(&first) && !woke(&second));
-    assert_eq!(host.window_session(3).unwrap().project, "delta");
+    assert_eq!(host.claim_placed(3).unwrap().project, "delta");
     assert_eq!(
         host.current().unwrap().project,
         "delta",
@@ -863,5 +864,23 @@ fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
     // A closed window's project is no longer anyone's.
     host.detach_window(1);
     assert_eq!(host.session_of("gamma"), None);
+    // Two opens before a window catches up: the first placement nobody took is
+    // closed (no session or lock left behind); the window takes the second.
+    let fourth = host.attach_window(4);
+    host.activate_window(4);
+    host.open("epsilon".into(), project("epsilon")).unwrap();
+    host.open("zeta".into(), project("zeta")).unwrap();
+    assert!(woke(&fourth));
+    assert!(
+        host.kernel
+            .published("epsilon")
+            .is_none_or(|p| p.session.is_none()),
+        "the displaced placement was closed"
+    );
+    assert_eq!(host.claim_placed(4).unwrap().project, "zeta");
+    // Once taken, a later open leaves it to the window to close.
+    host.open("eta".into(), project("eta")).unwrap();
+    assert!(host.kernel.published("zeta").unwrap().session.is_some());
+    assert_eq!(host.window_session(4).unwrap().project, "eta");
     actor.shutdown();
 }
