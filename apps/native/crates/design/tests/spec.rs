@@ -52,6 +52,11 @@ const ROLES: &[(&str, &str)] = &[
         "colors.selected_fill",
         "Neutral selected row / segment fill",
     ),
+    (
+        "colors.selected_secondary",
+        "Metadata on a selected row (muted fails there)",
+    ),
+    ("colors.selected_danger", "Danger words on a selected row"),
     ("colors.focus", "Keyboard focus ring"),
     (
         "colors.accent_text",
@@ -116,6 +121,10 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.row", "Inspector and list row height"),
     ("metrics.status", "Status bar height"),
     ("metrics.toolbar", "Unified toolbar height"),
+    (
+        "metrics.titlebar",
+        "Title bar band of a plain panel window; content starts below it",
+    ),
     ("metrics.toolbar_title_width", "Document title slot width"),
     ("metrics.toolbar_title_line", "Document title line height"),
     (
@@ -180,6 +189,10 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.symbol_inline", "SF Symbol size inside rows"),
     ("metrics.hit", "Minimum pointer target"),
     ("metrics.popover_width", "Default popover width"),
+    (
+        "metrics.popover_radius",
+        "Corner of popovers Powermove frames itself (agent popover)",
+    ),
     ("metrics.sheet_width", "Default sheet width"),
     ("metrics.agent_width", "Default agent panel width"),
     ("metrics.tree_indent", "Indent per outline level"),
@@ -339,6 +352,15 @@ const ROLES: &[(&str, &str)] = &[
         "translucency.line",
         "Header, column and status dividers in `text` ink",
     ),
+    ("translucency.tick_minor", "Minor ruler tick, as `text` ink"),
+    (
+        "translucency.tick_major",
+        "Labelled ruler tick, as `text` ink",
+    ),
+    (
+        "translucency.grid",
+        "Time grid under the timeline tracks, as `text` ink",
+    ),
 ];
 
 fn root() -> PathBuf {
@@ -497,6 +519,15 @@ fn contrast_rules_from_language() {
             contrast(c.text, c.selected_fill) >= 7.,
             "{name}: selected row"
         );
+        for (what, ink) in [
+            ("metadata", c.selected_secondary),
+            ("danger words", c.selected_danger),
+        ] {
+            assert!(
+                contrast(ink, c.selected_fill) >= 4.5,
+                "{name}: {what} on a selected row"
+            );
+        }
         for (label, fill) in Labels::NAMES.iter().zip(c.labels.all()) {
             assert!(
                 contrast(c.text, fill) >= 7.,

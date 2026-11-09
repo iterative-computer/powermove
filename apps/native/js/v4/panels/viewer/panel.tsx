@@ -67,8 +67,9 @@ export function ViewerPanel({
       </div>
     );
   const zoomValue = m.fit ? "fit" : m.shownZoom;
+  // The native pop-up shows its selected row, so Fit names its zoom.
   const zoomOptions = [
-    { v: "fit", label: "Fit" },
+    { v: "fit", label: m.fit ? zoomTitle(m) : "Fit" },
     ...zoomPresets.map((v) => ({ v, label: `${percent(v)} %` })),
     ...[
       ["viewer.zoom.in", "Zoom In"],

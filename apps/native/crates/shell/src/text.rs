@@ -13,6 +13,8 @@ pub struct TextField {
     kind: TextKind,
     value: String,
     placeholder: SharedString,
+    /// Drawn after the value in `muted` while not editing (`34 px`).
+    unit: Option<SharedString>,
     tokens: pm_design::Tokens,
     /// A composer's last submitted text, cleared once the model empties it.
     submitted: Option<String>,
@@ -71,11 +73,15 @@ impl TextField {
             kind,
             value: value.into(),
             placeholder: SharedString::default(),
+            unit: None,
             tokens,
             submitted: None,
         }
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
+    pub fn set_unit(&mut self, unit: Option<SharedString>) {
+        self.unit = unit;
+    }
     pub fn set_placeholder(&mut self, text: &str) {
         if self.placeholder != text {
             self.slot.set_placeholder(text);
@@ -137,7 +143,12 @@ impl Render for TextField {
             } else {
                 self.tokens.metrics.field
             }))
-            .px(px(self.tokens.metrics.gap))
+            // A well with a unit trades side padding for the value's room.
+            .px(px(if self.unit.is_some() {
+                self.tokens.metrics.inner_radius
+            } else {
+                self.tokens.metrics.gap
+            }))
             .border_1()
             .border_color(rgb(self.tokens.colors.separator))
             .rounded(px(self.tokens.metrics.control_radius))
@@ -159,7 +170,15 @@ impl Render for TextField {
                     .child(self.placeholder.clone())
             })
             .when(dense && !editing && !self.value.is_empty(), |d| {
-                d.child(self.value.clone())
+                d.overflow_hidden()
+                    .child(div().min_w(px(0.)).truncate().child(self.value.clone()))
+                    .children(self.unit.clone().map(|unit| {
+                        div()
+                            .flex_none()
+                            .ml(px(self.tokens.metrics.inner_radius))
+                            .text_color(rgb(self.tokens.colors.muted))
+                            .child(unit)
+                    }))
             })
             .child(
                 canvas(

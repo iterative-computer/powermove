@@ -420,6 +420,7 @@ function Property({
           row.linked !== undefined ? (
             <Action
               id={`link:${row.id}`}
+              symbol={row.linked ? "link" : "link.slash"}
               label="Lock aspect ratio"
               tooltip={row.linked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"}
               active={row.linked}
@@ -521,6 +522,7 @@ export function InspectorPanel({
                 ...horizontal,
                 gap: token("metrics.gap"),
                 height: token("metrics.row"),
+                marginTop: token("metrics.gap"),
                 paddingLeft: token("metrics.inset"),
                 paddingRight: token("metrics.inset"),
               }}

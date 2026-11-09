@@ -218,7 +218,7 @@ fn an_agent_adds_a_panel_a_timeline_column_and_a_viewer_overlay_then_one_is_undo
     );
     let panel = PathBuf::from(forked["dir"].as_str().unwrap()).join("panel.tsx");
     let source = fs::read_to_string(&panel).unwrap();
-    let row = "<Layer row={row} send={send} />";
+    let row = "<Layer row={row} send={send} single={single} />";
     assert!(source.contains(row));
     fs::write(
         &panel,

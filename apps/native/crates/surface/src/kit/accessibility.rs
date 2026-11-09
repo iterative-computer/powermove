@@ -48,6 +48,8 @@ fn role(node: &Node) -> Role {
         None => match node.props.get("role").and_then(Value::as_str) {
             Some("heading") => Role::Heading,
             Some("group") => Role::Group,
+            // A live status: the host also posts its label as an announcement.
+            Some("status") => Role::Status,
             _ => match node.r#type.as_str() {
                 "text" => Role::Label,
                 "input" => Role::TextInput,

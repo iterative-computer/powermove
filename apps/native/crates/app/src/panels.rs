@@ -185,6 +185,19 @@ fn plural(n: usize, one: &str) -> String {
 }
 
 /// Status bar copy: document state, then counts. No developer words.
+/// Status line trailing facts (language §14 numbers): `1920×1080 · 29.97 fps`.
+pub fn format_facts(dimensions: [f64; 2], fps: f64) -> String {
+    let fps = if (fps - fps.round()).abs() < 1e-6 {
+        format!("{}", fps.round())
+    } else {
+        format!("{fps:.2}")
+    };
+    format!(
+        "{}×{} · {fps} fps",
+        dimensions[0].round(),
+        dimensions[1].round()
+    )
+}
 pub fn status_line(dirty: bool, saved_path: bool, layers: usize, keyframes: usize) -> String {
     let counts = format!(
         "{} · {}",
@@ -206,6 +219,17 @@ mod tests {
         parse_background, status_line, zoom_title,
     };
 
+    #[test]
+    fn format_facts_read_like_the_status_line() {
+        assert_eq!(
+            super::format_facts([1920., 1080.], 30.),
+            "1920×1080 · 30 fps"
+        );
+        assert_eq!(
+            super::format_facts([3840., 2160.], 30000. / 1001.),
+            "3840×2160 · 29.97 fps"
+        );
+    }
     #[test]
     fn values_carry_units_at_display_precision() {
         assert_eq!(display_value("opacity", 100.), "100 %");

@@ -163,6 +163,9 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
+    fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
+        id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
+    }
     fn native_panel(&self, id: &str, cx: &App) -> bool {
         self.0.read(cx).extensions.owns_panel(id)
     }
@@ -204,6 +207,13 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn status(&self, cx: &App) -> String {
         self.0.read(cx).status_text()
+    }
+    fn status_trailing(&self, cx: &App) -> String {
+        let c = self.0.read(cx);
+        if c.published.is_none() {
+            return String::new();
+        }
+        panels::format_facts(c.dimensions, c.rate.to_f64())
     }
     fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
         self.0.update(cx, |v, cx| v.import_dropped(paths, cx));

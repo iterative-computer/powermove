@@ -90,6 +90,7 @@ pub struct NativeControl {
     options: Vec<Value>,
     width: f32,
     height: f32,
+    inline: bool,
 }
 impl EventEmitter<Value> for NativeControl {}
 
@@ -102,6 +103,9 @@ pub struct ControlSpec<'a> {
     pub disabled: bool,
     pub default: bool,
     pub destructive: bool,
+    /// A borderless pop-up sized to its title, for panel bars (the viewer's
+    /// zoom and resolution); rows and sheets keep the bezel at `value_column`.
+    pub inline: bool,
 }
 
 impl NativeControl {
@@ -120,6 +124,7 @@ impl NativeControl {
             disabled,
             default,
             destructive,
+            inline,
         } = spec;
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let RawWindowHandle::AppKit(handle) =
@@ -154,6 +159,9 @@ impl NativeControl {
                     v.setAction(Some(sel!(act:)));
                 }
                 v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+                if inline {
+                    v.setBordered(false);
+                }
                 v.sizeToFit();
                 Control::Popup(v)
             }
@@ -202,7 +210,7 @@ impl NativeControl {
         control.enabled(!disabled);
         control.value(value, &options);
         let intrinsic = control.view().fittingSize();
-        let width = if matches!(kind, Kind::Popup) {
+        let width = if matches!(kind, Kind::Popup) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
         } else {
             (intrinsic.width as f32).max(t.metrics.hit)
@@ -226,6 +234,7 @@ impl NativeControl {
             options,
             width,
             height,
+            inline,
         }
     }
     pub fn keep(&self) {
@@ -271,6 +280,10 @@ impl NativeControl {
         }
         self.control.value(value, &self.options);
         self.control.enabled(!disabled);
+        if self.inline {
+            // The title names the current value, so the width follows it.
+            self.width = self.control.view().fittingSize().width as f32;
+        }
         cx.notify();
     }
 }

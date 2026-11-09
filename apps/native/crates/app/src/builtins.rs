@@ -718,6 +718,7 @@ impl Controller {
         }
         .into();
         let id = id.to_owned();
+        let popover = (id == "agent").then(|| self.host.borrow().tokens.clone());
         // Opening GPUI renders the new root synchronously. Do it after this
         // Controller update so the window can acquire its published panel safely.
         cx.spawn(async move |this, cx| {
@@ -735,18 +736,28 @@ impl Controller {
             if !current {
                 return;
             }
+            let mut options = WindowOptions::new().kind(kind);
+            if popover.is_some() {
+                // Clear GPUI content over the popover material (language §12).
+                options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
+            }
             let result = cx.open_window(
-                WindowOptions::new()
-                    .kind(kind)
-                    .titlebar(Some(TitlebarOptions {
+                options
+                    // A popover has no title bar; other panel windows get a
+                    // seamless transparent one over their own material.
+                    .titlebar(popover.is_none().then(|| TitlebarOptions {
                         title: Some(title),
+                        appears_transparent: true,
                         ..Default::default()
                     }))
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                         origin,
                         size(px(width), px(height)),
                     )))),
-                |_, cx| {
+                |window, cx| {
+                    if let Some(tokens) = &popover {
+                        pm_shell::popover_frame(window, tokens);
+                    }
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
                         SurfaceWindow { owner, panel }
@@ -1453,33 +1464,41 @@ impl Render for SurfaceWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = window.viewport_size();
         let panel = self.panel.clone();
-        let mut fill = 0;
+        let popover = self.panel == "agent";
+        let (mut fill, mut band) = (0, 0.);
         let body = self.owner.update(cx, |v, cx| {
-            let (header, colour) = {
+            let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
-                (t.metrics.header, t.colors.panel)
+                (t.metrics.header, t.colors.panel, t.metrics.titlebar)
             };
             fill = colour;
+            // Windows with a transparent title bar keep their content below it.
+            band = if popover { 0. } else { titlebar };
             v.builtin_panel(
                 &panel,
                 pm_shell::layout::Rect {
                     x: 0.,
                     y: 0.,
                     w: f32::from(size.width),
-                    h: f32::from(size.height) + header,
+                    h: f32::from(size.height) + header - band,
                 },
                 window,
                 cx,
             )
         });
+        // The agent popover's material is native (glass); other panel
+        // windows paint the solid panel colour.
         div()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(fill))
+            .pt(px(band))
+            .when(!popover, |d| d.bg(rgb(fill)))
             .children(body)
     }
 }
 
+/// v1's timeline `gutterWidth` default (`api-helpers.ts`).
+const V1_DEFAULT_GUTTER: f64 = 224.;
 /// A painter's answer: JSON text (the realm returns `JSON.stringify(…)`),
 /// refused past 4 MiB before parsing.
 fn painter_answer(text: &str) -> Option<Value> {
@@ -1537,7 +1556,12 @@ pub fn timeline_chrome(
     let m = &mut t.metrics;
     for (target, value) in [
         (&mut m.track_row, field("rowHeight", 22., 48., true)),
-        (&mut m.layer_column, field("gutterWidth", 160., 640., true)),
+        // v1 wrote its default (224) into every workspace; only another value
+        // is a person's choice. The default takes the native, wider column.
+        (
+            &mut m.layer_column,
+            field("gutterWidth", 160., 640., true).filter(|w| *w != V1_DEFAULT_GUTTER),
+        ),
         (&mut m.ruler, field("rulerHeight", 20., 42., true)),
         (&mut m.keyframe, field("keyframeSize", 4., 12., false)),
         // Main draws clip bars with at most a 5-point corner.

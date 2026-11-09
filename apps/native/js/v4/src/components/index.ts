@@ -236,6 +236,8 @@ export interface SegmentOption {
   id: string;
   label: string;
   disabled?: boolean;
+  /** SF Symbol shown instead of the label; the label becomes the tooltip. */
+  symbol?: string;
 }
 export function SegmentedControl(
   props: Omit<Common, "options" | "onChange"> & {
@@ -277,6 +279,9 @@ export function SegmentedControl(
             key: option.id,
             id: `${group}:${option.id}`,
             label: option.label,
+            ...(option.symbol
+              ? { attr: { symbol: option.symbol }, title: option.label }
+              : {}),
             role: "radio",
             disabled: props.disabled || option.disabled,
             "aria-checked": value === option.id,
@@ -307,7 +312,7 @@ export function SegmentedControl(
               }
               choose(enabled[next].id);
             },
-            children: option.label,
+            children: option.symbol ? undefined : option.label,
           },
           {
             ...target,

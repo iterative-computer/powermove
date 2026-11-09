@@ -993,6 +993,28 @@ impl Editor {
     }
 }
 /// A token colour at an alpha (`translucency.*`, `Tokens::edge`, `Tokens::line`).
+/// Space between neighbouring tab pills.
+const TAB_SPACING: f32 = 2.;
+/// Width of a header title at `size` in the medium weight, as the tab strip draws it.
+fn title_width(text: &str, size: f32, window: &Window) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: Font {
+            family: pm_design::TEXT_FONT.into(),
+            weight: FontWeight::MEDIUM,
+            ..window.text_style().font()
+        },
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+        letter_spacing: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(text.to_string().into(), px(size), &[run]);
+    f32::from(line.width).ceil()
+}
 pub fn tint(rgb: u32, alpha: f32) -> gpui::Rgba {
     gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
 }
@@ -1328,11 +1350,20 @@ impl Render for Editor {
                 .is_some_and(|i| i.native_panel(&id, cx));
             let tabs = group.tabs.clone();
             let active = group.active;
-            // The tab strip's own padding (2 pt each side) and 2 pt gaps come
-            // out of the width before it is shared between the tabs.
-            let strip_chrome = 4. + 2. * tabs.len().saturating_sub(1) as f32;
-            let tab_track =
-                group.tab_track(p.rect.w - m.inset - m.gap * 2. - m.hit - strip_chrome, &t);
+            // Quiet text tabs (language §9): each takes its title's width plus
+            // the leading close slot, trailing padding and the pill spacing.
+            // The leading close slot is the panel inset, and tab groups start
+            // flush, so the first title lands on the inset like a single title.
+            let close_slot = m.inset;
+            let widths: Vec<f32> = tabs
+                .iter()
+                .map(|tab| {
+                    title_width(layout::panel_title(tab), t.typography.title, w)
+                        + close_slot
+                        + m.gap
+                        + TAB_SPACING
+                })
+                .collect();
             let mut panel = positioned(p.rect)
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
@@ -1359,6 +1390,12 @@ impl Render for Editor {
                         h: (p.rect.h - m.header - m.border).max(0.),
                     },
                 ));
+            } else if self
+                .integration
+                .as_ref()
+                .is_some_and(|i| i.paints_own_ground(&id, cx))
+            {
+                // Header only: the body paints its own ground (see below).
             } else if !is_viewer || !native {
                 panel = panel.bg(if is_viewer {
                     rgb(c.viewer)
@@ -1369,10 +1406,23 @@ impl Render for Editor {
             // A panel may supply its own header content (viewer: pop-ups, no
             // title; timeline: transport). The shell keeps the tab strip only
             // when the group has more than one tab.
+            let own_ground = self
+                .integration
+                .as_ref()
+                .is_some_and(|i| i.paints_own_ground(&id, cx));
             let custom = self
                 .integration
                 .as_ref()
                 .and_then(|i| i.header(&id, p.rect, w, cx));
+            // The header's own tools (Add Panel, or the panel's actions such as
+            // Project's search and +) keep their room beside the tabs.
+            let tools = if custom.is_some() {
+                2. * m.hit + m.gap
+            } else {
+                m.hit
+            };
+            // Gaps: trailing padding, strip|chevron and chevron|tools, plus one spare.
+            let tab_track = group.tab_track(p.rect.w - m.gap * 4. - tools, &widths, &t);
             let group_name: SharedString = format!("tabs-{}-{}", p.dock, p.group).into();
             let header_id = id.clone();
             let menu_header = id.clone();
@@ -1388,8 +1438,9 @@ impl Render for Editor {
                 .flex_none()
                 .pl(px(m.inset))
                 .pr(px(m.gap))
-                // The native viewer body has no panel fill; its bar carries the material.
-                .when(is_viewer && native, |h| {
+                // The native viewer body has no panel fill, and the timeline paints
+                // its own ground: their headers carry the material.
+                .when((is_viewer && native) || own_ground, |h| {
                     h.bg(tint(c.panel, t.translucency.panel))
                 })
                 .when(!is_viewer, |h| {
@@ -1415,17 +1466,18 @@ impl Render for Editor {
             if custom.is_some() && !multi {
                 header = header.px(px(0.));
             }
+            if multi {
+                header = header.pl(px(0.));
+            }
             if multi || custom.is_none() {
-                // Approved mockup: a sunken segmented strip for tab groups, a
-                // semibold title for single panels. The whole tab is the drag handle.
-                // Tabs share what the panel's own header controls leave.
-                let mut strip = div().flex().items_center().gap(px(2.)).when(multi, |s| {
-                    s.flex_1()
-                        .min_w(px(0.))
-                        .bg(tint(line, line_alpha))
-                        .rounded(px(m.control_radius + 2.))
-                        .p(px(2.))
-                });
+                // Quiet text tabs (language §9): the active title in `text`, the
+                // rest in `muted`; a pill appears only on hover. The whole tab is
+                // the drag handle. A single panel shows its title the same way.
+                let mut strip = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(TAB_SPACING))
+                    .when(multi, |s| s.flex_1().min_w(px(0.)).overflow_hidden());
                 for (ti, tab) in tabs.iter().enumerate() {
                     if !tab_track.visible.contains(&ti) {
                         continue;
@@ -1453,19 +1505,35 @@ impl Render for Editor {
                         }))
                         .aria_label(title.clone())
                         .relative()
+                        .flex_none()
                         .flex()
                         .items_center()
-                        .justify_center()
-                        .px(px(if multi { m.gap } else { 0. }))
-                        .py(px(3.))
-                        .rounded(px(m.control_radius))
-                        .when(multi && selected, |s| s.bg(rgb(c.floating)))
+                        .h(px(m.hit))
+                        .when(multi, |s| {
+                            s.pl(px(close_slot))
+                                .pr(px(m.gap))
+                                .rounded(px(m.control_radius))
+                                .hover_style(|s| s.bg(rgb(c.hover)))
+                        })
                         .when(ghost, |s| s.opacity(0.4))
-                        .text_color(rgb(if selected { c.text } else { c.secondary }))
+                        .text_color(rgb(if selected || !multi { c.text } else { c.muted }))
+                        .when(multi && !selected, |s| {
+                            s.group_hover_style(tab_group.clone(), |s| {
+                                s.text_color(rgb(c.secondary))
+                            })
+                        })
                         .text_size(px(t.typography.title))
-                        .font_weight(FontWeight::MEDIUM)
-                        .when(multi, |s| s.flex_auto().min_w(px(0.)).overflow_hidden())
-                        .child(div().min_w(px(0.)).truncate().child(title.clone()));
+                        .font_weight(FontWeight(t.typography.medium_weight))
+                        .whitespace_nowrap();
+                    // Only an active tab wider than the room beside More Panels truncates.
+                    cell = match tab_track.active_limit.filter(|_| selected) {
+                        Some(limit) => cell
+                            .max_w(px(limit))
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .child(div().min_w(px(0.)).truncate().child(title.clone())),
+                        None => cell.flex_none().child(title.clone()),
+                    };
                     if closable {
                         // Mac tabs: the close button sits at the leading edge, on hover.
                         cell = cell.child(
@@ -1474,31 +1542,24 @@ impl Render for Editor {
                                 .aria_label(format!("Close {title}"))
                                 .role(Role::Button)
                                 .tab_index(0)
-                                .focus_style(|s| {
-                                    s.opacity(1.)
-                                        .ring(px(m.border * 2.))
-                                        .ring_color(rgb(c.focus))
-                                })
+                                .focus_style(|s| s.opacity(1.))
                                 .absolute()
-                                .left(px(m.border))
+                                .left_0()
                                 .top_0()
                                 .bottom_0()
+                                .w(px(close_slot))
                                 .flex()
                                 .items_center()
+                                .justify_center()
                                 .opacity(0.)
                                 .group_hover_style(tab_group.clone(), |s| s.opacity(1.))
-                                .child(
-                                    div()
-                                        .rounded(px(m.inner_radius))
-                                        .hover_style(|s| s.bg(rgb(c.hover)))
-                                        .child(crate::symbol::symbol(
-                                            "xmark",
-                                            m.symbol_inline,
-                                            crate::symbol::Weight::Medium,
-                                            c.secondary,
-                                            w,
-                                        )),
-                                )
+                                .child(crate::symbol::symbol(
+                                    "xmark",
+                                    m.symbol_inline - 3.,
+                                    crate::symbol::Weight::Semibold,
+                                    c.muted,
+                                    w,
+                                ))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -1526,6 +1587,7 @@ impl Render for Editor {
                         ),
                     );
                 }
+                header = header.child(strip);
                 if !tab_track.overflow.is_empty() {
                     let entries: Vec<_> = tab_track
                         .overflow
@@ -1538,9 +1600,10 @@ impl Render for Editor {
                             .checked(i == active)
                         })
                         .collect();
-                    strip = strip.child(
+                    header = header.child(
                         div()
                             .id(format!("more-panels-{}-{}", p.dock, p.group))
+                            .flex_none()
                             .role(Role::Button)
                             .aria_label("More Panels")
                             .tab_index(0)
@@ -1562,7 +1625,6 @@ impl Render for Editor {
                             })),
                     );
                 }
-                header = header.child(strip);
             }
             if self.maximized_panel.is_some() {
                 header = header.child(
@@ -1812,6 +1874,21 @@ impl Render for Editor {
             .text_size(px(t.typography.minimum))
             .text_color(rgb(c.muted))
             .child(div().flex_1().min_w(px(0.)).truncate().child(left))
+            .children(
+                self.integration
+                    .as_ref()
+                    .map(|i| i.status_trailing(cx))
+                    .filter(|s| !s.is_empty())
+                    .map(|facts| {
+                        div()
+                            .flex_none()
+                            .font_features(FontFeatures(std::sync::Arc::new(vec![(
+                                "tnum".into(),
+                                1,
+                            )])))
+                            .child(facts)
+                    }),
+            )
             .child(
                 div()
                     .id("status-workspace")

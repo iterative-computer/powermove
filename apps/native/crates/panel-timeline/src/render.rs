@@ -616,7 +616,16 @@ impl Scene {
         let mut ops = vec![];
         let m = t.metrics;
         let c = &t.colors;
-        ops.push(Op::new("ground", "rect", v.rect(), c.panel));
+        // The track ground is the panel material (a theme's panel colour at
+        // the material alpha; opaque under Reduce Transparency). The shell
+        // leaves this panel's body to it.
+        let mut ground = Op::new("ground", "rect", v.rect(), c.panel);
+        ground.opacity = if t.translucent() {
+            t.translucency.panel as f64
+        } else {
+            1.
+        };
+        ops.push(ground);
         ops.push(Op::new(
             "gutter",
             "rect",
@@ -632,7 +641,9 @@ impl Scene {
             let row = &self.rows[i];
             let y = m.ruler as f64 + self.tops[i] - v.scroll_y;
             let h = row.height(t);
-            let rect = Rect::new(0., y, v.width, h);
+            // Selection and hover fill the outline column only; in the tracks
+            // the clip's accent ring marks the selection (the owner's demo).
+            let rect = Rect::new(0., y, v.layer_column, h);
             if row.selected || row.hovered {
                 ops.push(Op::new(
                     format!("row:{}", row.id),
@@ -750,6 +761,22 @@ impl Scene {
                 ops.push(o);
             }
         }
+        // The layer column's edge, over row fills and clips: a hairline (the
+        // resize handle's mark).
+        let (edge, edge_alpha) = t.line();
+        let mut o = Op::new(
+            "column-edge",
+            "rect",
+            Rect::new(
+                v.layer_column - m.border as f64,
+                0.,
+                m.border as f64,
+                v.height,
+            ),
+            edge,
+        );
+        o.opacity = edge_alpha as f64;
+        ops.push(o);
         Ok(Frame {
             viewport: v,
             range,
@@ -792,6 +819,16 @@ impl Scene {
                 }
             }
         }
+        // Ticks are `text` ink at low alpha, so they sit in the material like
+        // the panel hairlines; Increase Contrast makes them solid.
+        let (tick, major) = if t.accessibility.increase_contrast {
+            ((c.separator, 1.), (c.secondary, 1.))
+        } else {
+            (
+                (c.text, t.translucency.tick_minor as f64),
+                (c.text, t.translucency.tick_major as f64),
+            )
+        };
         // Literal spec chooses the largest candidate retaining >=8pt spacing.
         let step = [1. / self.fps, 0.25, 1., 5.]
             .into_iter()
@@ -811,12 +848,14 @@ impl Scene {
         while (i as f64) * step <= right && ops.len() < 10_000 {
             let time = i as f64 * step;
             let x = v.x(time);
-            ops.push(Op::new(
+            let mut o = Op::new(
                 format!("minor:{i}"),
                 "rect",
                 Rect::new(x, h - 3., m.border as f64, 3.),
-                c.separator,
-            ));
+                tick.0,
+            );
+            o.opacity = tick.1;
+            ops.push(o);
             let Some(next) = i.checked_add(1) else {
                 break;
             };
@@ -826,12 +865,25 @@ impl Scene {
         while i as f64 * label_step <= right && ops.len() < 10_000 {
             let time = i as f64 * label_step;
             let x = v.x(time);
-            ops.push(Op::new(
+            let mut o = Op::new(
                 format!("major:{i}"),
                 "rect",
                 Rect::new(x, h - 7., m.border as f64, 7.),
-                c.secondary,
-            ));
+                major.0,
+            );
+            o.opacity = major.1;
+            ops.push(o);
+            // A faint second grid under the tracks (the owner's demo).
+            if !t.accessibility.increase_contrast {
+                let mut o = Op::new(
+                    format!("grid:{i}"),
+                    "rect",
+                    Rect::new(x, h, m.border as f64, (v.height - h).max(0.)),
+                    c.text,
+                );
+                o.opacity = t.translucency.grid as f64;
+                ops.push(o);
+            }
             let mut o = Op::new(
                 format!("time:{i}"),
                 "text",
@@ -973,12 +1025,25 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     o.radius = m.clip_radius as f64;
     o.detail = json!({"from":c.from,"duration":c.duration,"cursor":if c.locked {"notAllowed"}else{"openHand"},"sourceEdges":[v.x(c.from),v.x(c.from+c.duration)]});
     ops.push(o);
+    if !c.selected {
+        // A hairline keyline gives the muted fill an edge against the tracks.
+        let (edge, alpha) = t.edge();
+        let mut o = Op::new(format!("clip-edge:{}", c.id), "ring", r, edge);
+        o.opacity = if t.accessibility.increase_contrast {
+            1.
+        } else {
+            (alpha * 2.) as f64
+        };
+        o.stroke = m.border as f64;
+        o.radius = m.inner_radius as f64;
+        ops.push(o);
+    }
     if c.selected {
         let mut o = Op::new(
             format!("clip-ring:{}", c.id),
             "outside-ring",
             r,
-            colors.text,
+            colors.accent,
         );
         o.stroke = m.playhead as f64;
         o.radius = m.clip_radius as f64;

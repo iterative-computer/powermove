@@ -112,6 +112,9 @@ struct Viewed {
     scroll_time: f64,
     scroll_y: f64,
     layer_column: f64,
+    /// The person set the column (a drag); only then is it saved with the
+    /// project, so a default never sticks as if it had been chosen.
+    column_chosen: bool,
 }
 struct Built {
     scene: Arc<Scene>,
@@ -190,6 +193,7 @@ impl TimelineSurface {
             scroll_time: 0.,
             scroll_y: 0.,
             layer_column,
+            column_chosen: false,
         };
         outline.column.set(layer_column as f32);
         outline.bind_surface(cx.entity().downgrade());
@@ -263,6 +267,7 @@ impl TimelineSurface {
         }
         if let Some(column) = number("nativeLayerColumn").filter(|c| c.is_finite()) {
             self.view.layer_column = column;
+            self.view.column_chosen = true;
             self.outline.column.set(column as f32);
         }
     }
@@ -599,6 +604,7 @@ impl TimelineSurface {
         if (x - column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
             if event.click_count == 2 {
                 self.view.layer_column = m.layer_column as f64;
+                self.view.column_chosen = false;
                 self.changed(true, cx);
             } else {
                 self.gesture = Gesture::Column;
@@ -966,6 +972,7 @@ impl TimelineSurface {
                 let x = f32::from(event.position.x - self.bounds.origin.x) as f64;
                 self.view.layer_column =
                     x.clamp(m.layer_column as f64 / 2., (width - m.hit as f64).max(1.));
+                self.view.column_chosen = true;
                 self.changed(false, cx);
             }
             _ => {}
@@ -1400,10 +1407,14 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             timeline.insert("nativePps", pm_model::Value::from(view.pps));
             timeline.insert("nativeScrollTime", pm_model::Value::from(view.scroll_time));
             timeline.insert("nativeScrollY", pm_model::Value::from(view.scroll_y));
-            timeline.insert(
-                "nativeLayerColumn",
-                pm_model::Value::from(view.layer_column),
-            );
+            if view.column_chosen {
+                timeline.insert(
+                    "nativeLayerColumn",
+                    pm_model::Value::from(view.layer_column),
+                );
+            } else {
+                timeline.remove("nativeLayerColumn");
+            }
             ui.timeline = pm_model::Value::Object(timeline);
             let pending = client.kernel.state_transaction(StateTransaction {
                 ops: vec![StateOp::Ui {
@@ -1722,12 +1733,23 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     .corner_radii(area.size.width / 2.),
             );
         }
-        "diamond"
-        | "diamond.fill"
-        | "diamond.lefthalf.filled"
-        | "keyframe.hold"
-        | "marker"
-        | "ph-head" => diamond(area, color, window),
+        "diamond" | "diamond.fill" | "diamond.lefthalf.filled" | "keyframe.hold" | "marker" => {
+            diamond(area, color, window)
+        }
+        // The playhead pin: a rounded top and a rounder point (the owner's demo).
+        "ph-head" => {
+            let r = |key: &str| px(op.detail[key].as_f64().unwrap_or(0.) as f32);
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(color)
+                    .corner_radii(Corners {
+                        top_left: r("topRadius"),
+                        top_right: r("topRadius"),
+                        bottom_right: r("bottomRadius"),
+                        bottom_left: r("bottomRadius"),
+                    }),
+            );
+        }
         "line" => {
             if let (Some(from), Some(to)) =
                 (point_of(&op.detail["from"]), point_of(&op.detail["to"]))

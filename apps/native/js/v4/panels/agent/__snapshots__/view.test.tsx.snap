@@ -313,6 +313,9 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       },
       "parent": 17,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -786,6 +789,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -896,6 +900,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -1271,6 +1276,9 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       },
       "parent": 17,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -1744,6 +1752,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -1854,6 +1863,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -2229,6 +2239,9 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       },
       "parent": 17,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -2702,6 +2715,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -2812,6 +2826,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -3136,6 +3151,9 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       },
       "parent": 14,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -3609,6 +3627,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -3710,6 +3729,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -4090,6 +4110,9 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
       },
       "parent": 16,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -4564,6 +4587,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -4676,6 +4700,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -5197,6 +5222,9 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
       },
       "parent": 21,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -5637,6 +5665,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -5769,6 +5798,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -6306,6 +6336,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       },
       "parent": 22,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -6747,6 +6780,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -6883,6 +6917,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -7328,6 +7363,9 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       },
       "parent": 19,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -7770,6 +7808,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -7890,6 +7929,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -8335,6 +8375,9 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       },
       "parent": 19,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -8777,6 +8820,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -8897,6 +8941,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -9433,6 +9478,9 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       },
       "parent": 21,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -9873,6 +9921,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -10008,6 +10057,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -10554,6 +10604,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       },
       "parent": 21,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -10994,6 +11047,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -11132,6 +11186,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -11630,6 +11685,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       },
       "parent": 20,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -12070,6 +12128,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -12196,6 +12255,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -12694,6 +12754,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       },
       "parent": 20,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -13134,6 +13197,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -13260,6 +13324,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -13629,6 +13694,9 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       },
       "parent": 17,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-attach",
@@ -14102,6 +14170,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -14212,6 +14281,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -14772,6 +14842,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       },
       "parent": 24,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -15214,6 +15287,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -15358,6 +15432,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -15699,6 +15774,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       },
       "parent": 18,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -16172,6 +16250,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -16276,6 +16355,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -16774,6 +16854,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       },
       "parent": 20,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -17214,6 +17297,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -17340,6 +17424,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -17838,6 +17923,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       },
       "parent": 20,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -18278,6 +18366,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -18404,6 +18493,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -18898,6 +18988,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       },
       "parent": 20,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -19338,6 +19431,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -19463,6 +19557,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -19957,6 +20052,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       },
       "parent": 20,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -20397,6 +20495,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -20522,6 +20621,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -20897,6 +20997,9 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       },
       "parent": 17,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -21370,6 +21473,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -21480,6 +21584,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -21855,6 +21960,9 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       },
       "parent": 17,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -22328,6 +22436,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -22438,6 +22547,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",
@@ -22813,6 +22923,9 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       },
       "parent": 17,
       "props": {
+        "attr": {
+          "symbol": "plus",
+        },
         "data-pm-component": "toolbar-item",
         "disabled": false,
         "id": "agent-attach",
@@ -23286,6 +23399,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "style": {
           "display": "flex",
           "flexDirection": "column",
+          "flexGrow": 1,
           "gap": {
             "token": "metrics.inset",
           },
@@ -23396,6 +23510,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "create",
     "setProps",
     "create",
+    "setProps",
     "setProps",
     "setProps",
     "setProps",

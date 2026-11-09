@@ -44,7 +44,7 @@ fn all_reviewed_paint_states_have_wire_snapshots_in_each_appearance() {
     assert_eq!(actual, expected);
 }
 #[test]
-fn selected_clips_use_label_mix_and_text_ring_and_exact_authored_times() {
+fn selected_clips_use_label_mix_and_accent_ring_and_exact_authored_times() {
     for scheme in [Scheme::Light, Scheme::Dark] {
         let t = Tokens::new(scheme, Accessibility::default());
         let f = scene(&t).prepare(viewport(&t), &t).unwrap();
@@ -55,7 +55,7 @@ fn selected_clips_use_label_mix_and_text_ring_and_exact_authored_times() {
         assert_ne!(clip.color, t.colors.accent);
         assert_ne!(clip.color, t.colors.labels.teal);
         let ring = f.ops.iter().find(|o| o.id == "clip-ring:selected").unwrap();
-        assert_eq!(ring.color, t.colors.text);
+        assert_eq!(ring.color, t.colors.accent);
         assert_eq!(ring.stroke, t.metrics.playhead as f64);
         let content = f
             .ops
@@ -344,4 +344,27 @@ fn every_paint_operation_has_a_unique_id_even_for_summary_and_property_keys() {
         .map(|op| op.id.as_str())
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(ids.len(), f.ops.len());
+}
+#[test]
+fn track_ground_is_the_themed_panel_material() {
+    for reduce_transparency in [false, true] {
+        let mut t = Tokens::new(
+            Scheme::Dark,
+            Accessibility {
+                reduce_transparency,
+                ..Default::default()
+            },
+        );
+        // A theme's `--bg-panel` arrives as a `colors.panel` patch.
+        t.apply_patch([("colors.panel", 0x203040 as f64)]).unwrap();
+        let f = scene(&t).prepare(viewport(&t), &t).unwrap();
+        let ground = f.ops.iter().find(|o| o.id == "ground").unwrap();
+        assert_eq!(ground.color, 0x203040);
+        let alpha = if reduce_transparency {
+            1.
+        } else {
+            t.translucency.panel as f64
+        };
+        assert_eq!(ground.opacity, alpha);
+    }
 }

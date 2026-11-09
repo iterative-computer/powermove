@@ -11,7 +11,7 @@ import type {
   Row,
   TimelineFrame,
 } from "./model";
-import { announcementText } from "./model";
+import { announcementText, type Announcement } from "./model";
 import { nativeEvent, type TimelineSession } from "./session";
 
 type Send = (intent: Intent) => void;
@@ -74,6 +74,14 @@ function Icon(props: {
     </UI.ToolbarItem>
   );
 }
+/** Refused edits need visible feedback; confirmations do not. */
+function refusal(value: Announcement): boolean {
+  return (
+    value.kind === "keyCollision" ||
+    value.kind === "outsideComposition" ||
+    value.kind === "locked"
+  );
+}
 function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
   return (
     <div
@@ -105,7 +113,9 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                 value={f.timeEditor.value}
                 binding={f.timeEditor.binding}
                 metadata={{ cancelChange: true }}
-                onChange={(e) => send({ type: "editDone", value: String(e.value ?? "") })}
+                onChange={(e) =>
+                  send({ type: "editDone", value: String(e.value ?? "") })
+                }
                 style={{
                   color: t("colors.text"),
                   fontSize: t("typography.timecode"),
@@ -220,18 +230,22 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             id="timeline:view"
             label="Timeline view"
             value={f.view}
-            metadata={{
-              designTodo: "T1",
-              requiredSymbols: [
-                "chart.bar.doc.horizontal",
-                "rectangle.split.1x2",
-                "bezier",
-              ],
-            }}
             options={[
-              { id: "DopeSheet", label: "Dope Sheet" },
-              { id: "Combined", label: "Dope Sheet and Graph" },
-              { id: "Graph", label: "Graph Editor" },
+              {
+                id: "DopeSheet",
+                label: "Dope Sheet",
+                symbol: "chart.bar.doc.horizontal",
+              },
+              {
+                id: "Combined",
+                label: "Dope Sheet and Graph",
+                symbol: "rectangle.split.1x2",
+              },
+              {
+                id: "Graph",
+                label: "Graph Editor",
+                symbol: "point.topleft.down.to.point.bottomright.curvepath",
+              },
             ]}
             onChange={(view) =>
               send({
@@ -287,23 +301,42 @@ export function kindSymbol(kind: string): string | null {
     )[kind] ?? null
   );
 }
-function Layer({ row, send }: { row: LayerRow; send: Send }) {
-  const show = row.hovered || row.focused || row.selected;
+function Layer({
+  row,
+  send,
+  single,
+}: {
+  row: LayerRow;
+  send: Send;
+  single: boolean;
+}) {
+  // Unset switches appear under the pointer, keyboard focus or a single
+  // selected layer, so a multi-selection never squeezes every name.
+  const show = row.hovered || row.focused || (row.selected && single);
   return (
     <>
-      <div style={{ ...line, gap: t("metrics.gap") }}>
+      <div
+        style={{
+          ...line,
+          gap: t("metrics.gap"),
+          overflow: "hidden",
+          paddingLeft: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+        }}
+      >
         {row.index !== null && (
           <text
             style={{
               color: t("colors.muted"),
               fontSize: t("typography.minimum"),
               fontVariantNumeric: "tabular-nums",
+              flexShrink: 0,
             }}
           >
             {String(row.index).padStart(2, "0")}
           </text>
         )}
-        {row.canOpen && (
+        {row.canOpen ? (
           <Icon
             id={`timeline:disclosure:${row.id}`}
             label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
@@ -311,6 +344,17 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             tabIndex={-1}
             send={send}
             intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
+          />
+        ) : (
+          // The disclosure column stays reserved so badges and names align.
+          <div
+            role="presentation"
+            style={{
+              width: t("metrics.hit"),
+              minWidth: t("metrics.hit"),
+              flexShrink: 0,
+              height: t("metrics.hit"),
+            }}
           />
         )}
         <div
@@ -321,7 +365,12 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             designTodo: row.layerKind ? null : "native-schema-kind",
           }}
           style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
             width: t("metrics.kind_badge"),
+            minWidth: t("metrics.kind_badge"),
+            flexShrink: 0,
             height: t("metrics.kind_badge"),
             borderRadius: t("metrics.inner_radius"),
             background: t(
@@ -340,12 +389,20 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             binding={row.nameEditor.binding}
             tabIndex={-1}
             metadata={{ cancelChange: true }}
-            onChange={(e) => send({ type: "editDone", value: String(e.value ?? "") })}
+            onChange={(e) =>
+              send({ type: "editDone", value: String(e.value ?? "") })
+            }
           />
         ) : (
           <text
             title={row.label}
-            style={text}
+            style={{
+              ...text,
+              flexGrow: 1,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
             onDoubleClick={action(send, { type: "rename", id: row.id })}
           >
             {row.label}
@@ -503,11 +560,21 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
   );
 }
 const TimelineRow = memo(
-  function TimelineRow({ row: published, send }: { row: Row; send: Send; key?: string }) {
+  function TimelineRow({
+    row: published,
+    send,
+    single,
+  }: {
+    row: Row;
+    send: Send;
+    single: boolean;
+    key?: string;
+  }) {
     let clickModifiers: Modifiers = {};
     // Hover is the pointer's, local to the row: switches show without a host trip.
     const [hover, setHover] = useState(false);
-    const row = hover && !published.hovered ? { ...published, hovered: true } : published;
+    const row =
+      hover && !published.hovered ? { ...published, hovered: true } : published;
     return (
       <UI.TreeItem
         id={`timeline:row:${row.id}`}
@@ -549,7 +616,7 @@ const TimelineRow = memo(
         }}
       >
         {row.kind === "layer" ? (
-          <Layer row={row} send={send} />
+          <Layer row={row} send={send} single={single} />
         ) : row.kind === "property" ? (
           <Property row={row} send={send} />
         ) : (
@@ -592,6 +659,7 @@ const TimelineRow = memo(
   },
   (before, after) =>
     before.send === after.send &&
+    before.single === after.single &&
     JSON.stringify(before.row) === JSON.stringify(after.row),
 );
 
@@ -666,65 +734,70 @@ export function TimelinePanel({
                   overflow: "hidden",
                 }}
               >
-              <UI.Tree
-                id="timeline:tracks"
-                label={f.mode}
-                tabIndex={0}
-                style={{
-                  minWidth: t("metrics.hit"),
-                  minHeight: t("metrics.hit"),
-                }}
-                metadata={{
-                  totalRows: f.window.total,
-                  firstRow: f.window.first,
-                  indexDigits: f.indexDigits,
-                  nativeFirstRow: f.window.rows[0]?.id ?? null,
-                  nativeWindow: [f.window.first, f.window.rows.length],
-                }}
-                onKeyDown={(event) => {
-                  event.stopPropagation();
-                  send({
-                    type: "keyDown",
-                    event: nativeEvent(event),
-                  });
-                }}
-                onRangeChange={(event) => {
-                  if (event.range && event.range[1] > event.range[0])
+                <UI.Tree
+                  id="timeline:tracks"
+                  label={f.mode}
+                  tabIndex={0}
+                  style={{
+                    minWidth: t("metrics.hit"),
+                    minHeight: t("metrics.hit"),
+                  }}
+                  metadata={{
+                    totalRows: f.window.total,
+                    firstRow: f.window.first,
+                    indexDigits: f.indexDigits,
+                    nativeFirstRow: f.window.rows[0]?.id ?? null,
+                    nativeWindow: [f.window.first, f.window.rows.length],
+                  }}
+                  onKeyDown={(event) => {
+                    event.stopPropagation();
                     send({
-                      type: "range",
-                      first: event.range[0],
-                      visible: event.range[1] - event.range[0],
+                      type: "keyDown",
+                      event: nativeEvent(event),
                     });
-                }}
-              >
-                {f.window.rows.map((row) => (
-                  <TimelineRow key={row.id} row={row} send={send} />
-                ))}
-                {f.window.total === 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <text style={reading}>
-                      Drag media here or import from your computer.
-                    </text>
-                    <Icon
-                      id="timeline:import"
-                      label="Import…"
-                      symbol=""
-                      tabIndex={-1}
+                  }}
+                  onRangeChange={(event) => {
+                    if (event.range && event.range[1] > event.range[0])
+                      send({
+                        type: "range",
+                        first: event.range[0],
+                        visible: event.range[1] - event.range[0],
+                      });
+                  }}
+                >
+                  {f.window.rows.map((row) => (
+                    <TimelineRow
+                      key={row.id}
+                      row={row}
                       send={send}
-                      intent={{ type: "import" }}
+                      single={!f.selection || f.selection.count <= 1}
+                    />
+                  ))}
+                  {f.window.total === 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
                     >
-                      <text>Import…</text>
-                    </Icon>
-                  </div>
-                )}
-              </UI.Tree>
+                      <text style={reading}>
+                        Drag media here or import from your computer.
+                      </text>
+                      <Icon
+                        id="timeline:import"
+                        label="Import…"
+                        symbol=""
+                        tabIndex={-1}
+                        send={send}
+                        intent={{ type: "import" }}
+                      >
+                        <text>Import…</text>
+                      </Icon>
+                    </div>
+                  )}
+                </UI.Tree>
               </div>
             </div>
             {f.view !== "DopeSheet" && f.graphEmpty && (
@@ -740,21 +813,51 @@ export function TimelinePanel({
                 Select an animated property to see its curve.
               </text>
             )}
+            {f.announcement && refusal(f.announcement.value) && (
+              // A refused edit stays visible: a quiet capsule over the tracks,
+              // also announced (role="status").
+              <text
+                id="timeline:announcement"
+                role="status"
+                label={announcementText(f.announcement.value)}
+                metadata={{ sequence: f.announcement.sequence }}
+                style={{
+                  position: "absolute",
+                  left: t("metrics.inset"),
+                  bottom: t("metrics.inset"),
+                  paddingLeft: t("metrics.gap"),
+                  paddingRight: t("metrics.gap"),
+                  height: t("metrics.field"),
+                  display: "flex",
+                  alignItems: "center",
+                  borderRadius: t("metrics.control_radius"),
+                  background: t("colors.floating"),
+                  color: t("colors.text"),
+                  fontSize: t("typography.minimum"),
+                }}
+              >
+                {announcementText(f.announcement.value)}
+              </text>
+            )}
           </div>
           <text id="timeline:render-bar" label={f.renderSummary} />
           {f.selection && f.selection.count > 1 && (
-            <text id="timeline:selection" role="status">
-              {`${f.selection.count} ${f.selection.kind === "layers" ? "layers" : "keyframes"} selected`}
-            </text>
+            // Spoken, not drawn: the rows and rings already show the selection,
+            // and the inspector shows the count (as v1 does).
+            <text
+              id="timeline:selection"
+              role="status"
+              label={`${f.selection.count} ${f.selection.kind === "layers" ? "layers" : "keyframes"} selected`}
+            />
           )}
-          {f.announcement && (
+          {f.announcement && !refusal(f.announcement.value) && (
+            // Confirmations (marker added/removed) are spoken only.
             <text
               id="timeline:announcement"
               role="status"
+              label={announcementText(f.announcement.value)}
               metadata={{ sequence: f.announcement.sequence }}
-            >
-              {announcementText(f.announcement.value)}
-            </text>
+            />
           )}
         </>
       )}

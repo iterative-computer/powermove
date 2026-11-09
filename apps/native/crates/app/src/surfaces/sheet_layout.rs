@@ -161,6 +161,8 @@ pub mod native {
                 NSTextField::textFieldWithString(&NSString::from_str(""), self.mtm)
             };
             field.setStringValue(&NSString::from_str(value));
+            // Owner rule: no accent focus rings; the bezel and caret show focus.
+            field.setFocusRingType(NSFocusRingType::None);
             field.setIdentifier(Some(&NSString::from_str(id)));
             field.setAccessibilityLabel(Some(&NSString::from_str(label)));
             field.setEnabled(enabled);
@@ -172,6 +174,7 @@ pub mod native {
             group.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
             group.setSpacing(self.tokens.metrics.gap.into());
             let field = NSTextField::textFieldWithString(&NSString::from_str(value), self.mtm);
+            field.setFocusRingType(NSFocusRingType::None);
             field.setIdentifier(Some(&NSString::from_str(id)));
             field.setAccessibilityLabel(Some(&NSString::from_str(label)));
             field.setEnabled(enabled);

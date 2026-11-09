@@ -154,6 +154,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - The credential scan also reads `.tsx` and `.jsx` (main's list predates v4 sources).
 - Agent change history lives in `<profile>/agent-change-history/<project>`; Undo is the palette's Undo Extension Change (newest change set only, as on main).
 - The per-window isolate admission budget is 64 × 64 MiB (the plan's 64-isolate budget); 640 MiB admitted one extension beside the nine built-ins.
+- **v4 additive API:** `SegmentOption.symbol` (optional SF Symbol name) draws a glyph segment with the label as its tooltip and accessible name.
 
 ## Open, recovery and quit (core lane, 2026-11-08)
 
@@ -220,3 +221,12 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **Theme surface rules beyond tokens start with the timeline:** the translator's timeline inputs (track, gutter, accent, text, line, per scheme) are published with the v1–3 theme and drawn by the native timeline; a reversed `timelineSurfaceOrder` swaps track and gutter even without a theme (T1). Other surface rules (per-panel and per-control styles) are not applied natively yet.
 - **Closed built-in panels park** (`Builtins::park` / `unpark`; Project, Effect Controls, Properties, Effects): closing one retires its isolate off the main thread and returns its reservation; opening it again starts a new generation that the kept view adopts; a fork that replaced the panel starts again as the fork. The viewer, timeline, agent, Settings and Export never park.
 - **One cage account across windows is not adopted yet:** reserving every isolate at its heap ceiling in one process-wide 4 GiB account (built-ins 9 × 64 MiB per window, the compat realm 1 GiB per window, the extension compiler runner 1 GiB while it works) refuses a second window with extensions and fails 19 tests that run several hosts at once. It needs growth-based reservations (an initial slice per isolate, raised through V8's near-heap-limit callback only while the account has room), which is open.
+
+## Design pass (design lane, 2026-11-08)
+
+- Dev launch arguments `--appearance light|dark` and `--accessibility increase-contrast,reduce-transparency,reduce-motion` force the scheme or settings for that process only (the existing `PM_NATIVE_APPEARANCE` override plus `PM_NATIVE_ACCESSIBILITY`), so review captures never touch a person's system settings.
+- `Integration::status_trailing` (default empty) gives the status line its format facts; the shell stays free of document state.
+- New tokens: `metrics.titlebar` (28, plain panel windows' title band) and `metrics.popover_radius` (16).
+- Clip selection is the accent ring and row selection fills the layer column only (owner's demo), replacing language §11's `text` ring.
+- Review overrides are development-build only; a release build treats `--appearance`/`--accessibility` as unknown arguments and ignores `PM_NATIVE_ACCESSIBILITY`.
+- A workspace `gutterWidth` of 224 (v1's written default) takes the native timeline column default; other widths are kept as authored.

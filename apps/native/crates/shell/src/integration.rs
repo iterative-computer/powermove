@@ -54,6 +54,15 @@ pub trait Integration {
     fn shown_panels(&self, _shown: &[&str], _cx: &mut App) {}
     fn project_id(&self, cx: &App) -> Option<String>;
     fn status(&self, cx: &App) -> String;
+    /// The panel's body paints its own ground (the timeline's track material);
+    /// the shell then fills only its header.
+    fn paints_own_ground(&self, _id: &str, _cx: &App) -> bool {
+        false
+    }
+    /// Format facts on the status line's trailing side (`1920×1080 · 30 fps`).
+    fn status_trailing(&self, _cx: &App) -> String {
+        String::new()
+    }
     fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);
 }
 pub type Factory = Rc<dyn Fn(Rc<RefCell<Host>>, &mut Window, &mut App) -> Rc<dyn Integration>>;

@@ -29,6 +29,8 @@ mod media_import;
 mod media_refresh;
 mod migration_report;
 mod panel_bridge;
+#[cfg(all(test, target_os = "macos"))]
+mod panel_capture_tests;
 mod panels;
 mod perf_gate;
 mod platform;
@@ -118,6 +120,13 @@ fn main() -> Result<()> {
             profile = Some(PathBuf::from(
                 args.get(i).context("--profile needs a directory")?,
             ));
+        } else if let Some(name) = review_override(&args[i], cfg!(debug_assertions)) {
+            i += 1;
+            let value = args
+                .get(i)
+                .context("--appearance/--accessibility need a value")?;
+            // SAFETY: single-threaded here; nothing has read the environment yet.
+            unsafe { std::env::set_var(name, value) };
         } else if args[i].to_string_lossy().starts_with('-') {
             anyhow::bail!("Unknown argument: {}", args[i].to_string_lossy());
         } else {
@@ -280,5 +289,32 @@ fn node_string(node: &pm_model::Node) -> Option<&str> {
     match node.kind() {
         pm_model::NodeKind::String(s) => s.as_str(),
         _ => None,
+    }
+}
+
+/// Review captures may force a scheme or accessibility setting for one
+/// process (`--appearance`, `--accessibility`), in development builds only;
+/// a release build treats them as unknown arguments.
+fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
+    if !dev {
+        return None;
+    }
+    match arg.to_str()? {
+        "--appearance" => Some("PM_NATIVE_APPEARANCE"),
+        "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod review_override_tests {
+    #[test]
+    fn release_builds_reject_the_review_overrides() {
+        use std::ffi::OsStr;
+        for arg in ["--appearance", "--accessibility"] {
+            assert_eq!(super::review_override(OsStr::new(arg), false), None);
+            assert!(super::review_override(OsStr::new(arg), true).is_some());
+        }
+        assert_eq!(super::review_override(OsStr::new("--profile"), true), None);
     }
 }

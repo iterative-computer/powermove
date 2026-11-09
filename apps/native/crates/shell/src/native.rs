@@ -130,10 +130,21 @@ fn active_state() -> MenuState {
 }
 pub fn settings() -> Accessibility {
     let w = NSWorkspace::sharedWorkspace();
+    // Review captures may force settings for this process (comma-separated
+    // `increase-contrast`, `reduce-transparency`, `reduce-motion`).
+    // Development builds only; release builds follow the system alone.
+    let forced = if cfg!(debug_assertions) {
+        std::env::var("PM_NATIVE_ACCESSIBILITY").unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let on = |name: &str| forced.split(',').any(|f| f.trim() == name);
     Accessibility {
-        reduce_transparency: w.accessibilityDisplayShouldReduceTransparency(),
-        increase_contrast: w.accessibilityDisplayShouldIncreaseContrast(),
-        reduce_motion: w.accessibilityDisplayShouldReduceMotion(),
+        reduce_transparency: on("reduce-transparency")
+            || w.accessibilityDisplayShouldReduceTransparency(),
+        increase_contrast: on("increase-contrast")
+            || w.accessibilityDisplayShouldIncreaseContrast(),
+        reduce_motion: on("reduce-motion") || w.accessibilityDisplayShouldReduceMotion(),
     }
 }
 /// The highest zoom whose layer stays inside Metal's largest drawable.
@@ -241,6 +252,68 @@ pub fn material(
             Retained::into_super(v)
         }
     }
+}
+/// A transparent GPUI window over the shell's behind-window blur, tinted by
+/// its own content (the Project Library sidebar), as the editor's ground.
+/// Solid `window` under Reduce Transparency. GPUI's own `Blurred` background
+/// panics in its layer update, so windows use this instead.
+pub fn window_backdrop(w: &gpui::Window, t: &Tokens) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let gpui: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let (Some(window), Some(content)) =
+        (gpui.window(), gpui.window().and_then(|w| w.contentView()))
+    else {
+        return;
+    };
+    let view = backdrop(mtm, &content);
+    ground(&window, &view, t);
+}
+/// Frames a borderless GPUI window as a popover: `Surface::Popover` material
+/// (glass on macOS 26, a visual-effect popover before, solid `floating`
+/// under Reduce Transparency) under the transparent GPUI view, rounded to
+/// `popover_radius`, with the system shadow. The GPUI content stays clear.
+pub fn popover_frame(w: &gpui::Window, t: &Tokens) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(w).unwrap().as_raw()
+    else {
+        return;
+    };
+    let gpui: Retained<NSView> =
+        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+    let Some(window) = gpui.window() else {
+        return;
+    };
+    let Some(content) = window.contentView() else {
+        return;
+    };
+    appearance(&window, t);
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setHasShadow(true);
+    let radius = t.metrics.popover_radius as f64;
+    let mat = material(mtm, content.bounds(), t, Surface::Popover);
+    mat.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    if let Ok(glass) = mat.clone().downcast::<NSGlassEffectView>() {
+        glass.setCornerRadius(radius);
+    } else if let Ok(solid) = mat.clone().downcast::<NSBox>() {
+        solid.setCornerRadius(radius);
+    }
+    content.setWantsLayer(true);
+    if let Some(layer) = content.layer() {
+        layer.setCornerRadius(radius);
+        layer.setMasksToBounds(true);
+    }
+    content.addSubview_positioned_relativeTo(&mat, NSWindowOrderingMode::Below, Some(&gpui));
+    window.invalidateShadow();
+    // The half-bounce entrance (plan §3.10), as the palette and field menu.
+    animate(&window, true, t, &mut None);
 }
 pub fn contents(v: &NSView) -> Retained<NSView> {
     unsafe {
@@ -2463,6 +2536,9 @@ impl Popup {
             "Search fields…"
         })));
         search.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+        // The field is the menu's only input and always focused: no ring (owner rule:
+        // no accent focus rings), as Spotlight's field.
+        search.setFocusRingType(NSFocusRingType::None);
         search.setAccessibilityLabel(Some(&NSString::from_str("Search")));
         body.addSubview(&search);
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);

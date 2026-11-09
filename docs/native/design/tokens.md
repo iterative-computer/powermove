@@ -94,7 +94,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
 | `colors.field` | Value wells, text fields, segmented control track | `#F3F3F6` | `#262626` | `#F3F3F6` | `#262626` |
 | `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#2C2C2C` | `#FFFFFF` | `#2C2C2C` |
-| `colors.focus` | Keyboard focus ring | `#B93800` | `#FF8A55` | `#9A2F00` | `#FFA073` |
+| `colors.focus` | Keyboard focus ring | `#76767C` | `#9A9A9A` | `#3C3C42` | `#E0E0E0` |
 | `colors.hover` | Pointer hover fill on rows and borderless buttons | `#EBEBEF` | `#232323` | `#EBEBEF` | `#232323` |
 | `colors.labels.blue` | Label: default for text and shape layers | `#C9D4E8` | `#3B4250` | `#C9D4E8` | `#3B4250` |
 | `colors.labels.gray` | Label: guides, nulls, cameras | `#DCDCE0` | `#3A3A3A` | `#DCDCE0` | `#3A3A3A` |
@@ -112,7 +112,9 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.scope_green` | Green channel scope trace on the dark viewer | `#4FD58A` | `#4FD58A` | `#4FD58A` | `#4FD58A` |
 | `colors.scope_red` | Red channel scope trace on the dark viewer | `#FF6B62` | `#FF6B62` | `#FF6B62` | `#FF6B62` |
 | `colors.secondary` | Row labels, secondary text | `#52545A` | `#B4B4B4` | `#303036` | `#DDDDDD` |
+| `colors.selected_danger` | Danger words on a selected row | `#A82319` | `#FF8A80` | `#A82319` | `#FF8A80` |
 | `colors.selected_fill` | Neutral selected row / segment fill | `#D5D5DA` | `#3A3A3A` | `#D5D5DA` | `#3A3A3A` |
+| `colors.selected_secondary` | Metadata on a selected row (muted fails there) | `#52545A` | `#B4B4B4` | `#303036` | `#DDDDDD` |
 | `colors.selected_text` | Text and glyphs on an accent fill | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
 | `colors.separator` | Hairline separators and panel edges | `#D4D4D8` | `#303030` | `#686868` | `#888888` |
 | `colors.success` | Completed, online, rendered | `#117A52` | `#3FCF8E` | `#117A52` | `#3FCF8E` |
@@ -149,7 +151,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.keyboard_step` | Splitter arrow-key step | 10 | 10 | 10 | 10 |
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
 | `metrics.kind_badge` | Layer-kind badge square in the timeline and Project list | 18 | 18 | 18 | 18 |
-| `metrics.layer_column` | Timeline layer list column width | 266 | 266 | 266 | 266 |
+| `metrics.layer_column` | Timeline layer list column width | 320 | 320 | 320 | 320 |
 | `metrics.mark_bracket` | Width of In and Out brackets on rulers and scrubbers | 6 | 6 | 6 | 6 |
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
@@ -163,6 +165,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.panel_radius` | Panel corner radius | 8 | 8 | 8 | 8 |
 | `metrics.pasteboard_opacity` | Opacity of selected layers drawn outside the frame | 0.35 | 0.35 | 0.35 | 0.35 |
 | `metrics.playhead` | Playhead line width | 1.5 | 1.5 | 1.5 | 1.5 |
+| `metrics.popover_radius` | Corner of popovers Powermove frames itself (agent popover) | 16 | 16 | 16 | 16 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
 | `metrics.property_row` | Timeline property sub-row | 22 | 22 | 22 | 22 |
 | `metrics.rotation_stem` | Rotation handle stem length | 18 | 18 | 18 | 18 |
@@ -185,6 +188,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
 | `metrics.text_padding` | Vertical text padding in bubbles, the composer and code blocks | 8 | 8 | 8 | 8 |
 | `metrics.thumbnail_min` | Minimum Project grid thumbnail width | 120 | 120 | 120 | 120 |
+| `metrics.titlebar` | Title bar band of a plain panel window; content starts below it | 28 | 28 | 28 | 28 |
 | `metrics.toolbar` | Unified toolbar height | 52 | 52 | 52 | 52 |
 | `metrics.toolbar_title_line` | Document title line height | 14 | 14 | 14 | 14 |
 | `metrics.toolbar_title_width` | Document title slot width | 160 | 160 | 160 | 160 |
@@ -223,10 +227,13 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `motion.tooltip_warm` | Time window for an immediate tooltip swap to a neighbouring control (s) | 0.6 | 0.6 | 0.6 | 0.6 |
 | `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
 | `translucency.edge` | Panel hairline edge in `text` ink | 0.08 | 0.06 | 0.08 | 0.06 |
+| `translucency.grid` | Time grid under the timeline tracks, as `text` ink | 0.04 | 0.04 | 0.04 | 0.04 |
 | `translucency.ground` | Window tint over the behind-window blur, darker than `window` so panels step above the composite | `#EEEEF1` | `#080808` | `#EEEEF1` | `#080808` |
 | `translucency.line` | Header, column and status dividers in `text` ink | 0.09 | 0.07 | 0.09 | 0.07 |
-| `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.72 | 0.7 | 0.72 | 0.7 |
-| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.8 | 0.82 | 0.8 | 0.82 |
+| `translucency.panel` | Shared panel material over the window tint (1 = solid) | 0.66 | 0.7 | 0.66 | 0.7 |
+| `translucency.tick_major` | Labelled ruler tick, as `text` ink | 0.3 | 0.3 | 0.3 | 0.3 |
+| `translucency.tick_minor` | Minor ruler tick, as `text` ink | 0.14 | 0.14 | 0.14 | 0.14 |
+| `translucency.window` | Window tint over the behind-window blur (1 = solid, Reduce Transparency) | 0.62 | 0.82 | 0.62 | 0.82 |
 <!-- tokens:end -->
 
 ## Surface token additions — 2026-11-04
