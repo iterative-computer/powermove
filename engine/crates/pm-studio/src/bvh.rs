@@ -41,6 +41,7 @@ impl Aabb {
 /// triangle order the leaves refer to.
 #[allow(clippy::needless_range_loop)] // axis indexes Vec3 components
 pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
+    if tris.is_empty() { return (Vec::new(), Vec::new()); }
     let bounds: Vec<Aabb> = tris
         .iter()
         .map(|t| {
@@ -156,6 +157,7 @@ pub struct WideNode {
 }
 
 pub fn widen(nodes: &[Node]) -> Vec<WideNode> {
+    if nodes.is_empty() { return vec![WideNode { lcount: u32::MAX, rcount: u32::MAX, ..Default::default() }]; }
     let root = nodes[0];
     let empty = ([f32::MAX; 3], [f32::MIN; 3]);
     if root.count > 0 {
@@ -260,6 +262,14 @@ mod tests {
             }
         }
         assert_eq!(leaf_tris as usize, tris.len());
+    }
+
+    #[test]
+    fn empty_scene_has_no_children() {
+        let (nodes, order) = build(&[]);
+        assert!(nodes.is_empty() && order.is_empty());
+        let wide = widen(&nodes);
+        assert_eq!((wide[0].lcount, wide[0].rcount), (u32::MAX, u32::MAX));
     }
 
     #[test]

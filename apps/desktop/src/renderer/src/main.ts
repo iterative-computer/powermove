@@ -11,6 +11,7 @@ import '../../../css/publish.css';
 import '../../../css/transcription.css';
 import './legacy/core/image-sequence.css';
 import { installWebBridge, remoteLink } from './host/web-bridge';
+import { installNativeStudio } from './core/studio-native/install';
 import { installPointerFocus } from './controls/pointer-focus';
 import { installTooltips } from './controls/tooltips';
 
@@ -22,6 +23,7 @@ installTooltips();
 // in the kernel's capture before the engines read the store during their
 // synchronous boot.
 const remote = await installWebBridge();
+installNativeStudio();
 await import('./legacy/bootstrap');
 if (remote) {
   // Other tabs on the same host edit the same document; keep this one in step.

@@ -55,7 +55,10 @@ test('a 1M-triangle assembly prepares in the background, then Studio draws it', 
     return r.ok ? true : JSON.stringify(r).slice(0, 400);
   }, assembly(20, 160).toString('base64'));
   expect(imported).toBe(true);
-  await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
+  // Native readiness includes its first prepared scene. Measure the first UI
+  // draw before that work finishes, rather than waiting away the interval this
+  // check is intended to observe.
+  await page.evaluate(async()=>{await (window as any).PM.Studio?.whenReady?.();});
   const first = await page.evaluate(() => {
     const PM = (window as any).PM;
     const t = performance.now();

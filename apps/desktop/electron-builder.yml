@@ -43,6 +43,8 @@ extraResources:
       - manifest.json
       - ui.html
       - dist/code.js
+  - from: resources/studio
+    to: studio
   - from: resources/sounds
     to: sounds
   - from: node_modules/ffmpeg-static/ffmpeg

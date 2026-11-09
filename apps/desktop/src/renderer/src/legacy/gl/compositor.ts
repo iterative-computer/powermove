@@ -29,7 +29,7 @@ import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
-import { beginStudioCapture, studioLayer, studioPreviewKey, studioUnsettled, studioReady, studioIdle, studioPending } from '../../core/studio';
+import { beginStudioCapture, beginStudioCapturePass, studioLayer, studioPreviewKey, studioUnsettled, studioReady, studioIdle, studioPending } from '../../core/studio';
 import { MAP_SIZE as STUDIO_MAP_SIZE } from '../../core/studio/extract';
 
 /* Live screens being rendered right now (a screen showing its own 3D layer would never end). */
@@ -2168,18 +2168,22 @@ GL.prepareStudioFrame = async (project:any,time:number,options:any={}) => {
   await studioReady(PM);
   beginStudioCapture(PM);
   const width=options.width || project.w,height=options.height || project.h;
+  const preparing=PM._studioPreparing;PM._studioPreparing=true;
+  try{
   for(let attempt=0;attempt<8;attempt++){
+    beginStudioCapturePass(PM);
     if(options.signal?.aborted)throw new Error('Studio frame cancelled');
     const f=GL.renderProject(project,time,width,height,{...options,exporting:!!options.exporting || !!PM.Export?.busy || !!PM.agentFrameCapture,transparent:true});
     free(f);await studioIdle(PM);
     if(!studioPending(PM))return;
   }
   throw new Error('Studio frame did not become ready');
+  }finally{PM._studioPreparing=preparing;PM.invalidate?.('render');}
 };
 
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(proj===PM.proj && !opt.groupParent && !opt.mattePass)pruneSceneRuntimes(PM);
-  const previousStudio=[PM._studioFinal,PM._studioStill,PM._studioShutterSamples];
+  const previousStudio=[PM._studioFinal,PM._studioStill,PM._studioShutterSamples,PM._studioSyncCapture];
   const previous3DComposition=PM._renderComposition3D,previous3DPass=PM._renderComposition3DPass,previous3DCamera=PM._renderCamera3D;PM._renderComposition3D=proj;
   const previousInputs = layerInputs, previousInputFrameOptions = inputFrameOptions;
   if (inputFrameOptions || hasLayerInputs(proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))) inputFrameOptions = { signal:opt.signal, mblur: opt.mblur, mbSamples: opt.mbSamples, shutter: opt.shutter };
@@ -2212,11 +2216,12 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   }
   if(opt.rawOwner){const layer=proj.layers.find((l:any)=>l.id===opt.rawOwner);if(!layer||layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new EffectInputError('Source owner processing requires a 2D content layer');const frame=renderInputSource(proj,layer,T,'effects',{...opt,ownerGrow:true});completed=true;return frame;}
   // Exports and agent frames render 3D at Studio's Final quality.
-  PM._studioFinal=!!(opt.exporting||PM.agentFrameCapture);
+  PM._studioFinal=!!(opt.exporting||PM.agentFrameCapture||previousStudio[0]);
   // Offscreen renders that are neither the viewer nor final output (stills,
   // captures, thumbnails) get a fixed, repeatable Studio frame.
   // An explicit fresh frame (previewReuse: false) is a still too, even through the editor's camera.
   PM._studioStill=!PM._studioFinal&&(!opt.editorViewport||opt.previewReuse===false);
+  if(opt.editorViewport && opt.previewReuse===false)PM._studioSyncCapture=true;
   // Motion blur renders each frame at several shutter times; Studio splits its samples across them.
   PM._studioShutterSamples=opt.studioShutterSamples || 1;
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
@@ -2438,7 +2443,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     }
     layerInputs = previousInputs; inputFrameOptions = previousInputFrameOptions;
     PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;
-    [PM._studioFinal,PM._studioStill,PM._studioShutterSamples]=previousStudio;}
+    [PM._studioFinal,PM._studioStill,PM._studioShutterSamples,PM._studioSyncCapture]=previousStudio;}
 };
 
 const requestSourceWarmup = createPreviewWarmup(
@@ -2472,6 +2477,7 @@ const requestSourceWarmup = createPreviewWarmup(
 );
 
 GL.render = (T: any, opt: any = {}) => {
+  if(PM._studioPreparing)return false;
   visibleTextures.clear();
   framePrograms.clear(); compileSubmitMs = 0;
   const gl = GL.gl; if (!gl) return;
@@ -2705,6 +2711,7 @@ function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () =
   isolatedCaptureNoMotionBlur = !!ownedTexturePrefix && opt.mblur === false;
   if (ownedTexturePrefix) videoPath = '';
   const comp = opt.comp || PM.proj;
+  const previousStudioSync=PM._studioSyncCapture;PM._studioSyncCapture=true;
   PM.beginEval(T);
   let acc;
   try {
@@ -2756,6 +2763,7 @@ function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () =
     }
     return px;
   } finally {
+    PM._studioSyncCapture=previousStudioSync;
     useVideoPreviews = previousPreviews;
     isolatedVideoTexturePrefix = previousTexturePrefix;
     isolatedCaptureNoMotionBlur = previousNoMotionBlur;

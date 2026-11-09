@@ -1,5 +1,9 @@
 import { expect, test } from './helpers/app';
 
+// Exercise the portable renderer and its own temporal history even when the
+// app has a bundled native host. Native transport/denoising has separate checks.
+test.use({desktopLaunchOptions:{env:{POWERMOVE_STUDIO_HOST:'/usr/bin/false'}}});
+
 /* Studio, the path-traced 3D renderer: it draws 3D layers in the viewer and
    in exports, splits one trace into per-layer pixels, and keeps the same
    renderer for Fast and Quality previews. */

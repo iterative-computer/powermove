@@ -12,7 +12,7 @@ import { registerStudioBackend, type StudioBackend } from '../scene3d/studio-bac
 import { SceneRuntime } from '../scene3d/runtime';
 import { disposeSceneRuntimes } from '../scene3d/service';
 import { createScene, createObject } from '../scene3d/schema';
-import { beginStudioCapture,studioIdle, studioLayer, studioPending } from './index';
+import { beginStudioCapture,beginStudioCapturePass,studioIdle, studioLayer, studioPending } from './index';
 function fixture(){const PM:any={time:0,_studioFinal:true,invalidate:vi.fn(),store:{get:()=> 'quality'}};const runtime=new SceneRuntime();const scene=createScene();scene.objects=[createObject('model')];runtime.sync(scene);return {PM,runtime,draw:(time=0)=>studioLayer(PM,runtime,64,64,'model',new Set(['model']),true,runtime.camera,undefined,time)};}
 afterEach(()=>{registerStudioBackend(null);vi.unstubAllGlobals();});
 describe('Studio backend lifecycle',()=>{
@@ -49,6 +49,18 @@ describe('Studio backend lifecycle',()=>{
   draw(0);draw(.1);await studioIdle(PM);const a=draw(0),b=draw(.1);
   expect(rendered).toEqual([0,.1]);expect(a?.canvas).not.toBe(b?.canvas);
   expect(draw(0)?.canvas).toBe(a?.canvas);
+  PM._studioFinal=false;draw(.2);PM._studioFinal=true;PM._studioPreparing=true;
+  beginStudioCapturePass(PM);draw(0);draw(.1);expect(studioPending(PM)).toBe(false);
+  PM._studioPreparing=false;
   beginStudioCapture(PM);expect((a?.canvas as any).width).toBe(0);
+ });
+ it('requests native Live at output resolution and releases superseded depth sets',async()=>{
+  const requests:any[]=[],dispose=vi.fn();
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:async(r:any)=>{requests.push(r);return {source:document.createElement('canvas'),width:r.size.width,height:r.size.height,samples:1,version:'live'};},dispose} as unknown as StudioBackend));
+  const {PM,runtime,draw}=fixture();PM._studioFinal=false;draw();await studioIdle(PM);draw();await studioIdle(PM);
+  expect(requests[0]).toMatchObject({tier:'live',size:{width:64,height:64}});
+  const scene=createScene();scene.objects=[createObject('model'),createObject('other')];runtime.sync(scene);
+  studioLayer(PM,runtime,64,64,'model',new Set(['model','other']),true,runtime.camera);await studioIdle(PM);
+  expect(dispose).toHaveBeenCalledOnce();
  });
 });

@@ -42,9 +42,8 @@ Studio has three rendering tiers:
   floor's shadows while edges, paint and the backdrop stay exact.
 
 Perspective and orthographic cameras both use Studio, including camera zoom
-and near/far clipping. A native renderer can attach through
-[`StudioBackend`](../../../docs/studio/backend.md); otherwise the app uses
-WebGPU. Native initialization or rendering failures fall back to WebGPU.
+and near/far clipping. The macOS app uses a native Metal renderer through
+[`StudioBackend`](../../../docs/studio/backend.md). Other platforms use WebGPU. Native initialization or rendering failures fall back to WebGPU.
 There is no three.js picture-rendering mode.
 
 ## Building a product shot

@@ -4,6 +4,11 @@ use crate::math::Vec3;
 use crate::scene::{Prepared, Scene};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
+mod resampling;
+mod query;
+pub use query::SurfacePick;
+#[cfg(all(feature="metalfx",target_os="macos"))]
+mod metalfx;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -50,8 +55,13 @@ fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
 }
 "#;
 
+fn trace_source() -> String {
+    // Native Live uses a uniform frame jitter, as temporal denoisers require.
+    // Keep it out of the shared source: opts.w also carries camera clip bits.
+    include_str!("shaders/trace.wgsl").replacen("    var jitter = rnd2();", "    var jitter = rnd2();\n    if (P.opts.x == 1u) {jitter=vec2f(f32(pcg(P.dims.z ^ 0x68bc21ebu)),f32(pcg(P.dims.z ^ 0x02e5be93u)))*(1.0/4294967296.0);}",1)
+}
 fn rt_source() -> String {
-    let base = include_str!("shaders/trace.wgsl").replacen("fn intersect(ro: vec3f", "fn intersect_bvh(ro: vec3f", 1);
+    let base = trace_source().replacen("fn intersect(ro: vec3f", "fn intersect_bvh(ro: vec3f", 1);
     format!("enable wgpu_ray_query;\n{base}\n{RT_WGSL}")
 }
 
@@ -78,10 +88,11 @@ struct Present {
 struct Rt {
     layout: wgpu::BindGroupLayout,
     trace: wgpu::ComputePipeline,
+    resampled: wgpu::ComputePipeline,
     photons: wgpu::ComputePipeline,
     group: Option<wgpu::BindGroup>,
     tlas: Option<wgpu::Tlas>,
-    blas: Option<wgpu::Blas>,
+    blas: Vec<wgpu::Blas>,
 }
 
 /// Guide images for the Final denoiser (aov.wgsl), bound as group 1 here;
@@ -98,6 +109,13 @@ struct PostParams {
     cameras: [[f32; 4]; 8],
 }
 
+/// One resident native acceleration structure per mesh.
+#[derive(Clone, Debug)]
+pub struct RtGeometry { pub first_vertex: u32, pub vertex_count: u32 }
+/// Metal/wgpu row-major 3×4 object-to-world transform and global triangle offset.
+#[derive(Clone, Debug)]
+pub struct RtPlacement { pub geometry: usize, pub transform: [f32;12], pub triangle_offset: u32 }
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -109,6 +127,7 @@ pub struct Renderer {
     compose: wgpu::ComputePipeline,
     atrous: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
+    temporal: wgpu::ComputePipeline,
     photons: wgpu::ComputePipeline,
     aovs: wgpu::ComputePipeline,
     aov_layout: wgpu::BindGroupLayout,
@@ -124,12 +143,22 @@ pub struct Renderer {
     grid: wgpu::Buffer,
     display: [wgpu::Buffer; 2],
     packed: wgpu::Buffer,
+    history: [wgpu::Buffer; 2],
+    history_index: usize,
+    history_valid: bool,
+    previous_camera: [[f32;4];4],
     readback: wgpu::Buffer,
     screen: wgpu::Texture,
     sampler: wgpu::Sampler,
     trace_group: Option<wgpu::BindGroup>,
     scene_buffers: Vec<wgpu::Buffer>,
     light_count: u32,
+    instance_count: u32,
+    output_layer: Option<u32>,
+    output_include_void: bool,
+    straight_output: bool,
+    last_display: usize,
+    seed_salt: u32,
     base: Params,
     exposure: f32,
     backdrop: [f32; 4],
@@ -145,6 +174,13 @@ pub struct Renderer {
     /// accelerate it; M1/M2 run Metal's ray queries in software).
     pub hardware_rt: bool,
     rt: Option<Rt>,
+    resampling:Option<resampling::Resampling>,
+    query:Option<query::Query>,
+    #[cfg(all(feature="metalfx",target_os="macos"))]
+    metalfx:Option<metalfx::MetalFX>,
+    pub metalfx_enabled:bool,
+    pub last_surface:Option<u64>,
+    pub resampled_lighting:bool,
     photons_emitted: f32,
     present: Option<Present>,
 }
@@ -182,6 +218,7 @@ impl Renderer {
             max_storage_buffer_binding_size: have.max_storage_buffer_binding_size,
             max_buffer_size: have.max_buffer_size,
             max_storage_buffers_per_shader_stage: 12,
+            max_storage_textures_per_shader_stage: have.max_storage_textures_per_shader_stage.min(8),
             max_texture_array_layers: have.max_texture_array_layers,
             ..wgpu::Limits::default()
         };
@@ -214,6 +251,7 @@ impl Renderer {
             max_storage_buffer_binding_size: have.max_storage_buffer_binding_size,
             max_buffer_size: have.max_buffer_size,
             max_storage_buffers_per_shader_stage: have.max_storage_buffers_per_shader_stage.min(12),
+            max_storage_textures_per_shader_stage: have.max_storage_textures_per_shader_stage.min(8),
             max_texture_array_layers: have.max_texture_array_layers,
             ..wgpu::Limits::default()
         }
@@ -250,7 +288,7 @@ impl Renderer {
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("studio post"),
-            entries: &[uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true)],
+            entries: &[uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false)],
         });
         let pipeline = |module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str| {
             let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(entry), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
@@ -263,14 +301,16 @@ impl Renderer {
                 cache: None,
             })
         };
-        let trace_src = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("trace.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/trace.wgsl").into()) });
+        let trace_src = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("trace.wgsl"), source: wgpu::ShaderSource::Wgsl(trace_source().into()) });
         let post_src = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/post.wgsl").into()) });
         let trace = pipeline(&trace_src, &trace_layout, "main");
         let resolve = pipeline(&post_src, &post_layout, "resolve");
         let compose = pipeline(&post_src, &post_layout, "compose");
         let atrous = pipeline(&post_src, &post_layout, "atrous");
         let pack = pipeline(&post_src, &post_layout, "pack");
+        let temporal = pipeline(&post_src, &post_layout, "temporal");
         let photons = pipeline(&trace_src, &trace_layout, "photons");
+        let resampling=rt_ok.then(||resampling::Resampling::new(&device,width,height));
         let rt = rt_ok.then(|| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("studio rt"),
@@ -293,7 +333,11 @@ impl Renderer {
                     cache: None,
                 })
             };
-            Rt { trace: make("main"), photons: make("photons"), layout, group: None, tlas: None, blas: None }
+            let ris_src=resampling::source(&rt_source());
+            let ris_module=device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("trace reservoirs"),source:wgpu::ShaderSource::Wgsl(ris_src.into())});
+            let ris_layout=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("trace reservoirs"),bind_group_layouts:&[Some(&trace_layout),Some(&layout),Some(&resampling.as_ref().unwrap().layout)],immediate_size:0});
+            let resampled=device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor{label:Some("trace reservoirs"),layout:Some(&ris_layout),module:&ris_module,entry_point:Some("main"),compilation_options:Default::default(),cache:None});
+            Rt { trace: make("main"), resampled, photons: make("photons"), layout, group: None, tlas: None, blas: Vec::new() }
         });
         let aov_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("studio aov"), entries: &[storage(0, false)] });
         let aov_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -313,6 +357,7 @@ impl Renderer {
             cache: None,
         });
 
+        let metalfx_ok=device.limits().max_storage_textures_per_shader_stage>=8;
         let pixels = (width * height) as u64;
         let buf = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
         let rw = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
@@ -322,7 +367,7 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -343,6 +388,8 @@ impl Renderer {
             aov: buf("aov", pixels * 32, rw),
             display: [buf("display a", pixels * 16, rw), buf("display b", pixels * 16, rw)],
             packed: buf("packed", pixels * 4, rw),
+            history: [buf("history a", 64, rw), buf("history b", 64, rw)],
+            history_index: 0, history_valid: false, previous_camera: [[0.;4];4],
             readback: buf("readback", pixels * 4, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
             device,
             queue,
@@ -353,6 +400,7 @@ impl Renderer {
             compose,
             atrous,
             pack,
+            temporal,
             photons,
             aovs,
             aov_layout,
@@ -363,6 +411,8 @@ impl Renderer {
             trace_group: None,
             scene_buffers: Vec::new(),
             light_count: 0,
+            instance_count: 1,
+            output_layer: None, output_include_void: true, straight_output:false, last_display:0, seed_salt:0,
             base: bytemuck::Zeroable::zeroed(),
             exposure: 1.0,
             backdrop: [1.0; 4],
@@ -373,6 +423,11 @@ impl Renderer {
             caustics: false,
             hardware_rt: true,
             rt,
+            #[cfg(all(feature="metalfx",target_os="macos"))] metalfx:None,
+            last_surface:None,
+            metalfx_enabled:metalfx_ok&&cfg!(all(feature="metalfx",target_os="macos"))&&std::env::var_os("STUDIO_NO_METALFX").is_none(),
+            query:None,
+            resampling, resampled_lighting: std::env::var_os("STUDIO_NO_RIS").is_none(),
             photons_emitted: 0.0,
             present: None,
         };
@@ -389,7 +444,7 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
@@ -404,8 +459,10 @@ impl Renderer {
         let extra = if self.rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let init = |label: &str, data: &[u8]| {
             let data: Vec<u8> = if data.is_empty() { vec![0u8; 64] } else { data.to_vec() };
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE | extra })
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | extra })
         };
+        self.history_valid = false;
+        self.instance_count = 1;
         self.scene_buffers = vec![
             init("tris", bytemuck::cast_slice(&prepared.tris)),
             init("nodes", bytemuck::cast_slice(&prepared.nodes)),
@@ -429,6 +486,80 @@ impl Renderer {
         let radius = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-3) * 0.5;
         self.bounds = [centre[0], centre[1], centre[2], radius];
         self.set_camera(scene);
+    }
+
+    /// Native host upload. Geometry stays resident across camera/transform edits.
+    /// `top_nodes` is the mutable TLAS prefix; BLAS nodes and triangles are immutable.
+    pub fn set_instanced_scene(&mut self, scene: &Scene, prepared: &Prepared,
+        geometries: &[RtGeometry], placements: &[RtPlacement], top_nodes: usize,
+        geometry_changed: bool) {
+        if geometry_changed || self.scene_buffers.is_empty() {
+            self.set_scene(scene, prepared);
+        } else {
+            self.queue.write_buffer(&self.scene_buffers[1], 0, bytemuck::cast_slice(&prepared.nodes[..top_nodes]));
+            self.queue.write_buffer(&self.scene_buffers[2], 0, bytemuck::cast_slice(&prepared.materials));
+            self.queue.write_buffer(&self.scene_buffers[3], 0, bytemuck::cast_slice(&prepared.sdata));
+            self.light_count = prepared.lights.len() as u32;
+            self.set_camera(scene);
+        }
+        self.instance_count = placements.len() as u32;
+        self.caustics=prepared.materials.iter().any(|m|m.spec[3]*(1.-m.base[3])>0.5 || (m.base[3]>0.5 && m.spec[0]<0.25));
+        self.build_instanced_rt(geometries, placements, geometry_changed);
+    }
+
+    fn build_instanced_rt(&mut self, geometries: &[RtGeometry], placements: &[RtPlacement], rebuild: bool) {
+        let Some(rt) = self.rt.as_mut() else { return };
+        if geometries.is_empty() || placements.is_empty() { rt.group = None; return; }
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let sizes: Vec<_> = geometries.iter().map(|g| wgpu::BlasTriangleGeometrySizeDescriptor {
+            vertex_format: wgpu::VertexFormat::Float32x3, vertex_count: g.vertex_count,
+            index_format: None, index_count: None, flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+        }).collect();
+        if rebuild || rt.blas.len() != geometries.len() {
+            rt.blas = sizes.iter().map(|size| self.device.create_blas(
+                &wgpu::CreateBlasDescriptor { label: Some("studio mesh blas"),
+                    flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build },
+                wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: vec![size.clone()] },
+            )).collect();
+            let entries: Vec<_> = rt.blas.iter().zip(sizes.iter()).zip(geometries.iter()).map(|((blas, size), g)| wgpu::BlasBuildEntry {
+                blas, geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
+                    size, vertex_buffer: &self.scene_buffers[4], first_vertex: g.first_vertex,
+                    vertex_stride: 16, index_buffer: None, first_index: None, transform_buffer: None, transform_buffer_offset: None,
+                }]),
+            }).collect();
+            // Metal's acceleration builder can overlap work using the same
+            // scratch allocation. Separate submissions prevent a later BLAS
+            // build from overwriting an earlier one (chrome's glass sphere).
+            // These builds happen on mesh changes; dragging reuses every BLAS.
+            for entry in &entries {
+                let mut build=self.device.create_command_encoder(&Default::default());
+                build.build_acceleration_structures([entry],std::iter::empty::<&wgpu::Tlas>());
+                self.queue.submit([build.finish()]);
+                let _=self.device.poll(wgpu::PollType::wait_indefinitely());
+            }
+        }
+        let mut tlas = self.device.create_tlas(&wgpu::CreateTlasDescriptor {
+            label: Some("studio instances"), max_instances: placements.len() as u32,
+            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+        });
+        for (i, p) in placements.iter().enumerate() {
+            tlas[i] = Some(wgpu::TlasInstance::new(&rt.blas[p.geometry], p.transform, p.triangle_offset, 0xff));
+        }
+        enc.build_acceleration_structures(std::iter::empty::<&wgpu::BlasBuildEntry<'_>>(), [&tlas]);
+        self.queue.submit([enc.finish()]);
+        rt.group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("studio rt"), layout: &rt.layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: tlas.as_binding() }],
+        }));
+        rt.tlas = Some(tlas);
+    }
+
+    /// Update the already serialized camera basis, keeping the editor's camera roll.
+    pub fn set_view(&mut self, camera: [[f32; 4]; 4], ground: [f32;4], shadows: bool, bounds: [f32;4]) {
+        self.base.cam_pos = camera[0]; self.base.cam_fwd = camera[1];
+        self.base.cam_right = camera[2]; self.base.cam_up = camera[3];
+        self.base.ground = ground; self.base.opts[1] = u32::from(!shadows);
+        self.base.bounds = bounds; self.bounds = bounds; self.samples = 0;
     }
 
     /// Camera, backdrop and environment only (no geometry upload).
@@ -479,7 +610,7 @@ impl Renderer {
         let Some(rt) = self.rt.as_mut() else { return };
         rt.group = None;
         rt.tlas = None;
-        rt.blas = None;
+        rt.blas.clear();
         if vertices < 3 {
             return;
         }
@@ -514,7 +645,7 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: tlas.as_binding() }],
         }));
         rt.tlas = Some(tlas);
-        rt.blas = Some(blas);
+        rt.blas = vec![blas];
     }
 
     fn trace_group(&mut self) -> &wgpu::BindGroup {
@@ -556,7 +687,7 @@ impl Renderer {
         let start = Instant::now();
         // Seeds follow the sample index, so a scene and view render the same every time.
         if reset {
-            self.frame = 0;
+            if !self.live { self.frame = self.seed_salt.wrapping_mul(4099); }
             self.photons_emitted = 0.0;
         }
         let photons = self.caustics && !self.live && self.light_count > 0;
@@ -568,7 +699,7 @@ impl Renderer {
             let mut p = self.base;
             p.dims = [w, h, self.frame, n];
             p.counts = [self.light_count, bounces, if reset && first { 1 } else { 0 }, clamp];
-            p.opts = [u32::from(self.live), 0, 1, 0];
+            p.opts = [u32::from(self.live), self.base.opts[1], self.instance_count, self.base.opts[3]];
             let group = self.trace_group().clone();
             let mut enc = self.device.create_command_encoder(&Default::default());
             if photons {
@@ -596,11 +727,13 @@ impl Renderer {
                 p.caustic[1] = self.photons_emitted;
             }
             self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+            let use_reservoirs=self.live && self.resampled_lighting && self.uses_hardware_rt();
+            let reservoirs=use_reservoirs.then(||self.reservoir_group());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 match (self.uses_hardware_rt(), self.rt.as_ref()) {
                     (true, Some(rt)) => {
-                        pass.set_pipeline(&rt.trace);
+                        if let Some(group)=&reservoirs {pass.set_pipeline(&rt.resampled);pass.set_bind_group(2,group,&[]);}else{pass.set_pipeline(&rt.trace);}
                         pass.set_bind_group(1, rt.group.as_ref(), &[]);
                     }
                     _ => pass.set_pipeline(&self.trace),
@@ -610,6 +743,7 @@ impl Renderer {
             }
             self.queue.submit([enc.finish()]);
             self.wait();
+            if use_reservoirs {let r=self.resampling.as_mut().unwrap();r.index=1-r.index;}
             if reset && first {
                 self.samples = 0;
             }
@@ -633,6 +767,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 5, resource: self.display[dst].as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: self.packed.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: self.ebuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: self.history[self.history_index].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: self.history[1-self.history_index].as_entire_binding() },
             ],
         })
     }
@@ -708,7 +844,7 @@ impl Renderer {
     /// reference renderers.
     pub fn radiance(&mut self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
-        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, 0.0, 0.0], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
         self.queue.write_buffer(&self.post_params[0], 0, bytemuck::bytes_of(&params));
         let group = self.post_group(0, 1, 0);
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -745,11 +881,14 @@ impl Renderer {
     fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
         let (w, h) = (self.width, self.height);
+        if self.live && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
+            self.history=std::array::from_fn(|_|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("live history"),size:u64::from(w)*u64::from(h)*32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));self.history_valid=false;
+        }
         let groups = (w.div_ceil(8), h.div_ceil(8));
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut slot = 0;
         let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, src: usize, dst: usize, step: u32, slot: &mut usize| {
-            let params = PostParams { dims: [w, h, step, 0], k: [self.exposure, 1.6, 0.0, 0.0], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+            let params = PostParams { dims: [w, h, step, u32::from(self.history_valid)], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2)) as f32], backdrop: self.backdrop, cameras: [self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up,self.previous_camera[0],self.previous_camera[1],self.previous_camera[2],self.previous_camera[3]] };
             self.queue.write_buffer(&self.post_params[*slot], 0, bytemuck::bytes_of(&params));
             let group = self.post_group(*slot, src, dst);
             *slot += 1;
@@ -769,7 +908,7 @@ impl Renderer {
             });
             let mut p = self.base;
             p.dims = [w, h, 0, 1];
-            p.opts = [0, 0, 1, 0];
+            p.opts = [0, self.base.opts[1], self.instance_count, self.base.opts[3]];
             p.counts = [self.light_count, 6, 1, 64];
             self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
             let trace_group = self.trace_group.clone().expect("traced before finishing");
@@ -804,6 +943,10 @@ impl Renderer {
             }
         }
         let mut cur = 0;
+        if self.live {
+            run(&mut enc, &self.temporal, cur, 1-cur, 1, &mut slot);
+            cur = 1-cur;
+        }
         for i in 0..passes.min(5) {
             run(&mut enc, &self.atrous, cur, 1 - cur, 1 << i, &mut slot);
             cur = 1 - cur;
@@ -839,12 +982,16 @@ impl Renderer {
             }
             self.queue.submit([enc.finish()]);
             self.wait();
+            self.last_display=cur;
+            self.advance_history();
             return (Vec::new(), start.elapsed().as_secs_f64() * 1000.0);
         }
         run(&mut enc, &self.pack, cur, 1 - cur, 1, &mut slot);
         if !readback {
             self.queue.submit([enc.finish()]);
             self.wait();
+            self.last_display=cur;
+            self.advance_history();
             return (Vec::new(), start.elapsed().as_secs_f64() * 1000.0);
         }
         enc.copy_buffer_to_buffer(&self.packed, 0, &self.readback, 0, (w * h * 4) as u64);
@@ -855,7 +1002,89 @@ impl Renderer {
         let gpu_ms = start.elapsed().as_secs_f64() * 1000.0;
         let pixels = slice.get_mapped_range().expect("mapped readback").to_vec();
         self.readback.unmap();
+        self.last_display=cur;
+        self.advance_history();
         (pixels, gpu_ms)
+    }
+
+    /// Repack a different layer from the same finished trace (no tracing/denoising).
+    pub fn frame_pixels(&mut self) -> (Vec<u8>,f64) {
+        let start=Instant::now();let(w,h)=(self.width,self.height);
+        let params=PostParams { dims:[w,h,1,0], k:[self.exposure,1.6,self.output_layer.map_or(0.,|l|(l+1) as f32),(u32::from(self.output_include_void)|(u32::from(self.straight_output)<<1)) as f32],backdrop:self.backdrop,cameras:[[0.;4];8] };
+        self.queue.write_buffer(&self.post_params[0],0,bytemuck::bytes_of(&params));
+        let group=self.post_group(0,self.last_display,1-self.last_display);
+        let mut enc=self.device.create_command_encoder(&Default::default());
+        {let mut pass=enc.begin_compute_pass(&Default::default());pass.set_pipeline(&self.pack);pass.set_bind_group(0,&group,&[]);pass.dispatch_workgroups(w.div_ceil(8),h.div_ceil(8),1);}
+        enc.copy_buffer_to_buffer(&self.packed,0,&self.readback,0,(w*h*4) as u64);self.queue.submit([enc.finish()]);
+        let slice=self.readback.slice(..);slice.map_async(wgpu::MapMode::Read,|_|{});self.wait();let bytes=slice.get_mapped_range().expect("mapped native frame").to_vec();self.readback.unmap();
+        (bytes,start.elapsed().as_secs_f64()*1000.)
+    }
+    pub fn set_scene_bounds(&mut self,bounds:[f32;4]){self.bounds=bounds;self.base.bounds=bounds;}
+    pub fn set_projection(&mut self, orthographic:bool) {self.base.opts[3]=u32::from(orthographic);}
+    pub fn set_clip_planes(&mut self,near:Option<f32>,far:Option<f32>) {
+        if let (Some(near),Some(far))=(near,far) {
+            if near.is_finite()&&far.is_finite()&&near>=0.&&far>near {
+                self.base.opts[3]|=0x80000000|(near.to_bits()&0x7ffffffe);
+                self.base.backdrop[3]=far*if self.base.backdrop[3]>0.{1.}else{-1.};
+            }
+        }
+    }
+    pub fn set_time_seed(&mut self, salt:u32) {self.seed_salt=salt;}
+    pub fn set_straight_output(&mut self, on:bool) {self.straight_output=on;}
+
+    fn advance_history(&mut self) {
+        if self.live { self.history_index=1-self.history_index; self.history_valid=true;
+            self.previous_camera=[self.base.cam_pos,self.base.cam_fwd,self.base.cam_right,self.base.cam_up]; }
+        else { self.history_valid=false; }
+    }
+    pub fn set_output_mask(&mut self, layer: Option<u32>, include_void: bool) {
+        self.output_layer=layer;self.output_include_void=include_void;
+    }
+    pub fn invalidate_history(&mut self) { self.history_valid=false; }
+
+    /// Texture-array data uses the same layer indices as Rust GpuMaterial.maps.
+    pub fn set_maps(&mut self, rgba:&[u8], width:u32, height:u32, layers:u32) {
+        self.screen=self.device.create_texture_with_data(&self.queue,&wgpu::TextureDescriptor {
+            label:Some("studio material maps"),size:wgpu::Extent3d{width,height,depth_or_array_layers:layers},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba8Unorm,
+            usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::COPY_DST,view_formats:&[],
+        },wgpu::util::TextureDataOrder::LayerMajor,rgba);
+        self.trace_group=None;self.samples=0;self.history_valid=false;
+    }
+    pub fn update_map(&mut self, rgba:&[u8], width:u32, height:u32, layer:u32) {
+        self.queue.write_texture(wgpu::TexelCopyTextureInfo{texture:&self.screen,mip_level:0,origin:wgpu::Origin3d{x:0,y:0,z:layer},aspect:wgpu::TextureAspect::All},
+            rgba,wgpu::TexelCopyBufferLayout{offset:0,bytes_per_row:Some(width*4),rows_per_image:Some(height)},wgpu::Extent3d{width,height,depth_or_array_layers:1});
+        self.samples=0;self.history_valid=false;
+    }
+
+    /// Diagnostic: compare hardware and portable first-hit intersections.
+    pub fn probe(&mut self, x:f32,y:f32)->Vec<f32> {
+        let output=self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("probe"),size:64,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false});
+        let layout=self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("probe"),entries:&[storage(0,false)]});
+        let rt=self.uses_hardware_rt();
+        let base=if rt {rt_source()}else {include_str!("shaders/trace.wgsl").to_string()};
+        let kernel=format!(r#"
+@group(2) @binding(0) var<storage,read_write> probe_out:array<vec4f>;
+@compute @workgroup_size(1)
+fn probe_main() {{
+ seed=1u;let r=camera_ray(vec2f({x},{y}));let a=intersect(r[0],r[1],BIG,false);
+ let b={portable}(r[0],r[1],BIG,false);
+ probe_out[0]=vec4f(a.t,f32(a.tri),f32(a.inst),0.);
+ probe_out[1]=vec4f(b.t,f32(b.tri),f32(b.inst),0.);
+ if(a.tri>=0){{let sf=surface(r[0],r[1],a);probe_out[2]=vec4f(sf.m.base.xyz,sf.m.spec.w);}}
+ if(b.tri>=0){{let sf=surface(r[0],r[1],b);probe_out[3]=vec4f(sf.m.base.xyz,sf.m.spec.w);}}
+}}
+"#,portable=if rt {"intersect_bvh"}else{"intersect"});
+        let module=self.device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("probe"),source:wgpu::ShaderSource::Wgsl(format!("{base}\n{kernel}").into())});
+        let empty=self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:None,entries:&[]});
+        let ray_layout=if rt {&self.rt.as_ref().unwrap().layout}else{&empty};
+        let pipeline=self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor{label:Some("probe"),layout:Some(&self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:None,bind_group_layouts:&[Some(&self.trace_layout),Some(ray_layout),Some(&layout)],immediate_size:0})),module:&module,entry_point:Some("probe_main"),compilation_options:Default::default(),cache:None});
+        let group=self.device.create_bind_group(&wgpu::BindGroupDescriptor{label:None,layout:&layout,entries:&[wgpu::BindGroupEntry{binding:0,resource:output.as_entire_binding()}]});
+        let mut p=self.base;p.dims=[self.width,self.height,1,1];p.opts[2]=self.instance_count;
+        self.queue.write_buffer(&self.params,0,bytemuck::bytes_of(&p));
+        let g=self.trace_group().clone();let mut enc=self.device.create_command_encoder(&Default::default());
+        {let mut pass=enc.begin_compute_pass(&Default::default());pass.set_pipeline(&pipeline);pass.set_bind_group(0,&g,&[]);if rt {pass.set_bind_group(1,self.rt.as_ref().unwrap().group.as_ref(),&[]);}else{let g=self.device.create_bind_group(&wgpu::BindGroupDescriptor{label:None,layout:&empty,entries:&[]});pass.set_bind_group(1,&g,&[]);}pass.set_bind_group(2,&group,&[]);pass.dispatch_workgroups(1,1,1);}
+        self.queue.submit([enc.finish()]);self.read_f32(&output,64)
     }
 
     pub fn size(&self) -> (u32, u32) {

@@ -1,6 +1,8 @@
 import { figmaPluginSource, installFigmaPlugin } from './figma-plugin';
 import { FIGMA_COMMUNITY_URL } from '../shared/figma-link';
 import { FigmaLink } from './figma-link';
+import { registerStudioNativeIpc } from './studio-native/ipc';
+import { studioHostExecutable } from './studio-native/manager';
 import { createEditorClosePreparation } from './editor-close';
 import { watchMemoryPressure } from './memory-pressure';
 import { registerFontsIpc } from './fonts';
@@ -1260,6 +1262,8 @@ if (!hasSingleInstanceLock) {
     registerSaveIpc(ipcMain, { ...ctx, projects, recoveryProjects });
     registerProjectOpenPathIpc(ipcMain, { ...ctx, projects });
     registerCaptureIpc(ipcMain, ctx);
+    const disposeStudioNative = registerStudioNativeIpc(ipcMain, studioHostExecutable(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined), isTrustedSender);
+    app.once('will-quit', disposeStudioNative);
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);

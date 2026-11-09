@@ -101,3 +101,17 @@ Imported `EXT_mesh_gpu_instancing` becomes one mesh BVH with multiple transform
 instances. Cloned geometry within a layer can also share its BVH when original
 geometry, material assignment and pose match. The shared CPU cache is capped at
 256 MiB. Scene data and the material table retain stable binary strides.
+
+The macOS installer now registers the native implementation at boot. Native
+Live receives the output size because the host owns tracing resolution and
+MetalFX scaling; WebGPU Live receives half resolution. A finished native trace
+is reused across per-layer image requests. Overlapping obsolete depth sets are
+released immediately so incremental scene construction cannot consume the two
+native session slots with abandoned views.
+
+Captures track their own requested image keys. Viewer paints pause during async
+preparation; unrelated cached jobs cannot keep a completed capture pending.
+Nested composition renders inherit the parent Final flag. Synchronous readback
+calls without preparation use Studio WebGPU; prepared captures consume retained
+native frames. The diagnostics `Studio.status().backend` and `frameSamples`
+report the completed image's backend and sampling count.

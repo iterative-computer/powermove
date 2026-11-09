@@ -104,12 +104,14 @@ all of them already exist in Powermove.
 | STEP/IGES/BREP CAD import | No | Worker tessellation to glTF | Verified |
 | Gaussian splats and point clouds | No | Studio depth-aware splat composite | Verified |
 | Advanced glass/coat/sheen/film/dispersion/droplets/brushed/subsurface | No | Layered Studio shader; glass/caustics tested, full artistic range needs visual grading | Kept |
-| Native backend attachment | No | Serializable Rust scene contract and async prepared-scene adapter; native implementation is on Lane B | Verified |
+| Native backend attachment | No | Serializable Rust scene contract, native Metal process and shared-texture adapter, plus WebGPU recovery | Verified |
 
 ## Verification
 
-All 53 targeted 3D Electron checks pass in one serial run, including both
-export films.
+The WebGPU baseline passed all 53 targeted 3D Electron checks in one serial
+run. The combined native integration also covers the main editor, source
+materials, masked compositing, camera projection, shutter samples and real
+shared-texture transfers; native film validation uses the same export path.
 
 Checklist totals: **59 verified**, **4 kept**, **0 pending**, **11 gaps**.
 
@@ -123,7 +125,8 @@ Checklist totals: **59 verified**, **4 kept**, **0 pending**, **11 gaps**.
   instancing: 38 Electron checks pass. `scene3d*.spec.ts`, `studio-parity`,
   `studio-camera`, `studio-compositing`, `studio-instances`.
 - Geometry/material extraction, document operations, migration, async backends
-  and final-frame preparation: 268 unit checks pass across 28 files.
+  and final-frame preparation: 281 unit checks pass across 31 files, including
+  native process/transport recovery.
 - Studio quality, deterministic Final, temporal Live, caustics and denoising:
   five Electron checks pass in `studio.spec.ts`.
 - CAD import, large worker preparation, splats, animated screens, light tool,
@@ -131,22 +134,25 @@ Checklist totals: **59 verified**, **4 kept**, **0 pending**, **11 gaps**.
 - Export checks cover a six-second product film, a 25-second nested-composition
   film, and deterministic motion blur. Async shutter transport has its own
   regression check; shutter times reuse a backend session.
-- Rust: six library checks and the GPU per-layer presentation check pass.
+- Rust: 22 library, host and GPU checks pass with OIDN and MetalFX enabled.
 - Type checking has zero errors; one existing IconCropper accessibility warning.
 
 Viewer and export use the same Studio compositor. three.js remains for model
 loading, pose evaluation, geometry, picking and controls; it no longer draws
 mesh-layer images. Splats use a separate depth-aware WebGL2 splat pass.
 
-The native backend interface is tested with asynchronous transports and failure
-recovery. The Metal host and shared-texture adapter are owned by Lane B on
-`studio-3d-native`; this branch alone uses WebGPU. It does not claim native
-Metal performance or visual equivalence with Blender Cycles.
+The native implementation from `studio-3d-native` is integrated into this
+branch, with main's editing UI and Lane A's dispatch/extractor retained. The
+real editor receives native shared textures, keeps newly expanded depth sets
+native, and propagates Final sample budgets into nested 3D compositions.
+Native initialization/rendering failures recover through WebGPU. See
+[native measurements and limits](native-host.md); standalone benchmark rates
+do not establish full-editor 60 fps or Blender Cycles equivalence.
 
 Extended imported-material sampling is a known main-renderer parity gap.
 The six slots exposed by Powermove's Materials UI are covered, but models using
 extra glTF physical-material maps, texture transforms or secondary UV sets can
-look different. Standard imported anisotropy and dispersion scalar values are
+look different. The texture-array upload currently samples images at 1024². Standard imported anisotropy and dispersion scalar values are
 retained. The broader glass/coat/sheen/film/dispersion family also needs further
 visual grading; this table does not claim full source-material fidelity.
 
@@ -166,7 +172,8 @@ From the repository root (Electron tests run serially):
 ```sh
 nice -n 10 bun run --cwd apps/desktop test:unit \
   src/renderer/src/core/scene3d src/extensions/layers-3d \
-  src/renderer/src/core/studio \
+  src/renderer/src/core/studio src/renderer/src/core/studio-native \
+  src/main/studio-native \
   src/renderer/src/legacy/core/space-3d.test.ts \
   src/renderer/src/legacy/core/groups-3d.test.ts \
   src/renderer/src/legacy/core/switch-3d-migration.test.ts \
@@ -175,12 +182,16 @@ nice -n 10 bun run --cwd apps/desktop test:unit \
 
 env -u ELECTRON_RUN_AS_NODE POWERMOVE_BACKGROUND_TEST=1 \
   nice -n 10 bun run --cwd apps/desktop test:e2e \
-  scene3d studio --global-timeout=1200000
+  scene3d studio --grep-invert "product film" --global-timeout=1200000
+
+env -u ELECTRON_RUN_AS_NODE POWERMOVE_BACKGROUND_TEST=1 \
+  nice -n 10 bun run --cwd apps/desktop test:e2e \
+  studio-film.spec.ts studio-film-extended.spec.ts --global-timeout=1800000
 
 nice -n 10 bun run --cwd apps/desktop typecheck
 
 CARGO_TARGET_DIR="$HOME/Developer/pm-target" nice -n 10 "$HOME/.cargo/bin/cargo" test \
-  --manifest-path engine/Cargo.toml -p pm-studio --lib --test present
+  --manifest-path engine/Cargo.toml -p pm-studio -p pm-studio-host --features oidn,metalfx
 ```
 
 The Electron harness creates and removes isolated temporary user-data folders.

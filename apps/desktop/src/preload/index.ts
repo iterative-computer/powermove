@@ -1,3 +1,4 @@
+import { studioNativeBridge } from './studio-native';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 
 import {
@@ -72,6 +73,7 @@ const bridge: PowermoveBridge = {
     onReceive: cloudEvent(IPC.figmaReceive),
     result: (id, result) => ipcRenderer.send(IPC.figmaResult, { id, result }),
   },
+  studioNative: studioNativeBridge(),
   onInputKey: (cb) => {
     const listener = (_event: IpcRendererEvent, input: import('../shared/ipc').SandboxInputKey): void => cb(input);
     ipcRenderer.on(IPC.inputKey, listener);

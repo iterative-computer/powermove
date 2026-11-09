@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "dev:local": "POWERMOVE_REGISTRY_URL=http://localhost:8787 POWERMOVE_DEV_PROTOCOL=1 electron-vite dev",
-    "build": "electron-vite build",
+    "build": "node scripts/build-studio-native.mjs && electron-vite build",
     "preview": "electron-vite preview",
     "test": "vitest run",
     "test:unit": "vitest run",
@@ -17,8 +17,9 @@
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "check:builtins": "bun scripts/check-builtin-versions.mjs",
     "publish:builtins": "bun scripts/publish-builtins.mjs",
-    "dist:mac": "node scripts/clean-renderer.mjs && electron-vite build && electron-builder --mac && node scripts/create-dmg.mjs",
-    "dist:release": "node scripts/release-mac.mjs"
+    "dist:mac": "node scripts/clean-renderer.mjs && bun run build && electron-builder --mac && node scripts/create-dmg.mjs",
+    "dist:release": "node scripts/release-mac.mjs",
+    "build:studio-native": "node scripts/build-studio-native.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.280",

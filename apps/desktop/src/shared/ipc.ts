@@ -715,6 +715,7 @@ export interface RemoteMediaInfo { token: string; size: number; name: string; ty
 
 export interface PowermoveBridge {
   figmaLink?: import('./figma-link').FigmaLinkBridge;
+  studioNative?: import('./studio-native').StudioNativeBridge;
   onInputKey?(cb: (input: SandboxInputKey) => void): () => void;
   sandboxFocus?(focus: { focused: boolean; field: boolean; extensionId: string }): void;
   /** Kills the OS processes that run only this extension's sandbox (never an editor's); resolves to how many. */

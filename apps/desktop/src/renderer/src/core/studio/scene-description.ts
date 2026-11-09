@@ -87,7 +87,7 @@ export function describePreparedScene(input: StudioScene, view: StudioView, maps
     layer_ids: [...input.objects], object_ids: identities, material_options: materialOptions, light_options: [...areaOptions, ...extraOptions],
     camera_options: options, environment_options: { backdrop_opaque: view.backdropOpaque, shadows: view.shadows, floor_y: view.floorY, ground: vec(view.environment.ground) },
     textures: maps.map((source, index) => {
-      const pixels = source instanceof Uint8Array ? source : source.getContext('2d')!.getImageData(0, 0, MAP_SIZE, MAP_SIZE).data;
+      const pixels = source instanceof Uint8Array ? source : (source.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D)!.getImageData(0, 0, MAP_SIZE, MAP_SIZE).data;
       return { id: `map-${index}`, width: MAP_SIZE, height: MAP_SIZE, rgba: Array.from(pixels) };
     }),
   };

@@ -11,29 +11,29 @@ export const STUDIO_FINAL_SAMPLES = 64;
 const STUDIO_STILL_SAMPLES = 4, REFINE_SAMPLES = 256, REFINE_DELAY_MS = 140, JOB_TTL_MS = 10_000;
 export type StudioPreview = 'fast' | 'quality';
 type Job = {
-  runtime:any; uid:number; sceneKey: string; viewKey: string; scene: StudioScene; maps: StudioTextureSource[];
+  runtime:any; uid:number; depthIds:Set<string>; separate:boolean;sceneKey: string; viewKey: string; scene: StudioScene; maps: StudioTextureSource[];
   backend: StudioBackend; ready: boolean; disposed:boolean; chain: Promise<void> | null;
   frames: Map<string, StudioFrame>; pending: Map<string, Promise<void>>;
   screens: { layer: number; comp: string }[]; screenKey: string;
   changedAt: number; usedAt: number; refining: boolean; samples: number; refineGoal:number; generation: number;
   factoryRevision: number; completedGeneration: number; failure: string | null;
 };
-type Capture = { frames:Map<string,StudioFrame> };
-type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; preview: StudioPreview; previewListeners: Set<(q: StudioPreview) => void>; frames: number; declined: string; revision: number; preparing: Map<string, StudioPending>; capture:Capture|null };
+type Capture = { frames:Map<string,StudioFrame & {backendId?:string}>;requested:Set<string>;completed:Set<string>;loading:boolean };
+type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; preview: StudioPreview; previewListeners: Set<(q: StudioPreview) => void>; frames: number;backend:string;frameSamples:number; declined: string; revision: number; preparing: Map<string, StudioPending>; capture:Capture|null };
 const states = new WeakMap<object, State>();
 const state = (PM: any): State => {
   let s = states.get(PM);
   if (!s) {
-    s = { jobs: new Map(), tick: null, enabled: true, preview: PM.store?.get?.('studioPreview', 'quality') === 'fast' ? 'fast' : 'quality', previewListeners: new Set(), frames: 0, declined: '', revision: 0, preparing: new Map(),capture:null };
+    s = { jobs: new Map(), tick: null, enabled: true, preview: PM.store?.get?.('studioPreview', 'quality') === 'fast' ? 'fast' : 'quality', previewListeners: new Set(), frames: 0,backend:'webgpu',frameSamples:0, declined: '', revision: 0, preparing: new Map(),capture:null };
     states.set(PM, s); const st = s;
     PM.Studio ??= {
       setEnabled: (on: boolean) => setStudioEnabled(PM, on),
       setCaustics: (on: boolean) => { studioOptions.caustics = on; st.revision++; pruneStudio(PM, () => false); PM.invalidate?.('render'); },
       setDenoise: (on: boolean) => { studioOptions.denoise = on; st.revision++; pruneStudio(PM, () => false); PM.invalidate?.('render'); },
       getPreview: () => st.preview, setPreview: (q: StudioPreview) => setStudioPreview(PM, q), progress: () => studioProgress(PM),
-      status: () => ({ enabled: st.enabled, ready: studioGpuReady() || [...st.jobs.values()].some(j => j.ready), failure: [...st.jobs.values()].find(j => j.failure)?.failure ?? studioGpuFailure(), frames: st.frames, declined: st.declined, preparing: preparingOf(st), backend: [...st.jobs.values()][0]?.backend.id ?? 'webgpu' }),
+      status: () => ({ enabled: st.enabled, ready: studioBackendFactory() ? [...st.jobs.values()].some(j => j.ready) : studioGpuReady(), failure: [...st.jobs.values()].find(j => j.failure)?.failure ?? studioGpuFailure(), frames: st.frames,frameSamples:st.frameSamples, declined: st.declined, preparing: preparingOf(st), backend:st.backend }),
       whenReady: () => studioReady(PM), idle: () => studioIdle(PM),
-      liveHistory:async()=>{for(const job of st.jobs.values()){const stats=await (job.backend as any).liveHistory?.();if(stats)return stats;}return null;},
+      liveHistory:async()=>{await studioIdle(PM);for(const job of st.jobs.values()){const stats=await (job.backend as any).liveHistory?.();if(stats)return stats;}return null;},
     };
     void initStudioGpu().then(ok => { if (ok) PM.invalidate?.('render'); });
   }
@@ -173,27 +173,29 @@ function schedule(PM: any): void {
     if (more) { PM.invalidate?.('render'); schedule(PM); }
   }) as unknown as number;
 }
-function retainCapture(capture:Capture,key:string,frame:StudioFrame):void {
+function retainCapture(capture:Capture,key:string,frame:StudioFrame,backendId:string):void {
   const canvas=new OffscreenCanvas(frame.width,frame.height);
   canvas.getContext('2d')!.drawImage(frame.source,0,0);
-  capture.frames.set(key,{...frame,source:canvas,version:`capture:${nextCaptureFrame++}`,release:()=>{canvas.width=canvas.height=0;}});
+  capture.frames.get(key)?.release?.();
+  capture.frames.set(key,{...frame,backendId,source:canvas,version:`capture:${nextCaptureFrame++}`,release:()=>{canvas.width=canvas.height=0;}});
 }
 function requestFrame(PM: any, job: Job, request: StudioRenderRequest, key: string, capture:Capture|null=null,captureKey=''): StudioFrame | null {
-  const cached = job.frames.get(key); if (cached) {job.completedGeneration=job.generation;if(capture)retainCapture(capture,captureKey,cached);return cached;}
+  const cached = job.frames.get(key); if (cached) {job.completedGeneration=job.generation;state(PM).backend=job.backend.id;if(capture){capture.completed.add(captureKey);retainCapture(capture,captureKey,cached,job.backend.id);}return cached;}
   if (job.pending.has(key) || !job.ready) return null;
   const generation = job.generation;
   let asynchronous=false;
   const accept = (frame: StudioFrame) => {
     if (job.disposed || job.generation !== generation && (!capture || state(PM).capture!==capture)) { frame.release?.(); return; }
+    if(capture && state(PM).capture===capture)capture.completed.add(captureKey);
     if(asynchronous && capture && state(PM).capture===capture){
       // Transport canvases may be reused for the next shutter sample. Snapshot
       // on the GPU before another scene/time patch can change their pixels.
-      retainCapture(capture,captureKey,frame);
+      retainCapture(capture,captureKey,frame,job.backend.id);
     }
     // One current frame for each layer/tier; release superseded transport buffers.
     const prefix = `${request.layer}:${request.tier}:`;
     for (const [oldKey, old] of job.frames) if (oldKey.startsWith(prefix) && oldKey !== key) { old.release?.(); job.frames.delete(oldKey); }
-    job.frames.set(key, frame); job.completedGeneration=generation; job.samples = Math.max(job.samples, request.tier === 'refine' ? frame.samples : 0); state(PM).frames++;
+    job.frames.set(key, frame); job.completedGeneration=generation; job.samples = Math.max(job.samples, request.tier === 'refine' ? frame.samples : 0); state(PM).backend=job.backend.id;state(PM).frameSamples=frame.samples;state(PM).frames++;
   };
   try {
     const result = job.chain ? job.chain.then(() => job.backend.render(request)) : job.backend.render(request);
@@ -229,28 +231,44 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const splat=studioSplatLayer(runtime,camera,objectId,depthIds,width,height,bottom);
   if(splat){s.frames++;return {canvas:splat,version:`splat:${runtime.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}`};}
   const cam = cameraOf(camera, width, height); if (!cam) throw new Error('Unsupported Studio camera');
-  const capture=final?s.capture:null;
+  const capture=final || still?s.capture:null;
   const captureKey=capture?`${PM.animVersion?.() ?? ''}:${runtime.studioId ?? (runtime.studioId=nextRuntime++)}:${[...depthIds].sort()}:${objectId}:${time}:${width}:${height}:${bottom}:${JSON.stringify(cam)}:${PM._studioShutterSamples || 1}`:'';
+  if(capture && PM._studioPreparing){capture.requested.add(captureKey);if(runtime.materialsPending){capture.loading=true;return null;}}
   const prepared=capture?.frames.get(captureKey);
-  if(prepared)return {canvas:prepared.source,version:prepared.version};
+  if(prepared){s.backend=prepared.backendId ?? s.backend;s.frameSamples=prepared.samples;return {canvas:prepared.source,version:prepared.version};}
+  // The established synchronous readback API still works without preparation.
+  // Prepared exports/agent frames consume native capture images above; an
+  // unprepared readback uses the same Studio shader synchronously on WebGPU.
+  const synchronous=!!PM._studioSyncCapture;
   const separate=separateCompositing(PM,runtime,time),hiddenPrimary=new Set([...separate].filter(id=>id!==objectId && depthIds.has(id)));
   const fork=[...depthIds].some(id=>separate.has(id));
-  const setKey = `${runtime.studioId ?? (runtime.studioId = nextRuntime++)}:${[...depthIds].sort().join(',')}${fork?`:layer:${objectId}`:''}`;
-  for (const [k, j] of s.jobs) if (performance.now() - j.usedAt > JOB_TTL_MS || j.factoryRevision !== studioBackendRevision()) { disposeJob(j); s.jobs.delete(k); }
+  const geometrySetKey=`${runtime.studioId ?? (runtime.studioId = nextRuntime++)}:${[...depthIds].sort().join(',')}`;
+  const setKey = `${geometrySetKey}${fork?`:layer:${objectId}`:''}${synchronous?':sync':''}`;
+  for (const [k, j] of s.jobs) {
+    // Depth sets partition a composition. An overlapping, different set is a
+    // superseded scene layout, not another active view; release it immediately
+    // so adding objects cannot occupy all native sessions with obsolete jobs.
+    const overlap=j.runtime===runtime && [...depthIds].some(id=>j.depthIds.has(id));
+    const obsolete=overlap && (j.separate!==fork || j.depthIds.size!==depthIds.size || [...depthIds].some(id=>!j.depthIds.has(id)));
+    if (obsolete || performance.now() - j.usedAt > JOB_TTL_MS || j.factoryRevision !== studioBackendRevision()) { disposeJob(j); s.jobs.delete(k); }
+  }
   let job = s.jobs.get(setKey);
   const screenKey = `${time}:${PM.animVersion?.() ?? ''}:${PM.preparedVideoVersion ?? ''}`;
   const sceneKey = `${runtime.revision}:${screenKey}`;
   if (!job || job.sceneKey !== sceneKey) {
     const env = { sky: new THREE.Color(), ground: new THREE.Color(), intensity: 0 };
     const extracted = extractScene(runtime.scene, id => depthIds.has(id), env, {hiddenPrimary, onReady: () => { s.revision++; PM.invalidate?.('render'); } });
-    if (isPending(extracted)) { s.preparing.set(setKey, extracted); return null; }
-    s.preparing.delete(setKey);
+    // Native, synchronous and per-layer views prepare the same geometry.
+    // Share progress too, so a thumbnail cannot leave a stale Preparing entry
+    // after the viewer has already received the worker's completed geometry.
+    if (isPending(extracted)) { s.preparing.set(geometrySetKey, extracted); return null; }
+    s.preparing.delete(geometrySetKey);
     if (!studioBackendFactory() && extracted.tris.byteLength > studioMaxBindingBytes()) throw new Error('This scene exceeds the Studio GPU buffer budget');
     const screens: Job['screens'] = [];
     const maps = extracted.maps.map((m, layer) => { if ('screen' in m) { screens.push({ layer, comp: m.screen }); return renderScreen?.(m.screen) ?? new Uint8Array(MAP_SIZE * MAP_SIZE * 4); } return mapCanvas(m.source, m.flipY); });
     if (!job) {
-      const backend = studioBackendFactory()?.({ invalidate: () => PM.invalidate?.('render') }) ?? new WebGpuStudioBackend();
-      job = { runtime, uid:nextJob++, sceneKey: '', viewKey: '', scene: extracted, maps, backend, ready: false, disposed:false, chain: null, frames: new Map(), pending: new Map(), screens, screenKey, changedAt: performance.now(), usedAt: performance.now(), refining: false, samples: 0, refineGoal:0, generation: 0, factoryRevision: studioBackendRevision(), completedGeneration: -1, failure: null };
+      const backend = (!synchronous && studioBackendFactory()?.({ invalidate: () => PM.invalidate?.('render') })) || new WebGpuStudioBackend();
+      job = { runtime, uid:nextJob++,depthIds:new Set(depthIds),separate:fork, sceneKey: '', viewKey: '', scene: extracted, maps, backend, ready: false, disposed:false, chain: null, frames: new Map(), pending: new Map(), screens, screenKey, changedAt: performance.now(), usedAt: performance.now(), refining: false, samples: 0, refineGoal:0, generation: 0, factoryRevision: studioBackendRevision(), completedGeneration: -1, failure: null };
       const created = job;
       if(backend.id==='webgpu' && studioGpuReady())created.ready=true;
       else chain(created,backend.initialize().then(() => { created.ready = true; PM.invalidate?.('render'); }, error => backendFailure(created,PM,error)));
@@ -273,9 +291,12 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const tier = final || still ? 'final' : s.preview === 'quality' && performance.now() - job.changedAt >= REFINE_DELAY_MS && !PM.playing ? 'refine' : 'live';
   if(tier==='refine' && job.refineGoal===0)job.refineGoal=2;
   const samples = final ? Math.max(4, Math.ceil(Number(runtime.raw?.environment?.samples ?? STUDIO_FINAL_SAMPLES) / Math.max(1, PM._studioShutterSamples || 1))) : still ? STUDIO_STILL_SAMPLES : tier === 'refine' ? job.refineGoal : 1;
-  const rw = tier === 'live' ? Math.max(2, width >> 1) : width, rh = tier === 'live' ? Math.max(2, height >> 1) : height;
+  // Native Live owns tracing resolution and MetalFX upscaling. Its requested
+  // size is the final output size; do not halve it a second time in the page.
+  const lowResolution=tier==='live' && job.backend.id==='webgpu';
+  const rw = lowResolution ? Math.max(2, width >> 1) : width, rh = lowResolution ? Math.max(2, height >> 1) : height;
   const request: StudioRenderRequest = { tier, size: { width: rw, height: rh }, samples, layer: objectId || undefined, background: bottom, accumulate: tier === 'refine', denoise: studioOptions.denoise };
-  const key = `${objectId}:${tier}:${bottom}:${job.sceneKey}:${viewKey}:${samples}`;
+  const key = `${objectId}:${tier}:${bottom}:${job.sceneKey}:${viewKey}:${samples}:${rw}x${rh}`;
   const frame = requestFrame(PM, job, request, key,capture,captureKey);
   if (!final && !still) schedule(PM);
   if (frame) return { canvas: frame.source, version: `${job.uid}:${job.generation}:${frame.version}` };
@@ -286,8 +307,9 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
 let nextRuntime = 1,nextJob=1,nextCaptureFrame=1;
 /** A capture owns async shutter images until the next frame's preparation. */
 export function beginStudioCapture(PM:any):void {
-  const s=state(PM);for(const frame of s.capture?.frames.values() || [])frame.release?.();s.capture={frames:new Map()};
+  const s=state(PM);for(const frame of s.capture?.frames.values() || [])frame.release?.();s.capture={frames:new Map(),requested:new Set(),completed:new Set(),loading:false};
 }
+export function beginStudioCapturePass(PM:any):void {const capture=states.get(PM)?.capture;if(capture){capture.requested.clear();capture.loading=false;}}
 export function pruneStudio(PM: any, keep: (setKey: string) => boolean): void {
   const s = states.get(PM); if (!s) return;
   for (const k of s.preparing.keys()) if (!keep(k)) s.preparing.delete(k);
@@ -304,5 +326,6 @@ export async function studioIdle(PM?: any): Promise<void> {
 }
 
 export function studioPending(PM:any):boolean {
-  const s=states.get(PM);return !!s && (s.preparing.size>0 || [...s.jobs.values()].some(j=>!j.ready || j.pending.size || j.completedGeneration!==j.generation || j.runtime.materialsPending));
+  const s=states.get(PM);if(s?.capture && PM._studioPreparing)return s.capture.loading || [...s.capture.requested].some(key=>!s.capture!.completed.has(key));
+  return !!s && (s.preparing.size>0 || [...s.jobs.values()].some(j=>!j.ready || j.pending.size || j.completedGeneration!==j.generation || j.runtime.materialsPending));
 }

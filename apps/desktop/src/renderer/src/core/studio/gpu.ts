@@ -416,13 +416,13 @@ export class StudioTarget {
     const bd = this.view.backdrop;
     const cam = this.view.camera, prev = this.prevCamera;
     const camera = (c: StudioCamera) => [...c.position, 0, ...c.forward, 0, ...c.right, c.tanY * c.aspect, ...c.up, c.tanY];
-    const temporalOn = this.live && !!prev && !cam.orthographic;
+    const temporalOn = this.live && !!prev && !!prev.orthographic === !!cam.orthographic;
     // Final's denoiser hands compose its own coverage (see denoise.wgsl's finish).
     let sums = [this.accum, this.bgsum, this.ebuf];
     const run = (pipe: any, src: number, dst: number, step: number) => {
       const data = new ArrayBuffer(POST_BYTES);
       new Uint32Array(data, 0, 4).set([this.width, this.height, step, temporalOn ? 1 : 0]);
-      new Float32Array(data, 16, 8).set([this.view!.exposure, 1.6, 0, 0, bd[0], bd[1], bd[2], this.view!.backdropOpaque ? 1 : 0]);
+      new Float32Array(data, 16, 8).set([this.view!.exposure, 1.6, 0, cam.orthographic ? 4 : 0, bd[0], bd[1], bd[2], this.view!.backdropOpaque ? 1 : 0]);
       new Float32Array(data, 48, 32).set([...camera(cam), ...camera(prev ?? cam)]);
       device.queue.writeBuffer(this.postParams[slot], 0, data);
       const group = device.createBindGroup({
