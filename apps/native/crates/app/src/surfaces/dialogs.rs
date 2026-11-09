@@ -64,6 +64,8 @@ pub struct Field {
     pub placeholder: Option<&'static str>,
     pub enabled: bool,
     pub description: Option<String>,
+    /// The description is a warning (drawn in the warning colour).
+    pub warning: bool,
     pub tooltip: Option<&'static str>,
     pub error: Option<&'static str>,
 }
@@ -79,6 +81,7 @@ impl Field {
             placeholder: None,
             enabled: true,
             description: None,
+            warning: false,
             tooltip: None,
             error: None,
         }
@@ -136,7 +139,6 @@ pub struct Surface {
     pub groups: Vec<FieldGroup>,
     /// Display order as specified. Default is explicit, independent of order.
     pub buttons: Vec<Button>,
-    pub warning: Option<String>,
     pub width_token: &'static str,
     pub inset_token: &'static str,
     pub value_column_token: &'static str,
@@ -164,7 +166,6 @@ impl Surface {
             fields,
             groups: vec![],
             buttons: vec![Button::cancel(false), Button::action(action)],
-            warning: None,
             width_token: "metrics.sheet_width",
             inset_token: "metrics.sheet_inset",
             value_column_token: "metrics.sheet_value_column",
@@ -208,13 +209,46 @@ impl CompositionDraft {
         }
         e
     }
-    pub fn surface(
-        &self,
-        id: DialogId,
-        owner: WindowId,
-        settings: bool,
-        extending_layers: usize,
-    ) -> Surface {
+    /// The sheet's fields as a draft. Text the person left as it opened keeps
+    /// the exact value it shows (a duration of 2206 frames at 30 fps reads
+    /// `73.533` but stays frame-exact); unparseable numbers stay invalid.
+    pub fn read(&self, text: impl Fn(&str) -> String, background: Option<String>) -> Self {
+        let number = |id: &str, original: f64| {
+            let typed = text(id);
+            if typed.trim() == number_text(original) {
+                original
+            } else {
+                typed.trim().parse().unwrap_or(f64::NAN)
+            }
+        };
+        Self {
+            name: text("name"),
+            width: number("size.0", self.width),
+            height: number("size.1", self.height),
+            fps: number("fps", self.fps),
+            duration: number("duration", self.duration),
+            background: background.unwrap_or_else(|| self.background.clone()),
+        }
+    }
+    /// The Duration row's detail: the length in frames, as v1's settings say
+    /// it, or the layers a shorter duration cuts off (`cut`).
+    pub fn duration_detail(&self, cut: usize) -> (String, bool) {
+        match cut {
+            0 if in_range(self.duration, 0.1, 3600.) && in_range(self.fps, 1., 240.) => (
+                format!(
+                    "Total length of the composition — {} frames at {} fps.",
+                    (self.duration * self.fps).round().max(1.),
+                    number_text(self.fps)
+                ),
+                false,
+            ),
+            0 => ("Total length of the composition, in seconds.".into(), false),
+            1 => (CUT_ONE.into(), true),
+            n => (cut_many(n), true),
+        }
+    }
+    pub fn surface(&self, id: DialogId, owner: WindowId, settings: bool, cut: usize) -> Surface {
+        let (detail, warning) = self.duration_detail(cut);
         let mut fields = vec![
             Field::new(
                 "name",
@@ -234,11 +268,20 @@ impl CompositionDraft {
             Field::number(
                 "size",
                 "Size",
-                vec![self.width.to_string(), self.height.to_string()],
+                vec![number_text(self.width), number_text(self.height)],
                 "px",
             ),
-            Field::number("fps", "Frame Rate", vec![self.fps.to_string()], "fps"),
-            Field::number("duration", "Duration", vec![self.duration.to_string()], "s"),
+            Field::number("fps", "Frame Rate", vec![number_text(self.fps)], "fps"),
+            Field {
+                description: Some(detail),
+                warning,
+                ..Field::number(
+                    "duration",
+                    "Duration",
+                    vec![number_text(self.duration)],
+                    "s",
+                )
+            },
             Field::new(
                 "background",
                 "Background",
@@ -261,16 +304,6 @@ impl CompositionDraft {
             fields,
             if settings { "Apply" } else { "Create" },
         );
-        if settings && extending_layers > 0 {
-            s.warning = Some(if extending_layers == 1 {
-                "1 layer extends past the new duration. It’s kept but won’t play past the end."
-                    .into()
-            } else {
-                format!(
-                    "{extending_layers} layers extend past the new duration. They’re kept but won’t play past the end."
-                )
-            });
-        }
         s.valid();
         s
     }
@@ -297,6 +330,23 @@ fn resolution_labels() -> Vec<String> {
         .map(|r| r.0.to_owned())
         .chain(["Custom".to_owned()])
         .collect()
+}
+/// A number as a sheet field shows it: at most three decimals, no trailing zeros.
+pub fn number_text(n: f64) -> String {
+    if !n.is_finite() {
+        return n.to_string();
+    }
+    let text = format!("{n:.3}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.into()
+    }
+}
+pub const CUT_ONE: &str = "1 layer runs past this duration and stops at the end.";
+pub fn cut_many(n: usize) -> String {
+    format!("{n} layers run past this duration and stop at the end.")
 }
 fn in_range(n: f64, min: f64, max: f64) -> bool {
     n.is_finite() && (min..=max).contains(&n)

@@ -101,17 +101,28 @@ pub mod native {
             sheet.line(title, tokens.typography.heading.into(), tokens.colors.text);
             sheet
         }
-        pub fn line(&mut self, text: &str, size: f64, rgb: u32) {
-            let label = NSTextField::wrappingLabelWithString(&NSString::from_str(text), self.mtm);
+        pub fn line(&mut self, text: &str, size: f64, rgb: u32) -> Retained<NSTextField> {
+            self.line_reserving(text, text, size, rgb)
+        }
+        /// A line tall enough for `reserve` too, for text that changes while
+        /// the sheet is open.
+        pub fn line_reserving(
+            &mut self,
+            text: &str,
+            reserve: &str,
+            size: f64,
+            rgb: u32,
+        ) -> Retained<NSTextField> {
+            let label =
+                NSTextField::wrappingLabelWithString(&NSString::from_str(reserve), self.mtm);
             label.setFont(Some(&NSFont::systemFontOfSize(size)));
             label.setTextColor(Some(&colour(rgb)));
             let width = self.layout.width - 2. * self.layout.inset;
             label.setPreferredMaxLayoutWidth(width);
-            let height = label
-                .sizeThatFits(NSSize::new(width, f64::MAX))
-                .height
-                .ceil()
-                .max(self.layout.row);
+            let fit = |label: &NSTextField| label.sizeThatFits(NSSize::new(width, f64::MAX)).height;
+            let reserved = fit(&label);
+            label.setStringValue(&NSString::from_str(text));
+            let height = fit(&label).max(reserved).ceil().max(self.layout.row);
             let extra = height - self.layout.row;
             if extra > 0. {
                 let mut size = self.content.frame().size;
@@ -131,6 +142,7 @@ pub mod native {
                 NSSize::new(width, height),
             ));
             self.content.addSubview(&label);
+            label
         }
         pub fn row(&mut self, label: &str, view: &NSView) {
             self.y -= self.layout.row;

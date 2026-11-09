@@ -155,7 +155,7 @@ impl ProjectLibrary {
         };
         let mtm = objc2::MainThreadMarker::new().unwrap();
         let sheet = new_project_sheet(&form, &self.tokens, mtm);
-        let open = OpenSheet::present(sheet, &window, Some("name"));
+        let open = OpenSheet::present((sheet, Default::default()), &window, Some("name"));
         let actions = open.actions.clone();
         *self.sheet.borrow_mut() = Some(open);
         cx.spawn(async move |this, cx| {

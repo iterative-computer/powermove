@@ -106,7 +106,9 @@ fn composition_copy_and_reading_order() {
             ]
         );
         assert_eq!(s.first_selected, Some("name".into()));
-        assert_eq!(s.warning,settings.then(||"2 layers extend past the new duration. They’re kept but won’t play past the end.".into()));
+        let duration = &s.fields[4];
+        assert_eq!(duration.description, Some(cut_many(2)));
+        assert!(duration.warning);
     }
 }
 #[test]
@@ -233,7 +235,10 @@ fn kernel_composition_settings_one_undo_keeps_coordinates_and_opaque_data() {
     draft.name = "Changed".into();
     draft.width = 3840.;
     draft.duration = 1.;
-    assert_eq!(c.extending_layers(1.).unwrap(), 2);
+    assert_eq!(c.layers_cut_by(1.).unwrap(), 2);
+    // Both layers end at 5 s: keeping or lengthening the duration cuts none.
+    assert_eq!(c.layers_cut_by(5.).unwrap(), 0);
+    assert_eq!(c.layers_cut_by(6.).unwrap(), 0);
     apply(c.composition_edit(&draft, None).unwrap(), &h, 1);
     let p = h.published("P").unwrap();
     assert_eq!(
@@ -540,4 +545,85 @@ fn the_composition_size_menu_follows_the_dimensions() {
     assert_eq!(c.resolution_index(), 6, "Custom follows the presets");
     assert!(!c.choose_resolution("Custom"));
     assert_eq!((c.width, c.height), (1000., 1920.));
+}
+
+/// The texts a sheet shows for a surface's fields (`size.0`, `size.1`, …).
+fn shown(s: &Surface) -> BTreeMap<String, String> {
+    let mut texts = BTreeMap::new();
+    for f in &s.fields {
+        if f.values.len() > 1 {
+            for (i, v) in f.values.iter().enumerate() {
+                texts.insert(format!("{}.{i}", f.id), v.clone());
+            }
+        } else if let Some(v) = f.values.first() {
+            texts.insert(f.id.clone(), v.clone());
+        }
+    }
+    texts
+}
+#[test]
+fn a_frame_exact_duration_reads_short_opens_quiet_and_survives_apply() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let h = actor.handle();
+    // 2206 frames at 30 fps, a layer ending exactly at the end.
+    let dur = 2206. / 30.;
+    h.open("P",OpenSource::Untitled(parse(&format!(r##"{{"id":"P","name":"Project","compId":"C","w":1920,"h":1080,"fps":30,"dur":{dur},"bg":"#000000","comps":{{"C":{{"id":"C","name":"Main","w":1920,"h":1080,"fps":30,"dur":{dur},"bg":"#000000","layers":[{{"id":"L","name":"Layer","type":"solid","on":true,"from":0,"dur":{dur},"d":{{"w":200,"h":100,"color":"#ffffff"}},"p":{{}}}}]}}}}}}"##)).unwrap())).wait().unwrap().unwrap();
+    let c = Context::capture(&h, "P").unwrap();
+    let draft = c.composition_draft(true).unwrap();
+    let surface = draft.surface(
+        id(),
+        owner(),
+        true,
+        c.layers_cut_by(draft.duration).unwrap(),
+    );
+    let texts = shown(&surface);
+    assert_eq!(texts["duration"], "73.533");
+    let duration = &surface.fields[4];
+    assert_eq!(
+        duration.description.as_deref(),
+        Some("Total length of the composition — 2206 frames at 30 fps.")
+    );
+    assert!(!duration.warning);
+    // Only the name changes: the duration text is as it opened.
+    let read = draft.read(
+        |id| {
+            if id == "name" {
+                "Renamed".into()
+            } else {
+                texts[id].clone()
+            }
+        },
+        None,
+    );
+    assert_eq!(read.duration, dur);
+    apply(c.composition_edit(&read, None).unwrap(), &h, 1);
+    let comp = root(&h);
+    let comp = comp.get("comps").and_then(|c| c.get("C")).unwrap();
+    assert_eq!(comp.get("dur").and_then(Value::as_f64), Some(dur));
+    assert_eq!(comp.get("name").and_then(Value::as_str), Some("Renamed"));
+    // A typed duration is what was typed; a shorter one names the cut layer.
+    let typed = draft.read(
+        |id| {
+            if id == "duration" {
+                "60".into()
+            } else {
+                texts[id].clone()
+            }
+        },
+        None,
+    );
+    assert_eq!(typed.duration, 60.);
+    let cut = Context::capture(&h, "P")
+        .unwrap()
+        .layers_cut_by(typed.duration)
+        .unwrap();
+    assert_eq!(typed.duration_detail(cut), (CUT_ONE.into(), true));
+}
+#[test]
+fn sheet_numbers_show_at_most_three_decimals() {
+    assert_eq!(number_text(10.), "10");
+    assert_eq!(number_text(0.1), "0.1");
+    assert_eq!(number_text(30000. / 1001.), "29.97");
+    assert_eq!(number_text(2206. / 30.), "73.533");
+    assert_eq!(number_text(-0.0001), "0");
 }
