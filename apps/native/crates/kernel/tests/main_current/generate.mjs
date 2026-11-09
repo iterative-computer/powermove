@@ -42,16 +42,22 @@ const edit = (...commands) => {
   return result;
 };
 const id = name => P.proj.layers.find(l => l.name === name).id;
+const mutate = (label, action) => {
+  const result = P.Edit.mutate(label, action);
+  if (!result.ok) throw new Error(`${label}: ${result.message ?? result.error}`);
+};
 const add = (layerType, name, extra = {}) => { edit({type: 'add_layer', layerType, name, from: 0, duration: 4, ...extra}); return id(name); };
 
 // Media: one owned image (embedded range) and one linked original (sourcePath,
 // no range: ordinary native saves keep the link, bf26d9b3e).
 const image = png();
-P.Edit.mutate('Import media', () => {
-  P.proj.assets.owned = {id: 'owned', name: 'Swatch.png', type: 'image', mime: 'image/png', w: 2, h: 2, size: image.length, storageKey: 'media:owned'};
-  P.proj.assets.linked = {id: 'linked', name: 'Linked clip.mov', type: 'video', mime: 'video/quicktime', w: 1920, h: 1080, dur: 2,
-    size: 4096, storageKey: 'media:linked', sourcePath: '/Volumes/Synthetic/Linked clip.mov', futureAssetField: {kept: true}};
-});
+// Import writes asset records outside Undo, in `assetIdentity`'s shape
+// (legacy/gl/raster.ts importAsset).
+const identity = (id, name, kind, extra) => ({id, name, kind, fingerprint: `fp-${id}`, storageKey: `media:${id}`, ...extra,
+  channels: 0, sampleRate: 0, playbackProxy: false, playbackProxyVersion: 0, persisted: true});
+P.proj.assets.owned = identity('owned', 'Swatch.png', 'image', {size: image.length, dur: 0, w: 2, h: 2, format: 'png'});
+P.proj.assets.linked = {...identity('linked', 'Linked clip.mov', 'video', {sourcePath: '/Volumes/Synthetic/Linked clip.mov',
+  size: 4096, dur: 2, w: 1920, h: 1080, fps: 30}), hasAudio: false, audioDur: 0, futureAssetField: {kept: true}};
 const picture = add('image', 'Owned image', {content: {asset: 'owned'}});
 add('video', 'Linked video', {content: {asset: 'linked'}});
 
@@ -62,7 +68,7 @@ edit({type: 'add_effect', target: shape, effect: 'blur'},
   {type: 'add_effect', target: shape, effect: 'blur', version: 1},
   {type: 'add_effect', target: shape, effect: 'shadow'},
   {type: 'add_effect', target: shape, effect: 'gradient', version: 1});
-P.Edit.mutate('Future effects', () => {
+mutate('Future effects', () => {
   const layer = P.proj.layers.find(l => l.id === shape);
   layer.fx[0].version = 99; // a revision newer than this build knows
   layer.fx.push({id: 'fx-future', type: 'futureEffect', version: 3, on: true, open: true,
@@ -83,11 +89,11 @@ edit({type: 'set_effect', target: inputs, effect: fx[0].id, patch: {inputs: {map
   {type: 'set_effect', target: inputs, effect: fx[2].id, patch: {inputs: {map: {layerId: source, stage: 'effects'}, texture: {kind: 'asset', assetId: 'owned'}}}},
   {type: 'set_effect', target: inputs, effect: fx[3].id, patch: {inputs: {redLayer: {layerId: source, stage: 'source', space: 'composition'}}}},
   {type: 'set_layer', target: inputs, patch: {effectSpace: 'source', separateDimensions: false}});
-P.Edit.mutate('Path input', () => { fx[1].inputs = {...fx[1].inputs, path: {kind: 'path', layerId: pathOwner, pathId}}; });
+mutate('Path input', () => { fx[1].inputs = {...fx[1].inputs, path: {kind: 'path', layerId: pathOwner, pathId}}; });
 
 // Text timing v2 (stagger animators created by the inspector's presets).
 const text = add('text', 'Stagger title', {content: {text: 'Main fixture'}});
-P.Edit.mutate('Text animators', () => {
+mutate('Text animators', () => {
   const layer = P.proj.layers.find(l => l.id === text);
   const rise = makeAnimator(P.P, 'ta-in', 'Rise', ANIMATOR_PRESETS.find(p => p.id === 'rise'), 48);
   const out = makeAnimator(P.P, 'ta-out', 'Fade out', ANIMATOR_PRESETS.find(p => p.id === 'fade'), 48);
@@ -103,7 +109,9 @@ const group = edit({type: 'group_layers', targets: [a, b], name: '3D rig'}).data
 edit({type: 'set_layer', target: group, patch: {threeD: true}}, {type: 'set_layer', target: a, patch: {threeD: true}});
 for (const [i, blend] of ['colorburn', 'colordodge', 'hardlight', 'exclusion', 'hue', 'saturation', 'color', 'luminosity', 'linearburn'].entries())
   edit({type: 'set_layer', target: add('solid', `Blend ${blend}`, {from: i * 0.1}), patch: {blend}});
-P.Edit.mutate('Soft light v2', () => { const l = P.proj.layers.find(l => l.id === picture); l.blend = 'softlight'; l.blendVersion = 2; });
+// Several track mattes on one layer (multiple mattes, 841dc9dfd).
+edit({type: 'set_layer', target: b, patch: {matteSources: [{source: a, mode: 'alpha'}, {source: id('Blend hue'), mode: 'luma-inverted'}]}});
+mutate('Soft light v2', () => { const l = P.proj.layers.find(l => l.id === picture); l.blend = 'softlight'; l.blendVersion = 2; });
 
 // Figma editable content (main's own all-features fixture through its importer).
 const figma = allFeatures();
@@ -124,11 +132,16 @@ for (const op of [{operation: 'add', kind: 'goal', text: 'Keep the authored timi
   {operation: 'add', kind: 'constraint', text: 'No new colours', why: 'Brand'},
   {operation: 'add', kind: 'open', text: 'Review the nested inputs'}, {operation: 'update', id: 'mem-3', resolved: true}])
   memory = applyMemoryOperation(memory, op, ctx).entries;
-P.Edit.mutate('Memory', () => { P.proj.memory = memory; P.proj.memoryEnabled = false; });
+// The memory tool writes notes without an Undo entry (assistant/harness.ts);
+// the Settings switch then disables memory without deleting it.
+P.proj.memory = memory;
+P.proj.memoryEnabled = false;
 
 // Unknown fields at every level a future build may add them.
-P.Edit.mutate('Future fields', () => {
-  P.proj.futureProjectField = {nested: [1, {deep: 'x'}]};
+// Unknown fields at every level a future build may add them (written
+// directly: by definition no command of this build knows them).
+P.proj.futureProjectField = {nested: [1, {deep: 'x'}]};
+mutate('Future layer fields', () => {
   P.proj.layers[0].futureLayerField = 'kept';
   P.proj.layers[0].d.futureContentField = 7;
   for (const comp of Object.values(P.proj.comps || {})) comp.futureCompField = true;
@@ -145,6 +158,8 @@ edit({type: 'set_effect', target: shape, effect: P.proj.layers.find(l => l.id ==
 edit({type: 'set_layer', target: shape, patch: {name: 'Renamed then undone'}});
 P.hist.undo();
 
+if (!P.proj.assets.owned || !P.proj.assets.linked || P.proj.memory?.length !== 3 || !P.proj.futureProjectField)
+  throw new Error('fixture setup lost project fields');
 for (const [name, value] of Object.entries({
   scene3dDefaultsVersion: P.proj.scene3dDefaultsVersion, switch3DVersion: P.proj.switch3DVersion,
   timingVersion: P.proj.layers.find(l => l.id === text).d.animators[0].timingVersion,

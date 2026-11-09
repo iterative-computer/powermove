@@ -79,6 +79,7 @@ export const load = p => import(SRC + p);
 const {makePM} = await load('renderer/src/legacy/__tests__/make-pm.ts');
 const {EFFECTS} = await load('extensions/effects-basic/effects.ts');
 export {EFFECTS};
+const APP_VERSION = readFileSync(SRC + 'renderer/src/legacy/core/util.ts', 'utf8').match(/^PM\.version = '([^']+)';$/m)[1];
 
 const noop = () => {};
 const element = () => ({dataset: {}, style: {}, classList: {add: noop, remove: noop, contains: () => false},
@@ -92,6 +93,8 @@ export function editor(project = {name: 'Main fixture', w: 640, h: 360, fps: 30,
   // The renderer's store over main's FileStore (electron-shim, separateHistory).
   if (store) PM.store = {separateHistory: true, get: (key, fallback) => store.get(key) ?? fallback,
     has: key => store.get(key) !== undefined, set: (key, value) => { store.set(key, value); return true; }, del: key => store.delete(key)};
+  // core/util needs a browser window; its version constant is all a save uses.
+  PM.version = APP_VERSION;
   for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
   PM.Kernel.services.register('shaderHooks', {syncShaderUniforms: noop});
   PM.proj = PM.mkProject(project);
