@@ -3,7 +3,7 @@
 //! target instead of guessing. Other lanes add their own commands in `session.rs`.
 use crate::{
     dialogs::{
-        CompositionDraft, DialogId, RESOLUTIONS, WindowId,
+        CompositionDraft, DialogId, WindowId,
         kernel::{Context as Dialog, DialogError},
     },
     project_library::{Outbound, ProjectLibrary, Sink, current_format, default_format},
@@ -11,6 +11,7 @@ use crate::{
     sheets::{OpenSheet, from_surface},
 };
 use gpui::{prelude::*, *};
+use pm_builtins::RESOLUTIONS;
 use pm_kernel::Call;
 use std::rc::Rc;
 

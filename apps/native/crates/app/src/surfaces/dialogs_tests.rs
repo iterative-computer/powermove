@@ -530,3 +530,14 @@ fn reviewed_precompose_disabled_label_and_scale_errors_are_exact() {
     assert_eq!(s.fields[1].error, Some(NUMBER_ERROR));
     assert!(!s.buttons[1].enabled);
 }
+#[test]
+fn the_composition_size_menu_follows_the_dimensions() {
+    let mut c = comp();
+    assert_eq!(c.resolution_index(), 1);
+    assert!(c.choose_resolution("Vertical HD · 1080×1920"));
+    assert_eq!((c.width, c.height, c.resolution_index()), (1080., 1920., 3));
+    c.width = 1000.;
+    assert_eq!(c.resolution_index(), 6, "Custom follows the presets");
+    assert!(!c.choose_resolution("Custom"));
+    assert_eq!((c.width, c.height), (1000., 1920.));
+}

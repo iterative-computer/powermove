@@ -18,6 +18,7 @@ pub mod kernel;
 #[path = "dialogs_tests.rs"]
 mod tests;
 
+use pm_builtins::RESOLUTIONS;
 use std::collections::BTreeMap;
 
 pub const NAME_ERROR: &str = "Enter a name.";
@@ -277,13 +278,13 @@ impl CompositionDraft {
     pub fn resolution_index(&self) -> usize {
         RESOLUTIONS
             .iter()
-            .position(|(_, w, h)| *w == self.width && *h == self.height)
+            .position(|(_, w, h)| f64::from(*w) == self.width && f64::from(*h) == self.height)
             .unwrap_or(RESOLUTIONS.len())
     }
     pub fn choose_resolution(&mut self, label: &str) -> bool {
         if let Some((_, w, h)) = RESOLUTIONS.iter().find(|r| r.0 == label) {
-            self.width = *w;
-            self.height = *h;
+            self.width = f64::from(*w);
+            self.height = f64::from(*h);
             true
         } else {
             false
@@ -297,14 +298,6 @@ fn resolution_labels() -> Vec<String> {
         .chain(["Custom".to_owned()])
         .collect()
 }
-pub const RESOLUTIONS: &[(&str, f64, f64)] = &[
-    ("4K UHD · 3840×2160", 3840., 2160.),
-    ("HD 1080p · 1920×1080", 1920., 1080.),
-    ("HD 720p · 1280×720", 1280., 720.),
-    ("Vertical HD · 1080×1920", 1080., 1920.),
-    ("Portrait 4:5 · 1080×1350", 1080., 1350.),
-    ("Square · 1080×1080", 1080., 1080.),
-];
 fn in_range(n: f64, min: f64, max: f64) -> bool {
     n.is_finite() && (min..=max).contains(&n)
 }

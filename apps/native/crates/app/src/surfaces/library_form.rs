@@ -1,14 +1,7 @@
 //! S018 typed drafts. Invalid input stays visible and never reaches the kernel.
 use super::model::Failure;
+use pm_builtins::RESOLUTIONS;
 
-pub const PRESETS: &[(&str, u32, u32)] = &[
-    ("4K UHD · 3840×2160", 3840, 2160),
-    ("HD 1080p · 1920×1080", 1920, 1080),
-    ("HD 720p · 1280×720", 1280, 720),
-    ("Vertical HD · 1080×1920", 1080, 1920),
-    ("Portrait 4:5 · 1080×1350", 1080, 1350),
-    ("Square · 1080×1080", 1080, 1080),
-];
 pub const FORM_ROWS: &[&str] = &[
     "Name",
     "Resolution",
@@ -86,7 +79,7 @@ impl NewProjectForm {
             fps: seed.fps.to_string(),
             duration: seed.duration.to_string(),
             background: seed.background.clone(),
-            preset: PRESETS
+            preset: RESOLUTIONS
                 .iter()
                 .position(|(_, w, h)| *w == seed.width && *h == seed.height),
             linked: Some(true),
@@ -99,7 +92,7 @@ impl NewProjectForm {
             return Err(Failure::Busy);
         }
         if let Some(i) = index {
-            let (_, w, h) = PRESETS.get(i).ok_or(Failure::Stale)?;
+            let (_, w, h) = RESOLUTIONS.get(i).ok_or(Failure::Stale)?;
             self.width = w.to_string();
             self.height = h.to_string();
         }
