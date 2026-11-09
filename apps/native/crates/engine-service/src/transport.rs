@@ -1,7 +1,7 @@
 //! Reuse the existing presenter policy without its bridge transport.
+use crate::audio::{AudioCtl, AudioLink};
 use crate::clock::TransportClock;
 use crate::media::MediaMap;
-use crate::audio::{AudioCtl, AudioLink};
 use pm_protocol::{
     clock::{ClockSample, TransportCommand, TransportState},
     common::PlaybackRate,
@@ -153,11 +153,8 @@ impl Transport {
                         at: start,
                     });
                     self.clock.hold(from, now);
-                    self.awaiting = Some((
-                        now + crate::clock::AUDIO_START_TIMEOUT_US,
-                        before,
-                        rate,
-                    ));
+                    self.awaiting =
+                        Some((now + crate::clock::AUDIO_START_TIMEOUT_US, before, rate));
                 }
             }
             TransportCommand::PlayAround {
@@ -188,11 +185,8 @@ impl Transport {
                     if running && (self.audible || self.clock.following()) {
                         a.send(AudioCtl::Seek(time.get()));
                         self.clock.hold(time.get(), now);
-                        self.awaiting = Some((
-                            now + crate::clock::AUDIO_START_TIMEOUT_US,
-                            before,
-                            rate,
-                        ));
+                        self.awaiting =
+                            Some((now + crate::clock::AUDIO_START_TIMEOUT_US, before, rate));
                     } else {
                         a.send(if mode == pm_protocol::clock::SeekMode::Scrub {
                             AudioCtl::Scrub(time.get())
@@ -346,9 +340,17 @@ mod audible_tests {
         let mut transport = Transport::new(1);
         transport.refresh_audible(&project(audio), "C").unwrap();
         assert!(transport.audible);
-        assert!(transport.refresh_audible(&project(audio), "missing").is_err());
+        assert!(
+            transport
+                .refresh_audible(&project(audio), "missing")
+                .is_err()
+        );
         assert!(!transport.audible);
-        assert!(transport.refresh_audible(&Document::new(None, 1), "C").is_err());
+        assert!(
+            transport
+                .refresh_audible(&Document::new(None, 1), "C")
+                .is_err()
+        );
         transport.refresh_audible(&project(""), "C").unwrap();
         assert!(!transport.audible);
     }

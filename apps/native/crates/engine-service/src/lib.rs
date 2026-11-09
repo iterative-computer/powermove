@@ -2,15 +2,15 @@
 //! Callers own below-slot placement and pump native layers on the main thread.
 pub mod audio;
 pub mod clock;
-pub mod media;
 pub mod color;
 pub mod compat;
 pub mod frame_codec;
 pub mod jobs;
 pub mod layers;
+pub mod media;
 pub mod policy;
-pub mod qos;
 mod present;
+pub mod qos;
 mod render;
 pub mod render_cache;
 pub mod resources;
