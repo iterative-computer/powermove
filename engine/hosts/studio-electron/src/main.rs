@@ -35,6 +35,7 @@ enum Command {
         #[serde(flatten)]
         patch: packed::Patch,
     },
+    PreparedView { key:String, view:packed::View },
     Snapshot,
     Scene {
         scene: Scene,
@@ -187,13 +188,11 @@ impl Host {
         let sdata = append(bytemuck::cast_slice(&p.sdata));
         let texture=self.screen.as_ref().map(|(w,h,layers,data)|json!({"width":w,"height":h,"layers":layers,"bytes":append(data)}));
         let camera = r.scene.camera;
-        let forward = (camera.target - camera.position).normalize();
-        let right = forward.cross(pm_studio::math::Vec3::Y).normalize();
-        let up = right.cross(forward);
+        let (forward,right,up)=camera.basis();
         let tan_y = (camera.fov.to_radians() * 0.5).tan();
         let (lo, hi) = r.bounds();
         let center = (lo + hi) * 0.5;
-        let view = json!({"camera":{"position":camera.position.to_array(),"forward":forward.to_array(),"right":right.to_array(),"up":up.to_array(),"tanY":tan_y,"aspect":16.0/9.0,"lensRadius":if camera.f_stop>0.{camera.focal_mm/(2.*camera.f_stop)}else{0.},"focus":camera.focus.map(|f|(f-camera.position).dot(forward)).unwrap_or((camera.target-camera.position).length())},"exposure":r.scene.exposure,"backdrop":r.scene.backdrop.to_array(),"backdropOpaque":true,"shadowCatcher":r.scene.shadow_catcher,"shadows":true,"floorY":0.,"environment":{"zenith":r.scene.environment.0.to_array(),"horizon":r.scene.environment.1.to_array(),"ground":(r.scene.environment.1*0.5).to_array()},"bounds":[center.x,center.y,center.z,(hi-lo).length()*0.5]});
+        let view = json!({"camera":{"position":camera.position.to_array(),"forward":forward.to_array(),"right":right.to_array(),"up":up.to_array(),"tanY":tan_y,"aspect":16.0/9.0,"lensRadius":camera.aperture_radius(r.scene.meters_per_unit),"focus":camera.focus.map(|f|(f-camera.position).dot(forward)).unwrap_or((camera.target-camera.position).length())},"exposure":r.scene.exposure,"backdrop":r.scene.backdrop.to_array(),"backdropOpaque":true,"shadowCatcher":r.scene.shadow_catcher,"shadows":true,"floorY":0.,"environment":{"zenith":r.scene.environment.0.to_array(),"horizon":r.scene.environment.1.to_array(),"ground":(r.scene.environment.1*0.5).to_array()},"bounds":[center.x,center.y,center.z,(hi-lo).length()*0.5]});
         Ok((
             json!({"positions":positions,"tris":tris,"nodes":nodes,"materials":materials,"sdata":sdata,"topNodes":r.top_nodes,"instanceCount":r.placements.len(),"lightCount":p.lights.len(),"objects":r.identities,"view":view,"bounds":{"min":lo.to_array(),"max":hi.to_array()},"texture":texture}),
             binary,
@@ -223,6 +222,10 @@ impl Host {
                 self.revision += 1;
                 json!({"revision":self.revision})
             }
+            Command::PreparedView{key,view}=>{
+                if self.packed.as_mut().ok_or("no prepared scene")?.patch_view(&key,view)?{self.history_revision+=1;}
+                self.revision+=1;json!({"revision":self.revision})
+            }
             Command::Snapshot => {
                 return self.snapshot();
             }
@@ -234,7 +237,7 @@ impl Host {
                 json!({"released":frame})
             }
             Command::Hello => {
-                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
+                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries","preparedView","environments"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
             }
             Command::Scene {
                 scene,
@@ -287,14 +290,19 @@ impl Host {
                 if let Some(c) = camera {
                     r.scene.camera = c;
                 }
+                let lighting_or_materials_changed=materials.is_some()||lights.is_some();
                 if let Some(m) = materials {
                     r.scene.materials = m;
                 }
                 if let Some(l) = lights {
                     r.scene.lights = l;
                 }
+                if lighting_or_materials_changed {
                 // Small material/light arrays can be rebuilt without touching meshes or BLAS.
                 let metadata = Scene {
+                    meters_per_unit:r.scene.meters_per_unit,
+                    instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![],
+                    world: r.scene.world.clone(),
                     objects: vec![],
                     materials: r.scene.materials.clone(),
                     lights: r.scene.lights.clone(),
@@ -311,6 +319,8 @@ impl Host {
                 r.prepared.lights = metadata.lights;
                 let light_rows = r.prepared.lights.len() * 4;
                 r.prepared.sdata[..light_rows].copy_from_slice(&metadata.sdata[..light_rows]);
+                r.refresh_world();
+                }
                 self.revision += 1;
                 json!({"revision":self.revision,"time":time})
             }
@@ -368,7 +378,7 @@ impl Host {
             Command::Bounds { layer } => {
                 if let Some(r) = &self.resident {
                     let bounds = (0..r.transforms.len())
-                        .filter(|&i| layer.as_ref().is_none_or(|l| &r.identities[i].layer == l))
+                        .filter(|&i| layer.as_ref().is_none_or(|l| &r.identities[r.object_indices[i]].layer == l))
                         .map(|i| r.object_bounds(i))
                         .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
                     bounds
@@ -475,12 +485,13 @@ impl Host {
                 let (w, h) = if is_live {
                     // Keep Live within a predictable pixel budget for small worlds.
                     // Final/Refine always render at the requested output size.
-                    let (instances, lights) = if let Some(p) = &self.packed {
-                        (p.placements.len(), p.prepared.lights.len())
+                    let (instances, lights, media) = if let Some(p) = &self.packed {
+                        (p.placements.len(), p.prepared.lights.len(),pm_studio::environment::packed_has_media(&p.prepared.sdata,p.prepared.lights.len(),p.placements.len()))
                     } else {
                         let r = self.resident.as_ref().ok_or("no scene")?;
-                        (r.placements.len(), r.prepared.lights.len())
+                        (r.placements.len(), r.prepared.lights.len(),pm_studio::environment::packed_has_media(&r.prepared.sdata,r.prepared.lights.len(),r.placements.len()))
                     };
+                    self.live_budget.atmosphere(media);
                     self.live_budget
                         .size(width, height, instances > 128 || lights > 32)
                 } else {
@@ -836,7 +847,15 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let u: packed::Upload = serde_json::from_value(value).unwrap();
-        let packed = packed::PackedScene::new(u, &binary).unwrap();
+        let mut packed = packed::PackedScene::new(u, &binary).unwrap();
+        let positions=packed.prepared.positions.as_ptr();let instances=packed.prepared.sdata.as_ptr();
+        let mut view=packed.view.clone();view.camera.position[0]+=1.;
+        assert!(!packed.patch_view("test",view.clone()).unwrap());
+        assert_eq!(positions,packed.prepared.positions.as_ptr());assert_eq!(instances,packed.prepared.sdata.as_ptr());
+        assert!(packed.patch_view("stale",view.clone()).is_err());
+        view.shadows=!view.shadows;assert!(packed.patch_view("test",view).unwrap());
+        // Restore the original view for the picking assertions below.
+        let original:packed::View=serde_json::from_value(h.snapshot().unwrap().0["view"].clone()).unwrap();packed.patch_view("test",original).unwrap();
         let expected = h.resident.as_ref().unwrap().bounds();
         let actual = packed.bounds(None).unwrap();
         assert!((glam::Vec3::from(expected.0.to_array()) - actual.0).length() < 1e-3);

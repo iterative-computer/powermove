@@ -98,6 +98,9 @@ impl View {
         let c = &self.camera;
         let pos = v(c.position);
         Scene {
+            meters_per_unit:0.1,
+            instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![],
+            world: Default::default(),
             objects: vec![],
             materials: vec![],
             lights: vec![],
@@ -163,13 +166,15 @@ impl PackedScene {
             || materials.is_empty()
             || u.top_nodes == 0
             || u.top_nodes > nodes.len()
-            || u.instance_count > 65535
+            || u.instance_count > 1_000_000
             || u.light_count > 65535
-            || (sdata.len() != u.light_count * 4 + u.instance_count * 9
+            || (sdata.len() < u.light_count * 4 + u.instance_count * 9
                 && !(u.light_count == 0 && u.instance_count == 0 && sdata.len() == 1))
         {
             return Err("invalid prepared scene buffer sizes".into());
         }
+        let trailer_start=u.light_count*4+u.instance_count*9;
+        if sdata.len()>trailer_start && !(u.light_count==0 && u.instance_count==0 && sdata.len()==1) {pm_studio::environment::validate_packed(&sdata[trailer_start..],u.light_count)?;}
         if positions
             .iter()
             .flatten()
@@ -188,6 +193,7 @@ impl PackedScene {
                 return Err("prepared triangle has invalid material/object index".into());
             }
         }
+        validate_instance_flags(&sdata,u.light_count,u.instance_count,u.objects.len())?;
         validate_top(&nodes[..u.top_nodes], u.instance_count)?;
         let lights = sdata[..u.light_count * 4]
             .chunks_exact(4)
@@ -199,6 +205,7 @@ impl PackedScene {
             })
             .collect();
         let prepared = Prepared {
+            instancing:None,
             positions,
             tris,
             nodes,
@@ -240,6 +247,13 @@ impl PackedScene {
             local_bounds,
         })
     }
+    pub fn patch_view(&mut self,key:&str,view:View)->Result<bool,String>{
+        if key!=self.key{return Err("native geometry key is stale; upload scene again".into());}
+        view.validate()?;
+        let mut previous=self.view.clone();previous.camera=view.camera.clone();
+        let content_changed=self.view.camera.orthographic!=view.camera.orthographic || previous!=view;
+        self.view=view;Ok(content_changed)
+    }
     pub fn patch(&mut self, p: Patch, binary: &[u8]) -> Result<bool, String> {
         if self.key != p.key {
             return Err("native geometry key is stale; upload scene again".into());
@@ -268,6 +282,9 @@ impl PackedScene {
         {
             return Err("patch contains non-finite data".into());
         }
+        let lights=self.prepared.lights.len();let count=self.placements.len();let trailer=lights*4+count*9;
+        if sdata.len()>trailer && !(lights==0&&count==0&&sdata.len()==1){pm_studio::environment::validate_packed(&sdata[trailer..],lights)?;}
+        validate_instance_flags(&sdata,lights,count,self.objects.len())?;
         validate_top(&nodes, self.placements.len())?;
         let mut old_view = self.view.clone();
         old_view.camera = p.view.camera.clone();
@@ -416,6 +433,12 @@ impl PackedScene {
         found
     }
 }
+fn validate_instance_flags(data:&[[f32;4]],lights:usize,count:usize,objects:usize)->Result<(),String>{
+    for i in 0..count {
+        let flags=data[lights*4+i*9+4][3];let hidden=data[lights*4+i*9+5][3];
+        if !flags.is_finite()||flags<0.||flags.fract()!=0.||(flags as u32>>1)>objects as u32||!(0. ..=1.).contains(&hidden) {return Err("invalid instance flags or output-layer override".into());}
+    }Ok(())
+}
 fn placements(p: &Prepared, count: usize) -> Result<(Vec<RtGeometry>, Vec<RtPlacement>), String> {
     let start = p.lights.len() * 4;
     let mut roots = BTreeMap::<u32, (u32, u32)>::new();
@@ -548,6 +571,11 @@ fn validate_top(nodes: &[WideNode], instances: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layer_flags_preserve_visibility_and_reject_out_of_range_ids(){
+        let mut data=vec![[0.;4];9];data[4][3]=2.;data[5][3]=1.;validate_instance_flags(&data,0,1,1).unwrap();
+        data[4][3]=4.;assert!(validate_instance_flags(&data,0,1,1).is_err());data[4][3]=1.25;assert!(validate_instance_flags(&data,0,1,1).is_err());
+    }
     #[test]
     fn rejects_gpu_traversal_cycles_and_invalid_leaves() {
         assert!(validate_top(&[WideNode::default()], 1).is_err());

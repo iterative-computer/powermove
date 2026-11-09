@@ -1,6 +1,5 @@
 //! The GPU side: one path-tracing pipeline, resolve, denoise and pack.
 
-use crate::math::Vec3;
 use crate::scene::{Prepared, Scene};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
@@ -47,7 +46,7 @@ fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
   var rq: ray_query;
   var flags = RAY_FLAG_FORCE_OPAQUE;
   if (any) { flags |= RAY_FLAG_TERMINATE_ON_FIRST_HIT; }
-  rayQueryInitialize(&rq, tlas, RayDesc(flags, 0xffu, EPS, tmax, ro, rd));
+  rayQueryInitialize(&rq, tlas, RayDesc(flags, 0xffu, ray_epsilon(), tmax, ro, rd));
   rayQueryProceed(&rq);
   let x = rayQueryGetCommittedIntersection(&rq);
   if (x.kind != RAY_QUERY_INTERSECTION_TRIANGLE) { return h; }
@@ -458,11 +457,11 @@ impl Renderer {
     pub fn set_scene(&mut self, scene: &Scene, prepared: &Prepared) {
         let extra = if self.rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let init = |label: &str, data: &[u8]| {
-            let data: Vec<u8> = if data.is_empty() { vec![0u8; 64] } else { data.to_vec() };
+            let data: Vec<u8> = if data.is_empty() { vec![0u8; 128] } else { data.to_vec() };
             self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | extra })
         };
         self.history_valid = false;
-        self.instance_count = 1;
+        self.instance_count = prepared.instancing.as_ref().map_or(1,|i|i.placements.len() as u32);
         self.scene_buffers = vec![
             init("tris", bytemuck::cast_slice(&prepared.tris)),
             init("nodes", bytemuck::cast_slice(&prepared.nodes)),
@@ -472,7 +471,7 @@ impl Renderer {
         ];
         self.light_count = prepared.lights.len() as u32;
         self.trace_group = None;
-        self.build_rt(prepared.positions.len() as u32);
+        if let Some(i)=&prepared.instancing {self.build_instanced_rt(&i.geometries,&i.placements,true);}else{self.build_rt(prepared.positions.len() as u32);}
         // Caustics only where something can focus light: glass or polished metal.
         self.caustics = prepared.materials.iter().any(|m| m.spec[3] * (1.0 - m.base[3]) > 0.5 || (m.base[3] > 0.5 && m.spec[0] < 0.25));
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -482,6 +481,11 @@ impl Renderer {
                 hi[k] = hi[k].max(p[k]);
             }
         }
+        if prepared.instancing.is_some() {
+            lo=[f32::MAX;3];hi=[f32::MIN;3];let n=prepared.nodes[0];
+            for (a,b,count) in [(n.lmin,n.lmax,n.lcount),(n.rmin,n.rmax,n.rcount)] {if count!=u32::MAX {for k in 0..3 {lo[k]=lo[k].min(a[k]);hi[k]=hi[k].max(b[k]);}}}
+        }
+        if prepared.positions.is_empty(){lo=[-1.;3];hi=[1.;3];}
         let centre = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
         let radius = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-3) * 0.5;
         self.bounds = [centre[0], centre[1], centre[2], radius];
@@ -565,12 +569,10 @@ impl Renderer {
     /// Camera, backdrop and environment only (no geometry upload).
     pub fn set_camera(&mut self, scene: &Scene) {
         let c = &scene.camera;
-        let fwd = (c.target - c.position).normalize();
-        let right = fwd.cross(Vec3::Y).normalize();
-        let up = right.cross(fwd).normalize();
+        let (fwd,right,up)=c.basis();
         let tan_y = (c.fov.to_radians() * 0.5).tan();
         let aspect = self.width as f32 / self.height as f32;
-        let lens_radius = if c.f_stop > 0.0 { c.focal_mm / (2.0 * c.f_stop) } else { 0.0 };
+        let lens_radius = c.aperture_radius(scene.meters_per_unit);
         let focus = c.focus.map(|f| (f - c.position).dot(fwd)).unwrap_or((c.target - c.position).length());
         self.base = Params {
             cam_pos: c.position.to4(lens_radius),
@@ -839,9 +841,10 @@ impl Renderer {
         self.post(0, true, Some(denoise), None)
     }
 
-    /// Linear scene radiance per pixel (RGBA f32; A is the backdrop's
-    /// shading), before exposure and tone mapping: for comparing against
-    /// reference renderers.
+    /// Actual per-pixel counts (adaptive rendering may stop before the ceiling).
+    pub fn sample_counts(&self)->Vec<f32> {self.read_f32(&self.accum,u64::from(self.width)*u64::from(self.height)*16).chunks_exact(4).map(|p|p[3]).collect()}
+
+    /// Linear scene radiance before exposure and tone mapping.
     pub fn radiance(&mut self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
         let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, self.output_layer.map_or(0.,|l|(l+1) as f32), (u32::from(self.output_include_void) | (u32::from(self.straight_output) << 1) | ((self.base.opts[3]&1)<<2)) as f32], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };

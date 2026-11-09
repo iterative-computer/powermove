@@ -29,6 +29,7 @@ describe('native Studio process', () => {
       expect([...reply.binary]).toEqual([1, 2, 3, 255]);
       expect(host.status().running).toBe(true);
       expect(reply.roundTripMs).toBeGreaterThan(0);
+      expect((await host.request({op:'preparedView',key:'test',view:{}})).result.op).toBe('preparedView');
     } finally { host.dispose(); }
   });
   it('rejects a crashed render and restarts with a fresh generation', async () => {

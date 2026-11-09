@@ -10,8 +10,10 @@ publish.workspace = true
 [dependencies]
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 pollster = "0.4"
+glam = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
+image = { version = "0.25", default-features = false, features = ["hdr", "exr", "png"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

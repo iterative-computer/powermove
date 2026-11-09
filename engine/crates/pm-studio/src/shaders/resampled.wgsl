@@ -16,7 +16,7 @@ fn direct_candidate(li: u32, sample_seed: u32, p: vec3f, n: vec3f, v: vec3f, m: 
   if (s.pdf > 0.0) {
     if (floor_hit) { let nl = max(dot(n, s.dir), 0.0); f = vec3f(P.env_horizon.w * nl / PI); pb = nl / PI; }
     else { f = eval_reflect(m, n, v, s.dir); pb = pdf_reflect(m, w, n, v, s.dir); }
-    let pl = s.pdf / f32(P.counts.x);
+    let pl = s.pdf * light_selection_pdf(li,p);
     f *= s.radiance * (pl * pl / max(pl * pl + pb * pb, 1e-20)) / max(s.pdf,1e-20);
   }
   let importance = max(dot(f, vec3f(0.2126,0.7152,0.0722)), 0.0);
@@ -29,10 +29,10 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   var total_weight = 0.0; var candidates = 0u;
   let fresh=select(2u,4u,P.counts.x>8u);
   for (var j = 0u; j < fresh; j++) {
-    let li = min(u32(rnd()*f32(P.counts.x)),P.counts.x-1u);
+    let li = choose_light(p);
     let rs = pcg(seed); seed = pcg(rs);
     let c = direct_candidate(li,rs,p,n,v,m,w,floor_hit);
-    let weight = c.importance * f32(P.counts.x);
+    let weight = c.importance / max(light_selection_pdf(li,p),1e-20);
     total_weight += weight; candidates++;
     if (weight > 0.0 && rnd()*total_weight < weight) { chosen_light=li;chosen_seed=rs;chosen_target=c.importance; }
   }
@@ -47,7 +47,7 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
       let pixel=center+offset;
       if(any(pixel<vec2i(0))||any(pixel>=vec2i(R.dims.xy))){continue;}
       let h=reservoirs_in[u32(pixel.y)*R.dims.x+u32(pixel.x)];
-      if(h.key.w==0u||h.key.x>=P.counts.x||dot(h.normal.xyz,n)<.95||distance(h.surface.xyz,p)>max(.02*length(p-P.cam_pos.xyz),EPS*4.)){continue;}
+      if(h.key.w==0u||h.key.x>=P.counts.x||dot(h.normal.xyz,n)<.95||distance(h.surface.xyz,p)>max(.02*length(p-P.cam_pos.xyz),ray_epsilon()*4.)){continue;}
       let c=direct_candidate(h.key.x,h.key.y,p,n,v,m,w,floor_hit);
       let count=min(h.key.z,16u);let weight=c.importance*h.weights.x*f32(count);
       total_weight+=weight;candidates+=count;

@@ -33,6 +33,9 @@ impl LiveBudget {
         self.quiet = 0;
         self.slow = 0;
     }
+    /// Participating media need a conservative initial budget, avoiding any
+    /// expensive MetalFX target resize during the first camera drag.
+    pub fn atmosphere(&mut self,enabled:bool) {if enabled {self.level=self.level.max(4);}}
     pub fn size(&mut self, width: u32, height: u32, complex: bool) -> (u32, u32) {
         if complex {
             self.level = self.level.max(2);
@@ -102,6 +105,8 @@ mod tests {
             b.observe(20.);
         }
         assert_eq!(b.size(1920, 1080, false), (640, 360));
+        b.reset();
+        b.atmosphere(true);assert_eq!(b.size(1920,1080,false),(640,360));
         b.reset();
         assert_eq!(b.size(1920, 1080, true), (768, 432));
     }

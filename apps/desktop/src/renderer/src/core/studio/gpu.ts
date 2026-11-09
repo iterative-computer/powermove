@@ -80,8 +80,9 @@ export function initStudioGpu(): Promise<any> {
         },
       });
       failure=null;
-      device.addEventListener('uncapturederror',(event:any)=>{failure=event.error?.message || String(event.error);});
-      device.lost.then((info: any) => { failure = `WebGPU device lost: ${info.message}`; device = null; devicePromise = null; pipelines=null;denoisePipelines=null; });
+      const created=device;
+      created.addEventListener('uncapturederror',(event:any)=>{failure=event.error?.message || String(event.error);});
+      created.lost.then((info: any) => { if(device!==created)return;failure = `WebGPU device lost: ${info.message}`; device = null; devicePromise = null; pipelines=null;denoisePipelines=null; });
       await Promise.all([preparePipelines(),prepareDenoise()]);
       return device;
     } catch (error) {
@@ -92,6 +93,8 @@ export function initStudioGpu(): Promise<any> {
   return devicePromise;
 }
 export const studioGpuReady = () => !!device && !!pipelines && !!denoisePipelines;
+/** Diagnostic synchronization before reading browser-rendered pixels. */
+export const studioGpuWait = async ():Promise<void> => {await device?.queue.onSubmittedWorkDone();};
 /** The largest buffer one binding can hold (bytes): bounds how many triangles Studio can trace. */
 export const studioMaxBindingBytes = (): number => device?.limits?.maxStorageBufferBindingSize ?? 0;
 export const studioGpuFailure = () => failure;

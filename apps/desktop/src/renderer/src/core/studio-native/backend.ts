@@ -27,6 +27,9 @@ export class NativeStudioBackend implements StudioBackend {
   private time = 0;
   private revision = 0;
   private uploaded = -1;
+  private sceneRevision=0;
+  private uploadedSceneRevision=-1;
+  private supportsViewPatch=false;
   private geometryKey: string | null = null;
   private uploadedMaps: StudioTextureSource[] = [];
   private mapPixels: Uint8Array[] = [];
@@ -59,17 +62,17 @@ export class NativeStudioBackend implements StudioBackend {
       if(waiter){this.textureWaiters.delete(info.frame);clearTimeout(waiter.timer);waiter.resolve(source);}else{this.textureFrames.set(info.frame,source);}
       for(const [key,old] of this.textureFrames){if(this.textureFrames.size<=3)break;old.width=0;old.height=0;this.textureFrames.delete(key);}
     })??null;
-    const hello = await this.bridge.request(this.session, { op: 'hello' }); this.generation = hello.generation;
+    const hello = await this.bridge.request(this.session, { op: 'hello' }); this.generation = hello.generation;this.supportsViewPatch=hello.result?.capabilities?.includes('preparedView')??false;
     if(hello.result?.layout?.materialBytes!==STUDIO_MATERIAL_FLOATS*4 || hello.result?.layout?.triangleBytes!==96)throw new Error('Native Studio needs a matching renderer build');
   }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription): void {
-    this.disposeGraph(); this.prepared = scene; this.maps = maps; this.description = description; this.document = null; this.revision++; this.mapsRevision++;
+    this.disposeGraph(); this.prepared = scene; this.maps = maps; this.description = description; this.document = null; this.revision++; this.sceneRevision++; this.mapsRevision++;
   }
   setScene(document: StudioSceneDescription): void {
     if (document.version !== 1) throw new Error('Unsupported Studio scene version');
     this.disposeGraph(); const compiled = compileSceneDescription(document);
     this.graph = compiled.graph; this.document = document; this.description = () => document;
-    this.prepared = compiled.scene; this.maps = compiled.maps; this.geometryKey = null; this.revision++; this.mapsRevision++;
+    this.prepared = compiled.scene; this.maps = compiled.maps; this.geometryKey = null; this.revision++; this.sceneRevision++; this.mapsRevision++;
     this.setView(viewFromDescription(document, this.width / this.height));
   }
   patchScene(patch: StudioScenePatch): void {
@@ -96,7 +99,7 @@ export class NativeStudioBackend implements StudioBackend {
   private async send(command: StudioNativeCommand, binary?: Uint8Array): Promise<StudioNativeReply> {
     const reply = await this.bridge.request(this.session, command, binary);
     if (this.generation && reply.generation !== this.generation) {
-      this.uploaded = -1; this.geometryKey = null; this.uploadedMaps = []; this.uploadedMapsRevision=-1;
+      this.uploaded = -1; this.uploadedSceneRevision=-1;this.geometryKey = null; this.uploadedMaps = []; this.uploadedMapsRevision=-1;
       this.generation = reply.generation;
       throw new Error('Native Studio restarted; scene needs to be uploaded again');
     }
@@ -112,16 +115,22 @@ export class NativeStudioBackend implements StudioBackend {
     if (this.uploaded === this.revision) return;
     const revision = this.revision;
     if (this.prepared) {
-      const scene = this.prepared, writer = new StudioBinaryWriter();
+      const scene = this.prepared;
       const nativeKey=geometryKey(scene);
-      const small = { key: nativeKey, sdata: writer.append(scene.sdata), materials: writer.append(scene.materials), view: this.packedView() };
-      if (this.geometryKey === nativeKey) {
-        await this.send({ op: 'preparedPatch', ...small, top: writer.append(scene.tlasNodes), instancePolicies:scene.instancePolicies }, writer.finish());
-      } else {
-        const nodes = new Uint8Array(scene.tlasNodes.byteLength + scene.blasNodes.byteLength);
-        nodes.set(new Uint8Array(scene.tlasNodes)); nodes.set(new Uint8Array(scene.blasNodes), scene.tlasNodes.byteLength);
-        await this.send({ op: 'prepared', ...small, positions: writer.append(scene.positions), tris: writer.append(scene.tris), nodes: writer.append(nodes), topNodes: scene.tlasNodes.byteLength / 64, instanceCount: scene.instanceCount, lightCount: scene.lightCount, objects: scene.objects.map(layer => ({ layer, part: '' })), instancePolicies: scene.instancePolicies }, writer.finish());
-        this.geometryKey = nativeKey;
+      if(this.supportsViewPatch && this.geometryKey===nativeKey && this.uploadedSceneRevision===this.sceneRevision){
+        await this.send({op:'preparedView',key:nativeKey,view:this.packedView()});
+      }else{
+        const writer = new StudioBinaryWriter();
+        const small = { key: nativeKey, sdata: writer.append(scene.sdata), materials: writer.append(scene.materials), view: this.packedView() };
+        if (this.geometryKey === nativeKey) {
+          await this.send({ op: 'preparedPatch', ...small, top: writer.append(scene.tlasNodes), instancePolicies:scene.instancePolicies }, writer.finish());
+        } else {
+          const nodes = new Uint8Array(scene.tlasNodes.byteLength + scene.blasNodes.byteLength);
+          nodes.set(new Uint8Array(scene.tlasNodes)); nodes.set(new Uint8Array(scene.blasNodes), scene.tlasNodes.byteLength);
+          await this.send({ op: 'prepared', ...small, positions: writer.append(scene.positions), tris: writer.append(scene.tris), nodes: writer.append(nodes), topNodes: scene.tlasNodes.byteLength / 64, instanceCount: scene.instanceCount, lightCount: scene.lightCount, objects: scene.objects.map(layer => ({ layer, part: '' })), instancePolicies: scene.instancePolicies }, writer.finish());
+          this.geometryKey = nativeKey;
+        }
+        this.uploadedSceneRevision=this.sceneRevision;
       }
       if(this.mapsRevision!==this.uploadedMapsRevision){await this.uploadTextures(this.maps);this.uploadedMapsRevision=this.mapsRevision;}
     } else { throw new Error('Set a Studio scene before rendering'); }
