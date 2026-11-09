@@ -22,7 +22,7 @@ use crate::ring::Heard;
 pub const REFRESH_US: u64 = 100_000;
 
 /// Now, in host microseconds (`mach_absolute_time`, as `CLOCK_UPTIME_RAW`;
-/// the domain of `pm_engine::clock::host_now` and of CoreAudio host times).
+/// the domain of CoreAudio host times).
 pub fn host_now_us() -> u64 {
     #[cfg(target_vendor = "apple")]
     {

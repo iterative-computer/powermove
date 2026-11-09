@@ -123,7 +123,7 @@ pub struct Change {
     /// The revision these operations apply on top of.
     pub base_revision: u64,
     pub revision: u64,
-    /// The operations, in order (`pm_engine::document::DocumentUpdate::Ops`).
+    /// The operations, in order.
     pub ops: Arc<[Op]>,
     pub cause: ChangeCause,
 }
