@@ -234,11 +234,11 @@ impl Automation {
             creative: Arc::new(crate::creative::CreativeReader::default()),
         }
     }
-    /// The owned kernel. Attached hosts go through the app's actor instead.
-    pub fn kernel(&self) -> &Kernel {
+    /// The headless binary's own kernel; none when attached to the app's actor.
+    pub fn kernel(&self) -> Option<&Kernel> {
         match &self.backend {
-            Backend::Owned(kernel) => kernel,
-            Backend::App(_) => panic!("Attached automation has no owned kernel"),
+            Backend::Owned(kernel) => Some(kernel),
+            Backend::App(_) => None,
         }
     }
     #[cfg(test)]
@@ -324,6 +324,7 @@ impl Automation {
     /// The owned store, for headless harnesses. Production paths read `view`.
     pub fn store(&self, id: &str) -> Result<&pm_kernel::DocumentStore> {
         self.kernel()
+            .ok_or_else(|| Error::unavailable("an owned kernel store"))?
             .project(id)
             .map(|p| p.store())
             .ok_or_else(|| Error::invalid("Project is not open"))
@@ -937,7 +938,14 @@ mod tests {
             );
             assert_eq!(host.squash(&id, &mark, "Agent run").unwrap(), None);
             assert_eq!(host.read_document(&id).unwrap(), snapshot);
-            assert!(host.kernel().project(&id).unwrap().open_entry().is_some());
+            assert!(
+                host.kernel()
+                    .unwrap()
+                    .project(&id)
+                    .unwrap()
+                    .open_entry()
+                    .is_some()
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }

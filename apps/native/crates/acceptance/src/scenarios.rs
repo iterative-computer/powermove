@@ -550,8 +550,8 @@ fn journal() -> Check {
     f.add("L-journal")?;
     f.call("finish_session", json!({"commit":true}))?;
     let host = f.host.lock().unwrap();
-    host.kernel().sync_all();
-    match host.kernel().recover(&f.id, None, None) {
+    host.kernel().unwrap().sync_all();
+    match host.kernel().unwrap().recover(&f.id, None, None) {
         pm_kernel::journal::Recovery::Recovered(recovered) => {
             assert_eq!(recovered.history.len(), 1);
             assert!(

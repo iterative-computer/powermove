@@ -190,8 +190,9 @@ fn guarded_session_commit_squashes_and_undo_works() {
     assert!(finished["historyId"].is_string());
     let mut host = f.host.lock().unwrap();
     assert_eq!(host.store(&id).unwrap().history().len(), 1);
-    host.kernel().sync_all();
-    let pm_kernel::journal::Recovery::Recovered(recovered) = host.kernel().recover(&id, None, None)
+    host.kernel().unwrap().sync_all();
+    let pm_kernel::journal::Recovery::Recovered(recovered) =
+        host.kernel().unwrap().recover(&id, None, None)
     else {
         panic!("expected recoverable grouped history");
     };
@@ -413,8 +414,9 @@ fn restore_validates_then_remains_undoable() {
             .cause,
         pm_kernel::document::ChangeCause::Restore { .. }
     ));
-    h.kernel().sync_all();
-    let pm_kernel::journal::Recovery::Recovered(recovered) = h.kernel().recover(&id, None, None)
+    h.kernel().unwrap().sync_all();
+    let pm_kernel::journal::Recovery::Recovered(recovered) =
+        h.kernel().unwrap().recover(&id, None, None)
     else {
         panic!("expected recoverable rollback");
     };
@@ -435,7 +437,14 @@ fn restore_validates_then_remains_undoable() {
 fn durability_notice_does_not_hide_applied_changes_from_rollback() {
     let f = Fixture::new();
     let id = f.create();
-    let journal = f.host.lock().unwrap().kernel().journal_dir(&id).unwrap();
+    let journal = f
+        .host
+        .lock()
+        .unwrap()
+        .kernel()
+        .unwrap()
+        .journal_dir(&id)
+        .unwrap();
     // Force the next rotation to fail without filling the disk or changing
     // permissions globally. The initial segment remains writable.
     let blocked = journal.join("journal-00000001.log");

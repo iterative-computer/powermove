@@ -31,8 +31,12 @@ fn run() -> Result<(), String> {
         .ok_or("Kernel stopped")?
         .map_err(|e| e.to_string())?;
     let mut session = ProEditSession::new(h, &id, Caller::native())?;
-    serve_stdio(std::io::stdin().lock(), std::io::stdout().lock(), &mut session)
-        .map_err(|e| e.to_string())?;
+    serve_stdio(
+        std::io::stdin().lock(),
+        std::io::stdout().lock(),
+        &mut session,
+    )
+    .map_err(|e| e.to_string())?;
     drop(session);
     actor.shutdown();
     Ok(())

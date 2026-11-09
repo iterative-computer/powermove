@@ -61,7 +61,15 @@ pub fn fork() -> Check {
         }));
         let before = f.document()?;
         let revision = f.revision();
-        let registries = f.host.lock().unwrap().kernel().state().registries.clone();
+        let registries = f
+            .host
+            .lock()
+            .unwrap()
+            .kernel()
+            .unwrap()
+            .state()
+            .registries
+            .clone();
         let started = f.call(
             "start_session",
             json!({"prompt":"Synthetic source copy","context":if commit {"app"} else {"project"}}),
@@ -97,7 +105,7 @@ pub fn fork() -> Check {
         assert_eq!(f.document()?, before);
         assert_eq!(f.revision(), revision);
         assert_eq!(
-            f.host.lock().unwrap().kernel().state().registries,
+            f.host.lock().unwrap().kernel().unwrap().state().registries,
             registries
         );
         assert_eq!(
