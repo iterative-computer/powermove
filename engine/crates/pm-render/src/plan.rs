@@ -2327,6 +2327,10 @@ fn local_text<'d>(
     let [x0, y0, x1, y1] = first.crop.map(f64::from);
     let bounds = [x0 - MARGIN, y0 - MARGIN, x1 - x0, y1 - y0];
     let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
+    let (dx, dy) = (
+        crate::space25d::local::stepped(dx, bounds[2]),
+        crate::space25d::local::stepped(dy, bounds[3]),
+    );
     // Layer space at density, shifted so the content starts near the
     // canvas origin.
     let (ox, oy) = (
