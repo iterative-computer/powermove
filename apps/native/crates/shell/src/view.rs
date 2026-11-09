@@ -1105,12 +1105,13 @@ impl Render for Tip {
 /// A tooltip builder naming a control's action.
 pub fn tooltip(
     t: &Tokens,
-    text: &'static str,
+    text: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let tokens = t.clone();
+    let text = text.into();
     move |_, cx| {
         cx.new(|_| Tip {
-            text: text.into(),
+            text: text.clone(),
             tokens: tokens.clone(),
         })
         .into()

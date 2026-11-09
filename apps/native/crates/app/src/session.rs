@@ -73,6 +73,8 @@ pub struct Controller {
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
     pub mixer: crate::mixer_panel::State,
+    pub takes: crate::takes_panel::State,
+    pub notes: crate::notes_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -174,6 +176,8 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
                 .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -420,6 +424,8 @@ impl Controller {
             scopes: Default::default(),
             perf: Default::default(),
             mixer: Default::default(),
+            takes: Default::default(),
+            notes: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -1467,6 +1473,14 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
+            self.restore_take(id, cx);
+            return true;
+        }
+        if let Some(id) = cmd.name.strip_prefix("takeDelete:") {
+            self.delete_take(id, cx);
+            return true;
+        }
         if cmd.name == "toolShape" {
             // The segment menu names a variant; Q again on the Shape tool
             // cycles them; a toolbar click keeps the current one.
