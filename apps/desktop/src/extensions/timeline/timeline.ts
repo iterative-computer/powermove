@@ -735,7 +735,7 @@ function edgeSnapping(event?: any) {
 }
 function beginDrag(event: any, options: any) {
   let control: any;
-  let previousX=0,previousY=0;
+  let previousX=0,previousY=0,previousModifiers='';
   const finish = (kind: 'up' | 'cancel') => (...args: any[]) => {
     activeDrags.delete(control);
     return options[kind]?.(...args);
@@ -743,9 +743,11 @@ function beginDrag(event: any, options: any) {
   control = api.ui.drag(event, { ...options,
     move:(dx:number,dy:number,pointer:PointerEvent)=>{
       // Browsers can emit a stationary pointermove when a modifier changes.
-      // Releasing Shift must not replace a snapped preview with raw timing.
-      if(dx===previousX&&dy===previousY)return;
-      previousX=dx;previousY=dy;options.move?.(dx,dy,pointer);
+      // Releasing Shift must not replace a snapped preview with raw timing,
+      // but Alt/Cmd/Ctrl (precision, centred scale) still apply immediately.
+      const modifiers=`${!!pointer?.altKey}${!!pointer?.metaKey}${!!pointer?.ctrlKey}`;
+      if(dx===previousX&&dy===previousY&&modifiers===previousModifiers)return;
+      previousX=dx;previousY=dy;previousModifiers=modifiers;options.move?.(dx,dy,pointer);
     },up: finish('up'), cancel: finish('cancel') });
   activeDrags.add(control);
   return control;
