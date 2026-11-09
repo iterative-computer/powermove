@@ -133,10 +133,19 @@ impl GizmoSurface {
                     px((p[1] * frame.scale) as f32),
                 )
         };
+        // Each guide runs from the dragged point to its target; both ends get a
+        // small cross so the points that caught read at a glance (v1).
+        let cross = px(self.tokens.metrics.gap / 2.);
         for &(a, b) in &self.guides {
             let mut line = PathBuilder::stroke(px(1.));
             line.move_to(at(a));
             line.line_to(at(b));
+            for end in [at(a), at(b)] {
+                line.move_to(end - point(cross, cross));
+                line.line_to(end + point(cross, cross));
+                line.move_to(end + point(-cross, cross));
+                line.line_to(end + point(cross, -cross));
+            }
             if let Ok(line) = line.build() {
                 window.paint_path(line, ink);
             }
