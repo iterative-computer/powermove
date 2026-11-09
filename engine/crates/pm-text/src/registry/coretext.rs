@@ -984,50 +984,7 @@ impl CoreTextRegistry {
         &mut self,
         family: &str,
     ) -> Option<(FontBytes, String, CFRetained<CTFont>)> {
-        let normalize = |s: &str| {
-            s.trim()
-                .trim_matches(|c| c == '"' || c == '\'')
-                .to_lowercase()
-        };
-        let key = normalize(family);
-        if key.is_empty() {
-            return None;
-        }
-        let all = unsafe { CTFontCollection::from_available_fonts(None) };
-        let list = unsafe { all.matching_font_descriptors() }?;
-        // SAFETY: the array holds CTFontDescriptors.
-        let list: CFRetained<CFArray<CTFontDescriptor>> =
-            unsafe { CFRetained::cast_unchecked(list) };
-        let mut candidates: Vec<(String, bool, PathBuf)> = Vec::new();
-        for desc in list.iter() {
-            let string = |k: &CFString| {
-                unsafe { desc.attribute(k) }
-                    .and_then(|v| v.downcast::<CFString>().ok())
-                    .map(|s| s.to_string())
-            };
-            let ps = string(unsafe { kCTFontNameAttribute }).unwrap_or_default();
-            let names = [
-                string(unsafe { kCTFontFamilyNameAttribute }),
-                string(unsafe { kCTFontDisplayNameAttribute }),
-                Some(ps.clone()),
-            ];
-            if !names.iter().flatten().any(|n| normalize(n) == key) {
-                continue;
-            }
-            let style = string(unsafe { kCTFontStyleNameAttribute })
-                .or_else(|| string(unsafe { kCTFontDisplayNameAttribute }))
-                .unwrap_or_default();
-            let Some(path) = unsafe { desc.attribute(kCTFontURLAttribute) }
-                .and_then(|u| u.downcast::<CFURL>().ok())
-                .and_then(|u| u.to_file_path())
-            else {
-                continue;
-            };
-            candidates.push((ps, style.to_lowercase().contains("regular"), path));
-        }
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        candidates.sort_by_key(|c| !c.1);
-        for (_, _, path) in candidates {
+        for path in installed_family_files(family) {
             let Some((data, _)) = self.file_bytes(&path) else {
                 continue;
             };
@@ -1829,5 +1786,93 @@ mod snapshot_tests {
         assert_eq!(first.as_slice(), b"original font snapshot");
         assert_eq!(next.as_slice(), b"replaced font snapshot");
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+/// Files of the installed faces whose family, display or PostScript name is
+/// `family`, Regular faces first, then by PostScript name.
+fn installed_family_files(family: &str) -> Vec<PathBuf> {
+    let normalize = |s: &str| {
+        s.trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_lowercase()
+    };
+    let key = normalize(family);
+    if key.is_empty() {
+        return vec![];
+    }
+    let all = unsafe { CTFontCollection::from_available_fonts(None) };
+    let Some(list) = (unsafe { all.matching_font_descriptors() }) else {
+        return vec![];
+    };
+    // SAFETY: the array holds CTFontDescriptors.
+    let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
+    let mut candidates: Vec<(String, bool, PathBuf)> = Vec::new();
+    for desc in list.iter() {
+        let string = |k: &CFString| {
+            unsafe { desc.attribute(k) }
+                .and_then(|v| v.downcast::<CFString>().ok())
+                .map(|s| s.to_string())
+        };
+        let ps = string(unsafe { kCTFontNameAttribute }).unwrap_or_default();
+        let names = [
+            string(unsafe { kCTFontFamilyNameAttribute }),
+            string(unsafe { kCTFontDisplayNameAttribute }),
+            Some(ps.clone()),
+        ];
+        if !names.iter().flatten().any(|n| normalize(n) == key) {
+            continue;
+        }
+        let style = string(unsafe { kCTFontStyleNameAttribute })
+            .or_else(|| string(unsafe { kCTFontDisplayNameAttribute }))
+            .unwrap_or_default();
+        let Some(path) = unsafe { desc.attribute(kCTFontURLAttribute) }
+            .and_then(|u| u.downcast::<CFURL>().ok())
+            .and_then(|u| u.to_file_path())
+        else {
+            continue;
+        };
+        candidates.push((ps, style.to_lowercase().contains("regular"), path));
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.sort_by_key(|c| !c.1);
+    candidates.into_iter().map(|(_, _, path)| path).collect()
+}
+
+/// What an installed family offers for variation (`inspectFont`): `None` when
+/// no installed face has that family, else the axes of its first variable
+/// face (empty for a static family).
+pub fn installed_family_axes(family: &str) -> Option<Vec<crate::font::Axis>> {
+    let files = installed_family_files(family);
+    if files.is_empty() {
+        return None;
+    }
+    for path in files {
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(file) = read_fonts::FileRef::new(data.as_slice()) else {
+            continue;
+        };
+        for i in 0..file.fonts().count() {
+            let axes = crate::font::axes(data.as_slice(), i as u32);
+            if !axes.is_empty() {
+                return Some(axes);
+            }
+        }
+    }
+    Some(vec![])
+}
+
+#[cfg(test)]
+mod family_axes_tests {
+    #[test]
+    fn installed_families_report_their_variation_axes() {
+        // Skia ships variable with macOS; Helvetica is static.
+        let skia = super::installed_family_axes("Skia").expect("Skia is installed");
+        let tags: Vec<u32> = skia.iter().map(|a| a.tag).collect();
+        assert!(tags.contains(&crate::font::WGHT), "{tags:x?}");
+        assert!(super::installed_family_axes("Helvetica").is_some_and(|a| a.is_empty()));
+        assert!(super::installed_family_axes("No Such Family 7f3a").is_none());
     }
 }

@@ -39,6 +39,7 @@ const sectionActions: Record<SectionAction, string> = {
   mask: "Add Mask",
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
+  "refresh-fonts": "Refresh Fonts",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -284,6 +285,17 @@ function Field({
     );
   // Narrow the number/point union explicitly for strict TypeScript.
   if ("axes" in control) return null;
+  if (control.kind === "status")
+    return (
+      <text
+        style={{
+          color: token("colors.muted"),
+          fontSize: token("typography.label"),
+        }}
+      >
+        {control.value}
+      </text>
+    );
   const bound = {
     ...common,
     binding: control.binding.handle,
@@ -455,6 +467,15 @@ function Property({
                 })
               }
             />
+          ) : row.control.kind === "status" ? (
+            // A fact row keeps the keyframe column, so its label lines up.
+            <div
+              role="presentation"
+              style={{
+                width: token("metrics.hit"),
+                minWidth: token("metrics.hit"),
+              }}
+            />
           ) : null
         }
         trailing={
@@ -619,24 +640,47 @@ export function InspectorPanel({
             }
           >
             {section.action ? (
-              <Action
-                id={`section-action:${section.id}`}
-                label={sectionActions[section.action]}
-                disabled={target.kind === "layers" && target.first.locked}
-                onActivate={(event) =>
-                  section.action === "animator"
-                    ? session.nativeRequest({
-                        type: "animator-menu",
-                        anchor: event.currentTarget,
-                        items: section.presets ?? [],
-                      })
-                    : session.send({
-                        type: "section-action",
-                        section: section.id,
-                        action: section.action!,
-                      })
-                }
-              />
+              // A quiet text action on the label inset (it drew as an empty
+              // button: no symbol, no title).
+              <div
+                style={{
+                  ...horizontal,
+                  paddingLeft: token("metrics.inset"),
+                  paddingRight: token("metrics.inset"),
+                }}
+              >
+                <Action
+                  id={`section-action:${section.id}`}
+                  label={sectionActions[section.action]}
+                  symbol={
+                    section.action === "refresh-fonts"
+                      ? "arrow.clockwise"
+                      : "plus"
+                  }
+                  children={sectionActions[section.action]}
+                  style={{
+                    gap: token("metrics.inner_radius"),
+                    paddingLeft: token("metrics.inner_radius"),
+                    paddingRight: token("metrics.gap"),
+                    fontSize: token("typography.label"),
+                    symbolSize: token("metrics.symbol_inline"),
+                  }}
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={(event) =>
+                    section.action === "animator"
+                      ? session.nativeRequest({
+                          type: "animator-menu",
+                          anchor: event.currentTarget,
+                          items: section.presets ?? [],
+                        })
+                      : session.send({
+                          type: "section-action",
+                          section: section.id,
+                          action: section.action!,
+                        })
+                  }
+                />
+              </div>
             ) : null}
             {section.animators?.map((animator) => (
               <InspectorRow key={animator.id} label={animator.name}>

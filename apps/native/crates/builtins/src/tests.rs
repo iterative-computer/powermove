@@ -2808,3 +2808,89 @@ fn a_contributed_layer_types_parameters_are_properties_rows() {
     assert_eq!(size.value.as_f64(), Some(3.));
     panels.close();
 }
+
+#[test]
+fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[
+      {"id":"skia","type":"text","name":"Variable","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"A","font":"Skia","color":"#112233"},"fx":[]},
+      {"id":"plain","type":"text","name":"Static","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"B","font":"Helvetica","color":"#112233"},"fx":[]},
+      {"id":"gone","type":"text","name":"Missing","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"C","font":"No Such Family 7f3a","color":"#112233","fontAxis.wdth":{"v":88.62,"kf":[],"expr":null}},"fx":[]}]}"##).unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let select = |id: &str| {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    SelectionCall::Layers {
+                        ids: vec![id.into()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    let mut presenter = properties::Properties::default();
+    let mut section = |id: &str, presenter: &mut properties::Properties| {
+        select(id);
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+        let found = publication["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "type")
+            .cloned();
+        (found, model)
+    };
+    // A variable font: one row per axis, Weight among them.
+    let (variable, mut model) = section("skia", &mut presenter);
+    let variable = variable.expect("Skia has variation axes");
+    let weight = variable["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["label"] == "Weight")
+        .expect("Weight axis")
+        .clone();
+    assert!(variable.get("action").is_none());
+    // Typing a value stores the axis the layer didn't have yet.
+    let handle = weight["control"]["axes"][0]["binding"]["handle"]
+        .as_str()
+        .unwrap();
+    let request = presenter
+        .write(&mut model, Caller::native(), handle, 1.5f64.into(), 0.)
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    model.sync(kernel.published("synthetic").unwrap());
+    let text = pm_model::json::to_canonical_string(&model.layer("skia").unwrap().to_owned());
+    assert!(text.contains("fontAxis.wght"), "{text}");
+    // A static font has nothing to set.
+    assert!(section("plain", &mut presenter).0.is_none());
+    // A missing font keeps the axes the layer saved, says so, offers a refresh.
+    let gone = section("gone", &mut presenter)
+        .0
+        .expect("saved axes stay visible");
+    let rows = gone["rows"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["label"] == "Width" && r["control"]["axes"][0]["value"] == 88.62)
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r["control"]["kind"] == "status" && r["control"]["value"] == "Not installed")
+    );
+    assert_eq!(gone["action"], "refresh-fonts");
+}

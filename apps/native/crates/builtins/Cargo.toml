@@ -19,6 +19,7 @@ pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
 tempfile = "3"
 
 pm-panel-timeline = { path = "../panel-timeline" }
+pm-text = { path = "../../../../engine/crates/pm-text", default-features = false, features = ["system"] }
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
 pm-panel-media = { path = "../panel-media" }
 pm-panel-agentpanel = { path = "../panel-agentpanel" }

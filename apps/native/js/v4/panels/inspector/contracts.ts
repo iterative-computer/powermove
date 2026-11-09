@@ -49,7 +49,9 @@ export type Control =
   | ({ kind: "toggle" } & Field<boolean>)
   | ({ kind: "colour"; hexBinding?: Binding; hex?: string } & Field<string>)
   | ({ kind: "fill"; description: string } & Field<Json>)
-  | ({ kind: "segmented"; options: SegmentOption[] } & Field<string>);
+  | ({ kind: "segmented"; options: SegmentOption[] } & Field<string>)
+  /** A read-only fact in the value column (`Font  Not installed`). */
+  | { kind: "status"; value: string };
 export interface Row {
   id: string;
   label: string;
@@ -61,7 +63,11 @@ export interface Row {
   expression?: { binding: Binding; source: string; error: string | null };
   error?: { kind: "number" } | { kind: "range"; min: number; max: number };
 }
-export type SectionAction = "mask" | "animator" | "release-precomp";
+export type SectionAction =
+  | "mask"
+  | "animator"
+  | "release-precomp"
+  | "refresh-fonts";
 export interface AnimatorPreset {
   id: string | null;
   label: string;
@@ -159,6 +165,7 @@ export function sectionRows(section: Section): Row[] {
   ];
 }
 export function rowBindings(row: Row): Binding[] {
+  if (row.control.kind === "status") return [];
   const fields = "axes" in row.control ? row.control.axes : [row.control];
   return [
     ...fields.map((field) => field.binding),
