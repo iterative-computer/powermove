@@ -5,6 +5,7 @@
 //! plays a real project (a private copy: its embedded media are extracted to
 //! a scratch folder) and then seeks it at random, as the viewer does.
 //! `--from=SECONDS` starts the run there instead of at the start;
+//! `--loop=SECONDS` loops that much of it for the whole run;
 //! `--quality=full|half|quarter` pins the resolution (Auto by default);
 //! `--fill=DIR` first renders the played range into a disk render cache in
 //! `DIR` (Render Selection's child) and reports its bytes and read cost.
@@ -30,6 +31,10 @@ fn percentile(sorted: &[f64], q: f64) -> Option<f64> {
         .copied()
 }
 
+/// How long the kernel took to open `--project` (µs): what a window waits
+/// for before its first frame, without media extraction.
+static OPEN_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The fixture or the project copy named by `--project`, with its media.
 #[cfg(feature = "kernel")]
 fn scene() -> anyhow::Result<(
@@ -44,8 +49,13 @@ fn scene() -> anyhow::Result<(
         let snapshot = pm_kernel::document::DocumentStore::new_untitled(value).snapshot();
         return Ok((snapshot, MediaCatalog::default(), 2., pm_time::Rate::FPS_30));
     }
+    let opening = Instant::now();
     let opened = pm_kernel::open_project(std::path::Path::new(&project), Default::default())?;
     let store = pm_kernel::document::DocumentStore::open(opened);
+    OPEN_US.store(
+        opening.elapsed().as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let media_dir = scratch_dir();
     std::fs::create_dir_all(&media_dir)?;
     let mut media = MediaCatalog::default();
@@ -172,8 +182,11 @@ pub fn run() -> anyhow::Result<()> {
         (0. ..duration).contains(&from),
         "--from is outside the composition"
     );
+    // `--loop=SECONDS` plays a shorter range over and over for the whole run
+    // (memory over a long playback); by default the range is the run.
+    let span: f64 = arg("loop", &seconds.to_string()).parse()?;
     let start = Ticks::from_whole_seconds(from.floor() as i32);
-    let end = Ticks::from_whole_seconds((from.floor() + seconds).min(duration).ceil() as i32);
+    let end = Ticks::from_whole_seconds((from.floor() + span.min(seconds)).min(duration).ceil() as i32);
     if start != Ticks::ZERO {
         viewer.scrub(start)?;
     }
@@ -303,7 +316,7 @@ pub fn run() -> anyhow::Result<()> {
     let summary = |v: &[f64]| json!({"n":v.len(),"p50":percentile(v,0.5),"p95":percentile(v,0.95),"max":v.last()});
     let result = json!({
         "mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,
-        "output":[width,height],"first_frame_s":first_frame_s,
+        "output":[width,height],"open_s":OPEN_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,"first_frame_s":first_frame_s,
         "samples":costs.len(),
         "worker_to_completion_ms":{"p50":percentile(&costs,0.5),"p95":percentile(&costs,0.95),"max":costs.last()},
         "headroom_budget_ms":500./hz,"gpu_failures":failures,
