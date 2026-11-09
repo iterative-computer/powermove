@@ -2249,10 +2249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-cache"
-version = "0.1.0"
-
-[[package]]
 name = "pm-captions"
 version = "0.1.0"
 dependencies = [
@@ -2446,15 +2442,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-host"
-version = "0.1.0"
-dependencies = [
- "pm-protocol",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "pm-media"
 version = "0.1.0"
 dependencies = [
@@ -2632,15 +2619,6 @@ dependencies = [
  "tiny-skia",
  "usvg",
  "wgpu",
-]
-
-[[package]]
-name = "pm-skia-path"
-version = "0.12.0"
-dependencies = [
- "bytemuck",
- "libm",
- "strict-num",
 ]
 
 [[package]]
