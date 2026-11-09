@@ -1090,6 +1090,14 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
     } else {
         0.
     };
+    // A missing extension effect: a quiet trailing badge in `danger`; the name
+    // truncates before it (media-offline.md). Too narrow a clip drops it.
+    let badge_w = t.typography.minimum as f64 * MISSING_EFFECT_ADVANCE;
+    let badge = c
+        .missing_effect
+        .as_ref()
+        .filter(|_| r.width - lead - offline_w > badge_w + 3. * lead);
+    let reserve = if badge.is_some() { badge_w + lead } else { 0. };
     let mut o = Op::new(
         format!("clip-content:{}", c.id),
         if c.waveform.is_some() {
@@ -1100,7 +1108,7 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         Rect::new(
             r.x + lead + offline_w,
             r.y,
-            (r.width - lead - offline_w).max(0.),
+            (r.width - lead - offline_w - reserve).max(0.),
             r.height,
         ),
         if c.media == Media::Loading {
@@ -1124,22 +1132,17 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens, ops: &mut Vec<O
         o.opacity = 0.75;
     }
     ops.push(o);
-    if let Some(effect) = &c.missing_effect {
-        // A missing extension effect: a quiet trailing badge in `danger`; the
-        // layer still draws with the effect bypassed (media-offline.md).
-        let w = t.typography.minimum as f64 * MISSING_EFFECT_ADVANCE;
-        if r.width > w + 3. * lead {
-            let mut o = Op::new(
-                format!("clip-missing-effect:{}", c.id),
-                "text",
-                Rect::new(r.x + r.width - w - lead, r.y, w, r.height),
-                colors.danger,
-            );
-            o.text = Some("Missing effect".into());
-            o.font_size = t.typography.minimum as f64;
-            o.detail = json!({"truncate":"tail","tooltip":format!("Missing effect: {effect}")});
-            ops.push(o);
-        }
+    if let Some(effect) = badge {
+        let mut o = Op::new(
+            format!("clip-missing-effect:{}", c.id),
+            "text",
+            Rect::new(r.x + r.width - badge_w - lead, r.y, badge_w, r.height),
+            colors.danger,
+        );
+        o.text = Some("Missing effect".into());
+        o.font_size = t.typography.minimum as f64;
+        o.detail = json!({"truncate":"tail","tooltip":format!("Missing effect: {effect}. The layer draws without it.")});
+        ops.push(o);
     }
     if let Some(edge) = c.trim {
         let x = match edge {
@@ -1328,6 +1331,12 @@ impl Frame {
         ])
     }
     /// Topmost op of a family under the point. Native hit testing follows paint order.
+    /// The tooltip of the op under the point (a clip's Missing effect badge).
+    pub fn tooltip_at(&self, x: f64, y: f64) -> Option<String> {
+        self.hit_op("clip-missing-effect:", x, y, 0.)
+            .and_then(|o| o.detail["tooltip"].as_str())
+            .map(str::to_owned)
+    }
     pub fn hit_op(&self, prefix: &str, x: f64, y: f64, slop: f64) -> Option<&Op> {
         self.ops.iter().rev().find(|o| {
             let b = o.bounds;
