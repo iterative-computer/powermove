@@ -262,12 +262,48 @@ fn open_editor_window(
                 }
             })
             .detach();
+            if visible {
+                review_open(editor.downgrade(), window.window_handle(), cx);
+            }
             editor
         },
     );
     if let Err(e) = result {
         eprintln!("Could not open editor: {e}");
     }
+}
+/// Development builds only: `--open a,b` (`PM_NATIVE_REVIEW_OPEN`) runs those
+/// commands in the first editor window once it has settled, so design review
+/// captures reach Settings, sheets and the palette without the menu bar or focus.
+fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &mut App) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let Some(names) = std::env::var("PM_NATIVE_REVIEW_OPEN")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+    else {
+        return;
+    };
+    ONCE.call_once(|| {
+        cx.spawn(async move |cx| {
+            // Wait for the project and built-ins to load, then space the commands out.
+            let mut wait = 8;
+            for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(wait))
+                    .await;
+                wait = 3;
+                let cmd = native::Command {
+                    name: name.into(),
+                    args: Vec::new(),
+                    token: None,
+                };
+                let _ = handle.update(cx, |_, window, cx| {
+                    editor.update(cx, |v, cx| v.command(cmd, window, cx))
+                });
+            }
+        })
+        .detach();
+    });
 }
 struct Settings {
     tokens: Tokens,

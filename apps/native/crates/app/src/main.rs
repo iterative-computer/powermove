@@ -331,7 +331,8 @@ fn node_string(node: &pm_model::Node) -> Option<&str> {
 }
 
 /// Review captures may force a scheme or accessibility setting for one
-/// process (`--appearance`, `--accessibility`), in development builds only;
+/// process (`--appearance`, `--accessibility`) or open surfaces by command
+/// (`--open settings,palette`), in development builds only;
 /// a release build treats them as unknown arguments.
 fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
     if !dev {
@@ -340,6 +341,7 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
     match arg.to_str()? {
         "--appearance" => Some("PM_NATIVE_APPEARANCE"),
         "--accessibility" => Some("PM_NATIVE_ACCESSIBILITY"),
+        "--open" => Some("PM_NATIVE_REVIEW_OPEN"),
         _ => None,
     }
 }
@@ -369,7 +371,7 @@ mod review_override_tests {
     #[test]
     fn release_builds_reject_the_review_overrides() {
         use std::ffi::OsStr;
-        for arg in ["--appearance", "--accessibility"] {
+        for arg in ["--appearance", "--accessibility", "--open"] {
             assert_eq!(super::review_override(OsStr::new(arg), false), None);
             assert!(super::review_override(OsStr::new(arg), true).is_some());
         }
