@@ -39,6 +39,10 @@ pub struct ProjectLibrary {
     focus: FocusHandle,
     sheet: Rc<RefCell<Option<OpenSheet>>>,
     window: Option<WindowHandle<ProjectLibrary>>,
+    /// Hover washes on sidebar sections, rows and buttons.
+    motion: pm_shell::motion::Motion<u64>,
+    /// The library's own AppKit window, which its sheets attach to.
+    ns_window: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
 }
 impl ProjectLibrary {
     /// The worker and its wake channel, started before the view exists.
@@ -78,6 +82,8 @@ impl ProjectLibrary {
             focus: cx.focus_handle(),
             sheet: Rc::default(),
             window: None,
+            motion: Default::default(),
+            ns_window: None,
         }
     }
     /// Takes finished work and turns the controller's effects into platform calls.
@@ -88,8 +94,13 @@ impl ProjectLibrary {
         }
         cx.notify();
     }
+    /// Sheets attach to the library window (whether or not the app is
+    /// active), or to the key window when the library isn't open.
     fn parent(&self, cx: &App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
         let _ = cx;
+        if let Some(window) = self.ns_window.clone().filter(|w| w.isVisible()) {
+            return Some(window);
+        }
         let mtm = objc2::MainThreadMarker::new()?;
         objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow()
     }
@@ -152,7 +163,7 @@ impl ProjectLibrary {
         };
         let mtm = objc2::MainThreadMarker::new().unwrap();
         let sheet = new_project_sheet(&form, &self.tokens, mtm);
-        let open = OpenSheet::present(sheet, &window, Some("name"));
+        let open = OpenSheet::present((sheet, Default::default()), &window, Some("name"));
         let actions = open.actions.clone();
         *self.sheet.borrow_mut() = Some(open);
         cx.spawn(async move |this, cx| {
@@ -292,6 +303,7 @@ impl ProjectLibrary {
         {
             return;
         }
+        self.ns_window = None;
         let this = cx.entity();
         let m = self.tokens.metrics;
         let translucent = self.tokens.translucent();
@@ -420,8 +432,108 @@ impl ProjectLibrary {
     }
 }
 const PRESET_COUNT: usize = pm_builtins::RESOLUTIONS.len();
+/// Hover key for a sidebar section, row or button.
+fn key(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    h.finish()
+}
+impl ProjectLibrary {
+    fn new_project(&mut self, cx: &mut Context<Self>) {
+        let _ = self.controller.refresh();
+        let _ = self
+            .controller
+            .begin_new(String::new(), None, &default_format());
+        self.pump(cx);
+    }
+    /// A quiet row: neutral wash on hover (spring), a stronger wash when selected.
+    fn row(&self, name: &str, selected: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = &self.tokens;
+        let k = key(name);
+        let wash = self.motion.hovers.amount(k);
+        let alpha = (t.translucency.hover * wash * 255.).round() as u32;
+        div()
+            .id(SharedString::from(name.to_owned()))
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(t.metrics.row))
+            .px(px(t.metrics.gap + t.metrics.inner_radius))
+            .rounded(px(t.metrics.control_radius))
+            .text_size(px(t.typography.title))
+            .text_color(rgb(if selected {
+                t.colors.text
+            } else {
+                t.colors.secondary
+            }))
+            // An ink wash reads on the sidebar's blurred ground and the panel alike.
+            .when(selected, |d| {
+                d.bg(rgba(
+                    t.colors.text << 8 | (t.translucency.selected * 255.).round() as u32,
+                ))
+            })
+            .when(!selected && alpha > 0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(t.metrics.control_radius))
+                        .bg(rgba(t.colors.text << 8 | alpha)),
+                )
+            })
+            .aria_selected(selected)
+            .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                let tokens = v.tokens.clone();
+                v.motion.hovers.hover(k, *hovered, &tokens);
+                cx.notify();
+            }))
+    }
+    /// The one prominent button: accent fill, white title, hover lightens.
+    fn primary_button(&self, label: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = &self.tokens;
+        let k = key(label);
+        let wash = self.motion.hovers.amount(k);
+        let alpha = (t.translucency.selected * wash * 255.).round() as u32;
+        div()
+            .id(label)
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(t.metrics.control))
+            .px(px(t.metrics.inset))
+            .rounded(px(t.metrics.control_radius))
+            .bg(rgb(t.colors.accent))
+            .text_color(rgb(0xffffff))
+            .font_weight(FontWeight(t.typography.medium_weight))
+            .when(alpha > 0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(t.metrics.control_radius))
+                        .bg(rgba(0xffffff00 | alpha)),
+                )
+            })
+            .role(Role::Button)
+            .aria_label(label)
+            .child(label)
+            .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                let tokens = v.tokens.clone();
+                v.motion.hovers.hover(k, *hovered, &tokens);
+                cx.notify();
+            }))
+            .on_click(cx.listener(|v, _, _, cx| v.new_project(cx)))
+    }
+}
 impl Render for ProjectLibrary {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.frame(window);
+        if self.ns_window.is_none() {
+            self.ns_window = crate::platform::ns_window(window);
+        }
         let t = self.tokens.clone();
         let (c, m) = (&t.colors, &t.metrics);
         let (ground, ground_alpha) = t.ground();
@@ -429,6 +541,7 @@ impl Render for ProjectLibrary {
         // Source list (language §9): the sidebar sits on the window ground
         // and starts below the traffic lights; rows are `row` high.
         let mut sidebar = div()
+            .id("library-sections")
             .flex()
             .flex_col()
             .flex_none()
@@ -439,7 +552,9 @@ impl Render for ProjectLibrary {
             .px(px(m.gap))
             .bg(pm_shell::view::tint(ground, ground_alpha))
             .border_r(px(m.border))
-            .border_color(pm_shell::view::tint(line, line_alpha));
+            .border_color(pm_shell::view::tint(line, line_alpha))
+            .role(Role::List)
+            .aria_label("Library sections");
         let mut heading = "";
         for (section, label) in [
             (Section::Recents, "Recents"),
@@ -451,15 +566,10 @@ impl Render for ProjectLibrary {
                 heading = label;
             }
             sidebar = sidebar.child(
-                div()
-                    .id(label)
+                self.row(label, selected, cx)
                     .debug_selector(|| format!("section-{label}"))
-                    .flex()
-                    .items_center()
-                    .h(px(m.row))
-                    .px(px(m.gap))
-                    .rounded(px(m.control_radius))
-                    .when(selected, |d| d.bg(rgb(c.selected_fill)))
+                    .role(Role::ListItem)
+                    .aria_label(label)
                     .child(label)
                     .on_click(cx.listener(move |v, _, _, cx| v.set_section(section, cx))),
             );
@@ -469,9 +579,12 @@ impl Render for ProjectLibrary {
             .flex_1()
             .flex()
             .flex_col()
+            .gap(px(m.border))
             .overflow_y_scroll()
             .px(px(m.gap))
-            .pb(px(m.gap));
+            .pb(px(m.gap))
+            .role(Role::List)
+            .aria_label(heading);
         if !self.controller.query.text.is_empty() {
             list = list.child(
                 div()
@@ -481,26 +594,16 @@ impl Render for ProjectLibrary {
                     .child(self.controller.query.text.clone()),
             );
         }
+        let mut empty = None;
         match self.controller.content() {
-            Content::Empty(empty) => {
+            Content::Empty(state) => empty = Some(state),
+            Content::Unavailable { message, .. } => {
                 list = list.child(
                     div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(m.gap))
-                        .child(div().text_size(px(t.typography.title)).child(empty.title))
-                        .child(
-                            div()
-                                .text_color(rgb(c.secondary))
-                                .child(empty.detail.clone()),
-                        ),
+                        .p(px(m.inset))
+                        .text_color(rgb(c.secondary))
+                        .child(message),
                 );
-            }
-            Content::Unavailable { message, .. } => {
-                list = list.child(div().p(px(m.inset)).child(message));
             }
             _ => {}
         }
@@ -509,23 +612,18 @@ impl Render for ProjectLibrary {
             let selected = self.controller.selected.as_ref() == Some(&row.id);
             let facts = row.facts("").unwrap_or_default();
             list = list.child(
-                div()
-                    .id(SharedString::from(format!("project-{}", row.id)))
+                self.row(&format!("project-{}", row.id), selected, cx)
                     .debug_selector(|| format!("project-{id}", id = id.clone()))
-                    .flex()
-                    .flex_none()
-                    .items_center()
                     .justify_between()
                     .gap(px(m.inset))
-                    .h(px(m.row))
-                    .px(px(m.gap))
-                    .rounded(px(m.control_radius))
-                    .when(selected, |d| d.bg(rgb(c.selected_fill)))
+                    .text_color(rgb(c.text))
+                    .role(Role::ListItem)
+                    .aria_label(format!("{}, {facts}", row.name))
                     .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(t.typography.minimum))
+                            .text_size(px(t.typography.label))
                             .text_color(rgb(c.muted))
                             .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
                             .child(facts),
@@ -551,8 +649,46 @@ impl Render for ProjectLibrary {
                     }),
             );
         }
+        // An empty section says so in the middle of the content, with its
+        // one action (New Project) as the prominent button.
+        let empty = empty.map(|state| {
+            div()
+                .id("library-empty")
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(m.gap))
+                .pb(px(m.toolbar))
+                .role(Role::Group)
+                .aria_label(state.title)
+                .child(pm_shell::symbol::symbol(
+                    state.symbol,
+                    m.symbol_toolbar * 2.,
+                    pm_shell::symbol::Weight::Regular,
+                    c.muted,
+                    window,
+                ))
+                .child(
+                    div()
+                        .text_size(px(t.typography.heading))
+                        .font_weight(FontWeight(t.typography.semibold_weight))
+                        .child(state.title),
+                )
+                .child(
+                    div()
+                        .text_size(px(t.typography.reading))
+                        .text_color(rgb(c.muted))
+                        .child(state.detail.clone()),
+                )
+                .when_some(state.action, |d, action| {
+                    d.child(div().mt(px(m.gap)).child(self.primary_button(action, cx)))
+                })
+        });
+        let has_rows = !self.controller.rows.is_empty();
         // The content column is solid: the section name sits in the title
-        // band, level with the traffic lights, then the list.
+        // band, level with the traffic lights, New Project trailing.
         let content = div()
             .flex_1()
             .min_w(px(0.))
@@ -565,13 +701,26 @@ impl Render for ProjectLibrary {
                     .flex()
                     .flex_none()
                     .items_center()
+                    .justify_between()
                     .h(px(m.toolbar))
                     .px(px(m.inset + m.gap))
-                    .text_size(px(t.typography.heading))
-                    .font_weight(FontWeight(t.typography.semibold_weight))
-                    .child(heading),
+                    .child(
+                        div()
+                            .id("library-heading")
+                            .text_size(px(t.typography.heading))
+                            .font_weight(FontWeight(t.typography.semibold_weight))
+                            .role(Role::Heading)
+                            .aria_label(heading)
+                            .child(heading),
+                    )
+                    .when(has_rows, |d| {
+                        d.child(self.primary_button("New Project", cx))
+                    }),
             )
-            .child(list);
+            .child(match empty {
+                Some(empty) => empty.into_any_element(),
+                None => list.into_any_element(),
+            });
         div()
             .size_full()
             .flex()

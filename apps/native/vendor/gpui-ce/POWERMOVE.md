@@ -212,3 +212,6 @@ has been made. No measurements from a locked or occluded session certify pacing.
   its last placement when a frame skips its host's paint (so it stays first
   responder), and shows the system insertion point (`NSTextInsertionIndicator`)
   at a caret rectangle the host stages.
+- **Development review frames:** debug builds with `PM_NATIVE_DRAW_OCCLUDED`
+  set keep an occluded window's display link running, so background lane checks
+  see live frames without raising a window. Release builds always pause it.

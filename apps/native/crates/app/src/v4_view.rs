@@ -104,6 +104,13 @@ struct Capture {
     target: Id,
     button: u64,
 }
+/// A publication compiled off the main thread, waiting to install.
+struct Compiled {
+    ticket: u64,
+    publication: Publication,
+    table: Arc<TokenTable>,
+    prepared: Prepared,
+}
 pub struct SurfaceView {
     pub runtime: Arc<Builtins>,
     pub publication: Publication,
@@ -118,6 +125,8 @@ pub struct SurfaceView {
     leases: BTreeMap<Id, Option<SharedString>>,
     option_sets: BTreeMap<Id, Value>,
     focus: BTreeMap<Id, FocusHandle>,
+    /// Hover washes (pm-design springs), stepped once per render.
+    motion: pm_shell::motion::Motion<Id>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
@@ -139,6 +148,9 @@ pub struct SurfaceView {
     /// Publications received, and the newest one compiled and shown.
     latest: u64,
     shown: u64,
+    /// The newest compiled tree, kept when it finished while the view had no
+    /// live window (a closed sheet); the next window installs it on attach.
+    parked: Option<Compiled>,
     requested: Option<(usize, usize)>,
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
@@ -175,6 +187,7 @@ impl SurfaceView {
             leases: BTreeMap::new(),
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
+            motion: Default::default(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
@@ -191,6 +204,7 @@ impl SurfaceView {
             queued_move: None,
             latest: 0,
             shown: 0,
+            parked: None,
             requested: None,
             focus_text: None,
             #[cfg(test)]
@@ -202,9 +216,13 @@ impl SurfaceView {
         this.reconcile(window, cx);
         this
     }
-    /// A reopened panel window keeps its view; later publications install there.
-    pub fn attach(&mut self, window: AnyWindowHandle) {
-        self.window = window;
+    /// A reopened panel window keeps its view; later publications install
+    /// there, and so does one that finished while no window was open.
+    pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window = window.window_handle();
+        if let Some(compiled) = self.parked.take() {
+            self.install(compiled, window, cx);
+        }
     }
     pub fn tokens(&self) -> &pm_design::Tokens {
         &self.table.tokens
@@ -234,7 +252,6 @@ impl SurfaceView {
     ) {
         self.latest += 1;
         let ticket = self.latest;
-        let window = self.window;
         cx.spawn(async move |this, cx| {
             let surface = publication.surface.clone();
             let worker = table.clone();
@@ -242,24 +259,48 @@ impl SurfaceView {
                 .background_executor()
                 .spawn(async move { Prepared::new(surface, &worker) })
                 .await;
-            let _ = cx.update_window(window, |_, window, cx| {
+            let mut compiled = Some(Compiled {
+                ticket,
+                publication,
+                table,
+                prepared,
+            });
+            // The window the view is in now: a reopened sheet has a new one.
+            let Ok(window) = this.update(cx, |v, _| v.window) else {
+                return;
+            };
+            let installed = cx.update_window(window, |_, window, cx| {
                 this.update(cx, |v, cx| {
-                    if v.latest == ticket {
-                        v.shown = ticket;
-                        if v.publication.generation != publication.generation {
-                            v.restart();
-                        }
-                        v.table = table;
-                        v.publication = publication;
-                        v.prepared = Rc::new(prepared);
-                        v.reconcile(window, cx);
-                        v.try_focus_text(cx);
-                        cx.notify();
+                    if let Some(compiled) = compiled.take() {
+                        v.install(compiled, window, cx);
                     }
                 })
             });
+            if installed.is_err() {
+                let _ = this.update(cx, |v, _| {
+                    if let Some(compiled) = compiled.take().filter(|c| c.ticket == v.latest) {
+                        v.parked = Some(compiled);
+                    }
+                });
+            }
         })
         .detach();
+    }
+    fn install(&mut self, compiled: Compiled, window: &mut Window, cx: &mut Context<Self>) {
+        if compiled.ticket != self.latest {
+            return;
+        }
+        self.parked = None;
+        self.shown = compiled.ticket;
+        if self.publication.generation != compiled.publication.generation {
+            self.restart();
+        }
+        self.table = compiled.table;
+        self.publication = compiled.publication;
+        self.prepared = Rc::new(compiled.prepared);
+        self.reconcile(window, cx);
+        self.try_focus_text(cx);
+        cx.notify();
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.
@@ -386,6 +427,11 @@ impl SurfaceView {
             .map(str::to_owned);
         if let Some(control) = self.controls.get(&id) {
             control.update(cx, |v, _| v.display(display.as_deref()));
+            if matches!(kind, crate::v4_control::Kind::Push)
+                && let Some(label) = node.props.get("label").and_then(Value::as_str)
+            {
+                control.update(cx, |v, cx| v.retitle(label, cx));
+            }
             let options = node
                 .props
                 .get("options")
@@ -1211,8 +1257,23 @@ impl SurfaceView {
             return div().into_any_element();
         }
         if let Some(control) = self.controls.get(&id) {
-            return div()
-                .flex_none()
+            // A control whose node may shrink gives way (and truncates)
+            // before its row pushes later controls out of the panel.
+            let shrinks = node.style.flex_shrink.is_some_and(|s| s > 0.);
+            let (fill, width) = control.read_with(cx, |c, _| (c.fill, c.width()));
+            if fill != shrinks {
+                control.update(cx, |c, _| c.fill = shrinks);
+            }
+            let slot = if shrinks {
+                div()
+                    .flex_basis(px(width))
+                    .flex_shrink(1.)
+                    .min_w(px(0.))
+                    .overflow_hidden()
+            } else {
+                div().flex_none()
+            };
+            return slot
                 .child(control.clone())
                 .children(self.probe(id))
                 .into_any_element();
@@ -1252,7 +1313,14 @@ impl SurfaceView {
             element = element.debug_selector(|| name);
         }
         if let Some(scroll) = self.scrolls.get(&id) {
-            element = element.flex_1().min_h(px(0.)).track_scroll(scroll);
+            // A scroll region with a max height (a sheet body) keeps its
+            // content height up to that cap; panel scrollers fill their dock.
+            element = if node.style.max_size.height.is_some() {
+                element.flex_grow(1.).flex_shrink(1.)
+            } else {
+                element.flex_1()
+            };
+            element = element.min_h(px(0.)).track_scroll(scroll);
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
@@ -1294,6 +1362,18 @@ impl SurfaceView {
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
         let mut children: Vec<AnyElement> = vec![];
+        let wash = self.motion.hovers.amount(id);
+        if wash > 0. && !node.disabled {
+            let t = &self.table.tokens;
+            let alpha = (t.translucency.hover * wash * 255.).round() as u32;
+            let mut layer = div().absolute().inset_0();
+            layer.style().corner_radii = node.style.corner_radii.clone();
+            children.push(
+                layer
+                    .bg(rgba(t.colors.text << 8 | alpha))
+                    .into_any_element(),
+            );
+        }
         if let Some(geometry) = node.virtual_window {
             let (before, _) = geometry.spacers();
             children.push(div().flex_none().h(px(before as f32)).into_any_element());
@@ -1342,12 +1422,19 @@ impl SurfaceView {
         };
         let t = &self.table.tokens;
         let origin = self.origin.get();
+        // In its own sheet window (Export) the sheet is the whole window.
+        let own_window = node.component == Some(Component::SheetAnchor)
+            && window.viewport_size().width <= px(t.metrics.sheet_width_wide + 1.);
         let position = if node.component == Some(Component::SheetAnchor) {
             let width = window.viewport_size().width;
-            point(
-                (width - px(t.metrics.sheet_width)) / 2.,
-                px(t.metrics.toolbar),
-            )
+            if own_window {
+                point(px(0.), px(0.))
+            } else {
+                point(
+                    (width - px(t.metrics.sheet_width)) / 2.,
+                    px(t.metrics.toolbar),
+                )
+            }
         } else if let Some(bounds) = anchor.and_then(|id| self.anchors.borrow().get(&id).copied()) {
             bounds.bottom_left()
         } else if let Some((x, y)) = at {
@@ -1357,6 +1444,23 @@ impl SurfaceView {
         };
         let id = node.id;
         let mut wrapper = div().occlude().child(element);
+        if own_window {
+            // The sheet's window fits its content whenever that changes height.
+            wrapper = wrapper.child(
+                canvas(
+                    |bounds, window, _| {
+                        let size = window.viewport_size();
+                        let laid_out = bounds.size.height > px(1.);
+                        if laid_out && (size.height - bounds.size.height).abs() > px(0.5) {
+                            window.resize(gpui::size(size.width, bounds.size.height));
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
         if dismiss {
             wrapper = wrapper.on_mouse_down_out(cx.listener(move |v, _, _, cx| {
                 v.send(
@@ -1429,10 +1533,6 @@ impl SurfaceView {
                 )
             );
         if !disabled && (clickable || events.double_click) {
-            let hover = rgb(self.table.tokens.colors.hover);
-            if clickable {
-                element = element.hover_style(move |s| s.bg(hover));
-            }
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 let position = event.position();
@@ -1509,14 +1609,24 @@ impl SurfaceView {
                 }),
             );
         }
-        if events.hover {
+        // One hover handler: the control's wash (a spring, never a snap) and
+        // the panel's own pointer events.
+        let wash = clickable;
+        if wash || events.hover {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
-                let event = if *hovered {
-                    "pointerenter"
-                } else {
-                    "pointerleave"
-                };
-                v.pointer(id, event, EventDetail::default(), cx);
+                if wash {
+                    let tokens = v.table.tokens.clone();
+                    v.motion.hovers.hover(id, *hovered, &tokens);
+                    cx.notify();
+                }
+                if events.hover {
+                    let event = if *hovered {
+                        "pointerenter"
+                    } else {
+                        "pointerleave"
+                    };
+                    v.pointer(id, event, EventDetail::default(), cx);
+                }
             }));
         }
         if events.wheel {
@@ -1863,6 +1973,7 @@ impl Render for SurfaceView {
         {
             self.renders += 1;
         }
+        self.motion.frame(window);
         let t = &self.table.tokens;
         div()
             .relative()

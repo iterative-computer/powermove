@@ -486,16 +486,19 @@ exports[`form-group: additive wire snapshot and real Rust publication 1`] = `
         "patch": {
           "style": {
             "color": {
-              "token": "colors.text",
+              "token": "colors.secondary",
             },
             "fontSize": {
-              "token": "typography.title",
+              "token": "typography.label",
             },
             "fontWeight": {
-              "token": "typography.semibold_weight",
+              "token": "typography.medium_weight",
             },
             "marginBottom": {
               "token": "metrics.gap",
+            },
+            "paddingLeft": {
+              "token": "metrics.inset",
             },
           },
         },
@@ -586,11 +589,27 @@ exports[`form-group: additive wire snapshot and real Rust publication 1`] = `
         "op": "setProps",
         "patch": {
           "style": {
+            "alignItems": "center",
             "display": "flex",
             "flexDirection": "row",
-            "justifyContent": "space-between",
-            "padding": {
+            "gap": {
               "token": "metrics.inset",
+            },
+            "justifyContent": "space-between",
+            "minHeight": {
+              "token": "metrics.form_row",
+            },
+            "paddingBottom": {
+              "token": "metrics.gap",
+            },
+            "paddingLeft": {
+              "token": "metrics.inset",
+            },
+            "paddingRight": {
+              "token": "metrics.inset",
+            },
+            "paddingTop": {
+              "token": "metrics.gap",
             },
           },
         },
@@ -608,6 +627,20 @@ exports[`form-group: additive wire snapshot and real Rust publication 1`] = `
         },
       },
       {
+        "id": 6,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "display": "flex",
+            "flexDirection": "column",
+            "flexGrow": 1,
+            "gap": {
+              "token": "metrics.border",
+            },
+          },
+        },
+      },
+      {
         "id": 7,
         "op": "create",
         "type": "text",
@@ -621,7 +654,7 @@ exports[`form-group: additive wire snapshot and real Rust publication 1`] = `
               "token": "colors.text",
             },
             "fontSize": {
-              "token": "typography.body",
+              "token": "typography.title",
             },
           },
         },
@@ -662,7 +695,7 @@ exports[`form-group: additive wire snapshot and real Rust publication 1`] = `
               "token": "colors.muted",
             },
             "fontSize": {
-              "token": "typography.minimum",
+              "token": "typography.label",
             },
           },
         },
@@ -705,6 +738,17 @@ exports[`form-group: additive wire snapshot and real Rust publication 1`] = `
         "op": "setProps",
         "patch": {
           "data-pm-slot": "control",
+        },
+      },
+      {
+        "id": 11,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "alignItems": "center",
+            "display": "flex",
+            "flexShrink": 0,
+          },
         },
       },
       {

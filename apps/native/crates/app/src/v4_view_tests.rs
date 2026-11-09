@@ -708,3 +708,71 @@ fn focus_text_waits_for_the_text_row_of_its_own_layer(cx: &mut TestAppContext) {
     settle(cx, |_| false_after(50));
     assert_eq!(row(&view, &mut vcx), None);
 }
+
+/// A panel window that hosts a kept view, as the app's sheet windows do: it
+/// attaches the view on every render (`Controller::builtin_panel`).
+struct SheetWindow(Entity<SurfaceView>);
+impl Render for SheetWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0.update(cx, |v, cx| v.attach(window, cx));
+        div().size_full().child(self.0.clone())
+    }
+}
+#[gpui::test]
+fn a_reopened_sheet_shows_what_was_published_while_it_was_closed(cx: &mut TestAppContext) {
+    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "export realm did not settle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let rig = rig("export", 1);
+    wait(rig.runtime.show("export").unwrap());
+    let (view, mut first) = window(cx, &rig, publication(&rig), Default::default());
+    let texts = |cx: &mut TestAppContext| {
+        view.read_with(cx, |v, _| {
+            v.publication
+                .surface
+                .nodes()
+                .values()
+                .map(|n| n.text.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    let deliver = |cx: &mut TestAppContext| {
+        for p in rig.runtime.take_publications() {
+            view.update(cx, |v, cx| v.publish(p, cx));
+        }
+    };
+    // The export runs to its last frame while the sheet is open.
+    wait(
+        rig.runtime
+            .observe_export(json!({"phase":"rendering","frame":300,"total":300,"elapsed":2}))
+            .unwrap(),
+    );
+    deliver(cx);
+    settle(cx, |cx| {
+        texts(cx).iter().any(|t| t.starts_with("Exporting"))
+    });
+    // It finishes: the app closes the sheet's window, then the realm
+    // publishes the finished run; the person opens Export again and the
+    // realm publishes a fresh sheet before the new window exists.
+    first.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    wait(
+        rig.runtime
+            .observe_export(json!({"phase":"done","path":"/tmp/Synthetic Film.mp4"}))
+            .unwrap(),
+    );
+    deliver(cx);
+    wait(rig.runtime.show("export").unwrap());
+    deliver(cx);
+    cx.run_until_parked();
+    let kept = view.clone();
+    cx.add_window(|_, _| SheetWindow(kept));
+    settle(cx, |cx| {
+        let texts = texts(cx);
+        !texts.iter().any(|t| t.starts_with("Exporting")) && texts.iter().any(|t| t == "Export")
+    });
+}

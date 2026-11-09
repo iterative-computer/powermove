@@ -68,20 +68,20 @@ pub fn new_project_sheet(
     popup.selectItemAtIndex(form.preset.unwrap_or(pm_builtins::RESOLUTIONS.len() + 1) as isize);
     popup.setEnabled(!form.submitting);
     sheet.control("resolution", "Resolution", popup.into_super().into_super());
-    // Two number wells in the one shared value column, with the inspector Link.
-    let group = NSStackView::new(mtm);
-    group.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-    group.setSpacing(tokens.metrics.gap.into());
-    for (id, label, value) in [
-        ("width", "Width", &form.width),
-        ("height", "Height", &form.height),
-    ] {
-        let field = NSTextField::textFieldWithString(&NSString::from_str(value), mtm);
-        field.setAccessibilityLabel(Some(&NSString::from_str(label)));
-        field.setEnabled(!form.submitting);
+    // `1920 × 1080`, with the inspector Link in the unit column.
+    sheet.pair(
+        "Size",
+        [
+            ("width", "Width", &form.width),
+            ("height", "Height", &form.height),
+        ],
+        "",
+        !form.submitting,
+    );
+    for id in ["width", "height"] {
+        let field = &sheet.fields[id];
         // A size reports when its editing ends, which applies the aspect link
         // to a whole number rather than to every keystroke.
-        field.setIdentifier(Some(&NSString::from_str(id)));
         field.setContinuous(false);
         // A cell property: NSTextField itself doesn't answer it (sending it
         // there aborted the app on File ▸ New Project).
@@ -90,16 +90,13 @@ pub fn new_project_sheet(
                 let _: () = objc2::msg_send![&*cell, setSendsActionOnEndEditing: true];
             }
         }
-        group.addArrangedSubview(&field);
-        sheet.fields.insert(id.into(), field);
     }
     sheet.button("link", "", !form.submitting, false, false);
-    let link = &sheet.buttons["link"];
+    let link = sheet.buttons["link"].clone();
     link.setBordered(false);
     link.setButtonType(NSButtonType::PushOnPushOff);
-    show_link(link, form);
-    group.addArrangedSubview(link);
-    sheet.row("Size", &group);
+    show_link(&link, form);
+    sheet.trailing(&link);
     if let Some(error) = errors.size {
         sheet.line(
             error,
@@ -131,13 +128,12 @@ pub fn new_project_sheet(
         );
     }
     let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), objc2_foundation::NSRect::ZERO);
-    well.setColorWellStyle(NSColorWellStyle::Minimal);
     well.setEnabled(!form.submitting);
     // A preview only. The authored string is read back once the well changes (N3).
     if let Some(rgb) = crate::sheets::hex_colour(&form.background) {
         well.setColor(&crate::dialogs::sheet_layout::native::colour(rgb));
     }
-    sheet.control("background", "Background", well.into_super());
+    sheet.swatch("background", "Background", well);
     let (label, create, cancel) = form.buttons();
     sheet.button("cancel", "Cancel", cancel, false, true);
     sheet.button("create", label, create, true, false);
