@@ -1,10 +1,8 @@
-// The bridge test source (pm-gpu bridge_out::test_source): what the frame
-// bridge's tests and the S1 harness show until pm-render draws real frames.
-// Writes working values (display encoding E, extended past 1.0) into the
-// rgba16float working target; the display transform turns them into the
-// pool surface's format.
+// The bridge test source (test_source.rs). Writes working values (display
+// encoding E, extended past 1.0) into the rgba16float working target; the
+// display transform turns them into the surface's format.
 //
-// Rows (frame pixels, y down; checked by tests and the harness):
+// Rows (frame pixels, y down; checked by the tests):
 //   [0, 32)      frame code: 64 cells of `cell` px; 32 bits of seq, then 32
 //                bits of the view sequence
 //   [64, 320)    continuous ramp 0..1 across the width (dithered on bgra)
@@ -84,15 +82,4 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         discard;
     }
     return vec4f(c, 1.0);
-}
-
-// Synthetic GPU load: a full-screen pass with some ALU per pixel into a
-// scratch target (the S1 harness's engine load).
-@fragment
-fn fs_load(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-    var v = pos.xy / u.size;
-    for (var i = 0u; i < 16u; i++) {
-        v = fract(v * 1.618 + vec2f(sin(v.y * 6.28 + u.time_s), cos(v.x * 6.28)));
-    }
-    return vec4f(v, 0.0, 1.0);
 }

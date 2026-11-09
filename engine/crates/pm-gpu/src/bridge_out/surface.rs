@@ -18,8 +18,8 @@ use pm_protocol::interop::{SurfaceFormat, SurfaceRequest};
 use super::BridgeOutError;
 
 /// `kCVPixelFormatType_32BGRA` and `kCVPixelFormatType_64RGBAHalf`.
-pub const FOURCC_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
-pub const FOURCC_RGHA: u32 = u32::from_be_bytes(*b"RGhA");
+const FOURCC_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+const FOURCC_RGHA: u32 = u32::from_be_bytes(*b"RGhA");
 
 /// A retained IOSurface. IOSurface references are reference counted
 /// atomically and the IOSurface API is thread-safe, so a reference may move
@@ -33,19 +33,8 @@ unsafe impl Send for SharedIoSurface {}
 unsafe impl Sync for SharedIoSurface {}
 
 impl SharedIoSurface {
-    /// A send right for the surface (`IOSurfaceCreateMachPort`), to be moved
-    /// to main through the bridge. `None` if the kernel refused.
-    pub fn mach_port(&self) -> Option<u32> {
-        let port = self.0.create_mach_port();
-        (port != 0).then_some(port)
-    }
-
     pub fn bytes_per_row(&self) -> u32 {
         self.0.bytes_per_row() as u32
-    }
-
-    pub fn alloc_size(&self) -> u64 {
-        self.0.alloc_size() as u64
     }
 
     /// Reads the surface's bytes under a read-only CPU lock (tests and
