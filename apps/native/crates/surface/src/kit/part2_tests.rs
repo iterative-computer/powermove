@@ -210,14 +210,8 @@ fn group_cards_follow_scheme_and_increase_contrast_without_a_normal_border() {
             );
             let p = panel(surface(Component::FormGroup, json!({})), &t);
             let r = &p.components[&1];
-            assert_eq!(
-                r.background,
-                if scheme == Scheme::Light {
-                    t.colors.field
-                } else {
-                    t.colors.floating
-                }
-            );
+            // A soft neutral card in both appearances (p0-decisions, design system).
+            assert_eq!(r.background, t.colors.fill);
             assert_eq!(r.radius, Some(10.));
             assert_eq!(r.draw_border, contrast);
             assert_eq!(r.border, t.metrics.border);

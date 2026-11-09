@@ -12,7 +12,7 @@ use objc2_app_kit::{
     NSColorWell, NSColorWellStyle, NSControl, NSControlTextEditingDelegate, NSPopUpButton,
     NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
 };
-use objc2_foundation::{NSNotification, NSRect, NSString};
+use objc2_foundation::{NSNotification, NSRect, NSSize, NSString};
 use std::collections::BTreeMap;
 
 pub struct TargetState {
@@ -204,7 +204,13 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
                 if let Some(rgb) = hex_colour(value) {
                     well.setColor(&crate::dialogs::sheet_layout::native::colour(rgb));
                 }
-                sheet.control(&field.id, &field.label, well.into_super());
+                // A minimal well is a swatch, not a value column-wide bar.
+                let swatch = NSSize::new(
+                    f64::from(2. * tokens.metrics.field),
+                    f64::from(tokens.metrics.field),
+                );
+                sheet.control(&field.id, &field.label, well.clone().into_super());
+                well.setFrameSize(swatch);
             }
             NativePiece::PopUpButton => {
                 let popup = NSPopUpButton::initWithFrame_pullsDown(
