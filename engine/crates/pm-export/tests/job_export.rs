@@ -1244,3 +1244,70 @@ fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
         "the field must reach the export mixer"
     );
 }
+
+/// Admits whole frames, but holds the admission of frame `at` for `hold`
+/// (a viewer playing through an export defers it that long).
+struct HoldOnce {
+    at: u32,
+    hold: std::time::Duration,
+    admitted: AtomicU32,
+}
+
+impl GpuGate for HoldOnce {
+    fn admit(&self, _: u64, units: u32, cancel: &AtomicBool) -> Option<u32> {
+        if self.admitted.fetch_add(1, Ordering::Relaxed) == self.at {
+            std::thread::sleep(self.hold);
+        }
+        (!cancel.load(Ordering::Relaxed)).then_some(units)
+    }
+    fn finished(&self, _: u64, _: u32, _: f64) {}
+    fn abandoned(&self, _: u64) {}
+    fn measures(&self) -> bool {
+        false
+    }
+}
+
+fn held_h264_export(name: &str, hold: std::time::Duration) {
+    let dir = scratch(name);
+    let dur = 4.0;
+    let (doc, media) = generated(dur);
+    let j = job(
+        &doc,
+        media,
+        settings(ExportFormat::H264, WireAlpha::None, dur),
+        dir.join("held.mp4"),
+    );
+    let gate = HoldOnce {
+        at: 40,
+        hold,
+        admitted: AtomicU32::new(0),
+    };
+    let mut renderer = Renderer::headless().unwrap();
+    let done = run_export(
+        &mut renderer,
+        &j,
+        &gate,
+        &AtomicBool::new(false),
+        &mut no_progress(),
+    )
+    .unwrap_or_else(|e| panic!("an export held {hold:?} mid-stream failed: {e}"));
+    assert_eq!(done.report.frames, 120);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A frame later than the encoder's idle wait: the encoder finishes the
+/// frames it holds for reordering and goes on; the file verifies.
+#[test]
+fn an_export_whose_frames_wait_flushes_the_encoder_and_verifies() {
+    held_h264_export("held-short", std::time::Duration::from_secs(7));
+}
+
+/// The hardware H.264 encoder drops the frames it holds when the next one is
+/// 75 s late (AVE error -1004, "VideoToolbox dropped a frame"); a viewer that
+/// plays that long through an export must not fail it. Slow: run with
+/// `--ignored` when touching the encoder's idle handling.
+#[test]
+#[ignore]
+fn an_export_held_for_a_long_playback_never_drops_a_frame() {
+    held_h264_export("held-long", std::time::Duration::from_secs(80));
+}

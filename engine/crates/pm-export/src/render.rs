@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pm_model::{Document, Node, NodeKind};
 use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
@@ -1481,10 +1481,17 @@ where
             let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
             let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {
-                let (n, rgba) = match rx.recv() {
-                    Ok(Rendered::Frame(n, rgba)) => (n, rgba),
-                    Ok(Rendered::Failed(e)) => return Err(e),
-                    Err(_) => return Err(JobError::Cancelled),
+                let (n, rgba) = loop {
+                    match rx.recv_timeout(ENCODER_IDLE) {
+                        Ok(Rendered::Frame(n, rgba)) => break (n, rgba),
+                        Ok(Rendered::Failed(e)) => return Err(e),
+                        // The render waits (a playing viewer, an extension):
+                        // the encoder must not hold frames that long.
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => pipeline.idle()?,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(JobError::Cancelled);
+                        }
+                    }
                 };
                 encoder_gate.sync_worker_qos();
                 debug_assert_eq!(n, expected);
@@ -1673,6 +1680,12 @@ where
 /// Frames' pixel buffers an export keeps in circulation between the render
 /// and encoder threads.
 const PIXEL_BUFFERS: u64 = 3;
+
+/// How long the encoder waits for a frame before it finishes the frames it
+/// holds for reordering (`Sink::idle`). The hardware H.264 encoder dropped
+/// held frames when the next one came 75 s late (30 s was fine); frames that
+/// arrive within this keep their B-frame structure.
+const ENCODER_IDLE: Duration = Duration::from_secs(5);
 
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// libvpx and libopus (WebM), or the engine's PNG writer.

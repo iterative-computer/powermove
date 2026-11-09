@@ -147,6 +147,15 @@ impl Sink for VideoToolboxSink {
         self.writer().push_audio(interleaved)
     }
 
+    fn idle(&mut self) -> Result<(), Error> {
+        if !self.encoder.holds_frames() {
+            return Ok(());
+        }
+        let samples = self.encoder.complete()?;
+        let samples = self.described(samples)?;
+        self.writer().push_video(samples)
+    }
+
     fn finish(self) -> Result<Delivered, Error> {
         self.finish_inner(None)
     }

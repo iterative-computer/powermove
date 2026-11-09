@@ -148,6 +148,14 @@ impl Sink for OutputSink {
         }
     }
 
+    fn idle(&mut self) -> Result<(), Error> {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.idle(),
+            _ => Ok(()),
+        }
+    }
+
     fn finish(self) -> Result<Delivered, Error> {
         match self {
             #[cfg(all(feature = "engine", target_os = "macos"))]
