@@ -312,6 +312,8 @@ struct View {
     overlay_time: Option<Ticks>,
     locked_provider: Option<LockedOverlayProvider>,
     commands: VecDeque<TransportCommand>,
+    /// A Mixer monitor solo not yet handed to the transport.
+    monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
     status: ViewerStatus,
     phase: Option<(f64, f64)>,
@@ -604,6 +606,16 @@ impl Viewer {
         cmd.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         self.edit(|v| v.enqueue(cmd))
     }
+    /// The Mixer's monitor solo: only these top-level layers are heard
+    /// (empty: every strip). Meters still read every strip.
+    pub fn monitor_solo(&self, solo: Vec<String>) -> Result<()> {
+        ensure!(solo.len() <= 4096, "too many solo strips");
+        self.edit(|v| {
+            v.monitor = Some(solo);
+            v.dirty = true;
+            Ok(())
+        })
+    }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;
         self.edit(|v| {
@@ -881,6 +893,7 @@ impl EngineService {
                 overlay_time: None,
                 locked_provider: None,
                 commands: VecDeque::new(),
+                monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
                     proxied,
@@ -1482,6 +1495,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
                 }
                 r.transport.command(cmd, (now * 1e6) as i64);
+            }
+            if let Some(solo) = v.monitor.take() {
+                r.transport.monitor(solo);
             }
             let sample = r.transport.poll((now * 1e6) as i64);
             changed |= v
