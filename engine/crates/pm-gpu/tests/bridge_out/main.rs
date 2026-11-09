@@ -146,12 +146,7 @@ const STANDARD_SRGB: DisplayParams = DisplayParams {
 fn rgbaf16_keeps_ten_bit_ramps_and_values_above_one() {
     let gpu = gpu();
     let target = surface(&gpu, Size::new(W, H), SurfaceFormat::Rgba16Float);
-    render(
-        &gpu,
-        &target,
-        &frame(0xA5A5_1234, 77),
-        STANDARD_SRGB,
-    );
+    render(&gpu, &target, &frame(0xA5A5_1234, 77), STANDARD_SRGB);
     let px = Pixels::of(&target);
     assert_eq!(px.code(), (0xA5A5_1234, 77));
     let mut codes = std::collections::BTreeSet::new();
