@@ -295,6 +295,9 @@ pub struct Motion {
     pub tooltip_delay: f64,
     /// Time window for an immediate tooltip swap to a neighbouring control (s).
     pub tooltip_warm: f64,
+    /// How long a status note (`Exported …`) holds before the status line
+    /// returns (s); errors stay until replaced.
+    pub note_hold: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -603,6 +606,7 @@ impl Tokens {
                 overlay_idle: 2.,
                 tooltip_delay: 0.38,
                 tooltip_warm: 0.6,
+                note_hold: 2.2,
             },
             translucency: match (scheme, accessibility.reduce_transparency) {
                 (Scheme::Dark, true) => Translucency {

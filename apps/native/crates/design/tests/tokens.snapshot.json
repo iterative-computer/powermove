@@ -160,7 +160,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 15658737,
@@ -338,7 +339,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 15658737,
@@ -516,7 +518,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 15658737,
@@ -694,7 +697,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 15658737,
@@ -872,7 +876,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 526344,
@@ -1050,7 +1055,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 1118481,
@@ -1228,7 +1234,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 526344,
@@ -1406,7 +1413,8 @@
       "wheel_rest": 0.5,
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
-      "tooltip_warm": 0.6
+      "tooltip_warm": 0.6,
+      "note_hold": 2.2
     },
     "translucency": {
       "ground": 1118481,

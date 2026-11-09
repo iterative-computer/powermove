@@ -336,6 +336,10 @@ const ROLES: &[(&str, &str)] = &[
         "Time window for an immediate tooltip swap to a neighbouring control (s)",
     ),
     (
+        "motion.note_hold",
+        "Time a status note holds before the status line returns (s)",
+    ),
+    (
         "translucency.window",
         "Window tint over the behind-window blur (1 = solid, Reduce Transparency)",
     ),

@@ -273,7 +273,14 @@ impl Controller {
                         {
                             v.message = error.clone();
                         }
-                        _ => v.close_export_sheet(cx),
+                        Ok(path) => {
+                            v.close_export_sheet(cx);
+                            let name = std::path::Path::new(path)
+                                .file_name()
+                                .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+                            v.note(format!("Exported {name}"), cx);
+                        }
+                        Err(_) => v.close_export_sheet(cx),
                     }
                 }
                 cx.notify();
@@ -294,7 +301,7 @@ async fn execute(
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let planned = pm_builtins::delivery::plan(
         &frozen.publication.snapshot,
         &frozen.options,
@@ -402,7 +409,7 @@ async fn execute(
         }
         Ok(path) => observe(&runtime, json!({"phase":"done","path":path})).await,
     }
-    result.map(|_| ()).map_err(|f| f.message)
+    result.map_err(|f| f.message)
 }
 /// Why an export ended without a file: what the sheet says, and the offline
 /// media it refused to export without (the sheet then offers Export Without
