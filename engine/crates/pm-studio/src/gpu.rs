@@ -844,6 +844,29 @@ impl Renderer {
     /// Actual per-pixel counts (adaptive rendering may stop before the ceiling).
     pub fn sample_counts(&self)->Vec<f32> {self.read_f32(&self.accum,u64::from(self.width)*u64::from(self.height)*16).chunks_exact(4).map(|p|p[3]).collect()}
 
+    /// Diagnostic scene-linear beauty, including directly seen emission.
+    /// RGB is premultiplied by coverage; alpha excludes the display-only void
+    /// and shadow catcher. Unlike `radiance`, this is suitable for EXR export.
+    pub fn linear_beauty(&self) -> Vec<f32> {
+        let bytes = u64::from(self.width) * u64::from(self.height) * 16;
+        let accum = self.read_f32(&self.accum, bytes);
+        let emission = self.read_f32(&self.ebuf, bytes);
+        let background = self.read_f32(&self.bgsum, bytes);
+        accum.chunks_exact(4).zip(emission.chunks_exact(4)).zip(background.chunks_exact(4))
+            .flat_map(|((a, e), b)| {
+                let n = a[3].max(1.0);
+                [(a[0]+e[0])/n, (a[1]+e[1])/n, (a[2]+e[2])/n, (1.0-b[3]/n).clamp(0.0,1.0)]
+            }).collect()
+    }
+
+    /// Diagnostic first-hit object/layer IDs (zero is the void), not coverage.
+    /// With depth of field these are the nearest sampled hits, not an ID pass
+    /// that can be used to composite antialiased silhouettes.
+    pub fn first_hit_ids(&self) -> Vec<u32> {
+        self.read_f32(&self.gbuf, u64::from(self.width)*u64::from(self.height)*16)
+            .chunks_exact(4).map(|p| p[2] as u32).collect()
+    }
+
     /// Linear scene radiance before exposure and tone mapping.
     pub fn radiance(&mut self) -> Vec<f32> {
         let (w, h) = (self.width, self.height);
