@@ -1071,23 +1071,46 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.media" => {
-                    // A file or address a reply names (checked by the panel's
-                    // host): the file opens in its own app or shows in Finder;
-                    // a web address goes to the browser.
-                    let input = &request.input;
-                    let path = input["path"].as_str().unwrap_or_default();
-                    let opened = if input["remote"] == true {
-                        path.starts_with("https://") && crate::platform::open_url(path)
-                    } else if input["reveal"] == true {
-                        crate::platform::reveal(std::path::Path::new(path));
-                        true
+                    // A file or address a reply names. The reply chose the path,
+                    // so the file is resolved and checked off the main thread
+                    // (a real image, video or sound, never an app or a link to
+                    // one) and opened as a document; a web address goes to the
+                    // browser only when it is http(s).
+                    let input = request.input.clone();
+                    let path = input["path"].as_str().unwrap_or_default().to_owned();
+                    let reveal = input["reveal"] == true;
+                    if input["remote"] == true {
+                        if !(pm_services::surfaces::agent_reply::safe_link(&path)
+                            && crate::platform::open_url(&path))
+                        {
+                            self.errors
+                                .borrow_mut()
+                                .tell("Agent", "That address couldn’t be opened.");
+                        }
                     } else {
-                        crate::platform::open_path(std::path::Path::new(path))
-                    };
-                    if !opened {
-                        self.errors
-                            .borrow_mut()
-                            .tell("Agent", "That file couldn’t be opened. It may have moved.");
+                        cx.spawn(async move |this, cx| {
+                            let outcome = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    let file = crate::platform::media_document(
+                                        std::path::Path::new(&path),
+                                    )?;
+                                    if reveal {
+                                        crate::platform::reveal(&file);
+                                    } else if !crate::platform::open_document(&file) {
+                                        return Err("No app on this Mac opens that file.");
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                            if let Err(message) = outcome {
+                                let _ = this.update(cx, |v, cx| {
+                                    v.errors.borrow_mut().tell("Agent", message);
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
                     }
                     Ok(Value::Null)
                 }
