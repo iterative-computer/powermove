@@ -3,7 +3,7 @@
 **Decision: not ready to ship.** A green renderer demonstration is insufficient.
 Every unchecked gate below blocks a production-quality claim. No tag, release,
 notarization, upload or installation over an existing app is authorized by this
-checklist. Updated 2026-11-09 by Lanes P1/P3 (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
+checklist. Updated 2026-11-09 by Lanes P1/P2/P3 (Apple M5, 16 GiB, macOS 27.3, Electron 44); shared branch `studio-3d`.
 
 Status: **PASS** = reproduced against the stated build; **OPEN** = evidence still
 required; **FAIL** = attempted and failed; **PARTIAL** = narrower evidence only.
@@ -14,17 +14,19 @@ Never add credentials, private projects, screenshots or raw local logs to Git.
 
 Run desktop commands from `apps/desktop`, Rust commands from `engine`. Use a
 clean checkout outside File Provider/iCloud with `bun install --frozen-lockfile`.
+Install the browser used by the Figma plugin UI tests with
+`nice -n 10 npx playwright install chromium --only-shell` from `apps/desktop`.
 Unset `ELECTRON_RUN_AS_NODE`; set `CARGO_TARGET_DIR=$HOME/Developer/pm-target`.
 
 | Gate | Status | Evidence / required command |
 | --- | --- | --- |
-| All desktop unit tests | PASS | Latest Lane P3 full run at `4368b15db`: **7,428 passed, 7 skipped**, 727 files passed / 3 skipped (348.76 s). Includes the P3 engine-facing, history/migration, import and lifecycle regressions. `nice -n 10 npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
-| Entire desktop e2e suite, including 2D/editor/media | FAIL | Full run: **979 passed, 19 failed, 24 skipped** (42.1 min). Retry: **5 passed, 14 still failing** (2.9 min), including all four native failures now cleared. Full 1,022-test discovery, no filter: `nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000`. Failures listed below.  `nice -n 10 npx playwright test`; report full discovery, completion and skips. A global timeout is a failure, not a pass. |
+| All desktop unit tests | PASS | P2 full run on combined code `bca577334`: **7,428 passed, 7 skipped**, 727 files passed / 3 skipped (268.17 s). Includes the P3 engine-facing, history/migration, import and lifecycle regressions. `nice -n 10 npx vitest run`; report all files/tests, failures and skips. Targeted tests alone do not pass. |
+| Entire desktop e2e suite, including 2D/editor/media | PASS (24 skipped) | P2 at `2844ef8de`: **1,024 discovered; 1,000 passed, 0 failed, 24 skipped** (48.9 min). Completed with one worker, no filters and no retries, including all fourteen repaired cases, native environment assertions, both film exports and video persistence. `nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000`. The 24 skipped cases remain unexecuted; optional fixtures/benchmarks and the separate acceptance gates below still need their own evidence. |
 | Non-film 3D editor regressions | PASS | Lane P3 at `46f2e9861`: **71 passed, zero skipped** (6.0 min), fresh native host, `ELECTRON_RUN_AS_NODE` unset, background mode, temporary user-data profile and optional UI screenshots outside Git. `npx playwright test scene3d studio --grep-invert 'product film' --trace off --reporter=line --global-timeout=1800000`; see [parity reproduction](parity.md#reproduce-the-checks). This is the 3D subset of the full desktop gate above. |
 | Svelte and renderer types | PASS | 0 errors, 1 existing accessibility warning in `IconCropper.svelte`.  `npx svelte-check --tsconfig ./tsconfig.web.json` |
 | Main/preload types | PASS | Generate cloud bindings/types first: `bun run --cwd ../cloud types && bun run --cwd ../cloud types:emit`.  `npx tsc --noEmit -p tsconfig.node.json` |
 | Rust workspace, host and GPU tests | PASS with disk-guard retry | P3 at `46f2e9861`: **100 tests passed** across 99 native/host/GPU tests and the optional 11-scene Cycles test. The latest Cargo invocation stopped only that optional test at its unchanged 8 GB disk guard; after pruning P3's own completed compiler cache, the same compiled test binary passed all 11 scenes (43.90 s). Earlier full invocation at `4368b15db` passed all 100 together. Features `oidn,metalfx,yardstick`; exact command below. This covers `pm-studio` and `pm-studio-host`, the workspace's two packages. The higher-quality full reference yardstick remains separate from this bounded regression, see [yardstick](cycles-yardstick.md). |
-| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; P3's `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans this branch's complete ancestry (1,225 commits at `4368b15db`) with no leaks. No ignore entries changed. Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
+| Public-repository secret scan | PASS for tested branch | Staged scans before every commit pass; P2's `gitleaks git --log-opts="--full-history HEAD" --redact --ignore-gitleaks-allow` scans **1,228 commits at tested code `2844ef8de`** with no leaks. No ignore entries changed. Before **each** commit: inspect `git diff --cached --stat`, `git diff --cached`, then `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Scan the final tested branch with the same explicit `HEAD` history scope; unrelated local refs are outside this branch validation. Keep `.githooks` active. |
 
 ## Real packaged app
 
@@ -202,29 +204,90 @@ above. They are not waived by green functional tests.
 | Old-project appearance | Medium | Compare representative pre-Studio and early-Studio rendered looks, not only semantic data, camera, references and timing. Synthetic fixtures do not establish pixel parity between renderers. |
 | Privacy instrumentation | Medium | Capture outbound traffic while opening/importing/editing synthetic projects to supplement source review; no project-data telemetry path was found in the audited code. |
 
-The full desktop e2e failures below remain Lane P2's separate work. P3 does not
+The full desktop e2e result is recorded separately by Lane P2 below. P3 does not
 claim full-suite, packaged UX or production-release approval. Local profiles,
 logs, Cycles outputs and optional UI screenshots stay under `/tmp/pm-p3-*`,
 outside Git.
 
-## Full-suite failures awaiting follow-up
+## Lane P2 full-suite failure audit
 
-The complete 1,022-test run finished with 979 passes, 19 failures and 24 skips.
-An isolated rerun of those 19 cases passed five and reproduced fourteen failures.
-Remaining failures cover agent extension recovery (timeout), authenticated visual
-replies (missing iframe), large agent attachments, idle effect GPU accounting,
-durable OBJ import, reference graph editing, group Properties keyboard reveal,
-2.5D group switch expectations, multi-layer value dragging/property reveal,
-keyframe dragging/navigation and track-value editing. Sandbox clipboard passed
-on retry; its first-run failure still warrants a flakiness review. These need their
-own reproduction/review; P1 has not labeled them pre-existing or waived them.
+Baseline: `origin/main` at `d7e9f9205`, checked out independently outside iCloud,
+installed with `bun install --frozen-lockfile`. Running the thirteen named spec
+files discovered **34 tests: 21 passed, 13 failed** (3.1 min). All fourteen
+reported cases were included; the durable OBJ case passed on main. The baseline
+checkout and its dependencies were removed after classification.
 
-Several native World/environment/iris assertions also failed because the
-initial full-suite build picked the incompatible shared-cache helper described
-above. All four native assertions pass on the corrected isolated build and targeted
-rerun (World ground, room/landscape, HDR sources and iris bokeh). Do not count WebGPU-rendered successes as
-native verification. Extended film exports are part of the full suite and can
-take substantially longer than the default 10-minute global test timeout.
+The unchanged Studio cases were also reproduced at `bcd623b3e`: the ten
+non-agent spec files produced **11 passed, 11 failed** (2.1 min), matching P1's
+repeatable failures. P1's full run and isolated retry provide the three agent
+reproductions. No case is classified as environmental without repeated evidence.
+
+Case paths are relative to `apps/desktop/e2e`.
+
+| Reported case | Classification | Correction / retained assertion |
+| --- | --- | --- |
+| `agent-extension-recovery.spec.ts` | Pre-existing on main | Replace the obsolete `codex exec` fixture with App Server thread/turn replies. Still checks isolated staging, promotion, recorded change set and Undo. |
+| `agent-visual-replies.spec.ts` (authenticated MCP) | Pre-existing on main | Provider fixture reads run-scoped MCP configuration from App Server and publishes through the real authenticated tool session. |
+| `chatgpt-connection.spec.ts` (large attachments) | Pre-existing on main | Use the current App Server protocol; retain exact image/file byte checks across renderer/main IPC. |
+| `effects-idle-cost.spec.ts` | Pre-existing on main | Account for the current 47 bundled effects, rather than the old 43; retain every GPU allocation, draw, cache and memory assertion. |
+| `extension-layers.spec.ts` (durable OBJ) | Studio regression | Select the imported model before committing the first-model studio transaction. Selection otherwise created an extra Undo step after the model/camera/lights edit. Real-history regression test checks one-step Undo, asset retention and Redo. |
+| `graph-reference.spec.ts` | Pre-existing on main | Enable Separate Dimensions explicitly for independent X/Y curve editing. |
+| `group-transforms.spec.ts` (Properties) | Pre-existing on main | Leave text-entry focus before the shortcut and assert the default joined Position row. |
+| `groups-25d.spec.ts` | Pre-existing on main | Assert explicit descendant 3D switches, as the group switch intentionally sets its members (`ef414bbb2`). Pixel changes, animation, picking, masks and Undo remain checked. |
+| `property-animation.spec.ts` (multi-layer drag) | Pre-existing on main | Enable Separate Dimensions for the Y-only gesture; retain both layer values and one-step Undo. |
+| `property-reveal.spec.ts` (shortcuts) | Pre-existing on main | Assert joined Position by default (`bff2ccd70`); retain Shift toggles, global disclosure and text-input isolation. |
+| `timeline-keyframe-drag.spec.ts` (Position Y) | Pre-existing on main | Enable Separate Dimensions for the scalar Y row; retain key values, times and Undo checks. |
+| `timeline-keyframe-navigation.spec.ts` (shortcuts) | Pre-existing on main | Enable Separate Dimensions for axis-specific navigation; retain exact times and input isolation. |
+| `timeline-keyframe-navigation.spec.ts` (deselection/deletion) | Pre-existing on main | Enable Separate Dimensions for Y-row selection; retain evaluated-value preservation and Undo. |
+| `timeline-track-values.spec.ts` (values) | Pre-existing on main | Enable Separate Dimensions for X-only editing; retain typing, scrubbing, Escape, locks and Undo. |
+
+Position is intentionally one timeline row by default; axis-specific tests now
+request the supported Separate Dimensions mode instead of silently looking up
+an absent row. The updated fixtures retain the existing interaction assertions
+and the product's default behavior.
+
+The incompatible shared-cache native helper found by P1 remains fixed: native
+builds use this checkout's isolated Cargo target and verify the real executable
+handshake. Full-suite validation must rebuild that release helper before launch.
+P2's targeted rerun passed **all 34 tests** (1.0 min), including all fourteen
+reported cases. An initial full attempt was interrupted after four Figma UI
+cases could not launch an absent Playwright Chromium executable. The browser
+was installed before restarting the full suite; no product/test assertion was
+changed for that environment setup failure; all nine Figma link/plugin cases
+then passed (22.1 s). A second full attempt passed 803 cases before it was
+stopped to integrate Lane K's new native renderer/import/font changes. The
+first complete combined-branch run at `be13c9731` finished with **999 passed,
+1 failed, 24 skipped** (50.4 min), including native environment assertions, both
+film exports and all fourteen repaired cases. The extra failure was a video
+restoration preview-seek wait; the unchanged case passed all three isolated
+repeats (1.1 min). Its persistence check now awaits the actual capture decoder
+and asserts a prepared source frame before retaining the existing byte, pixel
+and incremental-save checks. All five media-persistence cases passed three
+repeated runs after the change: **15 passed** (32.3 s).
+
+The final unfiltered run at **`2844ef8de`** includes the subsequent Lane K/P3
+hardening commits and the deterministic video wait: **1,024 discovered,
+1,000 passed, 0 failed, 24 skipped** (48.9 min). Both product films completed;
+the extended film took 17.9 min. All fourteen original blockers are resolved.
+The 24 skipped cases remain unexecuted, and the separate performance,
+physical-device-loss, long-run, packaged UX and documentation gates above
+remain open; this result does not establish production-release readiness.
+
+P2 reproduction from `apps/desktop` after the frozen install and browser setup:
+
+```sh
+unset ELECTRON_RUN_AS_NODE
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+export CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1
+export POWERMOVE_BACKGROUND_TEST=1
+export POWERMOVE_USER_DATA="$(mktemp -d)"
+nice -n 10 node scripts/build-studio-native.mjs
+nice -n 10 npx playwright test --trace off --reporter=line --global-timeout=7200000
+```
+
+The release helper was rebuilt with OIDN in this checkout's isolated Cargo
+target and its copied runtime verified before the final run. The suite used
+temporary profiles. Raw logs, captures and output media remain outside Git.
 
 
 ## Verified code and retained evidence
@@ -247,18 +310,3 @@ confirms the corrected 128-byte material / 96-byte triangle layout and OIDN.
 
 The Python host smoke and FBX measurement defaults now use this checkout's
 verified `resources/studio` helper rather than an unrelated shared Cargo binary.
-
-
-Repeatable e2e blockers (relative to `apps/desktop/e2e`; run the named files
-with `npx playwright test <file>`):
-
-| Area | Failing files / cases |
-| --- | --- |
-| Agent | `agent-extension-recovery.spec.ts`, authenticated MCP case in `agent-visual-replies.spec.ts`, large-attachment case in `chatgpt-connection.spec.ts` |
-| Effects/import | `effects-idle-cost.spec.ts`, durable OBJ case in `extension-layers.spec.ts` |
-| Groups/graph | `graph-reference.spec.ts`, first case in `group-transforms.spec.ts`, `groups-25d.spec.ts` |
-| Property editing | multi-layer drag in `property-animation.spec.ts`, `property-reveal.spec.ts` |
-| Timeline | `timeline-keyframe-drag.spec.ts`, both failing cases in `timeline-keyframe-navigation.spec.ts`, `timeline-track-values.spec.ts` |
-
-These fourteen failures block the full-suite gate. A retry passing five cases
-is not a clean full-suite run. No production release readiness is claimed.
