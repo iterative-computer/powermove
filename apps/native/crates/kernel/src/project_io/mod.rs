@@ -457,7 +457,17 @@ fn hash_project_file(
 
 /// Opens a project file. **Blocking**: run it off the UI thread.
 pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, ProjectIoError> {
-    let file = File::open(path).map_err(|e| io_err(path, e))?;
+    // Non-blocking open: a named pipe or device would otherwise block the
+    // kernel thread forever before the regular-file check below can refuse
+    // it. The flag changes nothing for reads of a regular file.
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|e| io_err(path, e))?
+    };
     let meta = file.metadata().map_err(|e| io_err(path, e))?;
     if !meta.is_file() {
         return Err(ProjectIoError::Invalid(
