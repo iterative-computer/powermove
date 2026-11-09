@@ -1,4 +1,3 @@
-/** Mounts the built-in panel into its window: the same entry a fork of it uses. */
 import { mountTimeline } from "./extension";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 

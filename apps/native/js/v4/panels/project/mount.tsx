@@ -1,4 +1,3 @@
-/** Mounts the built-in panel into its window: the same entry a fork of it uses. */
 import { ProjectPanel, ProjectService } from "./index";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 

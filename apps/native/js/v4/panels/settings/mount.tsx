@@ -1,4 +1,3 @@
-/** Mounts the built-in panel into its window: the same entry a fork of it uses. */
 import { SettingsPanel, SettingsModel, type Publication } from "./index";
 import { generalRows } from "./catalogue";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
