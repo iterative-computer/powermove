@@ -1088,7 +1088,8 @@ mod admission_tests {
             handler,
         )
     }
-    const INPUT: &str = r#"{"generation":3,"panel":1,"kind":"remote_dom","payload":{"kind":"event"}}"#;
+    const INPUT: &str =
+        r#"{"generation":3,"panel":1,"kind":"remote_dom","payload":{"kind":"event"}}"#;
     #[test]
     fn stale_and_unknown_panel_requests_do_not_reach_handler() {
         let (s, h) = shared(Trust::Trusted);

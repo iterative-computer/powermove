@@ -12,9 +12,7 @@ fn compare(name: &str) {
         root
     };
     let fixture = root.join("tests/golden").join(format!("{name}.png"));
-    let decoder = png::Decoder::new(BufReader::new(
-        File::open(fixture).unwrap(),
-    ));
+    let decoder = png::Decoder::new(BufReader::new(File::open(fixture).unwrap()));
     let mut reader = decoder.read_info().unwrap();
     let mut expected = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut expected).unwrap();

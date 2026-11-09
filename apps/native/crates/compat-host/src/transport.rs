@@ -55,10 +55,7 @@ impl Channel {
         }
         let route = parts.next().ok_or(Error::InvalidRequest)?.to_owned();
         if parts.next().is_some()
-            || !matches!(
-                route.as_str(),
-                "call" | "events" | "canvas" | "font"
-            )
+            || !matches!(route.as_str(), "call" | "events" | "canvas" | "font")
         {
             return Err(Error::InvalidRequest);
         }
