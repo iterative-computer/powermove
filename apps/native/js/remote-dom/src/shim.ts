@@ -800,7 +800,6 @@ export class RemoteDOM {
     const ops: Op[] = [];
     for (const node of this.dirty) this.sync(node, ops);
     this.dirty.clear();
-    // Ensure IDs referenced by focus/layout/listeners exist before commands.
     for (const command of this.commands) {
       if ('id' in command) this.ensure(this.node(command.id), ops);
       if (command.op === 'range') {

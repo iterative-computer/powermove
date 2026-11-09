@@ -31,7 +31,6 @@ export function installModelFactories(PM: Data): void {
   };
   PM.KF = KF;
 
-  /* ── channel schema ────────────────────────────────────── */
   const CH = {
     ...Object.fromEntries(
       Object.keys(CHANNELS_3D).map((key) => [
@@ -161,7 +160,6 @@ export function installModelFactories(PM: Data): void {
   };
   PM.TYPE_META = TYPE_META;
 
-  /* ── masks ─────────────────────────────────────────────── */
   /* Parametric layer masks (rect / ellipse) living in layer space, fully animatable.
    Geometry follows the layer transform; feather is a signed-distance falloff. */
   PM.MASK_SHAPES = ["rect", "ellipse"];
@@ -177,7 +175,6 @@ export function installModelFactories(PM: Data): void {
     };
   };
 
-  /* ── layer factory ─────────────────────────────────────── */
   function baseLayer(type: any, name: any, comp: any) {
     const w = comp ? comp.w : 1920,
       hgt = comp ? comp.h : 1080;
@@ -355,7 +352,6 @@ export function installModelFactories(PM: Data): void {
     return L;
   };
 
-  /* ── project factory ───────────────────────────────────── */
   PM.normalizeFill = (value: any, fallback = "#000000") => {
     const color = (v: any) =>
       typeof v === "string" && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(v)
@@ -414,7 +410,6 @@ export function installModelFactories(PM: Data): void {
     created: Date.now(),
   });
 
-  /* Deep clone that also refreshes ids. */
   PM.cloneLayer = (L: any) => {
     const c = JSON.parse(JSON.stringify(L));
     c.id = uid("L");
@@ -453,7 +448,6 @@ export function installModelFactories(PM: Data): void {
     return c;
   };
 
-  /* ── serialization ─────────────────────────────────────── */
   PM.serialize = () =>
     JSON.stringify(
       { v: PM.version, proj: PM.proj, ws: PM.WS && PM.WS.current },
