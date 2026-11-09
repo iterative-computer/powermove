@@ -216,19 +216,31 @@ impl Http {
     }
     /// One request; a failure names only the registry's error code
     /// (`api:handle_taken`) or the transport, never a body or a token.
-    fn call(
+    pub(crate) fn call(
         &mut self,
         method: &str,
         path: &str,
         body: Option<Value>,
         auth: bool,
     ) -> pm_services::Result<Value> {
+        let kind = body.as_ref().map(|_| "application/json".to_owned());
+        let bytes = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
+        self.send(method, path, bytes, kind, auth)
+    }
+    fn send(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        kind: Option<String>,
+        auth: bool,
+    ) -> pm_services::Result<Value> {
         let mut headers = vec![(
             "X-Powermove-Client".to_owned(),
             format!("desktop/{}", env!("CARGO_PKG_VERSION")),
         )];
-        if body.is_some() {
-            headers.push(("Content-Type".into(), "application/json".into()));
+        if let Some(kind) = kind {
+            headers.push(("Content-Type".into(), kind));
         }
         if auth {
             let token = stored_token(self.vault.as_ref(), self.origin).ok_or_else(|| {
@@ -241,7 +253,7 @@ impl Http {
                 url: format!("{}{}", self.origin.trim_end_matches('/'), path),
                 method: method.into(),
                 headers,
-                body: body.map(|b| b.to_string().into_bytes()).unwrap_or_default(),
+                body,
                 max_response_bytes: 1024 * 1024,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
             },
@@ -264,6 +276,29 @@ impl Http {
             _ => ServiceErrorCode::Unavailable,
         };
         Err(ServiceError::message(kind, format!("api:{code}")))
+    }
+    /// `POST` of git loose objects as `multipart/form-data`, one part per
+    /// object named by its id (the registry's upload route).
+    pub(crate) fn multipart(
+        &mut self,
+        path: &str,
+        parts: &[(String, Vec<u8>)],
+    ) -> pm_services::Result<Value> {
+        let boundary = format!("powermove-{:016x}", now_ms());
+        let mut body = Vec::new();
+        for (sha, bytes) in parts {
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{sha}\"; filename=\"{sha}\"\r\nContent-Type: application/x-git-loose-object\r\n\r\n").as_bytes());
+            body.extend_from_slice(bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        self.send(
+            "POST",
+            path,
+            body,
+            Some(format!("multipart/form-data; boundary={boundary}")),
+            true,
+        )
     }
     fn cache_path(&self) -> PathBuf {
         self.profile.join("cloud/account.json")

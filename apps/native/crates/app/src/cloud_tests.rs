@@ -198,3 +198,172 @@ fn an_ended_session_reads_as_signed_out_and_is_forgotten() {
     );
     assert!(s.vault.read().unwrap().is_none());
 }
+
+/// A signed-in maker with a handle, and an extension made on this Mac.
+fn maker() -> (Setup, std::path::PathBuf) {
+    let mut s = setup();
+    run(
+        &mut s,
+        CloudWork::SendEmail {
+            email: "maker@example.com".into(),
+        },
+    )
+    .unwrap();
+    account(run(
+        &mut s,
+        CloudWork::VerifyEmail {
+            email: "maker@example.com".into(),
+            code: Secret::new(CODE.into()),
+        },
+    ));
+    account(run(
+        &mut s,
+        CloudWork::ClaimHandle {
+            handle: "maker".into(),
+        },
+    ));
+    let profile = s._profile.path().to_owned();
+    let folder = profile.join("extensions/my-glow");
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        "{\n  \"id\": \"my-glow\",\n  \"name\": \"My Glow\",\n  \"version\": \"0.9.0\",\n  \"apiVersion\": 3,\n  \"permissions\": []\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("src/index.ts"),
+        "export default function () {}\n",
+    )
+    .unwrap();
+    std::fs::write(folder.join(".DS_Store"), "never published").unwrap();
+    (s, profile)
+}
+fn publish(s: &mut Setup, profile: &std::path::Path, version: &str) -> Result<String, String> {
+    use pm_services::surfaces::publishing::Draft;
+    let prepared = crate::publish::prepare(&mut s.host, profile, "my-glow", true)?;
+    let mut draft = Draft::for_plan(&prepared.plan);
+    draft.version = version.into();
+    draft.name = "My Glow".into();
+    draft.category = "effects".into();
+    crate::publish::draft_reasons(&prepared, &mut draft);
+    let form = draft
+        .form(&prepared.plan)
+        .map_err(|p| format!("{:?}", p[0].problem))?;
+    let frozen = crate::publish::freeze(&prepared, &form, 1_800_000_000)?;
+    assert_eq!(
+        frozen.confirmation().0,
+        format!("Publish maker/my-glow {version}?")
+    );
+    crate::publish::upload(&mut s.host, profile, &prepared, frozen)
+}
+
+#[test]
+fn publish_uploads_verified_objects_then_an_update_follows_its_commit() {
+    let (mut s, profile) = maker();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(plan.first_publish);
+    assert_eq!(plan.coordinate, "maker/my-glow");
+    assert_eq!(plan.suggested_version, "0.9.0");
+    assert_eq!(
+        publish(&mut s, &profile, "0.9.0").unwrap(),
+        "Published maker/my-glow 0.9.0."
+    );
+    {
+        let fixture = s.fixture.lock().unwrap();
+        let releases = &fixture.releases["maker/my-glow"];
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].3, None);
+        // Two blobs, two trees and the commit, each inflated and verified.
+        assert_eq!(fixture.objects.len(), 5);
+        assert!(
+            !fixture
+                .objects
+                .values()
+                .any(|o| o.ends_with(b"never published"))
+        );
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(profile.join("extensions-provenance.json")).unwrap())
+            .unwrap();
+    assert_eq!(record["my-glow"]["published"]["version"], "0.9.0");
+    // An update: the Store's version is the floor, the commit follows the last.
+    std::fs::write(
+        profile.join("extensions/my-glow/src/index.ts"),
+        "export default 2;\n",
+    )
+    .unwrap();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(!plan.first_publish);
+    assert_eq!(plan.last_version.as_deref(), Some("0.9.0"));
+    assert_eq!(plan.suggested_version, "0.9.1");
+    assert_eq!(
+        publish(&mut s, &profile, "0.9.0").unwrap_err(),
+        "VersionNotHigher"
+    );
+    assert_eq!(
+        publish(&mut s, &profile, "0.9.1").unwrap(),
+        "Published maker/my-glow 0.9.1."
+    );
+    let fixture = s.fixture.lock().unwrap();
+    let releases = &fixture.releases["maker/my-glow"];
+    assert_eq!(releases[1].3.as_deref(), Some(releases[0].1.as_str()));
+    // The published version went back into the folder's manifest.json.
+    let manifest =
+        std::fs::read_to_string(profile.join("extensions/my-glow/manifest.json")).unwrap();
+    assert!(manifest.contains("\"version\": \"0.9.1\""));
+    assert!(manifest.find("\"id\"").unwrap() < manifest.find("\"version\"").unwrap());
+}
+
+#[test]
+fn publish_refuses_secrets_undeclared_permissions_store_installs_and_a_signed_out_mac() {
+    let (mut s, profile) = maker();
+    let folder = profile.join("extensions/my-glow");
+    std::fs::write(
+        folder.join("src/key.ts"),
+        format!("const k = \"AKIA{}\";\n", "A".repeat(16)),
+    )
+    .unwrap();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(
+        crate::publish::plan_problem(&plan)
+            .unwrap()
+            .contains("looks like a secret")
+    );
+    std::fs::write(folder.join("src/key.ts"), "await fetch(url)\n").unwrap();
+    let plan = crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+        .unwrap()
+        .plan;
+    assert!(
+        crate::publish::plan_problem(&plan)
+            .unwrap()
+            .contains("network permission")
+    );
+    // A random-looking value with its reason in the code publishes as a waiver.
+    std::fs::write(
+        folder.join("src/key.ts"),
+        "const id = \"Zq8Xw2Lp9Rt4Vn7Ks1Mb6Jh3Gf5Dc0Ae2Bq9Wy\"; // powermove-secret-ok: public sample id\n",
+    )
+    .unwrap();
+    assert!(publish(&mut s, &profile, "0.9.0").is_ok());
+    // Never an extension the Store installed, and never signed out.
+    let store = profile.join("extensions/from-store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join(".powermove-store.json"), "{}").unwrap();
+    assert!(crate::publish::prepare(&mut s.host, &profile, "from-store", true).is_err());
+    assert!(matches!(
+        run(&mut s, CloudWork::SignOut),
+        Ok(CloudReply::SignedOut)
+    ));
+    assert_eq!(
+        crate::publish::prepare(&mut s.host, &profile, "my-glow", true)
+            .err()
+            .as_deref(),
+        Some("Sign in to publish.")
+    );
+}

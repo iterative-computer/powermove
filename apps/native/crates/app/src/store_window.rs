@@ -8,6 +8,7 @@
 use gpui::{prelude::*, *};
 use pm_compat_runner::{StoreAuthority, discovery, store_install};
 use pm_design::Tokens;
+use pm_services::surfaces::publishing::{Draft, Problem};
 use pm_services::{
     ServiceErrorCode,
     store::{InstalledRelease, StoreClient, StoreTransport},
@@ -30,6 +31,8 @@ pub struct Services {
     /// Where releases come from and the keys they must be signed with;
     /// `None` while this build pins no Store key (installs are refused).
     pub source: Option<Arc<store_install::Source>>,
+    /// The Powermove account's registry client, for publishing.
+    pub account: Arc<dyn Fn() -> crate::cloud::Http + Send + Sync>,
 }
 impl Services {
     /// The app's Store over the system HTTP stack, bound to the Store origin.
@@ -41,6 +44,16 @@ impl Services {
                 StoreClient::new(origin, transport)
             }),
             kernel: Arc::new(kernel),
+            account: {
+                let profile = profile.clone();
+                Arc::new(move || {
+                    crate::cloud::Http::new(
+                        store_install::origin(),
+                        Box::new(crate::cloud::Keychain::for_app()),
+                        profile.clone(),
+                    )
+                })
+            },
             profile,
             source: store_install::source().ok().flatten().map(Arc::new),
         }
@@ -126,11 +139,25 @@ pub struct Installed {
     /// The Store no longer lists it.
     pub removed: bool,
 }
+/// An extension made on this Mac (no Store marker): it can be published.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Yours {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    /// The version this Mac last published.
+    pub published: Option<String>,
+}
 enum Reply {
     Shelves(u64, Result<Vec<(String, Vec<Listing>)>, String>),
     Catalog(pm_services::surfaces::store::SearchReply),
     Detail(u64, Result<Detail, String>),
-    Library(Vec<Installed>, Option<String>),
+    Library(Vec<Installed>, Vec<Yours>, Option<String>),
+    Prepared(Result<crate::publish::Prepared, String>),
+    Frozen(
+        crate::publish::Prepared,
+        Result<crate::publish::Frozen, String>,
+    ),
     Done(String),
 }
 
@@ -145,6 +172,11 @@ pub struct StoreWindow {
     catalog: Catalog,
     pub detail: Option<(Listing, Load<Detail>)>,
     pub library: Load<Vec<Installed>>,
+    /// Extensions made on this Mac (Library › Yours).
+    pub yours: Vec<Yours>,
+    /// The publish being prepared or confirmed, and the sheet asking for it.
+    publishing: Option<(crate::publish::Prepared, Option<crate::sheets::OpenSheet>)>,
+    owner: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
     /// The extension or repository an install, update or uninstall is running for.
     pub busy: Option<String>,
     pub message: Option<String>,
@@ -174,6 +206,9 @@ impl StoreWindow {
             catalog: Catalog::default(),
             detail: None,
             library: Load::Loading,
+            yours: Vec::new(),
+            publishing: None,
+            owner: None,
             busy: None,
             message: None,
             generation: 0,
@@ -301,7 +336,7 @@ impl StoreWindow {
                 }
                 Err(error) => Some(load_error(error)),
             };
-            Reply::Library(installed, note)
+            Reply::Library(installed, yours(&profile), note)
         });
     }
     pub fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -499,12 +534,38 @@ impl StoreWindow {
                     };
                 }
             }
-            Reply::Library(items, note) => {
+            Reply::Library(items, yours, note) => {
                 self.library = Load::Ready(items);
+                self.yours = yours;
                 if note.is_some() && self.page == Page::Library {
                     self.message = note;
                 }
             }
+            Reply::Prepared(result) => {
+                self.busy = None;
+                match result {
+                    Ok(prepared) => match crate::publish::plan_problem(&prepared.plan) {
+                        Some(problem) => self.message = Some(problem),
+                        None => {
+                            let draft = Draft::for_plan(&prepared.plan);
+                            self.publishing = Some((prepared, None));
+                            self.publish_sheet(draft, None, cx);
+                        }
+                    },
+                    Err(message) => self.message = Some(message),
+                }
+            }
+            Reply::Frozen(prepared, result) => match result {
+                Ok(frozen) => {
+                    self.publishing = Some((prepared, None));
+                    self.confirm_publish(frozen, cx)
+                }
+                Err(message) => {
+                    self.busy = None;
+                    self.publishing = None;
+                    self.message = Some(message);
+                }
+            },
             Reply::Done(message) => {
                 self.message = Some(message);
                 if self.busy.take().is_some() {
@@ -523,6 +584,185 @@ impl StoreWindow {
         }
         self.catalog_items().into_iter().map(|l| l.slug).collect()
     }
+    /// Library › Yours › Publish…: the account and the folder are checked on
+    /// a worker, then the publish sheet asks for the version and listing.
+    pub fn publish(&mut self, id: String, window: &Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() || self.publishing.is_some() {
+            return;
+        }
+        self.owner = crate::platform::ns_window(window);
+        self.busy = Some(id.clone());
+        self.message = None;
+        let (account, profile) = (self.services.account.clone(), self.services.profile.clone());
+        let healthy = crate::publish::healthy(self.services.kernel.as_ref(), &id);
+        self.run(move |_| {
+            let mut http = account();
+            Reply::Prepared(crate::publish::prepare(&mut http, &profile, &id, healthy))
+        });
+        cx.notify();
+    }
+    fn publish_sheet(&mut self, draft: Draft, problem: Option<String>, cx: &mut Context<Self>) {
+        use crate::dialogs::{Button, DialogId, Field, NativePiece, Surface, WindowId};
+        let (Some(owner), Some((prepared, sheet))) = (self.owner.clone(), self.publishing.as_mut())
+        else {
+            return;
+        };
+        if let Some(old) = sheet.take() {
+            old.close();
+        }
+        let plan = &prepared.plan;
+        let text = |id: &str, label: &str, value: &str| {
+            Field::new(id, label, NativePiece::TextField, vec![value.into()])
+        };
+        let popup = |id: &str, label: &str, options: &[(&str, &str)], value: &str| Field {
+            selected: options.iter().position(|(v, _)| *v == value).unwrap_or(0),
+            ..Field::new(
+                id,
+                label,
+                NativePiece::PopUpButton,
+                options.iter().map(|(_, l)| (*l).into()).collect(),
+            )
+        };
+        let mut fields = vec![
+            text("version", "Version", &draft.version),
+            text("notes", "Release Notes", &draft.notes),
+        ];
+        if plan.first_publish {
+            fields.push(text("name", "Name", &draft.name));
+            fields.push(text("tagline", "Tagline", &draft.tagline));
+            fields.push(popup("category", "Kind", &CATEGORIES, &draft.category));
+            fields.push(popup(
+                "visibility",
+                "Visibility",
+                &VISIBILITY,
+                &draft.visibility,
+            ));
+        }
+        let mut surface = Surface::sheet(
+            DialogId("publish".into()),
+            WindowId("store".into()),
+            &if plan.first_publish {
+                format!("Publish {}", plan.coordinate)
+            } else {
+                format!("Publish an Update to {}", plan.coordinate)
+            },
+            fields,
+            "Publish…",
+        );
+        surface.line = Some(match &plan.last_version {
+            Some(last) => {
+                format!("The Store has {last}. People who installed it are offered this version.")
+            }
+            None => "It appears on the Store under your handle. Everyone can install it.".into(),
+        });
+        surface.buttons = vec![Button::cancel(false), Button::action("Publish…")];
+        surface.warning = problem;
+        let open = crate::sheets::OpenSheet::present(
+            crate::sheets::from_surface(&surface, &self.tokens),
+            &owner,
+            Some("version"),
+        );
+        let actions = open.actions.clone();
+        *sheet = Some(open);
+        cx.spawn(async move |this, cx| {
+            // Buttons only; a field also sends its id when editing ends.
+            while let Ok(action) = actions.recv().await {
+                if action == "apply" || action == "cancel" {
+                    let _ = this.update(cx, |v, cx| v.publish_action(&action, cx));
+                }
+            }
+        })
+        .detach();
+    }
+    fn publish_action(&mut self, action: &str, cx: &mut Context<Self>) {
+        let Some((prepared, Some(sheet))) = self.publishing.as_mut() else {
+            return;
+        };
+        if action == "cancel" {
+            sheet.close();
+            self.publishing = None;
+            cx.notify();
+            return;
+        }
+        let plan = &prepared.plan;
+        let mut draft = Draft::for_plan(plan);
+        draft.version = sheet.text("version");
+        draft.notes = sheet.text("notes");
+        if plan.first_publish {
+            draft.name = sheet.text("name");
+            draft.tagline = sheet.text("tagline");
+            draft.category = CATEGORIES[sheet
+                .popup("category")
+                .unwrap_or(0)
+                .min(CATEGORIES.len() - 1)]
+            .0
+            .into();
+            draft.visibility = VISIBILITY[sheet.popup("visibility").unwrap_or(0).min(1)]
+                .0
+                .into();
+        }
+        crate::publish::draft_reasons(prepared, &mut draft);
+        match draft.form(plan) {
+            Err(problems) => {
+                let text = problem_text(&problems[0], plan);
+                self.publish_sheet(draft, Some(text), cx);
+            }
+            Ok(form) => {
+                sheet.close();
+                let (Some((prepared, _)), now) = (self.publishing.take(), now_seconds()) else {
+                    return;
+                };
+                self.busy = Some(prepared.plan.local_id.clone());
+                self.run(move |_| {
+                    let frozen = crate::publish::freeze(&prepared, &form, now);
+                    Reply::Frozen(prepared, frozen)
+                });
+            }
+        }
+        cx.notify();
+    }
+    /// v1's confirmation names the frozen snapshot; Publish uploads exactly it.
+    fn confirm_publish(&mut self, frozen: crate::publish::Frozen, cx: &mut Context<Self>) {
+        use crate::alert::{Alert, Button};
+        let Some(owner) = self.owner.clone() else {
+            return;
+        };
+        let (message, detail) = frozen.confirmation();
+        let rx = Alert::new(
+            message,
+            detail,
+            vec![
+                Button::new("Publish", true).default(),
+                Button::new("Cancel", false).cancel(),
+            ],
+        )
+        .sheet(&owner);
+        cx.spawn(async move |this, cx| {
+            let publish = rx.recv().await == Ok(Some(true));
+            let _ = this.update(cx, |v, cx| v.upload(publish.then_some(frozen), cx));
+        })
+        .detach();
+    }
+    /// The confirmed upload (or its cancellation).
+    pub fn upload(&mut self, frozen: Option<crate::publish::Frozen>, cx: &mut Context<Self>) {
+        let Some((prepared, _)) = self.publishing.take() else {
+            return;
+        };
+        let Some(frozen) = frozen else {
+            self.busy = None;
+            cx.notify();
+            return;
+        };
+        let (account, profile) = (self.services.account.clone(), self.services.profile.clone());
+        self.run(move |_| {
+            let mut http = account();
+            Reply::Done(
+                crate::publish::upload(&mut http, &profile, &prepared, frozen)
+                    .unwrap_or_else(|message| message),
+            )
+        });
+        cx.notify();
+    }
     fn catalog_items(&self) -> Vec<Listing> {
         self.catalog
             .items
@@ -537,6 +777,44 @@ impl StoreWindow {
     }
 }
 
+const CATEGORIES: [(&str, &str); 7] = [
+    ("effects", "Effect"),
+    ("transitions", "Transition"),
+    ("panels", "Panel"),
+    ("themes", "Theme"),
+    ("commands", "Commands"),
+    ("layers", "Layer"),
+    ("tools", "Tool"),
+];
+const VISIBILITY: [(&str, &str); 2] = [("public", "Public"), ("unlisted", "Unlisted")];
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+/// A publish form's first problem, as one sentence.
+fn problem_text(
+    problem: &pm_services::surfaces::publishing::FieldProblem,
+    plan: &pm_services::surfaces::publishing::Plan,
+) -> String {
+    match problem.problem {
+        Problem::VersionRequired => "Enter a version, such as 1.0.0.".into(),
+        Problem::VersionInvalid => "Use a version like 1.2.3.".into(),
+        Problem::VersionNotHigher => format!(
+            "Use a version higher than {}.",
+            plan.last_version.as_deref().unwrap_or("the last one")
+        ),
+        Problem::NotesTooLong => "Release notes can be up to 4,000 characters.".into(),
+        Problem::NameRequired => "Add a name for the Store.".into(),
+        Problem::NameTooLong => "Names can be up to 80 characters.".into(),
+        Problem::TaglineTooLong => "Taglines can be up to 160 characters.".into(),
+        Problem::WaiverTooShort | Problem::WaiverTooLong => format!(
+            "{} looks like a random key. Remove it, or add `// powermove-secret-ok: <why>` beside it.",
+            problem.field
+        ),
+        _ => "This extension can’t be published as it is.".into(),
+    }
+}
 const GENERIC: &str = "Something went wrong. Try again.";
 const SIGNING: &str =
     "Store installs need a signed release, and the Store doesn't sign releases yet.";
@@ -551,6 +829,27 @@ fn load_error(error: pm_services::ServiceError) -> String {
 }
 fn uuid_like(s: &str) -> bool {
     s.len() == 36 && s.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
+}
+/// Extensions made on this Mac (no Store marker), with what was published.
+pub fn yours(profile: &std::path::Path) -> Vec<Yours> {
+    let provenance: Value = std::fs::read(profile.join("extensions-provenance.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    discovery::scan(&[profile.join("extensions")])
+        .into_iter()
+        .filter(|found| found.store.is_none())
+        .map(|found| {
+            let manifest = found.manifest.as_ref().ok();
+            let text = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_owned);
+            Yours {
+                name: text(manifest.and_then(|m| m.get("name"))).unwrap_or(found.id.clone()),
+                version: text(manifest.and_then(|m| m.get("version"))).unwrap_or_default(),
+                published: text(provenance[&found.id]["published"].get("version")),
+                id: found.id,
+            }
+        })
+        .collect()
 }
 /// The Store installs in this profile's extensions folder.
 pub fn scan(profile: &std::path::Path) -> Vec<Installed> {
@@ -810,7 +1109,7 @@ impl StoreWindow {
             Load::Loading => return vec![self.status("Loading…").into_any_element()],
             Load::Failed(error) => return vec![self.status(error).into_any_element()],
         };
-        if items.is_empty() {
+        if items.is_empty() && self.yours.is_empty() {
             return vec![
                 pm_shell::view::empty_state(
                     &self.tokens,
@@ -907,6 +1206,60 @@ impl StoreWindow {
                 }
                 out.push(row.into_any_element());
             }
+        }
+        // Made on this Mac: publish to the Store (v1 Library › Yours).
+        if !self.yours.is_empty() {
+            out.push(self.heading("Yours").into_any_element());
+        }
+        for item in self.yours.clone() {
+            let (status, label) = match &item.published {
+                Some(published) if *published == item.version => {
+                    (format!("Published {published}"), "Publish Update…")
+                }
+                Some(published) => (
+                    format!("Published {published} · Changed since"),
+                    "Publish Update…",
+                ),
+                None => ("Not on the Store".to_owned(), "Publish…"),
+            };
+            let id = item.id.clone();
+            let busy = self.busy.as_deref() == Some(id.as_str());
+            out.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(m.inset))
+                    .py(px(m.gap * 0.75))
+                    .px(px(m.gap))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w(px(0.))
+                            .gap(px(m.border))
+                            .child(div().truncate().child(item.name.clone()))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(ty.minimum))
+                                    .text_color(rgb(c.secondary))
+                                    .child(status),
+                            ),
+                    )
+                    .child(
+                        self.button(
+                            format!("store-publish-{id}"),
+                            if busy { "Publishing…" } else { label },
+                            self.busy.is_none() && self.publishing.is_none(),
+                            false,
+                        )
+                        .on_click(
+                            cx.listener(move |v, _, window, cx| v.publish(id.clone(), window, cx)),
+                        ),
+                    )
+                    .into_any_element(),
+            );
         }
         out
     }

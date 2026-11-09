@@ -86,6 +86,9 @@ path = "../migrate"
 [dev-dependencies.ed25519-dalek]
 version = "2.2"
 
+[dev-dependencies.sha1]
+version = "0.10"
+
 [dev-dependencies.tar]
 version = "0.4"
 

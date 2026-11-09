@@ -178,6 +178,23 @@ pub struct Account {
     remember: bool,
     pub installs: Vec<(String, String)>,
     pub deleted: bool,
+    /// Uploaded objects, each inflated and checked against its id.
+    pub objects: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Published releases by `handle/slug`: (version, commit, tree, parent).
+    pub releases: std::collections::BTreeMap<String, Vec<(String, String, String, Option<String>)>>,
+}
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+/// A git object id of inflated `<type> <size>\0<body>` bytes.
+mod sha1_smol_free {
+    pub fn hash(bytes: &[u8]) -> String {
+        use sha1::Digest;
+        sha1::Sha1::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
 }
 impl Account {
     pub fn sessions_clear(&mut self) {
@@ -217,6 +234,21 @@ fn cloud(
         "settings":{"rememberInstalls":a.remember}})
     };
     match (method, path) {
+        ("GET", p) if p.starts_with("/v1/store/x/") => {
+            let coordinate = p.strip_prefix("/v1/store/x/")?;
+            let releases = a.releases.get(coordinate)?;
+            let (handle, slug) = coordinate.split_once('/')?;
+            let id = |i: usize| format!("5a1c0000-0000-4000-8000-{:012x}", 0x100 + i);
+            let latest = releases.len() - 1;
+            json(json!({"repoId":"5a1c0000-0000-4000-8000-0000000000dd",
+                "owner":{"id":"5a1c0000-0000-4000-8000-0000000000ee","handle":handle,"tombstoned":false,"verified":false},
+                "slug":slug,"name":slug,"tagline":"","category":"effects","iconUrl":null,"visibility":"public",
+                "latest":{"id":id(latest),"version":releases[latest].0,"publishedAt":"2026-11-09T00:00:00Z","apiVersion":3,"yankedAt":null},
+                "permissions":[],"installCount":0,"forkCount":0,"licence":"MIT","forkedFrom":null,
+                "createdAt":"2026-11-09T00:00:00Z","updatedAt":"2026-11-09T00:00:00Z","about":null,"moderation":"none",
+                "releases":releases.iter().enumerate().rev().map(|(i, r)| json!({"id":id(i),"version":r.0,"commitSha":r.1,
+                    "publishedAt":"2026-11-09T00:00:00Z","yankedAt":null,"notes":null,"apiVersion":3,"manifest":{}})).collect::<Vec<_>>()}))
+        }
         // The registry's Google page, played by the review: it answers with
         // the return link a browser would follow.
         ("GET", "/v1/auth/desktop") => {
@@ -266,6 +298,8 @@ fn cloud(
         (_, p)
             if p.starts_with("/v1/me")
                 || p.starts_with("/v1/installs")
+                || p.starts_with("/v1/objects")
+                || p.starts_with("/v1/repos/")
                 || p == "/v1/auth/sign-out" =>
         {
             if !authed {
@@ -306,6 +340,98 @@ fn cloud(
                         request["releaseId"].as_str()?.to_owned(),
                     ));
                     Some((204, vec![]))
+                }
+                ("POST", "/v1/objects/missing") => {
+                    let missing: Vec<&str> = request["shas"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|sha| !a.objects.contains_key(*sha))
+                        .collect();
+                    json(json!({ "missing": missing }))
+                }
+                ("POST", "/v1/objects") => {
+                    let boundary = head.lines().find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-type")
+                            .then(|| v.split("boundary=").nth(1).map(|b| b.trim().to_owned()))?
+                    })?;
+                    let mut stored = Vec::new();
+                    let marker = format!("--{boundary}");
+                    let text = body;
+                    let mut at = 0;
+                    while let Some(start) =
+                        find(&text[at..], marker.as_bytes()).map(|i| at + i + marker.len())
+                    {
+                        let Some(end) = find(&text[start..], marker.as_bytes()).map(|i| start + i)
+                        else {
+                            break;
+                        };
+                        let part = &text[start..end];
+                        at = end;
+                        let Some(split) = find(part, b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let headers = String::from_utf8_lossy(&part[..split]);
+                        let sha = headers
+                            .split("name=\"")
+                            .nth(1)?
+                            .split('"')
+                            .next()?
+                            .to_owned();
+                        let data = &part[split + 4..part.len() - 2];
+                        let mut inflated = Vec::new();
+                        use std::io::Read;
+                        flate2::read::ZlibDecoder::new(data)
+                            .read_to_end(&mut inflated)
+                            .ok()?;
+                        let actual = {
+                            use sha1_smol_free::hash;
+                            hash(&inflated)
+                        };
+                        if actual != sha {
+                            return Some((200, json!({"stored":[],"present":[],"rejected":[{"sha":sha,"code":"hash_mismatch"}]}).to_string().into_bytes()));
+                        }
+                        a.objects.insert(sha.clone(), inflated);
+                        stored.push(sha);
+                    }
+                    json(json!({"stored":stored,"present":[],"rejected":[]}))
+                }
+                ("PUT", p) if p.starts_with("/v1/repos/") => {
+                    let rest = p.strip_prefix("/v1/repos/")?.strip_suffix("/releases")?;
+                    let (handle, _) = rest.split_once('/')?;
+                    if a.handle.as_deref() != Some(handle) {
+                        return fail(403, "not_owner");
+                    }
+                    let commit = request["commitSha"].as_str()?.to_owned();
+                    let Some(object) = a.objects.get(&commit) else {
+                        return fail(422, "commit_missing");
+                    };
+                    let text = String::from_utf8_lossy(object).into_owned();
+                    let body = text.split_once('\0')?.1;
+                    let tree = body.lines().next()?.strip_prefix("tree ")?.to_owned();
+                    let parent = body
+                        .lines()
+                        .nth(1)
+                        .and_then(|l| l.strip_prefix("parent "))
+                        .map(str::to_owned);
+                    if !a.objects.contains_key(&tree) {
+                        return fail(422, "object_missing");
+                    }
+                    let version = request["version"].as_str()?.to_owned();
+                    let releases = a.releases.entry(rest.to_owned()).or_default();
+                    if releases.iter().any(|r| r.0 == version) {
+                        return fail(409, "version_exists");
+                    }
+                    releases.push((version.clone(), commit.clone(), tree.clone(), parent));
+                    let id = format!(
+                        "5a1c0000-0000-4000-8000-{:012x}",
+                        0x100 + releases.len() - 1
+                    );
+                    json(
+                        json!({"repo":{"repoId":"5a1c0000-0000-4000-8000-0000000000dd"},
+                        "release":{"id":id,"version":version,"commitSha":commit,"treeSha":tree}}),
+                    )
                 }
                 ("DELETE", p) => {
                     let repo = p.strip_prefix("/v1/installs/")?;
@@ -515,8 +641,25 @@ fn services(f: &Fixture, signed: bool) -> Services {
             pm_services::store::StoreClient::new(origin, transport)
         }),
         kernel: f.kernel.clone(),
+        // Publishing has its own tests (cloud_tests); signed out here.
+        account: {
+            let profile = f.profile.path().to_owned();
+            Arc::new(move || crate::cloud::Http::new(origin, Box::new(NoVault), profile.clone()))
+        },
         profile: f.profile.path().canonicalize().unwrap(),
         source: signed.then(|| Arc::new(store_install::Source { origin, trust })),
+    }
+}
+struct NoVault;
+impl crate::cloud::Vault for NoVault {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    fn write(&mut self, _: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn delete(&mut self) -> Result<(), String> {
+        Ok(())
     }
 }
 /// The window's transport is the system HTTP stack held to one origin; the

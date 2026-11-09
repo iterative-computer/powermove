@@ -43,6 +43,7 @@ mod playback;
 mod playhead;
 mod pro_media;
 mod project_library;
+mod publish;
 mod raster_overrides;
 mod render_frames;
 mod rows;
