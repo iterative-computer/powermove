@@ -184,6 +184,8 @@ pub struct Account {
     pub objects: std::collections::BTreeMap<String, Vec<u8>>,
     /// Published releases by `handle/slug`: (version, commit, tree, parent).
     pub releases: std::collections::BTreeMap<String, Vec<Published>>,
+    /// A Store that answers for one release with another's envelope and archive.
+    pub replay: Option<(&'static str, &'static str)>,
 }
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
@@ -583,6 +585,11 @@ pub fn serve_with(port: u16, account: Arc<Mutex<Account>>) -> String {
                 };
                 let mut line = head.lines().next().unwrap_or_default().split(' ');
                 let (method, path) = (line.next().unwrap_or(""), line.next().unwrap_or(""));
+                let replay = account.lock().unwrap().replay;
+                let path = &match replay {
+                    Some((asked, served)) => path.replace(asked, served),
+                    None => path.to_owned(),
+                };
                 let (status, reply) = cloud(method, path, &head, &body, &account)
                     .unwrap_or_else(|| route(method, path, &body));
                 // A redirect's body is where it goes.
@@ -639,10 +646,13 @@ struct Fixture {
     origin: &'static str,
 }
 fn fixture() -> Fixture {
+    fixture_with(Arc::default())
+}
+fn fixture_with(account: Arc<Mutex<Account>>) -> Fixture {
     Fixture {
         profile: tempfile::tempdir().unwrap(),
         kernel: Arc::new(Mutex::new(Kernel::new(KernelConfig::default()))),
-        origin: Box::leak(serve(0).into_boxed_str()),
+        origin: Box::leak(serve_with(0, account).into_boxed_str()),
     }
 }
 fn services(f: &Fixture, signed: bool) -> Services {
@@ -842,8 +852,12 @@ fn library_shows_an_update_notice_and_updates_then_uninstall_archives() {
         f.kernel.as_ref(),
         &profile,
         "native",
-        GLOW_OLD,
-        GLOW_REPO,
+        &store_install::Request {
+            release: GLOW_OLD,
+            repo: GLOW_REPO,
+            extension: "soft-glow",
+            version: "1.0.0",
+        },
     )
     .unwrap();
     let mut cx = TestAppContext::single();
@@ -886,6 +900,49 @@ fn library_shows_an_update_notice_and_updates_then_uninstall_archives() {
             .count(),
         2
     );
+}
+
+#[::core::prelude::v1::test]
+fn an_update_answered_with_an_older_signed_release_is_refused_and_keeps_the_install() {
+    let account = Arc::new(Mutex::new(Account::default()));
+    let f = fixture_with(account.clone());
+    let profile = f.profile.path().canonicalize().unwrap();
+    let source = services(&f, true).source.unwrap();
+    store_install::install_from(
+        &source,
+        f.kernel.as_ref(),
+        &profile,
+        "native",
+        &store_install::Request {
+            release: GLOW_OLD,
+            repo: GLOW_REPO,
+            extension: "soft-glow",
+            version: "1.0.0",
+        },
+    )
+    .unwrap();
+    // The Store offers 1.1.0, then answers its download with 1.0.0's valid
+    // envelope and archive.
+    account.lock().unwrap().replay = Some((GLOW_NEW, GLOW_OLD));
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, services(&f, true));
+    click(cx, "store-section-Library");
+    settle(&view, cx, "update notice", |v| {
+        matches!(&v.library, crate::store_window::Load::Ready(items)
+            if items.len() == 1 && items[0].update.as_ref().is_some_and(|u| u.0 == "1.1.0"))
+    });
+    click(cx, "store-update-soft-glow");
+    settle(&view, cx, "refused", |v| {
+        v.busy.is_none() && v.message.is_some()
+    });
+    assert_eq!(
+        view.read_with(cx, |v, _| v.message.clone()).as_deref(),
+        Some("This release isn't the one the Store page offered, so it wasn't installed.")
+    );
+    assert!(!profile.join("extensions/.archive").exists());
+    let manifest =
+        std::fs::read_to_string(profile.join("extensions/soft-glow/manifest.json")).unwrap();
+    assert!(manifest.contains("1.0.0"));
 }
 
 #[::core::prelude::v1::test]

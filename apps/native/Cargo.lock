@@ -4766,6 +4766,7 @@ dependencies = [
  "png",
  "regex",
  "resvg",
+ "semver",
  "serde_json",
  "sha2",
  "tar",

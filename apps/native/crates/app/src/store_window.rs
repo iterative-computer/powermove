@@ -139,6 +139,16 @@ pub struct Installed {
     /// The Store no longer lists it.
     pub removed: bool,
 }
+/// A release a person chose to install: the page's extension and version
+/// for it, which its signed envelope must name.
+#[derive(Clone, Debug)]
+pub struct Pick {
+    pub release: String,
+    pub repo: String,
+    pub extension: String,
+    pub version: String,
+    pub name: String,
+}
 /// An extension made on this Mac (no Store marker): it can be published.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Yours {
@@ -426,7 +436,7 @@ impl StoreWindow {
         )
     }
     /// Installs (or updates to) a release, then every window rescans.
-    pub fn install(&mut self, release: String, repo: String, name: String, cx: &mut Context<Self>) {
+    pub fn install(&mut self, pick: Pick, cx: &mut Context<Self>) {
         if self.busy.is_some() {
             return;
         }
@@ -435,29 +445,34 @@ impl StoreWindow {
             cx.notify();
             return;
         };
-        let updating = self.installed_repo(&repo);
-        self.busy = Some(repo.clone());
+        let updating = self.installed_repo(&pick.repo);
+        self.busy = Some(pick.repo.clone());
         self.message = None;
         let (kernel, profile) = (self.services.kernel.clone(), self.services.profile.clone());
         self.run(move |_| {
+            let request = store_install::Request {
+                release: &pick.release,
+                repo: &pick.repo,
+                extension: &pick.extension,
+                version: &pick.version,
+            };
             match store_install::install_from(
                 &source,
                 kernel.as_ref(),
                 &profile,
                 "native",
-                &release,
-                &repo,
+                &request,
             ) {
                 Ok(_) => {
                     pm_compat_runner::host::rescan_all();
-                    crate::cloud::remember_install(&profile, &repo, Some(&release));
+                    crate::cloud::remember_install(&profile, &pick.repo, Some(&pick.release));
                     Reply::Done(if updating {
-                        format!("{name} is updated.")
+                        format!("{} is updated.", pick.name)
                     } else {
-                        format!("{name} is installed.")
+                        format!("{} is installed.", pick.name)
                     })
                 }
-                Err(error) => Reply::Done(error.to_string()),
+                Err(error) => Reply::Done(refusal(error)),
             }
         });
         cx.notify();
@@ -512,7 +527,7 @@ impl StoreWindow {
                     }
                     Reply::Done(format!("{name} is uninstalled."))
                 }
-                Err(error) => Reply::Done(error.to_string()),
+                Err(error) => Reply::Done(refusal(error)),
             },
         );
         cx.notify();
@@ -795,6 +810,13 @@ fn now_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+/// An install or uninstall failure as the sentence the Store gave for it.
+fn refusal(error: pm_runtime_v8::Error) -> String {
+    match error {
+        pm_runtime_v8::Error::Host(message) => message,
+        _ => "Powermove couldn’t change this extension. Try again.".into(),
+    }
 }
 /// A publish form's first problem, as one sentence.
 fn problem_text(
@@ -1191,10 +1213,16 @@ impl StoreWindow {
                                     .child(status),
                             ),
                     );
-                if let (Some((_, release)), Some(repo), false) =
+                if let (Some((version, release)), Some(repo), false) =
                     (&item.update, &item.repo, item.removed)
                 {
-                    let (release, repo, name) = (release.clone(), repo.clone(), item.name.clone());
+                    let pick = Pick {
+                        release: release.clone(),
+                        repo: repo.clone(),
+                        extension: item.id.clone(),
+                        version: version.clone(),
+                        name: item.name.clone(),
+                    };
                     let busy = self.busy.as_deref() == Some(repo.as_str());
                     row = row.child(
                         self.button(
@@ -1203,9 +1231,7 @@ impl StoreWindow {
                             self.busy.is_none() && self.services.source.is_some(),
                             true,
                         )
-                        .on_click(cx.listener(move |v, _, _, cx| {
-                            v.install(release.clone(), repo.clone(), name.clone(), cx)
-                        })),
+                        .on_click(cx.listener(move |v, _, _, cx| v.install(pick.clone(), cx))),
                     );
                 }
                 out.push(row.into_any_element());
@@ -1336,19 +1362,26 @@ impl StoreWindow {
             action,
             DetailAction::Install | DetailAction::InstallAndSetUp | DetailAction::Update
         );
-        let release = match action {
+        // (extension, version, release) the page offers.
+        let offer = match action {
             DetailAction::Update => installed
                 .as_ref()
-                .and_then(|i| i.update.clone())
-                .map(|u| u.1),
-            _ => listing.latest.as_ref().map(|l| l.0.clone()),
+                .and_then(|i| Some((i.id.clone(), i.update.clone()?))),
+            _ => listing
+                .latest
+                .as_ref()
+                .map(|l| (listing.slug.clone(), (l.1.clone(), l.0.clone()))),
         };
         let mut button = self.button("store-action", action.label(), can_act, primary);
-        if can_act && let Some(release) = release {
-            let (repo, name) = (listing.repo_id.clone(), listing.name.clone());
-            button = button.on_click(cx.listener(move |v, _, _, cx| {
-                v.install(release.clone(), repo.clone(), name.clone(), cx)
-            }));
+        if can_act && let Some((extension, (version, release))) = offer {
+            let pick = Pick {
+                release,
+                repo: listing.repo_id.clone(),
+                extension,
+                version,
+                name: listing.name.clone(),
+            };
+            button = button.on_click(cx.listener(move |v, _, _, cx| v.install(pick.clone(), cx)));
         }
         actions = actions.child(button);
         if let Some(item) = installed {

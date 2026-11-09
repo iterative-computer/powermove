@@ -9,6 +9,7 @@ publish = false
 macos-sandbox = ["pm-runtime-v8/macos-sandbox"]
 
 [dependencies]
+semver = "1"
 pm-runtime-v8 = { path = "../runtime-v8" }
 pm-recorder = { path = "../recorder" }
 pm-kernel = { path = "../kernel" }

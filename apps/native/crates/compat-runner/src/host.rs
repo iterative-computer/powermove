@@ -12,7 +12,7 @@ use crate::{
     store_kernel::update_state,
     transport::{Transport, TransportOwner},
 };
-use crate::{store_host::StoreExtension, store_install, store_runtime::StoreViews};
+use crate::{store_host::StoreExtension, store_runtime::StoreViews};
 use pm_compat_host::{AdmittedDomBatch, CanvasFrame, RemoteDomPanel};
 use pm_kernel::{
     KernelEvent, KernelHandle, RealmEnvelope, RealmMessage, Writer,
@@ -521,8 +521,6 @@ impl RasterInbox {
 pub struct ExtensionHost {
     inbox: Sender<Input>,
     shared: Arc<Shared>,
-    kernel: KernelHandle,
-    profile: PathBuf,
     transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
     moved: Arc<AtomicU8>,
     worker: Option<thread::JoinHandle<()>>,
@@ -530,13 +528,6 @@ pub struct ExtensionHost {
 impl ExtensionHost {
     pub fn start(config: HostConfig) -> Self {
         let (inbox, input) = mpsc::channel();
-        let kernel = config.kernel.clone();
-        let profile = config
-            .roots
-            .last()
-            .and_then(|root| root.parent())
-            .unwrap_or(&config.cache)
-            .to_path_buf();
         let shared = Arc::new(Shared {
             published: Mutex::default(),
             store: Mutex::new(json!({})),
@@ -587,8 +578,6 @@ impl ExtensionHost {
         Self {
             inbox,
             shared,
-            kernel,
-            profile,
             transport,
             moved,
             worker: Some(worker),
@@ -663,29 +652,6 @@ impl ExtensionHost {
     /// rebuilt without the extension that was activating), or keep waiting.
     pub fn answer_unresponsive(&self, execution: u64, stop: bool) {
         let _ = self.inbox.send(Input::StopTask(execution, stop));
-    }
-    /// The Store's listings, as a request for the main thread to show.
-    pub fn browse_store(&self) {
-        let shared = self.shared.clone();
-        thread::spawn(move || match store_install::catalog() {
-            Ok(items) => shared.update(|p| p.requests.push(json!({"kind":"store","items":items}))),
-            Err(error) => shared.update(|p| p.toasts.push(error.to_string())),
-        });
-    }
-    /// Verifies and installs off every thread that matters, then discovers it.
-    pub fn install_store(&self, release: &str, repo: &str) {
-        let (shared, inbox) = (self.shared.clone(), self.inbox.clone());
-        let (release, repo) = (release.to_owned(), repo.to_owned());
-        let kernel = self.kernel.clone();
-        let profile = self.profile.clone();
-        thread::spawn(move || {
-            match store_install::install(&kernel, &profile, "native", &release, &repo) {
-                Ok(_) => {
-                    let _ = inbox.send(Input::Rescan);
-                }
-                Err(error) => shared.update(|p| p.toasts.push(error.to_string())),
-            }
-        });
     }
     /// The shell's current tool (`{tool}`) or viewer navigation
     /// (`{zoom, pan, fit}`), which the `tool` and `viewer` services report.
