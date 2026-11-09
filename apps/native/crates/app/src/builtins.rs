@@ -195,6 +195,12 @@ impl Controller {
                     match result {
                         Ok(generation) => {
                             v.builtins.generations.insert(id.clone(), generation);
+                            // A panel window kept open across a restart (Export
+                            // asked for before the project arrived) shows its
+                            // panel from the new realm, not an empty sheet.
+                            if v.builtins.windows.contains_key(&id) {
+                                let _ = check.show(&id);
+                            }
                             v.builtins.ready.insert(id);
                         }
                         Err(error) => {
