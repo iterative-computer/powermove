@@ -626,8 +626,41 @@ const TimelineRow = memo(
           <Property row={row} send={send} />
         ) : (
           <>
-            <text style={text}>{row.label}</text>
-            <div style={line}>
+            <div
+              style={{
+                ...line,
+                gap: t("metrics.gap"),
+                overflow: "hidden",
+                paddingLeft: t("metrics.inset"),
+              }}
+            >
+              <text
+                style={{
+                  ...text,
+                  fontWeight: t("typography.medium_weight"),
+                  fontVariantNumeric: "tabular-nums",
+                  flexShrink: 0,
+                }}
+              >
+                {row.label}
+              </text>
+              {row.summary && (
+                <text
+                  title={row.summary}
+                  style={{
+                    color: t("colors.secondary"),
+                    fontSize: t("typography.body"),
+                    flexGrow: 1,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {row.summary}
+                </text>
+              )}
+            </div>
+            <div style={{ ...line, paddingRight: t("metrics.gap") }}>
               <Icon
                 id={`timeline:track-enable:${row.id}`}
                 label={row.accessibilityLabel}
