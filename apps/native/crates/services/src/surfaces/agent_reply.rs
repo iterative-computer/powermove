@@ -110,7 +110,12 @@ fn media_at(target: &str, alt: &str, image: bool, home: &Path) -> Option<ReplyMe
         });
     }
     let target = target.trim();
-    if image && target.len() > 8 && target[..8].eq_ignore_ascii_case("https://") {
+    if image
+        && target.len() > 8
+        && target
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    {
         let bare = target.split(['?', '#']).next().unwrap_or(target);
         return Some(ReplyMedia {
             kind: media_type(Path::new(bare)).map_or(MediaKind::Image, |(kind, _)| kind),
@@ -356,6 +361,56 @@ mod tests {
                 ("image", "/tmp/i.gif".into(), "Logo".into(), false),
             ]
         );
+    }
+    #[test]
+    fn reply_media_never_panics_on_any_unicode_reply() {
+        // Pieces the parser reacts to, mixed with multi-byte characters.
+        const PIECES: [&str; 22] = [
+            "![",
+            "](",
+            "[",
+            "]",
+            "(",
+            ")",
+            "`",
+            "``",
+            "<img src=\"",
+            "\">",
+            "\\",
+            "/",
+            "~/",
+            ".png",
+            "https://",
+            "你好",
+            "é",
+            "🎬",
+            "\u{301}",
+            " ",
+            "\n",
+            "```\n",
+        ];
+        let home = Path::new("/Users/p");
+        assert!(reply_media("![x](你好你好你好)", home).is_empty());
+        assert!(reply_media("![x](https你好你好)", home).is_empty());
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            let mut text = String::new();
+            for _ in 0..next() % 24 {
+                let pick = next();
+                if pick % 3 == 0 {
+                    text.push(char::from_u32((next() % 0x2_0000) as u32).unwrap_or('\u{fffd}'));
+                } else {
+                    text.push_str(PIECES[(pick % PIECES.len() as u64) as usize]);
+                }
+            }
+            let _ = reply_media(&text, home);
+        }
     }
     #[test]
     fn local_media_requires_supported_absolute_paths_and_explicit_home() {
