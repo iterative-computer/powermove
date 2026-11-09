@@ -41,7 +41,7 @@ declare const runtime: { engine(operation: string, input?: Json): Json };
 const native = (operation: string, input: unknown = null): any =>
   runtime.engine(operation, input as Json);
 const report = (error: unknown) => native("report", String(error));
-/** Built-in panel ids (Rust `LIVE_PANELS`) to the module that mounts each. */
+/** Each built-in panel (`panels.json`) to the module that mounts it. */
 const MOUNTS: Record<string, Mount> = {
   "layer-effects": layerEffects,
   fxbrowser,

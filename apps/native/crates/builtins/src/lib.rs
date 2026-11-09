@@ -28,17 +28,38 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub const LIVE_PANELS: &[&str] = &[
-    "timeline",
-    "inspector",
-    "layer-effects",
-    "viewer",
-    "assets",
-    "fxbrowser",
-    "agent",
-    "settings",
-    "export",
-];
+/// A built-in panel, from `js/v4/app/panels.json`: the one list the runtime
+/// mounts, forks copy and the build bundles.
+pub struct BuiltinPanel {
+    pub id: String,
+    /// Parks while closed: its isolate goes until it opens again. The viewer
+    /// and timeline are always shown, the agent holds live runs, and window
+    /// panels close with their window.
+    pub parks: bool,
+    /// Mounts with no project open (the application window).
+    pub application: bool,
+    /// Shown in its own window rather than docked.
+    pub window: bool,
+}
+pub static BUILTIN_PANELS: std::sync::LazyLock<Vec<BuiltinPanel>> =
+    std::sync::LazyLock::new(|| {
+        let list: Vec<Value> = serde_json::from_str(include_str!("../../../js/v4/app/panels.json"))
+            .expect("panels.json is a list");
+        list.iter()
+            .map(|p| {
+                let flag = |name: &str| p[name].as_bool().unwrap_or(false);
+                BuiltinPanel {
+                    id: p["id"].as_str().expect("panel id").to_owned(),
+                    parks: flag("parks"),
+                    application: flag("application"),
+                    window: flag("window"),
+                }
+            })
+            .collect()
+    });
+pub fn builtin_panel(id: &str) -> Option<&'static BuiltinPanel> {
+    BUILTIN_PANELS.iter().find(|p| p.id == id)
+}
 const BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/builtins.js"));
 /// Each built-in panel's source as a v4 extension tree (`scripts/builtin-sources.ts`).
 const SOURCES: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin-sources.json"));
@@ -81,9 +102,6 @@ pub fn builtin_sources(root: &std::path::Path) -> std::io::Result<std::path::Pat
     }
 }
 
-/// Built-in panels that park while closed. The viewer and timeline are always
-/// shown; the agent holds live runs; Settings and Export are windows.
-pub const PARKABLE: &[&str] = &["assets", "layer-effects", "inspector", "fxbrowser"];
 /// A v4 extension's viewer overlay publishes as `<panel>@viewer`.
 pub const VIEWER_OVERLAY: &str = "@viewer";
 /// A `themes.activate` request: its number, panel and theme id (`None`: the
@@ -766,7 +784,9 @@ impl Builtins {
     /// returns to the cage account; `unpark` starts it again from its first
     /// commit. Waits (bounded) for the isolate: call off the main thread.
     pub fn park(&self, panel: &str) -> bool {
-        if !PARKABLE.contains(&panel) || !self.realms.lock().unwrap().contains_key(panel) {
+        if !builtin_panel(panel).is_some_and(|p| p.parks)
+            || !self.realms.lock().unwrap().contains_key(panel)
+        {
             return false;
         }
         self.retire(panel);
@@ -788,9 +808,11 @@ impl Builtins {
         self.broker.parked.lock().unwrap().contains(panel)
     }
     fn mount_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
-        if !LIVE_PANELS.contains(&panel)
-            || self.realms.lock().unwrap().contains_key(panel)
-            || (self.broker.application && !matches!(panel, "settings" | "agent"))
+        let Some(builtin) = builtin_panel(panel) else {
+            return Err(Error::Invalid("unregistered/already mounted built-in"));
+        };
+        if self.realms.lock().unwrap().contains_key(panel)
+            || (self.broker.application && !builtin.application)
         {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
@@ -833,7 +855,7 @@ impl Builtins {
     /// it: same realm identity, routes and host operations, the fork's code.
     /// Waits for the old isolate to close, so call it off the main thread.
     pub fn replace(&self, panel: &str, fork: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
-        if !LIVE_PANELS.contains(&panel)
+        if !builtin_panel(panel).is_some()
             || (self.broker.application && !matches!(panel, "settings" | "agent"))
         {
             return Err(Error::Invalid("unregistered built-in"));
@@ -889,7 +911,7 @@ impl Builtins {
         hot: Option<&str>,
     ) -> Result<Ticket<Evaluation>> {
         let mut extensions = self.extension_realms.lock().unwrap();
-        if LIVE_PANELS.contains(&id) || extensions.contains_key(id) || self.broker.application {
+        if builtin_panel(id).is_some() || extensions.contains_key(id) || self.broker.application {
             return Err(Error::Invalid("extension panel id is taken"));
         }
         self.broker.extensions.lock().unwrap().insert(id.into());
@@ -1427,7 +1449,7 @@ impl Broker {
     }
     fn panel<'a>(&self, generation: &'a Generation) -> Result<&'a str> {
         let id = Self::realm_id(generation).ok_or(Error::Invalid("not a v4 built-in realm"))?;
-        if !LIVE_PANELS.contains(&id) && !self.extensions.lock().unwrap().contains(id) {
+        if !builtin_panel(id).is_some() && !self.extensions.lock().unwrap().contains(id) {
             return Err(Error::Invalid("unknown panel"));
         }
         Ok(id)
@@ -1450,7 +1472,7 @@ impl EngineProxy for Broker {
             operation,
             "host.enqueue" | "host.poll" | "platform.enqueue" | "platform.poll"
         );
-        !(queue && Self::realm_id(generation).is_some_and(|id| LIVE_PANELS.contains(&id)))
+        !(queue && Self::realm_id(generation).is_some_and(|id| builtin_panel(id).is_some()))
     }
     fn call(
         &self,

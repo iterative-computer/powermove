@@ -110,10 +110,11 @@ fn effects_mounts_in_a_separate_v4_isolate() {
 fn all_nine_authored_entries_mount_and_publish_accessible_native_trees() {
     let actor = actor();
     let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
-    for id in LIVE_PANELS {
+    for panel in BUILTIN_PANELS.iter() {
+        let id = &panel.id;
         let ticket = panels.mount(id).unwrap();
         finish(ticket);
-        if matches!(*id, "settings" | "export") {
+        if panel.window {
             finish(panels.show(id).unwrap());
         }
     }

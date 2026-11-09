@@ -2,7 +2,7 @@
 //! extensions live, the shipped built-in sources, and the isolated check that
 //! compiles and activates staged code before it is promoted. Runs on MCP
 //! workers, never on the main thread.
-use pm_builtins::{Builtins, LIVE_PANELS};
+use pm_builtins::{BUILTIN_PANELS, Builtins};
 use pm_compat_runner::{CompatRunner, manifest};
 use pm_mcp::extensions::ExtensionHost;
 use pm_runtime_v8::{Evaluation, Ticket};
@@ -153,9 +153,9 @@ fn settle(ticket: Ticket<Evaluation>) -> Result<(), String> {
 /// The built-in a fork draws in place of, if any.
 pub fn replaced_panel(manifest: &Value) -> Option<&'static str> {
     let replaces = manifest["replaces"].as_array()?;
-    LIVE_PANELS
+    BUILTIN_PANELS
         .iter()
-        .copied()
+        .map(|p| p.id.as_str())
         .find(|panel| replaces.iter().any(|r| r == panel))
 }
 /// Compile with the app's compiler, then activate in throwaway runtimes on a

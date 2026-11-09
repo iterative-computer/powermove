@@ -46,7 +46,7 @@ fn check(panel: &str, title: &str) {
         .unwrap();
     let mut runtime = Builtins::new(kernel.clone(), "integration", || {}).unwrap();
     settle(runtime.mount(panel).unwrap());
-    if matches!(panel, "settings" | "export") {
+    if pm_builtins::builtin_panel(panel).is_some_and(|p| p.window) {
         settle(runtime.show(panel).unwrap());
     }
     let first = runtime
