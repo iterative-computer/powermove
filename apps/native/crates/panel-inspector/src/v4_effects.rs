@@ -306,7 +306,7 @@ impl EffectsPanel {
                         "label",
                         display
                             .map(|d| d.label.clone())
-                            .unwrap_or_else(|| key.clone())
+                            .unwrap_or_else(|| pm_surface::humanize(key))
                             .into(),
                     ),
                     (
@@ -320,7 +320,22 @@ impl EffectsPanel {
                     ),
                     (
                         "value",
-                        state.as_ref().map(|s| s.value.clone()).unwrap_or(raw),
+                        state.as_ref().map(|s| s.value.clone()).unwrap_or_else(|| {
+                            // Without a definition the stored property still has
+                            // a value at rest; keyframes read as Animated.
+                            match raw.get("v") {
+                                Some(_)
+                                    if raw
+                                        .get("kf")
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|k| !k.is_empty()) =>
+                                {
+                                    Value::String("Animated".into())
+                                }
+                                Some(v) => v.clone(),
+                                None => raw,
+                            }
+                        }),
                     ),
                     (
                         "control",

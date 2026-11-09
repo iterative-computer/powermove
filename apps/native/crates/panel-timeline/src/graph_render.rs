@@ -180,7 +180,7 @@ pub fn sample(
         }
         curves.push(Curve {
             id: format!("{layer_id}:{}", channel.path),
-            name: channel.path.clone(),
+            name: crate::property_label(&channel.path),
             focused: true,
             segments,
             points,

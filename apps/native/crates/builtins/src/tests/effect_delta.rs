@@ -702,3 +702,38 @@ fn ramp_on_a_text_layer_adds_and_resets_without_font_bounds() {
         .unwrap();
     assert_eq!(effect(&kernel)["p"]["startX"]["v"], 80.);
 }
+
+#[test]
+fn a_missing_effect_names_its_parameters_in_words_and_shows_their_values_at_rest() {
+    let saved = json!({"id":"lost","type":"ascii-magic-effects.characters","on":true,"open":true,"missing":true,
+        "p":{"backgroundColor":{"v":"#112233","kf":[]},"dotGrid":{"v":4,"kf":[]},"amount":{"v":0.5,"kf":[{"t":0,"v":0},{"t":1,"v":1}]}}});
+    let (actor, _) = setup_with_saved_effect(Some(saved));
+    let kernel = actor.handle();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    let projection = panels
+        .broker
+        .entry("layer-effects")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone()
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap();
+    let parameter = |label: &str| {
+        projection["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "parameter" && r["parameter"]["label"] == label)
+            .unwrap_or_else(|| panic!("{label}: {projection:#}"))["parameter"]
+            .clone()
+    };
+    assert_eq!(parameter("Background Color")["value"], "#112233");
+    assert_eq!(parameter("Dot Grid")["value"], 4.);
+    assert_eq!(parameter("Amount")["value"], "Animated");
+    assert_eq!(parameter("Amount")["readonly"], true);
+}

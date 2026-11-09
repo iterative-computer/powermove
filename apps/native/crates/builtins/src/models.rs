@@ -743,18 +743,8 @@ impl Backend {
         None
     }
 }
-fn property_label(path: &str) -> &str {
-    match path {
-        "position" => "Position",
-        "position.x" => "Position X",
-        "position.y" => "Position Y",
-        "scale" => "Scale",
-        "scale.x" => "Scale X",
-        "scale.y" => "Scale Y",
-        "rotation" => "Rotation",
-        "opacity" => "Opacity",
-        _ => path,
-    }
+fn property_label(path: &str) -> String {
+    pm_panel_timeline::property_label(path)
 }
 
 /// A timeline row's name, or the header time, open for typing.
