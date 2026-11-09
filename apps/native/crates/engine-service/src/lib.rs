@@ -378,6 +378,9 @@ struct Shared {
     lose_device: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     invalid_call: std::sync::atomic::AtomicBool,
+    /// Every still costs more than a refresh (drag adaptation tests).
+    #[cfg(test)]
+    slow_stills: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub struct Viewer {
@@ -785,6 +788,8 @@ impl EngineService {
             lose_device: Default::default(),
             #[cfg(test)]
             invalid_call: Default::default(),
+            #[cfg(test)]
+            slow_stills: Default::default(),
         });
         // Answers that land redraw every viewer, as a font change does.
         let compat = Arc::new(compat::CompatStores::default());
@@ -1309,11 +1314,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         .record((t.completed - t.worker_start) * 1000., f.budget_ms);
                 }
                 if t.gpu_ok && !t.cache_hit && f.spec.moment != Moment::Playing {
-                    r.auto.record_still(
-                        (t.completed - t.worker_start) * 1000.,
-                        r.interval * 1000.,
-                        f.spec.scale,
-                    );
+                    let cost = (t.completed - t.worker_start) * 1000.;
+                    #[cfg(test)]
+                    let cost = if shared
+                        .slow_stills
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        f64::MAX
+                    } else {
+                        cost
+                    };
+                    r.auto
+                        .record_still(cost, r.interval * 1000., f.spec.scale);
                 }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
@@ -1568,9 +1580,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 v.dirty = !playing || v.dirty;
             }
             // The playhead stopped on a frame dragged at reduced resolution.
+            // A new picture of the same time: its own `frame:rendered`.
             if !playing && r.refine_at.is_some_and(|at| now >= at) {
                 r.refine_at = None;
                 r.scrub = false;
+                v.stamp.sequence += 1;
                 v.dirty = true;
             }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
@@ -2344,6 +2358,64 @@ mod worker_tests {
             new.as_ptr(),
             "the layer follows the rebuild"
         );
+    }
+
+    /// A slow project's drag draws reduced; the stopped frame is drawn again
+    /// exact, as a picture of its own.
+    #[test]
+    fn a_slow_drag_draws_reduced_then_its_stopped_frame_exact_as_a_new_picture() {
+        let service = EngineService::start(pm_gpu::Gpu::new("drag-test").unwrap()).unwrap();
+        let shown = |v: &Viewer| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !v.status().frame.is_some_and(|f| f.gpu_ok) {
+                assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let v = shapes_viewer(&service, None);
+        v.adapt_drags(true).unwrap();
+        service
+            .shared
+            .slow_stills
+            .store(true, std::sync::atomic::Ordering::Release);
+        shown(&v);
+        let at = Ticks::from_whole_seconds(1);
+        v.scrub(at).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let reduced = loop {
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.gpu_ok) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(reduced.scale, crate::policy::AUTO_FLOOR, "a slow drag is reduced");
+        // Settled: the same time again, exact, as a picture of its own (a
+        // new stamp: the window tells extensions `frame:rendered` again).
+        let exact = loop {
+            let status = v.status();
+            if let Some(f) = status.frame.filter(|f| f.time == at && f.scale == 1.) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline, "never drawn exact");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(exact.stamp.sequence > reduced.stamp.sequence);
+        // A viewer that does not adapt keeps every paused frame exact.
+        let plain = shapes_viewer(&service, None);
+        shown(&plain);
+        plain.scrub(at).unwrap();
+        let f = loop {
+            if let Some(f) = plain.status().frame.filter(|f| f.time == at) {
+                break f;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(f.scale, 1.);
+        v.retire();
+        plain.retire();
     }
 
     /// A validation error fails the frame that raised it, visibly, without a
