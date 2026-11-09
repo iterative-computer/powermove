@@ -26,6 +26,7 @@ const renderer = `
 import * as THREE from 'three';
 import {nativeEnvironment} from './scripts/studio-native-environments';
 import {extractScene} from './src/renderer/src/core/studio/extract';
+import {studioGpuWait,studioGpuFailure} from './src/renderer/src/core/studio/gpu';
 import {NativeStudioBackend} from './src/renderer/src/core/studio-native/backend';
 import {RecoveringStudioBackend} from './src/renderer/src/core/studio-native/recovery';
 import {WebGpuStudioBackend} from './src/renderer/src/core/studio/webgpu-backend';
@@ -53,7 +54,7 @@ window.runStudioNative=async(name,size,frames)=>{
  // Compare both engines at the same resolution/sample count with denoising off.
  const compareSize={width:960,height:540};const nativeReference=await native.render({tier:'final',size:compareSize,samples:64,denoise:false,background:true,accumulate:false});
  const nativeComparePng=capture(nativeReference.source);
- const portable=new WebGpuStudioBackend();await portable.initialize();portable.setPreparedScene(scene,maps,description);portable.setView(m.view);portable.setTime(0);const webStart=performance.now();const web=portable.render({tier:'final',size:compareSize,samples:64,denoise:false,background:true});const webCanvas=document.createElement('canvas');webCanvas.width=compareSize.width;webCanvas.height=compareSize.height;webCanvas.getContext('2d').drawImage(web.source,0,0);const webPixels=webCanvas.getContext('2d').getImageData(0,0,compareSize.width,compareSize.height).data;const nativeCanvas=nativeReference.source;const nativePixels=nativeCanvas.getContext('2d').getImageData(0,0,compareSize.width,compareSize.height).data;
+ const portable=new WebGpuStudioBackend();await portable.initialize();portable.setPreparedScene(scene,maps,description);portable.setView(m.view);portable.setTime(0);const webStart=performance.now();const web=portable.render({tier:'final',size:compareSize,samples:64,denoise:false,background:true});await studioGpuWait();if(studioGpuFailure())throw new Error(studioGpuFailure());const webCanvas=document.createElement('canvas');webCanvas.width=compareSize.width;webCanvas.height=compareSize.height;webCanvas.getContext('2d').drawImage(web.source,0,0);const webPixels=webCanvas.getContext('2d').getImageData(0,0,compareSize.width,compareSize.height).data;const nativeCanvas=nativeReference.source;const nativePixels=nativeCanvas.getContext('2d').getImageData(0,0,compareSize.width,compareSize.height).data;
  let absolute=0,peak=0;for(let i=0;i<webPixels.length;i++){if(i%4===3)continue;const d=Math.abs(webPixels[i]-nativePixels[i]);absolute+=d;peak=Math.max(peak,d);}const meanCodeDifference=absolute/(compareSize.width*compareSize.height*3);
  const webSeconds=(performance.now()-webStart)/1000;const webPng=capture(webCanvas);
  const peakNativeRssMiB=(await bridge.request(native.session,{op:"hello"})).result.peakRssMiB;

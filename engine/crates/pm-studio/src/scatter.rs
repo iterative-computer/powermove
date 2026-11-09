@@ -151,7 +151,7 @@ impl Scatter {
         let mut state = self.seed;
         let mut rnd = || {
             state = hash(state);
-            (state as f64 / 4294967296.) as f32
+            (state >> 8) as f32 * (1. / 16777216.)
         };
         let terrain: Option<&Terrain> = self.terrain.map(|i| &s.terrains[i]);
         let surface = self.surface.map(|i| &s.objects[i].mesh);

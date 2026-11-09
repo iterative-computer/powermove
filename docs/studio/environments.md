@@ -45,13 +45,17 @@ Bruneton, Hosek-Wilkie or Cycles parity. The separate sun disc is importance
 sampled at its true solid angle (radius 0.266° by default), with atmospheric
 attenuation. Environment maps use a luminance × exact texel-solid-angle CDF;
 sampling is uniform in solid angle within each pixel, including polar rows.
-Surface lighting uses MIS against BSDF sampling. Map lookup is piecewise constant.
+A 1% uniform-sphere mixture avoids starving dark map regions.
+Surface lighting uses MIS against BSDF sampling. Radiance lookup is bilinear with longitude wrapping and polar clamping; the
+PDF remains the exact piecewise constant sampling distribution.
 
 Refine/Final use delta tracking for medium events and ratio tracking for shadow
 transmittance, HG phase sampling, and multiple volume/surface bounces. Live uses
-four jittered single-scattering steps and eight-step shadow transmittance. Both
+two primary-ray single-scattering steps with an ambient approximation and
+analytic height/box/sphere optical depth. Both
 produce geometry-dependent shafts and aerial perspective. Dense/very large
-media can be expensive; there is no empty-space hierarchy yet.
+media can be expensive; tracking clips to potentially occupied intervals and tightens the global
+majorant with height; there is no full empty-space hierarchy yet.
 
 ## GPU transport
 
@@ -65,13 +69,20 @@ Header version 1 is six vec4 rows:
 | 1 | rotation radians, intensity, camera visible 0/1, pixel offset (6) |
 | 2 | global scattering albedo RGB, density |
 | 3 | global g, base height, height falloff, segment distance |
-| 4 | local-volume offset, count, light-CDF offset, reserved |
+| 4 | local-volume offset, count, light-CDF offset, light-tree offset (0: absent) |
 | 5 | adaptive enabled, min samples, relative error, absolute error |
 
 Offsets are relative to the header in vec4 rows. Map pixels (RGB,0) precede one
 CDF row per pixel (cumulative probability, solid-angle PDF,0,0). Each volume uses
 three rows: center XYZ/shape (0 box,1 sphere), half-size XYZ/density,
-albedo RGB/g. Light rows contain cumulative selection probability and PMF.
+albedo RGB/g. Light rows contain cumulative selection probability, PMF, tree leaf index,0.
+Above eight lights a balanced spatial tree follows: three rows per node,
+(min XYZ,left child or light index), (max XYZ,right child or -1 for leaf),
+(finite power,infinite power,parent,0). Selection estimates power/distance²
+from node bounds, with a small probability floor. Reverse traversal computes
+the exact position-dependent selection PMF for MIS. Refine/Final and fresh Live
+reservoir candidates use this hierarchy; finite-emitter intersection also walks
+its bounds. This is a light tree, not hundreds of independent visibility rays.
 Legacy uploads without a trailer continue to use uniform light selection.
 
 ## Validation and measurements
@@ -143,3 +154,10 @@ from `core/studio/environment-geometry.ts`. `packWorld` and `worldSun` are the
 portable preparation helpers for evaluated app data. HDR/EXR decoding stays at
 the file-import boundary; `hdri.pixels` carries linear floats, not display PNGs.
 `Terrain::load_height_image` is the Rust grayscale decoding/resizing helper.
+
+Camera-only native edits use capability-gated `preparedView {key,view}` messages
+with no binary geometry, TLAS, materials or instance rows. Older hosts retain
+the existing prepared-patch fallback. Camera edits preserve the native placement
+cache and temporal history; changing projection, lighting or output policy resets
+history. Browser diagnostics explicitly wait for queued GPU work before pixel
+readback. A lost browser device also discards its compiled pipeline cache.

@@ -486,12 +486,13 @@ impl Host {
                 let (w, h) = if is_live {
                     // Keep Live within a predictable pixel budget for small worlds.
                     // Final/Refine always render at the requested output size.
-                    let (instances, lights) = if let Some(p) = &self.packed {
-                        (p.placements.len(), p.prepared.lights.len())
+                    let (instances, lights, media) = if let Some(p) = &self.packed {
+                        (p.placements.len(), p.prepared.lights.len(),pm_studio::environment::packed_has_media(&p.prepared.sdata,p.prepared.lights.len(),p.placements.len()))
                     } else {
                         let r = self.resident.as_ref().ok_or("no scene")?;
-                        (r.placements.len(), r.prepared.lights.len())
+                        (r.placements.len(), r.prepared.lights.len(),pm_studio::environment::packed_has_media(&r.prepared.sdata,r.prepared.lights.len(),r.placements.len()))
                     };
+                    self.live_budget.atmosphere(media);
                     self.live_budget
                         .size(width, height, instances > 128 || lights > 32)
                 } else {

@@ -70,6 +70,21 @@ fn noise(x: f32, z: f32, seed: u32) -> f32 {
     low * (1. - v) + high * v
 }
 impl Terrain {
+    /// Decode and resize normalized grayscale image data for this heightfield.
+    pub fn load_height_image(&mut self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
+        if !(2..=512).contains(&self.resolution) {
+            return Err("terrain resolution must be 2..512".into());
+        }
+        let image = image::ImageReader::open(path)
+            .map_err(|e| e.to_string())?
+            .decode()
+            .map_err(|e| e.to_string())?
+            .to_luma32f();
+        let n = self.resolution + 1;
+        let image = image::imageops::resize(&image, n, n, image::imageops::FilterType::Triangle);
+        self.heights = image.pixels().map(|p| p[0].clamp(0., 1.)).collect();
+        Ok(())
+    }
     pub fn validate(&self, materials: usize) -> Result<(), String> {
         if !(2..=512).contains(&self.resolution)
             || self.octaves > 12

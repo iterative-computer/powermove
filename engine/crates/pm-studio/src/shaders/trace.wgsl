@@ -108,7 +108,7 @@ fn pcg(v: u32) -> u32 {
   let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
   return (w >> 22u) ^ w;
 }
-fn rnd() -> f32 { seed = pcg(seed); return f32(seed) * (1.0 / 4294967296.0); }
+fn rnd() -> f32 { seed = pcg(seed); return f32(seed >> 8u) * (1.0 / 16777216.0); }
 fn rnd2() -> vec2f { return vec2f(rnd(), rnd()); }
 
 struct Hit { t: f32, tri: i32, b: vec2f, inst: u32 }
@@ -290,14 +290,52 @@ fn medium_majorant()->f32 {
   return m;
 }
 fn medium_distance(dist:f32)->f32 {if(!world_on()){return 0.;}return min(dist,world_row(3u).w);}
-fn medium_transmittance(ro:vec3f,rd:vec3f,dist:f32)->f32 {
-  let majorant=medium_majorant();if(majorant<=0.){return 1.;}
-  let end=medium_distance(dist);
-  if(P.opts.x!=0u){
-    var optical=0.;for(var i=0u;i<8u;i++){optical+=medium_at(ro+rd*((f32(i)+0.5)*end/8.)).sigma;}
-    return exp(-optical*end/8.);
+fn volume_interval(center:vec4f,size:vec4f,ro:vec3f,rd:vec3f,end:f32)->vec2f {
+  let q=ro-center.xyz;var near=0.;var far=0.;
+  if(center.w>0.5){let b=dot(q,rd);let disc=b*b-dot(q,q)+size.x*size.x;if(disc<=0.){return vec2f(0.);}near=-b-sqrt(disc);far=-b+sqrt(disc);}
+  else {let inv=select(1./rd,vec3f(1e30),abs(rd)<vec3f(1e-30));let a=(-size.xyz-q)*inv;let b=(size.xyz-q)*inv;near=max(max(min(a.x,b.x),min(a.y,b.y)),min(a.z,b.z));far=min(min(max(a.x,b.x),max(a.y,b.y)),max(a.z,b.z));}
+  return vec2f(max(0.,near),min(end,far));
+}
+// Clip null-collision tracking to potentially occupied space and use a
+// height-aware majorant. A small dense steam volume must not make a kilometre
+// of empty ray march at the steam density.
+fn tracking_segment(ro:vec3f,rd:vec3f,dist:f32)->vec3f {
+  let end=medium_distance(dist);let fog=world_row(2u);let h=world_row(3u);
+  var near=end;var far=0.;var majorant=0.;
+  if(fog.w>0.){near=0.;far=end;majorant=fog.w*exp(-max(min(ro.y,ro.y+rd.y*end)-h.y,0.)*h.z);}
+  let config=world_row(4u);
+  for(var i=0u;i<u32(config.y);i++){
+    let at=u32(config.x)+3u*i;let interval=volume_interval(world_row(at),world_row(at+1u),ro,rd,end);
+    if(interval.y>interval.x){near=min(near,interval.x);far=max(far,interval.y);majorant+=world_row(at+1u).w;}
   }
-  var t=0.;var tr=1.;
+  return vec3f(near,far,majorant);
+}
+// Exact optical depth for exponential height fog plus homogeneous local shapes.
+// Used by Live; Refine retains ratio tracking to share the heterogeneous path.
+fn live_optical_depth(ro:vec3f,rd:vec3f,end:f32)->f32 {
+  let fog=world_row(2u);let h=world_row(3u);var optical=0.;
+  let y0=ro.y-h.y;let y1=y0+rd.y*end;let k=h.z;
+  if(k==0.){optical=fog.w*end;}
+  else if(abs(k*rd.y)*end<1e-4){optical=fog.w*exp(-k*max((y0+y1)*0.5,0.))*end;}
+  else {
+    var below=0.;
+    if(rd.y>0.){below=clamp(-y0/rd.y,0.,end);}else{below=end-clamp(y0/(-rd.y),0.,end);}
+    let upper=max(y0,y1);let lower=max(min(y0,y1),0.);
+    optical=fog.w*(below+(exp(-k*lower)-exp(-k*max(upper,0.)))/(k*abs(rd.y)));
+  }
+  let config=world_row(4u);
+  for(var i=0u;i<u32(config.y);i++){
+    let at=u32(config.x)+3u*i;let size=world_row(at+1u);let interval=volume_interval(world_row(at),size,ro,rd,end);
+    optical+=size.w*max(0.,interval.y-interval.x);
+  }
+  return optical;
+}
+fn medium_transmittance(ro:vec3f,rd:vec3f,dist:f32)->f32 {
+  if(!world_on()){return 1.;}
+  let segment=tracking_segment(ro,rd,dist);let majorant=segment.z;let end=segment.y;
+  if(majorant<=0.){return 1.;}
+  if(P.opts.x!=0u){return exp(-live_optical_depth(ro,rd,medium_distance(dist)));}
+  var t=segment.x;var tr=1.;
   loop {
     t+=-log(max(1.-rnd(),1e-7))/majorant;
     if(t>=end){break;}
@@ -323,10 +361,18 @@ fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
     if(pdf>0.){e+=environment(d)*transmittance(p,d,BIG)*phase_hg(dot(rd,d),g)/pdf;}}
   return e;
 }
+fn medium_direct_live(p:vec3f,rd:vec3f,g:f32)->vec3f {
+  // Smooth ambient fill, plus one visible practical/sun sample. The expensive
+  // environment shadow integral is reserved for Refine/Final.
+  var e=(environment(rd)+environment(vec3f(0.,1.,0.)))*0.5;
+  if(P.counts.x>0u){let li=choose_light(p);let l=sample_light(light_at(li),p);
+    if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li,p));}}
+  return e;
+}
 // Delta-tracked real event; w=distance, negative means no event before the surface.
 fn medium_event(ro:vec3f,rd:vec3f,dist:f32)->f32 {
-  let majorant=medium_majorant();if(majorant<=0.){return -1.;}
-  let end=medium_distance(dist);var t=0.;
+  let segment=tracking_segment(ro,rd,dist);let majorant=segment.z;if(majorant<=0.){return -1.;}
+  let end=segment.y;var t=segment.x;
   loop{t+=-log(max(1.-rnd(),1e-7))/majorant;if(t>=end){return -1.;}
     if(rnd()*majorant<medium_at(ro+rd*t).sigma){return t;}}
   return -1.;
@@ -363,7 +409,8 @@ fn world_row(i:u32)->vec4f {return sdata[world_base()+i];}
 fn map_count()->u32 {if(!world_on()){return 0u;}return u32(world_row(0u).z)*u32(world_row(0u).w);}
 fn environment_uv(d:vec3f)->vec2f {
   let rotation=world_row(1u).x;
-  return vec2f(fract((atan2(d.x,d.z)-rotation)/(2.*PI)+1.),acos(clamp(d.y,-1.,1.))/PI);
+  var longitude=0.;if(abs(d.x)+abs(d.z)>1e-8){longitude=atan2(d.x,d.z);}
+  return vec2f(fract((longitude-rotation)/(2.*PI)+1.),acos(clamp(d.y,-1.,1.))/PI);
 }
 fn environment_index(d:vec3f)->u32 {
   let wh=vec2u(world_row(0u).zw);let xy=min(vec2u(environment_uv(d)*vec2f(wh)),wh-1u);
@@ -374,7 +421,13 @@ fn environment_pdf(d:vec3f)->f32 {
   return world_row(u32(world_row(1u).w)+count+environment_index(d)).y;
 }
 fn environment(d: vec3f) -> vec3f {
-  if(map_count()>0u){return world_row(u32(world_row(1u).w)+environment_index(d)).xyz*world_row(1u).y;}
+  if(map_count()>0u){
+    let wh=vec2i(world_row(0u).zw);let q=environment_uv(d)*vec2f(wh)-0.5;let xy=vec2i(floor(q));let f=fract(q);
+    let x0=u32((xy.x%wh.x+wh.x)%wh.x);let x1=(x0+1u)%u32(wh.x);let y0=u32(clamp(xy.y,0,wh.y-1));let y1=u32(clamp(xy.y+1,0,wh.y-1));let base=u32(world_row(1u).w);
+    let a=mix(world_row(base+y0*u32(wh.x)+x0).xyz,world_row(base+y0*u32(wh.x)+x1).xyz,f.x);
+    let b=mix(world_row(base+y1*u32(wh.x)+x0).xyz,world_row(base+y1*u32(wh.x)+x1).xyz,f.x);
+    return mix(a,b,f.y)*world_row(1u).y;
+  }
   if (d.y < 0.0) { return mix(P.env_horizon.xyz, P.ground.xyz, clamp(-d.y * 4.0, 0.0, 1.0)); }
   return mix(P.env_horizon.xyz, P.env_zenith.xyz, clamp(d.y,0.,1.));
 }
@@ -461,6 +514,21 @@ fn hit_light(ro: vec3f, rd: vec3f, l: Light) -> f32 {
   }
   if (kind == 1u || kind == 2u) { return sphere_t(ro, rd, l.pos.xyz, l.u.x); }
   return BIG;
+}
+
+struct EmittingHit {t:f32,light:u32}
+fn closest_light(ro:vec3f,rd:vec3f,limit:f32)->EmittingHit {
+  var hit=EmittingHit(limit,0u);
+  if(!world_on() || world_row(4u).w<=0.){
+    for(var i=0u;i<P.counts.x;i++){let t=hit_light(ro,rd,light_at(i));if(t<hit.t){hit=EmittingHit(t,i);}}return hit;
+  }
+  let base=u32(world_row(4u).w);var stack:array<u32,32>;var size=1u;stack[0]=0u;let inv=1./rd;
+  while(size>0u){size-=1u;let index=stack[size];let a=world_row(base+3u*index);let b=world_row(base+3u*index+1u);let power=world_row(base+3u*index+2u);
+    if(power.x<=0. || box_t(ro,inv,a.xyz,b.xyz,hit.t)>=BIG){continue;}
+    if(b.w<0.){let light=u32(a.w);let t=hit_light(ro,rd,light_at(light));if(t<hit.t){hit=EmittingHit(t,light);}}
+    else{stack[size]=u32(a.w);stack[size+1u]=u32(b.w);size+=2u;}
+  }
+  return hit;
 }
 
 // Radiance leaving a light toward `-rd` at point q.
@@ -810,7 +878,8 @@ fn catcher_ratio(p: vec3f) -> f32 {
   let dome = select(2, 1, live);
   for (var k = 0; k < dome; k++) {
     let dir = cosine_dir(n, rnd2());
-    let e = 2.4 / f32(dome);
+    var e = 2.4 / f32(dome);
+    if(map_count()>0u){e=PI*dot(environment(dir),vec3f(0.2126,0.7152,0.0722))/f32(dome);}
     free += e;
     lit += e * select(1.0, ambient_visibility(p, dir, 4000.0), P.opts.y == 0u);
   }
@@ -923,11 +992,8 @@ fn droplets(n: vec3f, uv: vec2f, amount: f32) -> vec3f {
 fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   let h = intersect(p, d, BIG, false);
   let tf = floor_t(p, d);
-  for (var i = 0u; i < P.counts.x; i++) {
-    let l = light_at(i);
-    let tl = hit_light(p, d, l);
-    if (tl < h.t && tl < tf) { return light_emit(l, p + d * tl, d); }
-  }
+  let light_hit=closest_light(p,d,min(h.t,tf));
+  if(light_hit.t<h.t && light_hit.t<tf){return light_emit(light_at(light_hit.light),p+d*light_hit.t,d);}
   if (h.tri < 0 && tf >= BIG) { return environment(d) + sun_seen(d); }
   if (tf < h.t) {
     let q = p + d * tf;
@@ -1001,14 +1067,20 @@ fn path(px: vec2f) -> Sample {
     var h:Hit;
     if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}else{h=intersect(ro,rd,BIG,false);}
     let tf = floor_t(ro, rd);
-    let segment=min(h.t,tf);
+    // Finite emitters terminate a secondary segment at the closest light.
+    var light_distance=BIG;var seen_light=0u;
+    if(!primary){let light_hit=closest_light(ro,rd,min(h.t,tf));light_distance=light_hit.t;seen_light=light_hit.light;}
+    let segment=min(min(h.t,tf),light_distance);
     if(medium_majorant()>0.){
       if(P.opts.x!=0u){
-        let end=medium_distance(segment);let dt=end/4.;
-        for(var step=0u;step<4u;step++){
-          let point=ro+rd*((f32(step)+rnd())*dt);let med=medium_at(point);
-          let tr=exp(-med.sigma*dt);s.radiance+=tp*med.albedo*(1.-tr)*medium_direct(point,rd,med.g);tp*=tr;
-        }
+        let end=medium_distance(segment);let dt=end/2.;
+        if(primary){
+          for(var step=0u;step<2u;step++){
+            let point=ro+rd*((f32(step)+rnd())*dt);let med=medium_at(point);
+            let tr=exp(-live_optical_depth(ro+rd*(f32(step)*dt),rd,dt));
+            s.radiance+=tp*med.albedo*(1.-tr)*medium_direct_live(point,rd,med.g);tp*=tr;
+          }
+        }else{tp*=exp(-live_optical_depth(ro,rd,end));}
       }else{
         let event=medium_event(ro,rd,segment);
         if(event>=0.){
@@ -1022,28 +1094,16 @@ fn path(px: vec2f) -> Sample {
         }
       }
     }
-    // Lights: invisible to the camera, visible in reflections.
-    if (!primary) {
-      for (var i = 0u; i < P.counts.x; i++) {
-        let l = light_at(i);
-        let tl = hit_light(ro, rd, l);
-        if (tl < h.t && tl < tf) {
-          if (chain == 2 || chain == 3) { return s; }
-          let e = light_emit(l, ro + rd * tl, rd);
-          var mis = 1.0;
-          if (last_pdf > 0.0) {
-            let pl = light_pdf(l, ro, rd, tl) * light_selection_pdf(i,ro);
-            mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
-          }
-          s.radiance += tp * e * mis;
-          return s;
-        }
-      }
+    if(light_distance<h.t && light_distance<tf){
+      if(chain==2 || chain==3){return s;}
+      let light=light_at(seen_light);var mis=1.;
+      if(last_pdf>0.){let pl=light_pdf(light,ro,rd,light_distance)*light_selection_pdf(seen_light,ro);mis=last_pdf*last_pdf/(last_pdf*last_pdf+pl*pl);}
+      s.radiance+=tp*light_emit(light,ro+rd*light_distance,rd)*mis;return s;
     }
     if (h.tri < 0 && tf >= BIG) {
       if (primary) {
         if(map_count()>0u && world_row(1u).z>0.5){s.radiance+=tp*(environment(rd)+sun_seen(rd));}
-        else{s.bg = P.backdrop.xyz;s.void_hit = 1.0;}
+        else{let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);s.bg = P.backdrop.xyz*transmission;s.void_hit = transmission;}
       } else {
         let pe=environment_pdf(rd);
         var mis=1.;if(last_pdf>0. && pe>0.){mis=last_pdf*last_pdf/(last_pdf*last_pdf+pe*pe);}
@@ -1066,8 +1126,9 @@ fn path(px: vec2f) -> Sample {
     if (tf < h.t) {
       let p = ro + rd * tf;
       if (primary) {
-        s.bg = P.backdrop.xyz * catcher_ratio(p);
-        s.void_hit = 1.0;
+        let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);
+        s.bg = P.backdrop.xyz * catcher_ratio(p)*transmission;
+        s.void_hit = transmission;
         return s;
       }
       // A matte floor in reflections: one diffuse bounce, lit by the lights.

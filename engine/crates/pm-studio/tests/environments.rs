@@ -139,3 +139,58 @@ fn shared_blas_instances_render_in_both_traversal_paths() {
         .fold(0f32, f32::max);
     assert!(max < 0.01, "instance traversal disagreement {max}");
 }
+
+#[test]
+fn spatial_light_tree_preserves_the_flat_estimator_energy() {
+    let mut r = Renderer::new(32, 32).expect("GPU");
+    r.hardware_rt = false;
+    let mut s = world_scene();
+    s.objects.push(Object {
+        mesh: mesh::sphere(Vec3::ZERO, 1., 16, 32),
+        material: 0,
+    });
+    s.world.hdri.as_mut().unwrap().pixels.fill(Vec3::ZERO);
+    s.extra_lights = (0..50)
+        .map(|i| {
+            let angle = i as f32 / 50. * std::f32::consts::TAU;
+            pm_studio::scene::GpuLight::sphere(
+                v3(angle.sin() * 3., 1.8, angle.cos() * 3.),
+                0.12,
+                Vec3::splat(if i == 0 { 200. } else { 20. }),
+            )
+        })
+        .collect();
+    let mut p = s.prepare();
+    r.set_scene(&s, &p);
+    r.trace(1024, 4, true, 1000000);
+    let tree = center_mean(&mut r);
+    let world = s.extra_lights.len() * 4 + 9;
+    let tree_offset = p.sdata[world + 4][3] as usize;
+    p.sdata.truncate(world + tree_offset);
+    p.sdata[world + 4][3] = 0.;
+    r.set_scene(&s, &p);
+    r.trace(1024, 4, true, 1000000);
+    let flat = center_mean(&mut r);
+    assert!(
+        (tree - flat).abs() / flat < 0.03,
+        "spatial light tree {tree}, flat CDF {flat}"
+    );
+}
+
+#[test]
+fn live_fog_retains_scattering_when_the_environment_is_hidden() {
+    let mut r = Renderer::new(32, 32).expect("GPU");
+    let mut s = world_scene();
+    s.world.hdri.as_mut().unwrap().visible = false;
+    s.world.atmosphere.density = 0.1;
+    s.world.atmosphere.distance = 10.;
+    s.world.atmosphere.color = Vec3::splat(1.);
+    r.set_scene(&s, &s.prepare());
+    r.live = true;
+    r.trace(4, 3, true, 1000000);
+    let mean = center_mean(&mut r);
+    assert!(
+        mean > 0.5,
+        "hidden dome must retain visible fog scattering, got {mean}"
+    );
+}
