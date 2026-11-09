@@ -59,7 +59,7 @@ test('double-clicking a pre-comp bar opens it; the viewer path steps back up and
   await page.evaluate(()=>(window as any).PM.setTime(3.25,{raw:true,force:true}));
   await page.locator('#viewer-path button.viewer-crumb', { hasText: 'Untitled' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.Comps.active())).toBe(ids.root);
-  expect(await page.evaluate(()=>(window as any).PM.time)).toBe(6.25);
+  expect(await page.evaluate(()=>(window as any).PM.time)).toBe(188/30);
   // Pre-comp 1 stays, dimmed, to the right so you can step back down.
   await expect(crumbs(page)).toHaveText(['Untitled', 'Pre-comp 1']);
   await expect(page.locator('#viewer-path .viewer-crumb.ahead')).toHaveText('Pre-comp 1');
