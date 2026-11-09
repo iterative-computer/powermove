@@ -77,6 +77,18 @@ There is no three.js picture-rendering mode.
 
 ## Large models and CAD
 
+**FBX** files (up to 256 MB) import through the existing model picker or drop
+flow. A disposable native worker uses ufbx to retain the node/parts tree,
+materials, embedded PNG/JPEG color/normal/emission textures, cameras and
+point/directional/spot lights. Node animation is baked to linear translation,
+quaternion rotation and scale tracks; skeletal poses use the existing glTF
+skin evaluation before tracing. The saved asset is a self-contained GLB,
+so reopening needs no FBX reader or original file. External texture files are
+not read. Skins retain the four strongest normalized weights per vertex;
+area/volume FBX lights currently use a point-light approximation. The import
+worker has memory, geometry and time limits and cannot block the renderer.
+See [import licenses](../../../docs/studio/import-licenses.md).
+
 **STEP, IGES and BREP** files import directly: OpenCascade tessellates them
 in a worker (fine enough for close-ups) into a GLB that keeps the
 assembly's parts, names and colors, so each part can take its own finish.
@@ -217,8 +229,8 @@ shells. Verify with `render_frames`: agent frames always use the Final tier.
 Main's layer document, timeline, material sources, parts, Front/Bevel/Side/Back
 surfaces, native controls and agent operation shapes remain the editing API.
 The checklist and verified limitations are in
-[`docs/studio/parity.md`](../../../docs/studio/parity.md). Substance SBSAR, FBX animation and simultaneous (2-up/4-up) views still
-require implementation. Studio does not
+[`docs/studio/parity.md`](../../../docs/studio/parity.md). Substance SBSAR still
+requires implementation. Studio does not
 claim Blender Cycles parity.
 
 Imported glTF models using additional physical-material texture maps, texture

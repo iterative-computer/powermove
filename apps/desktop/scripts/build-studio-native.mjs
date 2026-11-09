@@ -26,6 +26,7 @@ run('/usr/bin/nice', ['-n', '10', cargo, 'build', '--manifest-path', path.join(e
 rmSync(output, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
 const host = path.join(output, 'pm-studio-host');
+copyFileSync(path.join(engine,'hosts/studio-electron/licenses/ufbx.txt'),path.join(output,'LICENSE-ufbx.txt'));
 copyFileSync(path.join(target, 'release/pm-studio-host'), host); chmodSync(host, 0o755);
 const dependencyLines = file => {
   const result = spawnSync('/usr/bin/otool', ['-L', file], { encoding: 'utf8' });

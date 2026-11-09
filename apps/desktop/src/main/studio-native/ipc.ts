@@ -8,6 +8,7 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
   trusted: (event: IpcMainInvokeEvent) => boolean): () => void {
   const sessions = new Map<number, Map<string, StudioHostManager>>();
   const watched = new Set<number>();
+  const imports = new Map<number,StudioHostManager>();
   const surfaces=new Map<StudioHostManager,StudioSurfaceReceiver>();
   const releaseManager=(manager:StudioHostManager)=>{manager.dispose();surfaces.get(manager)?.close();surfaces.delete(manager);};
   const check = (event: IpcMainInvokeEvent, key: unknown): string => {
@@ -15,7 +16,7 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
     if (typeof key !== 'string' || !/^[a-zA-Z0-9:_-]{1,128}$/.test(key)) throw new Error('Invalid Studio session');
     return key;
   };
-  const releaseAll = (id: number) => { for (const manager of sessions.get(id)?.values() ?? []) releaseManager(manager); sessions.delete(id); };
+  const releaseAll = (id: number) => { for (const manager of sessions.get(id)?.values() ?? []) releaseManager(manager); sessions.delete(id); imports.get(id)?.dispose();imports.delete(id); };
   const watch = (contents: WebContents) => {
     if (watched.has(contents.id)) return;
     watched.add(contents.id);
@@ -26,6 +27,14 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
   ipc.handle(STUDIO_NATIVE_IPC.request, async (event, key: unknown, command: StudioNativeCommand, binary?: Uint8Array) => {
     const id = check(event, key);
     if (binary !== undefined && (!(binary instanceof Uint8Array) || binary.byteLength > STUDIO_MAX_BINARY)) throw new Error('Invalid Studio binary payload');
+    if(command?.op==='importFbx') {
+      if(!binary?.byteLength)throw new Error('FBX data is empty');
+      if(imports.has(event.sender.id))throw new Error('An FBX import is already running');
+      const worker=new StudioHostManager({executable,timeoutMs:120_000});
+      imports.set(event.sender.id,worker);watch(event.sender);
+      try {return await worker.request({op:'importFbx'},binary);}
+      finally {worker.dispose();if(imports.get(event.sender.id)===worker)imports.delete(event.sender.id);}
+    }
     let owner = sessions.get(event.sender.id);
     if (!owner) { owner = new Map(); sessions.set(event.sender.id, owner); watch(event.sender); }
     let manager = owner.get(id);
@@ -50,5 +59,5 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
     const manager = sessions.get(event.sender.id)?.values().next().value;
     return manager?.status() ?? { available: !!executable, running: false, generation: 0, failure: executable ? null : 'Native Studio is not installed' };
   });
-  return () => { for (const id of sessions.keys()) releaseAll(id); for (const channel of Object.values(STUDIO_NATIVE_IPC)) ipc.removeHandler(channel); };
+  return () => { for (const id of new Set([...sessions.keys(),...imports.keys()])) releaseAll(id); for (const channel of Object.values(STUDIO_NATIVE_IPC)) ipc.removeHandler(channel); };
 }

@@ -50,6 +50,8 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   const scene=result.scene;
   let vertices=0,triangles=0;
   scene.traverse((object:any)=>{
+    if(object.userData.studioFbxVisible===false)object.visible=false;
+    if(object.isLight && typeof object.userData.studioFbxCastShadow==='boolean')object.castShadow=object.userData.studioFbxCastShadow;
     if(!object.isMesh)return;
     for(const material of Array.isArray(object.material)?object.material:[object.material]){
       const index=result.parser.associations.get(material)?.materials;

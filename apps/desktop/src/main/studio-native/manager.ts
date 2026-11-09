@@ -15,7 +15,7 @@ export type HostOptions = {
   surfaceService?: string;
   spawnHost?: typeof spawn;
 };
-const OPS = new Set(['hello', 'scene', 'preset', 'patch', 'screen', 'render', 'pick', 'bounds', 'shutdown', 'prepared', 'preparedPatch', 'preparedView', 'textures', 'snapshot', 'releaseFrame']);
+const OPS = new Set(['hello', 'scene', 'preset', 'patch', 'screen', 'render', 'pick', 'bounds', 'shutdown', 'prepared', 'preparedPatch', 'preparedView', 'textures', 'snapshot', 'releaseFrame', 'importFbx']);
 
 /** One GPU process per active editor session. A failure rejects all pending work;
  * the next connection starts a fresh process and a new scene generation. */

@@ -1,5 +1,6 @@
 //! Powermove Studio's isolated, headless native process. No Electron/Node dependency.
 mod budget;
+mod fbx;
 mod packed;
 mod protocol;
 mod scene;
@@ -23,6 +24,7 @@ struct Request {
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Command {
     Hello,
+    ImportFbx,
     ReleaseFrame {
         frame: u64,
     },
@@ -201,6 +203,13 @@ impl Host {
     fn handle(&mut self, command: Command, binary: &[u8]) -> Result<(Value, Vec<u8>), String> {
         let begin = Instant::now();
         let value = match command {
+            Command::ImportFbx => {
+                let bytes=binary.to_vec();
+                let imported=std::thread::Builder::new().name("fbx-import".into()).stack_size(8*1024*1024)
+                    .spawn(move||fbx::convert(&bytes)).map_err(|e|e.to_string())?
+                    .join().map_err(|_|"FBX importer failed".to_string())??;
+                return Ok((imported.stats,imported.glb));
+            }
             Command::Prepared { upload } => {
                 self.packed = Some(packed::PackedScene::new(upload, binary)?);
                 self.live_budget.reset();

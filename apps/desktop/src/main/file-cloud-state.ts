@@ -4,7 +4,7 @@ async function nativeState(file: string): Promise<CloudFileState> {
   if (process.platform !== 'darwin') return 'unknown';
   try {
     const module = await import('@powermove/macos-haptics');
-    const native = (module as typeof module & { default?: typeof module }).default ?? module;
+    const native = module.default ?? module;
     return await native.cloudFileState(file);
   }
   catch (error: any) {

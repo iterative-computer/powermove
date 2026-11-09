@@ -85,7 +85,7 @@ all of them already exist in Powermove.
 | Camera iris controls | No | Keyframeable blade count, rotation, roundness, aspect; shared uniform aperture sampling | Verified |
 | Multiple views | Single camera/free view, no simultaneous panels | 1/2/4 View layouts; each pane looks through the Active Camera, Front/Left/Top/Back/Right/Bottom or a Custom View; the selected pane is the interactive viewer, the others are Studio Live pictures | Done |
 | glTF embedded animation | Yes | Pose evaluation before tracing | Kept |
-| FBX with embedded animation | No | Importer required | Gap |
+| FBX with embedded animation | No | ufbx native worker converts meshes/materials/cameras/lights, skins and baked TRS tracks to durable GLB; existing parts/animation path | Verified |
 | 2D layers casting shadows onto 3D | No; native-plane casts explicitly disabled | Native 3D planes cast alpha shadows and support receiving light/shadows through Material Options | Verified |
 | Render passes | Internal per-layer/depth surfaces; no user export passes | Beauty, depth, world normal, albedo, object/material ID and shadow as true RGBA16 PNG sequences | Verified |
 
