@@ -435,10 +435,27 @@ fn compile(
     if in_value_slot
         && matches!(
             component,
-            Some(Component::NumberField | Component::TextField | Component::PopUpButton)
+            Some(
+                Component::NumberField
+                    | Component::TextField
+                    | Component::PopUpButton
+                    | Component::SegmentedControl
+            )
         )
     {
         compiled.sheet = compiled.sheet.flex_1().min_w(px(0.)).overflow_hidden();
+    }
+    // A segmented control filling the value column shares it between its
+    // segments (Align: three equal cells, as wide as the wells beside it).
+    let in_filled_segments = component == Some(Component::Segment)
+        && node
+            .parent
+            .and_then(|p| surface.node(p))
+            .and_then(|p| p.parent)
+            .and_then(|g| surface.node(g))
+            .is_some_and(|g| g.props.get("data-pm-slot").and_then(Value::as_str) == Some("value"));
+    if in_filled_segments {
+        compiled.sheet = compiled.sheet.flex_1();
     }
     // A host-menu trigger in the value column (Font, Fill) reads as a well.
     // Icon actions beside wells (Position's Pad) keep their hit square.

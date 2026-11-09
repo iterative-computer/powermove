@@ -1681,10 +1681,16 @@ impl SurfaceView {
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
         if let Some(symbol) = &node.symbol {
+            // The glyph takes the colour the panel declared (an active toggle's
+            // accent, a keyframe state); disabled is always `muted`.
             let ink = if node.disabled {
                 t.colors.muted
             } else {
-                t.colors.secondary
+                node.style.text.color.map_or(t.colors.secondary, |c| {
+                    let c = hsla_to_rgba(c);
+                    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+                    (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
+                })
             };
             element = element.child(pm_shell::symbol::symbol(
                 symbol,

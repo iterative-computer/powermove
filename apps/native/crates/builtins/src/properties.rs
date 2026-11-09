@@ -178,12 +178,24 @@ impl Properties {
                     (FieldType::Text, Value::String(_)) => {
                         json!({"kind":"text","multiline":id=="content.text","binding":lease,"value":value,"mixed":state.mixed})
                     }
+                    // The swatch and its hex beside it, both editable (v1).
                     (FieldType::Color, Value::String(_)) => {
-                        json!({"kind":"colour","binding":lease,"value":value,"mixed":state.mixed})
+                        let hex = self.lease(model, &format!("{id}#hex"), field.binding.clone())?;
+                        json!({"kind":"colour","binding":lease,"value":value,"mixed":state.mixed,
+                            "hexBinding":hex,"hex":value})
                     }
                     (FieldType::Font, Value::String(_)) => {
                         json!({"kind":"font","binding":lease,"value":value,"options":[],"mixed":state.mixed})
                     }
+                    // Text alignment is three glyphs, not a menu of words (v1).
+                    (FieldType::Choice, _) if id == "content.align" => json!({
+                        "kind":"segmented","binding":lease,"value":value,"mixed":state.mixed,
+                        "options":[
+                            {"id":"left","label":"Align Left","symbol":"text.alignleft"},
+                            {"id":"center","label":"Align Center","symbol":"text.aligncenter"},
+                            {"id":"right","label":"Align Right","symbol":"text.alignright"},
+                        ],
+                    }),
                     (FieldType::Choice, _) => {
                         let options = match id {
                             "content.shape" => {
@@ -215,7 +227,6 @@ impl Properties {
                                 }
                                 json!(options)
                             }
-                            "content.align" => json!(["left", "center", "right"]),
                             _ if contributed.is_some() => json!(
                                 contributed
                                     .iter()

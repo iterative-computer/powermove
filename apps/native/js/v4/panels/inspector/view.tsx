@@ -178,7 +178,8 @@ function AlignmentStrip({
       style={{
         ...horizontal,
         gap: token("metrics.gap"),
-        height: token("metrics.row"),
+        paddingTop: token("metrics.gap"),
+        paddingBottom: token("metrics.gap"),
         paddingLeft: token("metrics.inset"),
         paddingRight: token("metrics.inset"),
       }}
@@ -197,7 +198,16 @@ function AlignmentStrip({
     >
       {[alignmentButtons.slice(0, 3), alignmentButtons.slice(3)].map(
         (group, index) => (
-          <div key={index} style={horizontal}>
+          // Two wells of three, sharing the row (v1's two button groups).
+          <div
+            key={index}
+            style={{
+              ...horizontal,
+              ...well,
+              flexGrow: 1,
+              justifyContent: "space-between",
+            }}
+          >
             {group.map((button) => (
               <Action
                 key={button.id}
@@ -406,6 +416,21 @@ function Property({
               value={keyValue}
               disabled={disabled}
               active={row.animation !== "static"}
+              // One small mark whose shape says the state, as the timeline's:
+              // outline = static, half = animated, filled = key at playhead.
+              symbol={
+                row.animation === "key-at-playhead"
+                  ? "diamond.fill"
+                  : row.animation === "animated"
+                    ? "diamond.lefthalf.filled"
+                    : "diamond"
+              }
+              style={{
+                symbolSize: token("metrics.symbol_inline"),
+                color: token(
+                  row.animation === "static" ? "colors.muted" : "colors.accent",
+                ),
+              }}
               onActivate={(event) =>
                 session.send({
                   type: "key",
@@ -424,6 +449,8 @@ function Property({
               label="Lock aspect ratio"
               tooltip={row.linked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"}
               active={row.linked}
+              // Linked is a state, not an alert: the glyph stays neutral.
+              style={{ color: token("colors.secondary") }}
               disabled={disabled}
               onActivate={() =>
                 session.send({
@@ -535,7 +562,9 @@ export function InspectorPanel({
                   fontWeight: token("typography.semibold_weight"),
                 }}
               >
-                {target.count > 1 ? `${target.count} Layers` : target.first.name}
+                {target.count > 1
+                  ? `${target.count} Layers`
+                  : target.first.name}
               </text>
               <text
                 style={{
@@ -611,21 +640,21 @@ export function InspectorPanel({
               </InspectorRow>
             ))}
             {section.masks?.flatMap((mask) => [
-                <InspectorRow key={mask.id} label={mask.name}>
-                  <Action
-                    id={`remove-mask:${mask.id}`}
-                    label={`Remove ${mask.name}`}
-                    tooltip="Remove Mask"
-                    symbol="minus"
-                    disabled={target.kind === "layers" && target.first.locked}
-                    onActivate={() =>
-                      session.send({ type: "remove-mask", mask: mask.id })
-                    }
-                  />
-                </InspectorRow>,
-                ...mask.rows.map((row) => (
-                  <Property key={row.id} row={row} session={session} />
-                )),
+              <InspectorRow key={mask.id} label={mask.name}>
+                <Action
+                  id={`remove-mask:${mask.id}`}
+                  label={`Remove ${mask.name}`}
+                  tooltip="Remove Mask"
+                  symbol="minus"
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={() =>
+                    session.send({ type: "remove-mask", mask: mask.id })
+                  }
+                />
+              </InspectorRow>,
+              ...mask.rows.map((row) => (
+                <Property key={row.id} row={row} session={session} />
+              )),
             ])}
             {section.rows.map((row) => (
               <Property key={row.id} row={row} session={session} />
