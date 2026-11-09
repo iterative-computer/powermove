@@ -68,6 +68,7 @@ export function projection(rows: Row[] = []): Projection {
     composition_count: 1,
     missing_only: false,
     query: "",
+    host_filter: 0,
   };
 }
 export const project = {

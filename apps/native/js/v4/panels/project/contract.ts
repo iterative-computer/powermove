@@ -211,6 +211,8 @@ export interface Projection {
   missing_only: boolean;
   /** The search the model applies; the field follows it. */
   query: string;
+  /** Moves when the host set the filter; only then does the field follow `query`. */
+  host_filter: number;
 }
 export type Action =
   | { Page: { offset: number; limit: number } }

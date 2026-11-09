@@ -146,19 +146,15 @@ export function ProjectView(props: ProjectViewProps) {
     throw new RangeError("Invalid native media grid layout");
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
-  // Queries this field sent and the model hasn't answered yet, oldest first.
-  // An answer carrying another query came from the host (the status line's
-  // missing files clear the search): the field follows it.
-  const sent = useRef<string[]>([]);
+  // The host set the filter (the status line's missing files clear the
+  // search): the field follows that query, and only a newer one. Answers to
+  // the person's own typing, however late, never replace what they typed.
+  const hostFilter = useRef(0);
   useLayoutEffect(() => {
-    if (!view) return;
-    const at = sent.current.indexOf(view.query);
-    if (at >= 0) sent.current = sent.current.slice(at + 1);
-    else if (view.query !== query) {
-      sent.current = [];
-      setQuery(view.query);
-    }
-  }, [view?.query]);
+    if (!view || view.host_filter <= hostFilter.current) return;
+    hostFilter.current = view.host_filter;
+    setQuery(view.query);
+  }, [view?.host_filter]);
   const [hovered, setHovered] = useState<string | null>(null);
   const [rename, setRename] = useState("");
   const [crumbFocus, setCrumbFocus] = useState(0);
@@ -178,7 +174,6 @@ export function ProjectView(props: ProjectViewProps) {
   }, [view?.renaming]);
   const filter = (value: string, missingOnly = !!view?.missing_only) => {
     setQuery(value);
-    sent.current.push(value);
     input({
       Filter: {
         query: value,
@@ -650,6 +645,7 @@ export function ProjectView(props: ProjectViewProps) {
             label="Search media"
             title="Search media"
             value={query}
+            metadata={{ hostValue: hostFilter.current }}
             id="media-search"
             binding={native.searchBinding}
             focusRequest="media-search"

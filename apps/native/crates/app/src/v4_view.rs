@@ -482,19 +482,20 @@ impl SurfaceView {
         let unit = view.unit.clone();
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
-            // A text field that reports each keystroke (a search) echoes
-            // the typing; anything else it's given came from its panel.
-            let follows = view.number.is_none()
-                && node.r#type != "textarea"
-                && node.listeners.contains_key("input");
+            // A value the panel's host set (`metadata.hostValue`) replaces
+            // the text even mid-edit; nothing else does.
+            let host = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("hostValue"))
+                .and_then(Value::as_u64);
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
-                if follows {
-                    f.set_value_following(&value, cx);
-                } else {
-                    f.set_value(&value, cx);
+                match host {
+                    Some(revision) => f.set_value_from_host(&value, revision, cx),
+                    None => f.set_value(&value, cx),
                 }
             });
             return;

@@ -478,22 +478,10 @@ impl Backend {
                 missing_only: true,
                 ..Default::default()
             };
-            for input in [
-                pm_panel_media::Input::OpenFolder(None),
-                pm_panel_media::Input::Filter(filter),
-            ] {
-                self.native
-                    .project
-                    .request(
-                        &catalog,
-                        &self.native.media_runtime,
-                        pm_panel_media::v4::Request {
-                            owner: catalog.stamp.clone(),
-                            action: pm_panel_media::v4::Action::Input(input),
-                        },
-                    )
-                    .map_err(|e| format!("{e:?}"))?;
-            }
+            self.native
+                .project
+                .apply_host_filter(&catalog, &self.native.media_runtime, filter)
+                .map_err(|e| format!("{e:?}"))?;
         }
         let mut reply = self
             .native

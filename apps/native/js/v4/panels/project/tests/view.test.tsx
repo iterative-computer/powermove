@@ -518,11 +518,18 @@ test("the search field follows a query the host set, not late answers to typing"
     );
   await render();
   await event(root, find(root, "Search Media").id, "click");
-  for (const value of ["c", "cl"])
-    await event(root, find(root, "Search media").id, "input", {
-      value,
-      composing: false,
-    });
+  await event(root, find(root, "Search media").id, "input", {
+    value: "c",
+    composing: false,
+  });
+  // A publication queued before the keystroke lands late with "".
+  view = { ...view, query: "" };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("c");
+  await event(root, find(root, "Search media").id, "input", {
+    value: "cl",
+    composing: false,
+  });
   // The model answers the first keystroke after the second was typed.
   view = { ...view, query: "c" };
   await render();
@@ -531,7 +538,13 @@ test("the search field follows a query the host set, not late answers to typing"
   await render();
   expect(find(root, "Search media").props.value).toBe("cl");
   // The status line's missing files clear the search on the host.
-  view = { ...view, query: "", missing_only: true };
+  view = { ...view, query: "", missing_only: true, host_filter: 1 };
+  await render();
+  const field = find(root, "Search media");
+  expect(field.props.value).toBe("");
+  expect((field.props.metadata as { hostValue: number }).hostValue).toBe(1);
+  // A late publication from before the host's change doesn't undo it.
+  view = { ...view, query: "cl", host_filter: 1 };
   await render();
   expect(find(root, "Search media").props.value).toBe("");
   await root.dispose();

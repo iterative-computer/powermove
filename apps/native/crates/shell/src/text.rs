@@ -18,9 +18,9 @@ pub struct TextField {
     tokens: pm_design::Tokens,
     /// A composer's last submitted text, cleared once the model empties it.
     submitted: Option<String>,
-    /// Text this field reported as typed and the panel hasn't echoed yet,
-    /// oldest first (see [`Self::set_value_following`]).
-    typed: std::collections::VecDeque<String>,
+    /// The newest host replacement this field took (see
+    /// [`Self::set_value_from_host`]).
+    host_value: u64,
 }
 impl EventEmitter<TextEvent> for TextField {}
 impl TextField {
@@ -58,12 +58,6 @@ impl TextField {
                                 TextEvent::Changed(value) if this.kind == TextKind::Composer => {
                                     this.value = value.clone();
                                 }
-                                TextEvent::Changed(value) => {
-                                    this.typed.push_back(value.clone());
-                                    if this.typed.len() > 64 {
-                                        this.typed.pop_front();
-                                    }
-                                }
                                 _ => {}
                             }
                             cx.emit(event);
@@ -85,7 +79,7 @@ impl TextField {
             unit: None,
             tokens,
             submitted: None,
-            typed: Default::default(),
+            host_value: 0,
         }
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
@@ -115,19 +109,19 @@ impl TextField {
         self.slot.set_font_size(tokens.typography.body as f64);
         self.tokens = tokens;
     }
-    /// For a field whose value echoes what is typed (a search): an echo of
-    /// this field's own typing never replaces its text, but any other value is
-    /// the panel's own (a search the host cleared) and replaces it even
-    /// while the person is editing.
-    pub fn set_value_following(&mut self, value: &str, cx: &mut Context<Self>) {
-        if let Some(at) = self.typed.iter().position(|t| t == value) {
-            self.typed.drain(..=at);
-        } else if self.slot.is_editing() && self.slot.value() != value {
-            self.typed.clear();
-            self.slot.replace_value(value);
-            self.value = value.into();
-            cx.notify();
-            return;
+    /// The panel marks a value its host set (`metadata.hostValue`, rising
+    /// with each one): that value replaces the text even while the person is
+    /// editing, once. Anything else, such as a late answer to their own
+    /// typing, never replaces what they typed.
+    pub fn set_value_from_host(&mut self, value: &str, revision: u64, cx: &mut Context<Self>) {
+        if revision > self.host_value {
+            self.host_value = revision;
+            if self.slot.is_editing() && self.slot.value() != value {
+                self.slot.replace_value(value);
+                self.value = value.into();
+                cx.notify();
+                return;
+            }
         }
         self.set_value(value, cx);
     }
