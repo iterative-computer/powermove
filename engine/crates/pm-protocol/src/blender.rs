@@ -8,10 +8,6 @@
 //! composition: 16-bit RGBA PNG through AgX with straight alpha, cached by
 //! content key and never re-rendered within a job.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{
     AssetId, ByteSize, CompositionId, ContentHash, JobId, LayerId, PixelRect, Size, Ticks,
 };
@@ -19,6 +15,7 @@ use crate::host::CapabilityHandle;
 use crate::priority::PriorityClass;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Oldest supported Blender.
 pub const MIN_BLENDER_VERSION: (u16, u16) = (4, 5);
@@ -38,7 +35,6 @@ pub mod limits {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum BlenderEngine {
     Eevee,
@@ -47,7 +43,6 @@ pub enum BlenderEngine {
 
 /// `render3d.device` as stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum RequestedDevice {
     Auto,
@@ -57,7 +52,6 @@ pub enum RequestedDevice {
 
 /// The device Blender actually used; `auto` is resolved and recorded per job.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -74,7 +68,6 @@ pub enum ResolvedDevice {
 
 /// Render settings from the composition's `render3d`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderSettings {
     pub engine: BlenderEngine,
@@ -134,7 +127,6 @@ pub const WORKER_FLAGS: [&str; 4] = [
 
 /// The snapshot encoding: today's `renderSnapshot` JSON, version 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SnapshotEncoding {
     RenderSnapshotJsonV1,
@@ -142,7 +134,6 @@ pub enum SnapshotEncoding {
 
 /// A snapshot stored in a cache file, addressed by its hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotRef {
     pub hash: ContentHash,
@@ -153,7 +144,6 @@ pub struct SnapshotRef {
 
 /// An asset the snapshot references (textures, source `.blend` files).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderAsset {
     pub asset: AssetId,
@@ -163,7 +153,6 @@ pub struct BlenderAsset {
 
 /// Motion-blur shutter sample `index` of `count`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ShutterSample {
     pub index: u16,
@@ -172,7 +161,6 @@ pub struct ShutterSample {
 
 /// One surface the job needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceRequest {
     pub layer: LayerId,
@@ -188,7 +176,6 @@ pub struct SurfaceRequest {
 
 /// Run a Blender render job (job engine → host services).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderJobRequest {
     pub job: JobId,
@@ -278,7 +265,6 @@ impl Validate for BlenderJobRequest {
 /// [`crate::patch::EngineFact::BlenderResult`] and is committed as one
 /// undoable edit, dropped if the document moved past `revision` meanwhile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -298,7 +284,6 @@ pub enum BlenderModelOperation {
 
 /// Renderer → host: run a model operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderModelJob {
     pub job: JobId,
@@ -346,7 +331,6 @@ impl Validate for BlenderModelJob {
 
 /// One file a model operation produced (GLB, textures), in the host's scratch cache.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderOutputFile {
     pub name: String,
@@ -357,7 +341,6 @@ pub struct BlenderOutputFile {
 
 /// A finished surface (host → job engine, one event per surface).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderSurface {
     pub job: JobId,
@@ -390,7 +373,6 @@ impl Validate for BlenderSurface {
 
 /// Job progress (host → job engine).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderProgress {
     pub job: JobId,
@@ -400,7 +382,6 @@ pub struct BlenderProgress {
 
 /// Blender availability, as host services report it. Not committed to the document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderStatus {
     pub available: bool,
@@ -428,7 +409,6 @@ impl BlenderStatus {
 /// Every input of a surface's cache key (section 14.7). The job engine hashes
 /// [`SurfaceKey::key_bytes`] with BLAKE3 to get [`SurfaceRequest::key`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceKey {
     pub snapshot_hash: ContentHash,

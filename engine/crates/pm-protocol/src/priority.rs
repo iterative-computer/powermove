@@ -5,10 +5,6 @@
 //! (section 17). Agent frame requests are batched, carry the agent's revision
 //! for read-your-writes, queue instead of failing, and never pause playback.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::color::{OutputColor, Precision};
 use crate::common::{
     AgentRunId, AssetId, ByteSize, Bytes, CompositionId, FrameRate, JobId, Revision, SessionId,
@@ -20,11 +16,11 @@ use crate::host::OutputChoice;
 use crate::snapshot::{SourceColor, SourceFit};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Scheduling class, highest first. The derived order puts the most urgent
 /// class last, so `a > b` means `a` preempts `b`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PriorityClass {
     /// Background renders (4b), lowest.
@@ -89,7 +85,6 @@ pub const AGENT_JPEG_QUALITY: f32 = 0.74;
 
 /// How agent frames treat Blender-rendered compositions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum BlenderPolicy {
     /// Use cached surfaces, else native shading reported as `pending` (default).
@@ -100,7 +95,6 @@ pub enum BlenderPolicy {
 
 /// Image encoding for agent frames.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -113,7 +107,6 @@ pub enum AgentImageFormat {
 
 /// One frame an agent wants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentFrame {
     pub composition: CompositionId,
@@ -123,7 +116,6 @@ pub struct AgentFrame {
 /// A batch of agent frames. The envelope's revision is the agent's last write;
 /// the engine answers at that revision or later (read-your-writes).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentFrameRequest {
     pub run: AgentRunId,
@@ -218,7 +210,6 @@ impl Validate for JobStatus {
 
 /// How the Blender surface for a frame was produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum BlenderUse {
     /// The composition does not render with Blender.
@@ -233,7 +224,6 @@ pub enum BlenderUse {
 
 /// Where the encoded image is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -251,7 +241,6 @@ pub enum ImagePayload {
 
 /// The result for one requested frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -274,7 +263,6 @@ pub enum AgentFrameOutcome {
 
 /// Response to [`AgentFrameRequest`], one outcome per frame in request order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentFrameResult {
     pub outcomes: Vec<AgentFrameOutcome>,
@@ -284,7 +272,6 @@ pub struct AgentFrameResult {
 
 /// Job states as `get_render_status` reports them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum JobState {
     Queued,
@@ -308,7 +295,6 @@ impl JobState {
 /// Job status event; maps one-to-one onto `get_render_status`
 /// `{jobId, state, progress, path?, error?}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatus {
     pub job: JobId,
@@ -323,14 +309,12 @@ pub struct JobStatus {
     /// The latest encoded frame, small, for the export progress sheet
     /// ([`DeliveryOptions::preview`]).
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub preview: Option<JobPreview>,
 }
 
 /// A preview of an export's latest encoded frame: a JPEG at most
 /// [`JOB_PREVIEW_MAX_EDGE`] pixels on its long edge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct JobPreview {
     /// The export frame it shows (0-based).
@@ -349,7 +333,6 @@ pub const JOB_PREVIEW_MAX_EDGE: u32 = 640;
 
 /// ProRes profiles (VideoToolbox on macOS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ProResProfile {
     Proxy,
@@ -368,7 +351,6 @@ impl ProResProfile {
 
 /// MP4 or QuickTime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Container {
     Mp4,
@@ -376,7 +358,6 @@ pub enum Container {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum WebmCodec {
     Vp9,
@@ -386,7 +367,6 @@ pub enum WebmCodec {
 /// The engine-rendered formats at cutover (section 17). Code export and
 /// project export are not render jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -444,7 +424,6 @@ impl ExportFormat {
 
 /// How alpha is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum AlphaOutput {
     None,
@@ -454,7 +433,6 @@ pub enum AlphaOutput {
 
 /// Today's quality tiers (`export-defaults.ts`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum QualityTier {
     Draft,
@@ -476,7 +454,6 @@ impl QualityTier {
 /// preserved (section 17); pm-export owns their meaning, this contract owns
 /// their shape and limits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSettings {
     pub format: ExportFormat,
@@ -491,7 +468,6 @@ pub struct ExportSettings {
     /// App playhead when audioLayers last built its index (embedded and
     /// precomposition trims). Omitted by headless clients: use range start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub audio_index_playhead: Option<Ticks>,
     pub motion_blur: bool,
     pub color: OutputColor,
@@ -503,13 +479,11 @@ pub struct ExportSettings {
     pub draft_from_proxies: bool,
     /// Phase 3b delivery options; absent in Phase 2 senders (today's defaults).
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(as = "Option<DeliveryOptions>", optional))]
     pub delivery: DeliveryOptions,
 }
 
 /// How an export's audio is coded (section 16, "Export"). WebM is always Opus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum AudioCoding {
     /// 16-bit LPCM with deterministic TPDF dither (MOV).
@@ -525,7 +499,6 @@ pub enum AudioCoding {
 /// The `tmcd` track's label for the first frame (section 17, "Comfort": start
 /// timecode and reel name). MOV outputs only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ExportTimecode {
     /// `HH:MM:SS:FF`, or `HH:MM:SS;FF` drop-frame, at the export rate.
@@ -538,7 +511,6 @@ pub struct ExportTimecode {
 
 /// Delivery options added in Phase 3b. The defaults are today's behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeliveryOptions {
     /// `None`: 24-bit PCM in MOV, AAC in MP4, Opus in WebM.
@@ -559,10 +531,6 @@ pub struct DeliveryOptions {
     /// override): the job asks the host for those layers' pixels at each
     /// frame (`Request::CompatFrame`). Empty: every layer is the engine's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(
-        feature = "ts",
-        ts(as = "Option<Vec<crate::snapshot::CompatSource>>", optional)
-    )]
     pub compat: Vec<crate::snapshot::CompatSource>,
 }
 
@@ -679,7 +647,6 @@ impl Validate for ExportSettings {
 
 /// Proxy formats (appendix D, Settings › Project › Media).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ProxyFormat {
     ProResProxy,
@@ -692,7 +659,6 @@ pub enum ProxyFormat {
 
 /// Proxy sizes (appendix D). Automatic never goes below 540p.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ProxySize {
     Automatic,
@@ -706,7 +672,6 @@ pub enum ProxySize {
 
 /// What a job does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -745,7 +710,6 @@ pub enum JobSpec {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum BrowserRenditionFormat {
     Png,
@@ -754,7 +718,6 @@ pub enum BrowserRenditionFormat {
 
 /// Submit a job to the job engine (host → job engine).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitJob {
     pub job: JobId,
@@ -873,7 +836,6 @@ impl Validate for SubmitJob {
 
 /// The job engine accepted a job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct JobAccepted {
     pub job: JobId,
@@ -884,7 +846,6 @@ pub struct JobAccepted {
 
 /// What to cancel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -902,7 +863,6 @@ pub enum CancelJobs {
 
 /// The jobs a cancel stopped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct JobsCancelled {
     pub jobs: Vec<JobId>,
@@ -910,7 +870,6 @@ pub struct JobsCancelled {
 
 /// `export_video` `mode` (section 17): `wait` (default) or `async`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum AgentExportMode {
     #[default]
@@ -920,7 +879,6 @@ pub enum AgentExportMode {
 
 /// What `export_video` returns to the agent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",

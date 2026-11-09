@@ -8,13 +8,10 @@
 //! the numbers spike S8 measured (plan section 26, amendment 12;
 //! `docs/engine/spikes/S8.md`, "Recommended contract 13 parameters").
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{HostMicros, PlaybackRate, Seq};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// Signals from the interactive engine to the job engine. Playback start,
 /// stop, misses, and quality steps go through main (which also moves the
@@ -22,7 +19,6 @@ use crate::version::ContractId;
 /// hands the two engines (S8: 4 ms of relay latency cut export throughput by
 /// 24 to 55%).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -66,7 +62,6 @@ pub enum DeadlineSignal {
 /// main always sends `pause` for playback; `throttle` remains for
 /// non-playback load shedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -82,7 +77,6 @@ pub enum BlenderThrottle {
 
 /// The job engine's slicing policy (host → job engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SlicingPolicy {
     /// Hard bound on any job-engine command buffer, and on any single

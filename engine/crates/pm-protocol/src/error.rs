@@ -7,18 +7,14 @@
 //! whole session. Crash attribution marks an asset or effect failed after two
 //! crashes attributed to it (section 19).
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{
     AssetId, DefinitionId, EffectInstanceId, JobId, LayerId, RequestId, Revision, Seq, SessionId,
 };
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// What failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
     /// The bytes did not decode, or a value broke a contract invariant.
@@ -70,7 +66,6 @@ pub enum ErrorCode {
 
 /// The thing an error is about; decides the isolation rule.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -101,7 +96,6 @@ pub enum ErrorScope {
 
 /// What the engine does about an error in this scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Isolation {
     FailRequest,
@@ -131,7 +125,6 @@ impl ErrorScope {
 
 /// Whether the same request can succeed later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -151,7 +144,6 @@ pub enum Retry {
 
 /// A user-facing line number in a shader diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ShaderDiagnostic {
     /// 1-based line in the user's source (wrapping offsets removed).
@@ -162,7 +154,6 @@ pub struct ShaderDiagnostic {
 
 /// Structured details for codes that need them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -199,7 +190,6 @@ pub enum ErrorDetail {
 
 /// An error as it crosses the protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EngineError {
     pub code: ErrorCode,
@@ -258,7 +248,6 @@ impl std::error::Error for EngineError {}
 /// renders transparent, an effect is skipped). Filled into
 /// `uiState.getShaderMeta` and the status bar at the frame's revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FailureReport {
     pub revision: Revision,
@@ -267,7 +256,6 @@ pub struct FailureReport {
 
 /// Which engine process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum EngineProcess {
     Interactive,
@@ -276,7 +264,6 @@ pub enum EngineProcess {
 
 /// Sent by the host after an engine process exits unexpectedly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CrashReport {
     pub process: EngineProcess,
@@ -296,7 +283,6 @@ pub struct CrashReport {
 /// now (its crash breadcrumb). Sent whenever the set changes; after a crash
 /// the host reads the last one as the crash's suspects ([`CrashLedger`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct InFlight {
     pub suspects: Vec<ErrorScope>,

@@ -12,7 +12,7 @@ pm-perf = { path = "../pm-perf" }
 pm-model = { path = "../pm-model" }
 pm-eval = { path = "../pm-eval" }
 pm-engine = { path = "../pm-engine" }
-pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-protocol = { path = "../pm-protocol" }
 serde_json.workspace = true
 png = "0.18"
 

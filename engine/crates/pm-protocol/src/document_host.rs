@@ -7,24 +7,19 @@
 //! stays TypeScript. This contract is the host ↔ worker interface: instances,
 //! persistence, the extension runtime, and agent tool routing.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{AgentRunId, DocumentId, ExtensionId, ProjectId, Revision, Seq};
 use crate::host::CapabilityHandle;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// One document host worker for one project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceId(pub u32);
 
 /// Open a project in a new instance (host → worker pool).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OpenProject {
     pub project: ProjectId,
@@ -36,7 +31,6 @@ pub struct OpenProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOpened {
     pub instance: InstanceId,
@@ -46,7 +40,6 @@ pub struct ProjectOpened {
 
 /// Why a worker persists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PersistReason {
     Autosave,
@@ -59,7 +52,6 @@ pub enum PersistReason {
 /// History is per instance, so concurrent runs on two projects never touch
 /// each other's rollback (appendix A, item 16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Persist {
     pub instance: InstanceId,
@@ -67,7 +59,6 @@ pub struct Persist {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Persisted {
     pub instance: InstanceId,
@@ -76,7 +67,6 @@ pub struct Persisted {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CloseProject {
     pub instance: InstanceId,
@@ -86,7 +76,6 @@ pub struct CloseProject {
 /// register in the instance's kernel; Store extensions run in their
 /// contained sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ExtensionSource {
     Local,
@@ -96,7 +85,6 @@ pub enum ExtensionSource {
 
 /// Register (or hot-reload) an extension in an instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterExtension {
     pub instance: InstanceId,
@@ -110,7 +98,6 @@ pub struct RegisterExtension {
 /// engine at `definitions_generation` before this reply was sent, so a
 /// `render_frames` call right after `publish_extensions` sees them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionRegistered {
     pub instance: InstanceId,
@@ -120,7 +107,6 @@ pub struct ExtensionRegistered {
 
 /// Where a tool call runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ToolRoute {
     /// The project's document host instance (pm-wasm, kernel, history, harness).
@@ -221,7 +207,6 @@ pub mod limits {
 /// An agent tool call routed to an instance. Arguments and results are the
 /// tools' existing JSON schemas, unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCall {
     pub instance: InstanceId,
@@ -232,7 +217,6 @@ pub struct ToolCall {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ToolResult {
     pub instance: InstanceId,

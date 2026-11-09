@@ -9,10 +9,6 @@
 //! The scene crosses processes for parity runs, agent `get_3d_scene`, and
 //! pm-cli; inside an engine it is passed by reference.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::color::{BlendMode, ToneMapping3d};
 use crate::common::{
     AssetId, CompositionId, DefinitionId, EffectInstanceId, FrameRate, LayerId, Mat3, Mat4,
@@ -22,12 +18,11 @@ use crate::error::FailureReport;
 use crate::frame::{Projection, ViewOverride};
 use crate::validate::{Validate, Violation, ensure, ensure_unique};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// `compat` level (section 6): 1 keeps today's behavior, 2 gets fixes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(try_from = "u8", into = "u8")]
-#[cfg_attr(feature = "ts", ts(type = "1 | 2"))]
 pub enum Compat {
     Level1,
     Level2,
@@ -55,7 +50,6 @@ impl From<Compat> for u8 {
 
 /// An evaluated parameter value (effects, transitions, extension layers, shaders).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -75,7 +69,6 @@ pub enum ParamValue {
 
 /// Composition background (appendix B).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -98,7 +91,6 @@ pub enum Background {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct GradientStop {
     pub position: f64,
@@ -110,7 +102,6 @@ pub struct GradientStop {
 /// render graph evaluates one scene per sample; this scene is the center
 /// time.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Shutter {
     pub angle_degrees: f64,
@@ -143,7 +134,6 @@ pub const MAX_GRADIENT_STOPS: usize = 8;
 
 /// Layer kinds (section 10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum LayerKind {
     Solid,
@@ -184,7 +174,6 @@ impl LayerKind {
 
 /// The layer's transform space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -207,7 +196,6 @@ pub enum LayerTransform {
 /// runs, meshes) are referenced by id and fetched from pm-eval caches inside
 /// the engine; the scene carries what the graph keys on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -259,7 +247,6 @@ pub enum LayerSource {
 
 /// A named parameter value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct NamedParam {
     pub key: String,
@@ -268,7 +255,6 @@ pub struct NamedParam {
 
 /// An evaluated effect instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluatedEffect {
     pub instance: EffectInstanceId,
@@ -281,7 +267,6 @@ pub struct EvaluatedEffect {
 
 /// Mask modes for parametric masks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum MaskMode {
     Add,
@@ -290,7 +275,6 @@ pub enum MaskMode {
 
 /// An evaluated mask.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -324,7 +308,6 @@ pub enum EvaluatedMask {
 
 /// Track matte modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum MatteMode {
     Alpha,
@@ -335,7 +318,6 @@ pub enum MatteMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct MatteRef {
     pub source: LayerId,
@@ -344,7 +326,6 @@ pub struct MatteRef {
 
 /// A transition active on the layer at this time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluatedTransition {
     pub definition: DefinitionId,
@@ -355,7 +336,6 @@ pub struct EvaluatedTransition {
 
 /// One layer at one time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluatedLayer {
     pub id: LayerId,
@@ -381,7 +361,6 @@ pub const MAX_PARAMETRIC_MASKS: usize = 8;
 
 /// A light in a 3D world.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -409,7 +388,6 @@ pub enum LightKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Light3d {
     /// The light layer, or `None` for the studio default sun and glTF-embedded lights.
@@ -425,7 +403,6 @@ pub struct Light3d {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Camera3d {
     /// The topmost active camera layer, or `None` for the studio default
@@ -438,7 +415,6 @@ pub struct Camera3d {
 
 /// What a 3D object draws.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -459,7 +435,6 @@ pub enum ModelSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Object3d {
     pub layer: LayerId,
@@ -475,7 +450,6 @@ pub struct Object3d {
 
 /// One 3D world: the models, lights, and camera of a composition's 3D layers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct World3d {
     pub camera: Camera3d,
@@ -493,7 +467,6 @@ pub const MAX_SHADOW_LIGHTS: usize = 4;
 
 /// The layers sharing a depth prepass and shadow maps with one another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DepthSet {
     pub world: u32,
@@ -508,7 +481,6 @@ pub struct DepthSet {
 /// One run of consecutive 3D layers in stack order, re-sorted for drawing.
 /// Blocks are never reordered across runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OrderedRun {
     /// Index of the run's first layer in [`EvaluatedScene::layers`].
@@ -520,7 +492,6 @@ pub struct OrderedRun {
 
 /// Everything the render graph needs for one frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluatedScene {
     pub composition: CompositionId,

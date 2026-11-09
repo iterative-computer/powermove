@@ -7,18 +7,14 @@
 //! descriptors here are what crosses processes; native objects
 //! (`CVPixelBuffer`, `IOSurfaceRef`, NT handles) stay behind associated types.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::color::{ColorDescription, Subsampling};
 use crate::common::{ContentHash, PixelRect, Seq, Size};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// GPU texture formats that cross the interop boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SurfaceFormat {
     /// 8-bit BGRA, viewer pool option (blue-noise dither in the display transform).
@@ -53,7 +49,6 @@ impl SurfaceFormat {
 
 /// Decoded frame layouts the engine imports without copies (section 13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -132,7 +127,6 @@ impl DecodedLayout {
 
 /// One plane of a decoded layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PlaneSpec {
     pub format: SurfaceFormat,
@@ -200,7 +194,6 @@ impl DecodedLayout {
 
 /// A decoded frame as the decoder hands it to the interop layer.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DecodedFrameDesc {
     pub size: Size,
@@ -269,7 +262,6 @@ impl Validate for DecodedFrameDesc {
 /// Identifies the GPU so the engine and Chromium's GPU process use the same
 /// adapter (Metal `registryID`, Windows LUID).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -288,7 +280,6 @@ pub enum AdapterIdentity {
 
 /// The platform object behind an exported surface, as it crosses processes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -309,7 +300,6 @@ pub enum PlatformSurface {
 
 /// A surface in the viewer pool, sent once and imported once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceDescriptor {
     pub pool_index: u32,
@@ -320,7 +310,6 @@ pub struct SurfaceDescriptor {
 
 /// What a surface pool carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PoolRole {
     Color,
@@ -331,7 +320,6 @@ pub enum PoolRole {
 /// surface is imported once with `importSharedTexture`; frames then name a
 /// `pool_index` only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SurfacePool {
     /// Increases when the pool is replaced; frames from older generations are stale.
@@ -343,7 +331,6 @@ pub struct SurfacePool {
     /// the Phase 3c render transport). A depth pool never replaces the
     /// color pool.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub role: Option<PoolRole>,
 }
 
@@ -405,7 +392,6 @@ impl Validate for SurfacePool {
 
 /// Ask the interop layer for an exportable surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceRequest {
     pub size: Size,
@@ -414,7 +400,6 @@ pub struct SurfaceRequest {
 
 /// What an encoder session wants as input.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderInputDesc {
     pub size: Size,
@@ -424,7 +409,6 @@ pub struct EncoderInputDesc {
 
 /// A Blender surface as stored by the job engine (16-bit RGBA PNG, straight alpha).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct BlenderSurfaceDesc {
     pub size: Size,
@@ -435,7 +419,6 @@ pub struct BlenderSurfaceDesc {
 /// What an interop implementation supports on this machine. Spike S2 fills
 /// `rgba32float_filterable` and `rgba32float_blendable` per reference machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct InteropCapabilities {
     pub adapter: AdapterIdentity,

@@ -11,19 +11,15 @@
 //! [`PatchEncoding`]. The field table and the engine-originated facts table
 //! from section 6 are data here because both sides must agree on them.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::blender::BlenderOutputFile;
 use crate::common::{AssetId, ByteSize, Bytes, ContentHash, DocumentId, JobId, Revision};
 use crate::host::CapabilityHandle;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// The encoding of a patch body, owned by pm-model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PatchEncoding {
     /// pm-model canonical binary patches, version 1.
@@ -32,7 +28,6 @@ pub enum PatchEncoding {
 
 /// The encoding of a whole-document resync body, owned by pm-model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum DocumentEncoding {
     /// `PM.Comps.canonicalize(PM.proj)` serialized with sorted keys (JSON, UTF-8).
@@ -43,7 +38,6 @@ pub enum DocumentEncoding {
 
 /// Why a batch exists. Decides Undo and logging, never how it is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PatchOrigin {
     /// A user or agent edit: one intent, one Undo step.
@@ -65,7 +59,6 @@ pub const MAX_PATCH_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// One batch of canonical patches moving a document from `base_revision`
 /// to `revision`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PatchBatch {
     pub document: DocumentId,
@@ -83,7 +76,6 @@ pub struct PatchBatch {
     /// not presented until a `ConfirmRevision` names it. A later batch
     /// supersedes it, and its frames are never presented.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub provisional: bool,
 }
 
@@ -115,7 +107,6 @@ impl Validate for PatchBatch {
 
 /// Where a resync body is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -136,7 +127,6 @@ pub enum ResyncSource {
 /// Sent on session open, after a revision gap, after a consistency mismatch,
 /// and when a renderer reconnects after an engine restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Resync {
     pub document: DocumentId,
@@ -150,7 +140,6 @@ pub struct Resync {
 /// The production consistency check: on idle, before save, and before every
 /// export or agent export, compare canonical hashes at one revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ConsistencyCheck {
     pub document: DocumentId,
@@ -161,7 +150,6 @@ pub struct ConsistencyCheck {
 /// The receiver's answer. A mismatch forces a canonical resync before the
 /// save or export proceeds and records a telemetry event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ConsistencyResult {
     pub revision: Revision,
@@ -172,7 +160,6 @@ pub struct ConsistencyResult {
 /// Renderer → engine: the provisional batch that made `revision` was the
 /// whole change; its frames may be presented.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmRevision {
     pub document: DocumentId,
@@ -181,7 +168,6 @@ pub struct ConfirmRevision {
 
 /// Acknowledges applied patches (sent at most once per frame, coalesced).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PatchesApplied {
     pub document: DocumentId,
@@ -252,7 +238,6 @@ impl RevisionTracker {
 /// What the legacy engine does with an additive field while it can still be
 /// selected (section 6 table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum LegacyBehavior {
     IgnoredSafely,
@@ -389,7 +374,6 @@ pub const INGESTED_AS_IS: [(&str, &str); 8] = [
 
 /// How an engine-originated fact reaches the document (section 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum FactCommit {
     /// Kept in the engine's media index or generated-media store, never in the document.
@@ -406,7 +390,6 @@ pub enum FactCommit {
 /// commits it according to [`EngineFact::commit`]; the engine never writes
 /// the document itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -448,7 +431,6 @@ pub enum EngineFact {
 
 /// Why a relink candidate was proposed (never applied automatically).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum RelinkReason {
     Name,

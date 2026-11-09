@@ -9,16 +9,12 @@
 //! RFC and a version bump (section 26, Phase 0).
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 /// Version of the envelope layout itself. Peers with different wire versions
 /// cannot exchange anything but a `Hello` and the error that rejects it.
 pub const WIRE_VERSION: u16 = 1;
 
 /// The fifteen contracts of section 27.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ContractId {
     /// 1. `EvaluatedScene`.
@@ -123,7 +119,6 @@ impl ContractId {
 
 /// The versions of one contract a peer can speak, inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ContractRange {
     pub contract: ContractId,
@@ -135,7 +130,6 @@ pub struct ContractRange {
 
 /// A negotiated contract version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ContractVersion {
     pub contract: ContractId,
@@ -144,7 +138,6 @@ pub struct ContractVersion {
 
 /// Which process a peer is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PeerRole {
     /// Electron main or the CLI host (host services, contract 14).
@@ -163,7 +156,6 @@ pub enum PeerRole {
 
 /// First message on every connection, from the side that opened it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Hello {
     pub role: PeerRole,
@@ -189,7 +181,6 @@ pub const MIN_MESSAGE_LIMIT: u32 = 64 * 1024;
 
 /// Reply to `Hello` with the negotiated versions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Welcome {
     pub role: PeerRole,

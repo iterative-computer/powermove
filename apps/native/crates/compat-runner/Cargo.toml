@@ -26,7 +26,7 @@ ed25519-dalek = "2.2"
 resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 
 [dev-dependencies]
-pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
 tempfile = "3"
 libc = "=0.2.186"
 tar = "0.4"

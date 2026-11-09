@@ -6,10 +6,6 @@
 //! colorSpace, overlayGeometry}` plus what is on screen. The viewer releases
 //! each frame by `{poolIndex, seq}`.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::color::{OutputColor, Precision, ViewerColorSpace};
 use crate::common::{
     CompositionId, HostMicros, LayerId, Mat3, Mat4, PixelRect, Rect, Revision, Seq, Size, Ticks,
@@ -18,10 +14,10 @@ use crate::interop::SurfaceFormat;
 use crate::priority::PriorityClass;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 /// The viewer's Resolution control (appendix D).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PreviewResolution {
     Automatic,
@@ -32,7 +28,6 @@ pub enum PreviewResolution {
 
 /// The viewer's Media control (appendix D).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum MediaPreference {
     Automatic,
@@ -44,7 +39,6 @@ pub enum MediaPreference {
 
 /// Which motion-blur sample count applies (composition `motionBlurSamples`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum MotionBlurKind {
     Export,
@@ -58,7 +52,6 @@ pub enum MotionBlurKind {
 /// What the frame is for. Decides which inputs may apply: view overrides and
 /// reduced quality never reach exports or agent captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum FramePurpose {
     /// Viewer presentation through the surface pool.
@@ -82,7 +75,6 @@ impl FramePurpose {
 
 /// 3D shading for the editor view (the 3D viewport's shading modes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Shading3d {
     Wireframe,
@@ -93,7 +85,6 @@ pub enum Shading3d {
 
 /// Camera projection.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -116,7 +107,6 @@ pub enum Projection {
 
 /// A camera that is not in the document (the editor camera).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EditorCamera {
     /// World-to-camera matrix.
@@ -127,7 +117,6 @@ pub struct EditorCamera {
 /// Preview-only overrides (glossary: view override). Never applied to
 /// exports or agent captures.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ViewOverride {
     pub camera: Option<EditorCamera>,
@@ -144,7 +133,6 @@ pub const XRAY_OPACITY: f64 = 0.45;
 /// Ask for one frame. The envelope's revision is the minimum document
 /// revision to render (read-your-writes).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FrameRequest {
     pub composition: CompositionId,
@@ -301,7 +289,6 @@ impl Validate for FrameRequest {
 
 /// Which representation produced a frame's source pixels (section 14.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Representation {
     Original,
@@ -313,7 +300,6 @@ pub enum Representation {
 
 /// What is on screen, so the viewer can say so ("Half · Proxy").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FrameQuality {
     /// The resolution actually rendered (Automatic resolves to one of the others).
@@ -340,7 +326,6 @@ pub type Quad = [[f64; 2]; 4];
 
 /// One path command in view pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "op")]
 pub enum PathCommand {
     MoveTo {
@@ -364,7 +349,6 @@ pub enum PathCommand {
 
 /// Geometry the overlay draws for one layer, at the frame's revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayLayer {
     pub layer: LayerId,
@@ -379,7 +363,6 @@ pub struct OverlayLayer {
 
 /// The text caret at the frame's revision.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Caret {
     pub top: [f64; 2],
@@ -388,7 +371,6 @@ pub struct Caret {
 
 /// Overlay geometry that travels with a frame, so handles never lead pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayGeometry {
     /// Composition rectangle in view pixels.
@@ -399,7 +381,6 @@ pub struct OverlayGeometry {
 
 /// Selection coverage requested for the native viewport chrome.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ChromeSelection {
     pub selected: Vec<String>,
@@ -408,7 +389,6 @@ pub struct ChromeSelection {
 
 /// A light/camera glyph evaluated by the engine at this frame's time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ChromeGlyph {
     pub id: String,
@@ -432,31 +412,26 @@ pub struct ChromeGlyph {
 /// the same fractions; B=0/.5/1 is unoccluded none/selected/active
 /// coverage. Alpha is always 1. IDs are one-based into `legend`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DepthIdSurface {
     pub pool_index: u32,
     pub seq: Seq,
     pub pool_generation: Seq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub encoding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub coverage_pool_index: Option<u32>,
     #[serde(default)]
     pub legend: Vec<String>,
     #[serde(default)]
     pub glyphs: Vec<ChromeGlyph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub selection: Option<ChromeSelection>,
 }
 
 /// The scene metadata of layers that share one evaluated scene. Grouping
 /// avoids repeating a composition's warning array for every object layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Scene3dMeta {
     pub composition: CompositionId,
@@ -467,7 +442,6 @@ pub struct Scene3dMeta {
 
 /// One presented frame. Sent after the command buffer completes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FrameDescriptor {
     pub pool_index: u32,
@@ -591,7 +565,6 @@ impl Validate for FrameDescriptor {
 /// (`queue.onSubmittedWorkDone()`). The per-use release callback is not a
 /// completion signal (S1: it runs before the GPU finished reading).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct FrameRelease {
     pub pool_index: u32,
@@ -600,12 +573,10 @@ pub struct FrameRelease {
 
 /// The viewer's state, sent whenever it changes (section 18, view override).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ViewerState {
     /// Keep the transport and audio alive without allocating or drawing a view.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub headless: Option<bool>,
     pub composition: CompositionId,
     /// Canvas size in device pixels.
@@ -634,16 +605,13 @@ pub struct ViewerState {
     /// `None`, and a change of the hint alone is not a new view (it keeps
     /// `view_seq`).
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub vsync: Option<VsyncHint>,
     /// The 3D viewport chrome wants each frame's depth and object-id
     /// surface (plan section 8; the Phase 3c render transport). Absent or
     /// false: no depth pool. A change of it is a new view.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub depth_id: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub chrome_selection: Option<ChromeSelection>,
     /// The canvas today's viewer draws this view into (decision V1,
     /// docs/engine/bridge.md "Today's viewer canvas"). With it, the engine
@@ -653,7 +621,6 @@ pub struct ViewerState {
     /// as an optional field (RFC 02 version notes); a change of it is a
     /// new view.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub canvas: Option<ViewerCanvas>,
     /// The viewer's surface epoch: a change makes the engine replace this
     /// view's surface pools (the frames' pool and the depth/ID pool) with
@@ -665,7 +632,6 @@ pub struct ViewerState {
     /// Added as an optional field (RFC 02 version notes); a change of it
     /// is a new view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
     pub surface_epoch: Option<u32>,
 }
 
@@ -674,7 +640,6 @@ pub struct ViewerState {
 /// cropped `previewRenderViewport`) and the CSS box the browser scales it
 /// into.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ViewerCanvas {
     /// Backing size in pixels (`canvas.width` × `canvas.height`).
@@ -690,7 +655,6 @@ pub struct ViewerCanvas {
 /// A display's refresh grid on the host clock: refreshes (BeginFrame times)
 /// fall at `host_time + n × period_us`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct VsyncHint {
     /// One refresh instant (host µs).
@@ -703,7 +667,6 @@ pub struct VsyncHint {
     /// frame shows at the first refresh it can be ready for. Optional on
     /// the wire: absent, the line starts after a fixed pre-roll.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub latency_us: Option<f64>,
 }
 

@@ -2,17 +2,13 @@
 //! A generation identifies one explicit renderer request; revision and frame
 //! sequence identify the document and presented frame that satisfied it.
 
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts")]
-use ts_rs::TS;
-
 use crate::common::{CompositionId, Revision, Seq, Size, Ticks};
 use crate::frame::{EditorCamera, Projection, Shading3d};
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PreviewAction {
     Render,
@@ -20,7 +16,6 @@ pub enum PreviewAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewControl {
     pub generation: Seq,
@@ -43,7 +38,6 @@ pub struct PreviewControl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum PreviewPhase {
     Queued,
@@ -54,7 +48,6 @@ pub enum PreviewPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewStatus {
     // Per-session monotonically increasing generation for this kind of work.

@@ -24,7 +24,7 @@ pm-text = { path = "../pm-text", features = ["system"] }
 # The renderer's mirror, run natively for the native/wasm32 identity check
 # and as the production expression engine.
 pm-wasm = { path = "../pm-wasm" }
-pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-protocol = { path = "../pm-protocol" }
 pm-time = { path = "../pm-time" }
 # Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
 pm-media = { path = "../pm-media" }
