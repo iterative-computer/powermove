@@ -1,11 +1,11 @@
 // Independent r180 reference for the native scene pass. The production
 // SceneRuntime supplies authored objects, lights, cameras and layer grouping;
 // this path renders them into an RGBA32F target at eight samples per axis.
-import * as THREE from v1Root + '/apps/desktop/node_modules/three/build/three.module.js';
-import { SceneRuntime } from v1Root + '/apps/desktop/src/renderer/src/core/scene3d/runtime';
-import { loadGltf } from v1Root + '/apps/desktop/src/renderer/src/core/scene3d/import-model';
-// The Electron app ships from main, not this branch; point PM_V1_REF at a v1 checkout (default /tmp/pm-ref-v1.2.0).
-const v1Root = process.env.PM_V1_REF ?? '/tmp/pm-ref-v1.2.0';
+// scene3d_float_reference.ts bundles it with tools/three-ref/v1-resolve.ts,
+// which redirects these apps/desktop specifiers to the v1 checkout.
+import * as THREE from '../../../../apps/desktop/node_modules/three/build/three.module.js';
+import { SceneRuntime } from '../../../../apps/desktop/src/renderer/src/core/scene3d/runtime';
+import { loadGltf } from '../../../../apps/desktop/src/renderer/src/core/scene3d/import-model';
 
 function editorCamera(e: any) {
   const camera = e.projection === 'orthographic'

@@ -11,7 +11,7 @@ export const v1Resolve = {
   name: 'v1-desktop',
   setup(build: { onResolve: (o: { filter: RegExp }, cb: (a: { path: string }) => { path: string }) => void }) {
     build.onResolve({ filter: /apps\/desktop\// }, (args) => ({
-      path: resolve(v1Root, args.path.slice(args.path.indexOf('apps/desktop/'))),
+      path: Bun.resolveSync(resolve(v1Root, args.path.slice(args.path.indexOf('apps/desktop/'))), v1Root),
     }));
   },
 };
