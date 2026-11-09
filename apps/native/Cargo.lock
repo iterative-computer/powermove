@@ -4745,6 +4745,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-text",
  "objc2-foundation 0.3.2",
  "objc2-image-io",
  "objc2-web-kit",
@@ -5136,6 +5137,7 @@ dependencies = [
  "pm-services",
  "pm-shell",
  "pm-surface",
+ "pm-text",
  "pm-time",
  "png",
  "raw-window-handle",
@@ -5628,6 +5630,16 @@ dependencies = [
 [[package]]
 name = "pm-time"
 version = "0.1.0"
+
+[[package]]
+name = "pm-transcribe"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "pm-update-policy"

@@ -64,6 +64,27 @@ pub fn page_bundle(dark: bool, increase_contrast: bool, reduce_transparency: boo
     )
 }
 
+/// The font families this Mac has, as `PM.Fonts.system` lists them (main's
+/// `setSystemFamilies` list): CoreText's names without the hidden `.` ones.
+#[cfg(target_os = "macos")]
+pub(crate) fn font_families() -> Vec<String> {
+    let names = unsafe { objc2_core_text::CTFontManagerCopyAvailableFontFamilyNames() };
+    let mut out: Vec<String> = (0..names.len())
+        .filter_map(|i| {
+            let name = unsafe { names.value_at_index(i as isize) }
+                as *const objc2_core_foundation::CFString;
+            unsafe { name.as_ref() }.map(ToString::to_string)
+        })
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn font_families() -> Vec<String> {
+    vec![]
+}
 /// One realm holds every trusted extension and a live mirror of the project.
 pub(crate) fn limits() -> Limits {
     Limits {
@@ -135,6 +156,9 @@ pub struct FrameRequest<'a> {
     pub motion_blur: bool,
     /// True once the realm's task is stopped or past its host deadline.
     pub stop: &'a (dyn Fn() -> bool + Sync),
+    /// An export realm's frozen publication: the frame is of that project,
+    /// not the window's (`None`: the window's project now).
+    pub published: Option<Arc<pm_kernel::Published>>,
 }
 /// A layer's base raster (`render.raster`, today's `PM.raster` before any
 /// override): the layer by id, or the object an override passed.
@@ -147,9 +171,6 @@ pub struct BaseRasterRequest {
     pub scale: f64,
     /// Today's preview crop window `[x, y, w, h]` in raster pixels.
     pub crop: Option<[u32; 4]>,
-    /// The export whose frozen project the layer is read from (none: the
-    /// project as it is now).
-    pub job: Option<String>,
 }
 /// A base raster's straight RGBA8 canvas and today's geometry.
 pub struct BaseRasterReply {
@@ -173,6 +194,9 @@ pub enum RasterAnswer {
     Hidden,
     /// The realm has not seen the revision asked for yet: ask again.
     Retry,
+    /// The realm is past the exact revision asked for (`{revision, exact}`):
+    /// it cannot answer for it.
+    Moved,
     /// The override threw or returned what cannot be drawn: the frame fails.
     Failed(String),
     /// The override's canvas: premultiplied RGBA8 rows (a canvas's backing
@@ -196,9 +220,25 @@ pub struct RasterHooks {
     >,
     /// The answers to one batch of needs, in the batch's order.
     pub answers: Arc<dyn Fn(u64, Vec<RasterAnswer>) + Send + Sync>,
-    /// Whether a `raster` override is registered, and the generation of
-    /// wrappers answering (it changes whenever they do).
-    pub producing: Arc<dyn Fn(bool, u64) + Send + Sync>,
+    /// Whether a `raster` override is registered, the generation of
+    /// wrappers answering (it changes whenever they do), and the identity of
+    /// the compiled code they run ([`code_identity`]; 0 while unknown).
+    pub producing: Arc<dyn Fn(bool, u64, u64) + Send + Sync>,
+}
+
+/// Identity of the compiled extension code in a realm's records (each
+/// record's id, whether it runs, and its module graph's content hash): the
+/// records a window realm boots with and an export realm pins. The same on
+/// every launch while that code is unchanged; never 0.
+pub fn code_identity(records: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for record in records.as_array().into_iter().flatten() {
+        record["id"].as_str().hash(&mut hash);
+        (record["enabled"] != false).hash(&mut hash);
+        record["graph"]["hash"].as_str().hash(&mut hash);
+    }
+    hash.finish().max(1)
 }
 /// Renders a `FrameRequest` to PNG bytes.
 pub type FrameRenderer =
@@ -626,8 +666,17 @@ mod tests {
     }
     type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
     type RasterRunner = (CompatRunner, Log<Value>, Log<Value>, Log<(bool, u64)>);
+    #[test]
+    fn code_identity_follows_compiled_code_not_health() {
+        let records = |hash: &str, enabled: bool, health: &str| json!([{"id":"a","enabled":enabled,"health":{"state":health},"graph":{"hash":hash}}]);
+        let base = code_identity(&records("h1", true, "ok"));
+        assert_eq!(base, code_identity(&records("h1", true, "unresponsive")));
+        assert_ne!(base, code_identity(&records("h2", true, "ok")));
+        assert_ne!(base, code_identity(&records("h1", false, "ok")));
+        assert_ne!(code_identity(&json!([])), 0);
+    }
     /// A runner whose base rasters are 2×2 red, recording what was asked
-    /// (layer, composition, job, whether a layer object was passed) and
+    /// (layer, composition, whether a layer object was passed) and
     /// answered (as JSON), and the producing calls.
     fn raster_runner() -> RasterRunner {
         let runner = dom_runner();
@@ -640,7 +689,6 @@ mod tests {
                 p.lock().unwrap().push(json!([
                     request.layer,
                     request.composition,
-                    request.job,
                     request.content.is_some()
                 ]));
                 Ok(Some(crate::BaseRasterReply {
@@ -665,6 +713,7 @@ mod tests {
                         crate::RasterAnswer::Native => json!([batch, "native"]),
                         crate::RasterAnswer::Hidden => json!([batch, "hidden"]),
                         crate::RasterAnswer::Retry => json!([batch, "retry"]),
+                        crate::RasterAnswer::Moved => json!([batch, "moved"]),
                         crate::RasterAnswer::Failed(error) => json!([batch, "failed", error]),
                         crate::RasterAnswer::Raster {
                             width,
@@ -686,7 +735,7 @@ mod tests {
                     });
                 }
             }),
-            producing: Arc::new(move |on, epoch| o.lock().unwrap().push((on, epoch))),
+            producing: Arc::new(move |on, epoch, _| o.lock().unwrap().push((on, epoch))),
         }));
         (runner, painted, answered, producing)
     }
@@ -730,7 +779,7 @@ mod tests {
         // The pass-through layer was never painted; t1 painted in its composition.
         assert_eq!(
             *painted.lock().unwrap(),
-            vec![json!(["t1", "synthetic-comp", null, false])]
+            vec![json!(["t1", "synthetic-comp", false])]
         );
         runner.eval("dropRaster()").unwrap();
         // An extension that replaces PM.raster itself (variable-font-anchor) counts
@@ -806,71 +855,8 @@ mod tests {
         assert_eq!(answered[6][2], "broken wrapper");
         // The replacement painted as given; the nested layer in its composition.
         let painted = painted.lock().unwrap().clone();
-        assert!(painted.contains(&json!(["replaced", "synthetic-comp", null, true])));
+        assert!(painted.contains(&json!(["replaced", "synthetic-comp", true])));
         assert!(!painted.iter().any(|p| p[0] == "same" || p[0] == "nested"));
-    }
-    #[test]
-    fn exports_answer_only_at_their_revision_and_with_their_wrappers() {
-        let (runner, painted, answered, producing) = raster_runner();
-        let manifest =
-            json!({"id":"spy","name":"Spy","version":"1.0.0","apiVersion":3,"entry":"index.js"});
-        runner
-            .activate(
-                &manifest,
-                "export default function activate(api){const base=api.services.get('raster');
-                 globalThis.seen=[];const r=api.services.register('raster',(L,s,T,up,crop)=>{seen.push(L.d.text);return base(L,s,T,up,crop)});
-                 globalThis.reload=()=>{r.dispose();api.services.register('raster',(L,s,T)=>base(L,s,T))};}",
-            )
-            .unwrap();
-        let epoch = producing.lock().unwrap().last().unwrap().1;
-        runner
-            .eval("__compat.realm.PM.proj.layers.push({id:'t1',type:'text',name:'T1',d:{text:'edited'}})")
-            .unwrap();
-        // An export reads the project only at its own revision: at it, the
-        // live project is the export's; past it (an edit during the export),
-        // the frame fails rather than mix revisions; behind it, ask again.
-        let ask = |batch: u32, job: &str| {
-            format!(
-                "__compat.answerRasters({batch},[{{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}}],{{job:'{job}',epoch:{epoch}}});"
-            )
-        };
-        runner
-            .eval(&format!(
-                "const r=__compat.realm.revision;__compat.pinProject('job-1',r);__compat.pinProject('job-2',r-1);__compat.pinProject('job-3',r+1);
-                 {}{}{}globalThis.out=globalThis.seen.slice()",
-                ask(1, "job-1"),
-                ask(2, "job-2"),
-                ask(3, "job-3")
-            ))
-            .unwrap();
-        assert_eq!(runner.json("out").unwrap(), json!(["edited"]));
-        let answers = answered.lock().unwrap().clone();
-        assert_eq!(answers[0], json!([1, "native"]));
-        assert_eq!(answers[1][1], "failed");
-        assert!(
-            answers[1][2]
-                .as_str()
-                .unwrap()
-                .contains("changed during the export")
-        );
-        assert_eq!(answers[2], json!([3, "retry"]));
-        // A reload mid-export: its frames fail rather than mix wrappers.
-        runner.eval("reload()").unwrap();
-        runner.eval(&ask(4, "job-1")).unwrap();
-        let second = answered.lock().unwrap()[3].clone();
-        assert_eq!(second[1], "failed");
-        assert!(
-            second[2]
-                .as_str()
-                .unwrap()
-                .contains("changed during the export")
-        );
-        assert!(painted.lock().unwrap().is_empty());
-        // The viewer asks at a revision this realm has not seen: ask again.
-        runner
-            .eval("__compat.answerRasters(5,[{composition:'synthetic-comp',layer:'t1',seconds:0,scale:1}],{revision:1e9})")
-            .unwrap();
-        assert_eq!(answered.lock().unwrap()[4], json!([5, "retry"]));
     }
     #[test]
     fn a_capture_asks_its_waiting_realm_for_overrides_inline() {

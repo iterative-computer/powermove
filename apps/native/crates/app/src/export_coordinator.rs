@@ -263,8 +263,13 @@ impl Controller {
                     .is_some_and(|j| Arc::ptr_eq(j, &job))
                 {
                     v.builtins.export_job = None;
-                    if let Err(error) = &result {
-                        v.message = error.clone();
+                    match &result {
+                        Err(error)
+                            if !(job.cancel.load(Ordering::Acquire) && error == "cancelled") =>
+                        {
+                            v.message = error.clone();
+                        }
+                        _ => v.close_export_sheet(cx),
                     }
                 }
                 cx.notify();
@@ -442,6 +447,8 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    // Its raster overrides answer from this publication, whatever is edited meanwhile.
+    request.frozen = Some(frozen.publication.clone());
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
         &std::env::current_exe().map_err(|e| e.to_string())?,
         request,

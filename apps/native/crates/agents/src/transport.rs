@@ -152,8 +152,15 @@ pub struct Handle {
     tx: SyncSender<QueuedAction>,
     events: Receiver<Event>,
     surface: Surface,
+    /// Lives as long as the handle (a run's tool grant).
+    held: Vec<Box<dyn Send>>,
 }
 impl Handle {
+    /// Keep `value` alive until this handle drops.
+    pub fn hold(mut self, value: impl Send + 'static) -> Self {
+        self.held.push(Box::new(value));
+        self
+    }
     pub fn supports_steering(&self) -> bool {
         self.surface == Surface::Codex
     }
@@ -352,6 +359,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         tx,
         events,
         surface,
+        held: Vec::new(),
     }
 }
 fn read_output(path: &Path) -> io::Result<String> {

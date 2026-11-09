@@ -2699,6 +2699,13 @@ pub struct WindowOptions {
 
     /// Tab group name, allows opening the window as a native tab on macOS 10.12+. Windows with the same tabbing identifier will be grouped together.
     pub tabbing_identifier: Option<String>,
+
+    /// Powermove P-SHEET/P-CHILD: the window that asked. A
+    /// [`WindowKind::Dialog`] attaches to it as a sheet; a pop-up or floating
+    /// window sits above it as its child window. Without it, the
+    /// application's main window (none while the app is in the background,
+    /// and not always the window that asked).
+    pub parent: Option<AnyWindowHandle>,
 }
 
 impl FluentBuilder for WindowOptions {}
@@ -2767,6 +2774,10 @@ pub struct WindowParams {
 
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
+
+    /// The native handle of [`WindowOptions::parent`].
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub parent: Option<raw_window_handle::RawWindowHandle>,
 }
 
 /// Represents the status of how a window should be opened.
@@ -2835,6 +2846,7 @@ impl Default for WindowOptions {
             window_min_size: None,
             window_decorations: None,
             tabbing_identifier: None,
+            parent: None,
         }
     }
 }

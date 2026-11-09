@@ -451,8 +451,63 @@ fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
         Some(&source_access::Outcome::Skipped)
     );
     assert_eq!(
-        fs::read(source).unwrap(),
+        fs::read(&source).unwrap(),
         b"synthetic original",
         "the original is untouched"
     );
+
+    // Settings › Media lists the folder and its file, and Allow Access brings
+    // the original in (a test folder opens without a macOS prompt).
+    let waiting = pm_first_launch::waiting_folders(&config).unwrap();
+    assert_eq!(
+        waiting,
+        [pm_first_launch::WaitingFolder {
+            path: downloads.clone(),
+            name: "Downloads".into(),
+            files: 1,
+            outcome: source_access::Outcome::Skipped,
+        }]
+    );
+    // macOS refused it later (persisted Denied), then the person allowed
+    // Powermove in System Settings: Check Again reads it now.
+    let state_path = config.native_profile.join("migration.json");
+    let mut state: Value = read(&state_path);
+    let key = downloads.to_string_lossy().into_owned();
+    state["folder_outcomes"][&key] = json!("denied");
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(
+        pm_first_launch::waiting_folders(&config).unwrap()[0].outcome,
+        source_access::Outcome::Denied
+    );
+    let mut events = vec![];
+    let outcome = pm_first_launch::allow_folders(&config, std::slice::from_ref(&downloads), |e| {
+        events.push(e);
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Complete {
+                not_reached: 0,
+                blocked_owners: 0,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(events.last(), Some(&pm_first_launch::Event::Complete));
+    let state: pm_first_launch::State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(
+        state.folder_outcomes.get(&downloads),
+        Some(&source_access::Outcome::Granted)
+    );
+    assert_eq!(pm_first_launch::waiting_folders(&config).unwrap(), []);
+    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
+    assert!(
+        !report.rows.iter().any(|r| r.kind == ReportKind::NotReached),
+        "{:?}",
+        report.rows
+    );
+    assert_eq!(fs::read(&source).unwrap(), b"synthetic original");
 }

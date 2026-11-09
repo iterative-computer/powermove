@@ -842,6 +842,38 @@ fn search_kind_missing_and_proxy_filters_do_not_edit() {
     .unwrap();
     assert_eq!(p.total(), 1);
 }
+/// The status line's missing files: every one in the project, flat with its
+/// folder path, from any folder the panel was in; no folders or compositions.
+#[test]
+fn missing_only_lists_every_missing_file_flat_with_its_folder() {
+    let (c, mut p, mut r) = setup();
+    r.set("a", Availability::Offline);
+    r.set("e", Availability::Offline);
+    p.dispatch(&c, &r, Input::OpenFolder(Some("f1".into())))
+        .unwrap();
+    p.dispatch(&c, &r, Input::OpenFolder(None)).unwrap();
+    p.dispatch(
+        &c,
+        &r,
+        Input::Filter(Filter {
+            missing_only: true,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let rows = p.page(&c, &r, 0, 100).unwrap().rows;
+    let listed: Vec<_> = rows
+        .iter()
+        .map(|r| (r.id.clone(), r.folder_path.clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (asset("a"), vec![]),
+            (asset("e"), vec!["Bin 2".to_string(), "Inner".to_string()]),
+        ]
+    );
+}
 #[test]
 fn proxy_ready_never_promotes_offline_original() {
     let (c, mut p, mut r) = setup();

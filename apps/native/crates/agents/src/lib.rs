@@ -17,6 +17,7 @@ pub mod protocol;
 pub mod runtime;
 pub mod trace;
 pub mod transport;
+pub mod visual;
 pub mod workspace;
 
 use serde::{Deserialize, Serialize};

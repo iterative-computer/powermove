@@ -26088,6 +26088,9 @@ exports[`search Escape clears, then closes; no-results copy uses exact query: no
                   "focusRequest": "media-search",
                   "id": "media-search",
                   "label": "Search media",
+                  "metadata": {
+                    "hostValue": 0,
+                  },
                   "preventDefault": {
                     "keydown": [
                       "Escape",

@@ -26,6 +26,8 @@ use std::{
 };
 
 const PAGE_PANEL: u64 = 1;
+/// The hidden page of an export's own realm (`compat-runner/src/host/export.rs`).
+const EXPORT_PAGE: &str = "export:";
 const COMMAND: &str = "extension.command:";
 const MENU: &str = "extension.menu:";
 const STORE: &str = "extension.store";
@@ -201,6 +203,10 @@ pub struct Extensions {
     /// Quit stopped this window's extensions (a hung one); a cancelled quit
     /// starts them again.
     pub stopped_for_quit: bool,
+    /// The engine's faces for the project's text, given to every page.
+    faces: Vec<pm_compat_host::PageFace>,
+    /// Faces asked for, resolved or not: each is resolved once.
+    face_keys: BTreeSet<(String, u16, bool)>,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
 }
@@ -236,6 +242,8 @@ impl Default for Extensions {
             v1_timeline: Value::Null,
             v4_themes: vec![],
             v4_themes_seen: 0,
+            faces: vec![],
+            face_keys: BTreeSet::new(),
             surfaces: BTreeMap::new(),
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
@@ -331,7 +339,6 @@ impl Controller {
             &self.engine,
             self.kernel.clone(),
             project.clone(),
-            roots(&self.profile),
         );
         let frames = crate::mcp_services::frame_renderer(
             self.kernel.clone(),
@@ -427,6 +434,7 @@ impl Controller {
         if trusted_page {
             self.ensure_page("", cx);
         }
+        self.sync_export_pages(cx);
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
             self.mount_surfaces(cx);
@@ -552,6 +560,7 @@ impl Controller {
                     self.write_view(None, cx);
                 }
             }
+            Some("fonts") => self.ensure_page_fonts(&request["faces"], cx),
             Some("download") => {
                 let url = request["url"].as_str().unwrap_or_default().to_owned();
                 self.download_for_extension(token, url, cx);
@@ -930,7 +939,9 @@ impl Controller {
             .extensions
             .pages
             .keys()
-            .filter(|key| !key.is_empty() && !running.contains(key))
+            .filter(|key| {
+                !key.is_empty() && !key.starts_with(EXPORT_PAGE) && !running.contains(key)
+            })
             .cloned()
             .collect();
         for key in stopped {
@@ -1414,6 +1425,89 @@ impl Controller {
         {
             return;
         }
+        self.open_page(key, view, cx);
+    }
+    /// A realm's project text uses these faces (`PM.Fonts.ensure` too): the
+    /// engine's own face for each goes to every page of the window.
+    fn ensure_page_fonts(&mut self, faces: &Value, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, u16, bool)> = faces
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|face| {
+                let family = face["family"].as_str()?.trim();
+                let weight = face["weight"].as_f64().unwrap_or(400.).clamp(1., 1000.) as u16;
+                (!family.is_empty() && family.len() <= 256)
+                    .then(|| (family.to_owned(), weight, face["italic"] == true))
+            })
+            .filter(|key| self.extensions.face_keys.insert(key.clone()))
+            .take(256)
+            .collect();
+
+        if wanted.is_empty() {
+            return;
+        }
+        let keys: Vec<String> = wanted
+            .iter()
+            .map(|(family, weight, italic)| format!("{family}|{weight}|{}", u8::from(*italic)))
+            .collect();
+        let resolved = cx
+            .background_executor()
+            .spawn(async move { crate::text_host::page_faces(&wanted) });
+        cx.spawn(async move |this, cx| {
+            let faces = resolved.await;
+            let _ = this.update(cx, |v, _| {
+                for page in v.extensions.views.borrow().values() {
+                    let _ = page.borrow_mut().add_fonts(&faces);
+                }
+                // A face the registry could not give is settled now: no page
+                // will load it, and whoever waits for it stops waiting.
+                let unresolved: Vec<Value> = keys
+                    .iter()
+                    .filter(|key| !faces.iter().any(|f| &f.key() == *key))
+                    .map(|key| json!(key))
+                    .collect();
+                if let (false, Some(host)) = (unresolved.is_empty(), &v.extensions.host) {
+                    for key in v.extensions.pages.keys() {
+                        host.fonts_loaded(key, Value::Array(unresolved.clone()));
+                    }
+                }
+                v.extensions.faces.extend(faces);
+            });
+        })
+        .detach();
+    }
+    /// Each running export realm gets a page that is never shown: the layout
+    /// reads its overrides make are real; it goes when the export ends.
+    fn sync_export_pages(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        let running: BTreeMap<String, u64> = host
+            .export_pages()
+            .into_iter()
+            .map(|(job, view)| (format!("{EXPORT_PAGE}{job}"), view))
+            .collect();
+        let ended: Vec<String> = self
+            .extensions
+            .pages
+            .keys()
+            .filter(|key| key.starts_with(EXPORT_PAGE) && !running.contains_key(*key))
+            .cloned()
+            .collect();
+        for key in ended {
+            self.extensions.pages.remove(&key);
+            if let Some(view) = self.extensions.views.borrow_mut().remove(&key) {
+                view.borrow_mut().end_background_job();
+            }
+        }
+        for (key, view) in running {
+            if !self.extensions.pages.contains_key(&key) {
+                self.open_page(key, view, cx);
+            }
+        }
+    }
+    fn open_page(&mut self, key: String, view: u64, cx: &mut Context<Self>) {
         // That run is over: its document goes, and its replacement starts empty.
         self.extensions.pages.remove(&key);
         self.extensions.views.borrow_mut().remove(&key);
@@ -1448,7 +1542,7 @@ impl Controller {
                 &mut self.extensions.data_stores,
                 &bundle,
             ),
-            None if key.is_empty() => MacDomHost::new_remote_dom(
+            None if key.is_empty() || key.starts_with(EXPORT_PAGE) => MacDomHost::new_remote_dom(
                 mtm,
                 Trust::Trusted,
                 events.clone(),
@@ -1470,6 +1564,11 @@ impl Controller {
         };
         if host.create(spec).is_err() {
             return;
+        }
+        let _ = host.add_fonts(&self.extensions.faces);
+        // An export's page keeps running for its job, the window hidden or not.
+        if key.starts_with(EXPORT_PAGE) && host.begin_background_job(false).is_err() {
+            eprintln!("an export page could not keep running in the background");
         }
         let shell = self.host.borrow();
         host.install_below(&shell.native_container(), &shell.gpui);
@@ -1510,12 +1609,14 @@ impl Controller {
             }
             dirty
         }));
+        // An export realm's page is never shown, so VoiceOver never meets it.
         shell.native_accessibility = self
             .extensions
             .views
             .borrow()
-            .values()
-            .map(|page| page.borrow().accessibility_view())
+            .iter()
+            .filter(|(key, _)| !key.starts_with(EXPORT_PAGE))
+            .map(|(_, page)| page.borrow().accessibility_view())
             .collect();
         drop(shell);
         self.extensions.pages.insert(
@@ -1531,6 +1632,8 @@ impl Controller {
         let host = self.extensions.host.as_ref();
         let sink: Option<Box<dyn Fn(Value) + Send>> = if key.is_empty() {
             host.map(|h| Box::new(h.page_sink(view)) as _)
+        } else if let Some(job) = key.strip_prefix(EXPORT_PAGE) {
+            host.map(|h| Box::new(h.export_page_sink(job)) as _)
         } else {
             host.map(|h| Box::new(h.store_page_sink(&key, view)) as _)
         };
@@ -1638,14 +1741,18 @@ impl Controller {
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::Recovered { .. } => page.ready = true,
                     HostEvent::Failure(code) => eprintln!("extension page: {code}"),
+                    HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),
                     _ => (),
                 }
             }
             if !page.ready {
                 continue;
             }
+            let export = key.strip_prefix(EXPORT_PAGE);
             let mut batches = if key.is_empty() {
                 host.take_batches(page.view)
+            } else if let Some(job) = export {
+                host.take_export_batches(job)
             } else {
                 host.take_store_batches(key, page.view)
             };
@@ -1663,6 +1770,8 @@ impl Controller {
                         let _ = web.present_canvas(PAGE_PANEL, &frame);
                     }
                 }
+            } else if let Some(job) = export {
+                host.return_export_batches(job, batches);
             } else {
                 host.return_store_batches(key, page.view, batches);
             }

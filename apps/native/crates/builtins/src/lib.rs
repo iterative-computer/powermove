@@ -2,6 +2,7 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+mod agent_tasks;
 mod chrome;
 pub use agent_host::AgentCarry;
 pub use models::APPLICATION_AGENT_STORE;
@@ -522,6 +523,82 @@ impl Builtins {
         }
         Ok(result)
     }
+    /// Main's orchestrator tools for the run named by `agentRunId` (its MCP
+    /// session's `--agent-run`): subagent tasks and run watches, through this
+    /// window's Agent panel runs. Call it off the main thread.
+    pub fn agent_orchestrate(
+        &self,
+        tool: &str,
+        args: &Value,
+    ) -> std::result::Result<Value, String> {
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| {
+                "Open the Agent panel in this project's window before delegating.".to_owned()
+            })?;
+            let backend = backend.lock().unwrap();
+            let agent = backend
+                .native
+                .agent
+                .clone()
+                .ok_or("This agent run is no longer active.")?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let result = agent_tasks::call(&agent, &link, tool, args);
+        agent_host::ensure_worker(&agent, &link, &self.broker.kernel, self.broker.application);
+        link.touch();
+        link.publish_now();
+        result
+    }
+    /// publish_visual_reply for the run named by `agentRunId`: validated and
+    /// normalized as main does, saved on the run's thread before it answers.
+    pub fn agent_visual_reply(&self, args: &Value) -> std::result::Result<Value, String> {
+        const GONE: &str = "The visualization’s agent run is no longer active.";
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| GONE.to_owned())?;
+            let backend = backend.lock().unwrap();
+            let agent = backend.native.agent.clone().ok_or(GONE)?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let run = args["agentRunId"].as_str().ok_or(GONE)?;
+        let mut input = args.clone();
+        if let Some(object) = input.as_object_mut() {
+            for key in ["agentRunId", "callerAccess", "callerRunId"] {
+                object.remove(key);
+            }
+        }
+        let prepared = pm_agents::visual::prepare(&input)?;
+        let id = format!("visual-{}", pm_kernel::new_id("reply"));
+        let thread = {
+            let mut state = agent.lock().unwrap();
+            let thread = state.runs.live(run).ok_or(GONE)?.thread.clone();
+            let artifact = json!({"version":1,"id":id,"runId":run,"title":prepared.title,
+                "html":prepared.html,"height":prepared.height});
+            state
+                .panel
+                .add_visual_reply(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    &thread,
+                    artifact,
+                    agent_host::now_ms(),
+                )
+                .map_err(|e| match e {
+                    pm_panel_agentpanel::Error::Invalid("four visual replies") => {
+                        "This run already published four visual replies. Continue in a follow-up message.".to_owned()
+                    }
+                    pm_panel_agentpanel::Error::UnknownId(_) | pm_panel_agentpanel::Error::Stale => {
+                        "The visualization’s thread was removed.".to_owned()
+                    }
+                    _ => "The visual reply could not be saved. Free storage and try again.".to_owned(),
+                })?;
+            thread
+        };
+        link.touch();
+        link.publish_now();
+        Ok(json!({"id":id,"title":prepared.title,"saved":true,"threadId":thread}))
+    }
     /// Files the person chose with Add Attachments, as attachment records
     /// (`{id, name, type, size, dataUrl | content | dataBase64}`), into the
     /// visible thread's message. At most six per message, as on main.
@@ -989,6 +1066,17 @@ impl Builtins {
                 backend.native.media_runtime = observed.clone();
                 backend.native.media_sequence += 1;
             }
+        }
+    }
+    /// The Project panel lists only missing files from its next request; the
+    /// media sequence moves so it asks again at the next publication. Takes
+    /// every panel's locks: call it on a worker, as `update_media` is.
+    pub fn show_missing_media(&self) {
+        for entry in self.broker.all_entries() {
+            let backend = entry.lock().unwrap().backend.clone();
+            let mut backend = backend.lock().unwrap();
+            backend.native.show_missing = true;
+            backend.native.media_sequence += 1;
         }
     }
     /// Admit worker-owned originals, then await the actor's durable outcome.

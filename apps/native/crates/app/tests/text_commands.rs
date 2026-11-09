@@ -180,6 +180,18 @@ fn run(fonts: RenderFonts) {
         advance > 48. && advance < 200.,
         "the second word sits one word and a space along: {advance}"
     );
+    // The compat page measures with the engine's own faces: a family this Mac
+    // lacks is the face a text layer falls back to (`system-ui`).
+    let faces = text_host::page_faces(&[
+        ("Helvetica".into(), 400, false),
+        ("No Such Family Q".into(), 400, false),
+        ("system-ui".into(), 400, false),
+    ]);
+    assert_eq!(faces.len(), 3);
+    assert!(faces.iter().all(|f| f.bytes.len() > 1000));
+    assert_eq!(faces[1].family, "No Such Family Q");
+    assert_eq!(faces[1].bytes, faces[2].bytes);
+    assert_ne!(faces[0].bytes, faces[2].bytes);
 }
 
 fn main() {

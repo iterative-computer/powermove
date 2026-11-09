@@ -472,3 +472,80 @@ test("menu copy, separators, shortcuts and eligibility match the spec", async ()
     ).map((e) => e.label),
   ).toEqual(["Locate File…", "Delete Selected Media…"]);
 });
+test("missing-only listing says so; Show All and search keep or clear it", async () => {
+  const { root } = recorder();
+  const inputs: Input[] = [];
+  const view = { ...projection([asset()]), missing_only: true };
+  await root.render(
+    <ProjectView
+      view={view}
+      input={(i) => inputs.push(i)}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={layout}
+    />,
+  );
+  expect(JSON.stringify(root.inspect().nodes)).toContain("Missing files only");
+  await event(root, find(root, "Search Media").id, "click");
+  await event(root, find(root, "Search media").id, "input", {
+    value: "clip",
+    composing: false,
+  });
+  expect(inputs.at(-1)).toEqual({
+    Filter: { query: "clip", kind: null, missing_only: true, proxy: null },
+  });
+  await event(root, find(root, "Show All").id, "click");
+  expect(inputs.at(-1)).toEqual({
+    Filter: { query: "clip", kind: null, missing_only: false, proxy: null },
+  });
+  await root.dispose();
+});
+test("the search field follows a query the host set, not late answers to typing", async () => {
+  const { root } = recorder();
+  const inputs: Input[] = [];
+  let view = projection([asset()]);
+  const render = () =>
+    root.render(
+      <ProjectView
+        view={view}
+        input={(i) => inputs.push(i)}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={layout}
+      />,
+    );
+  await render();
+  await event(root, find(root, "Search Media").id, "click");
+  await event(root, find(root, "Search media").id, "input", {
+    value: "c",
+    composing: false,
+  });
+  // A publication queued before the keystroke lands late with "".
+  view = { ...view, query: "" };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("c");
+  await event(root, find(root, "Search media").id, "input", {
+    value: "cl",
+    composing: false,
+  });
+  // The model answers the first keystroke after the second was typed.
+  view = { ...view, query: "c" };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("cl");
+  view = { ...view, query: "cl" };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("cl");
+  // The status line's missing files clear the search on the host.
+  view = { ...view, query: "", missing_only: true, host_filter: 1 };
+  await render();
+  const field = find(root, "Search media");
+  expect(field.props.value).toBe("");
+  expect((field.props.metadata as { hostValue: number }).hostValue).toBe(1);
+  // A late publication from before the host's change doesn't undo it.
+  view = { ...view, query: "cl", host_filter: 1 };
+  await render();
+  expect(find(root, "Search media").props.value).toBe("");
+  await root.dispose();
+});

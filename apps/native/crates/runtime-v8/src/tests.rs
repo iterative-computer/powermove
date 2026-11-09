@@ -93,6 +93,7 @@ struct Host {
     cancels: Arc<AtomicUsize>,
     logs: Mutex<Vec<String>>,
     mode: AtomicUsize,
+    bodies: Mutex<Vec<Vec<u8>>>,
 }
 struct Request {
     deadline: Instant,
@@ -134,6 +135,7 @@ impl HostProxy for Host {
     ) -> Result<Box<dyn HostRequest>> {
         assert!(request.deadline > Instant::now());
         self.starts.fetch_add(1, Ordering::Relaxed);
+        self.bodies.lock().unwrap().push(request.body);
         Ok(Box::new(Request {
             deadline: Instant::now() + Duration::from_millis(10),
             mode: self.mode.load(Ordering::Relaxed),
@@ -512,6 +514,34 @@ fn fetch_proxy_response_and_body_consumption() {
     assert_eq!(f.host.starts.load(Ordering::Relaxed), 1);
     close(&r);
 }
+/// Request bodies reach the host as bytes: a body three times the JSON op
+/// limit arrives exactly, as do strings and blobs.
+#[test]
+fn fetch_request_bodies_cross_as_bytes() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(async()=>{const b=new Uint8Array(3*1024*1024);for(let i=0;i<b.length;i++)b[i]=i%251;await fetch('https://example.test/up',{method:'POST',body:b.subarray(1)});await fetch('https://example.test/up',{method:'POST',body:new Blob(['ab'])});await fetch('https://example.test/up',{method:'POST',body:'é'});await fetch('https://example.test/up');return true})()"
+        ),
+        "true"
+    );
+    let bodies = f.host.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 4);
+    assert_eq!(bodies[0].len(), 3 * 1024 * 1024 - 1);
+    assert!(
+        bodies[0]
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b as usize == (i + 1) % 251)
+    );
+    assert_eq!(bodies[1], b"ab");
+    assert_eq!(bodies[2], "é".as_bytes());
+    assert!(bodies[3].is_empty());
+    drop(bodies);
+    close(&r);
+}
 #[test]
 fn abort_controller_cancels_proxy_and_dispatches_once() {
     let f = fixture();
@@ -864,6 +894,44 @@ fn pending_fetch_capacity_is_attributed_and_released_on_abort() {
     close(&r);
 }
 
+/// An upload's body is held while its request lives: reserved with the
+/// response room, released when it retires; one that can't fit is refused
+/// before it is copied.
+#[test]
+fn upload_bodies_are_reserved_for_their_requests_lifetime() {
+    let f = fixture_with(|c| {
+        c.limits.max_response_bytes = 1024 * 1024;
+        c.limits.external_bytes = 4 * 1024 * 1024;
+    });
+    f.host.mode.store(1, Ordering::Relaxed);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(
+        &r,
+        "globalThis.abort=new AbortController();globalThis.pending=fetch('https://example.test/',{method:'POST',body:new Uint8Array(512*1024),signal:abort.signal}).catch(e=>e.name);'started'",
+    );
+    let measured = wait(r.measure().unwrap()).unwrap();
+    assert_eq!(
+        measured[0].memory.fetch_reserved_bytes,
+        1024 * 1024 + 512 * 1024
+    );
+    assert_eq!(eval(&r, "abort.abort();pending"), "AbortError");
+    assert_eq!(
+        wait(r.measure().unwrap()).unwrap()[0]
+            .memory
+            .fetch_reserved_bytes,
+        0
+    );
+    // Larger than a response may be: refused, nothing reserved or started.
+    assert_eq!(
+        eval(
+            &r,
+            "fetch('https://example.test/',{method:'POST',body:new Uint8Array(1024*1024+1)}).then(()=>'sent',e=>String(e))"
+        ),
+        "TypeError: Host argument quota"
+    );
+    assert_eq!(f.host.starts.load(Ordering::Relaxed), 1);
+    close(&r);
+}
 #[test]
 fn abort_before_host_start_releases_capacity_even_when_js_throws() {
     let f = fixture_with(|c| c.limits.max_response_bytes = 1024 * 1024);

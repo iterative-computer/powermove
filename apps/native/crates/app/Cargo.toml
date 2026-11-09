@@ -23,6 +23,7 @@ pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features
 pm-render = { path = "../../../../engine/crates/pm-render" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
+pm-text = { path = "../../../../engine/crates/pm-text", default-features = false }
 gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["frame-capture"] }
 metal = "0.33"
 foreign-types = "0.5"

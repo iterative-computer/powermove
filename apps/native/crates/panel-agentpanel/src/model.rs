@@ -103,6 +103,13 @@ pub struct Session {
     next_message: u64,
 }
 impl Session {
+    /// The thread's latest run, live or finished.
+    pub fn last_run(&self) -> Option<&str> {
+        self.run
+            .as_ref()
+            .map(|r| r.id.as_str())
+            .or(self.last_run.as_deref())
+    }
     fn from_record(v: &Value) -> Result<Self> {
         if v.get("provider").is_some_and(|p| {
             !p.is_null() && !matches!(p.as_str(), Some("chatgpt" | "claude" | "compatible"))
@@ -1538,6 +1545,62 @@ impl Panel {
             },
         );
         Ok(effect)
+    }
+    /// publish_visual_reply: the reply joins this run's latest assistant
+    /// message (main's one attachment group per response) or starts one, and
+    /// is saved before success is reported. Four per run, as on main.
+    pub fn add_visual_reply(
+        &mut self,
+        store: &mut impl Store,
+        thread: &str,
+        artifact: Value,
+        now: u64,
+    ) -> Result<()> {
+        let run = artifact["runId"].clone();
+        let mut next = self.clone();
+        let s = next.session_mut(thread)?;
+        let published = s
+            .conversation
+            .values()
+            .flat_map(|m| m["visualReplies"].as_array().into_iter().flatten())
+            .filter(|v| v["runId"] == run)
+            .count();
+        if published >= pm_agents::visual::MAX_PER_RUN {
+            return Err(Error::Invalid("four visual replies"));
+        }
+        let group = s.conversation.last().filter(|m| {
+            m.value["role"] == "assistant"
+                && m.value["error"] != true
+                && m.value["visualReplies"]
+                    .as_array()
+                    .is_none_or(|v| v.iter().all(|r| r["runId"] == run))
+        });
+        match group.map(|m| m.id.clone()) {
+            Some(id) => {
+                s.conversation.update(&id, |m| {
+                    if !m["visualReplies"].is_array() {
+                        m["visualReplies"] = json!([]);
+                    }
+                    m["visualReplies"].as_array_mut().unwrap().push(artifact);
+                })?;
+            }
+            None => {
+                s.append(json!({"role":"assistant","text":"","visualReplies":[artifact]}))?;
+            }
+        }
+        next.save(store, now)?;
+        *self = next;
+        Ok(())
+    }
+    /// A saved visual reply, by id, for the viewer.
+    pub fn visual_reply(&self, thread: &str, id: &str) -> Result<Value> {
+        self.session(thread)?
+            .conversation
+            .values()
+            .flat_map(|m| m["visualReplies"].as_array().into_iter().flatten())
+            .find(|v| v["id"] == id)
+            .cloned()
+            .ok_or_else(|| Error::UnknownId(id.into()))
     }
     pub fn open_attachment(&mut self, thread: &str, id: &str) -> Result<Effect> {
         let target = self.target(thread)?;

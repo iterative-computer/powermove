@@ -659,6 +659,8 @@ struct Request {
     job: Box<dyn HostRequest>,
     cancel: Cancellation,
     deadline: Instant,
+    /// External bytes it holds (response room and body), released on retire.
+    reserved: usize,
 }
 struct Live {
     vm: Vm,
@@ -715,20 +717,35 @@ impl Live {
         let (aborted, mut retired) = {
             let mut n = self.vm.native.lock().unwrap();
             let aborted = std::mem::take(&mut n.aborted);
-            let before = n.queued.len();
-            n.queued.retain(|(id, _)| !aborted.contains(id));
-            // A waiting fetch held no reservation: it leaves the count only.
-            let waiting = n.deferred.len();
-            n.deferred.retain(|(id, _)| !aborted.contains(id));
-            let waited = waiting - n.deferred.len();
-            n.in_flight -= waited;
-            (aborted, before - n.queued.len())
+            let (mut count, mut released) = (0, 0);
+            n.queued.retain(|(id, r)| {
+                let keep = !aborted.contains(id);
+                if !keep {
+                    count += 1;
+                    released += crate::vm::held(r, true);
+                }
+                keep
+            });
+            // A waiting fetch holds its body only.
+            n.deferred.retain(|(id, r)| {
+                let keep = !aborted.contains(id);
+                if !keep {
+                    count += 1;
+                    released += crate::vm::held(r, false);
+                }
+                keep
+            });
+            n.in_flight -= count;
+            n.reserved -= released;
+            (aborted, 0)
         };
+        let mut released = 0;
         self.requests.retain_mut(|request| {
             if aborted.contains(&request.id) {
                 request.cancel.cancel();
                 request.job.cancel();
                 retired += 1;
+                released += request.reserved;
                 false
             } else {
                 true
@@ -736,17 +753,24 @@ impl Live {
         });
         let mut n = self.vm.native.lock().unwrap();
         n.in_flight -= retired;
-        n.reserved -= retired * n.limits.max_response_bytes;
+        n.reserved -= released;
     }
     fn pump(&mut self, config: &Config) -> Result<()> {
         let (queued, aborted, logs) = {
             let mut n = self.vm.native.lock().unwrap();
-            // A waiting fetch that was aborted never held a reservation.
-            let before = n.deferred.len();
+            // A waiting fetch that was aborted held its body only.
             let aborted = n.aborted.clone();
-            n.deferred.retain(|(id, _)| !aborted.contains(id));
-            let dropped = before - n.deferred.len();
+            let (mut dropped, mut released) = (0, 0);
+            n.deferred.retain(|(id, r)| {
+                let keep = !aborted.contains(id);
+                if !keep {
+                    dropped += 1;
+                    released += crate::vm::held(r, false);
+                }
+                keep
+            });
             n.in_flight = n.in_flight.saturating_sub(dropped);
+            n.reserved = n.reserved.saturating_sub(released);
             n.admit_deferred();
             (
                 std::mem::take(&mut n.queued),
@@ -758,10 +782,12 @@ impl Live {
             config.host.console(&self.generation, &level, &message);
         }
         let mut completed = Vec::new();
-        let mut retired = 0;
+        let (mut retired, mut released) = (0, 0);
         for (id, request) in queued {
+            let reserved = crate::vm::held(&request, true);
             if aborted.contains(&id) {
                 retired += 1;
+                released += reserved;
                 continue;
             }
             let cancellation = Cancellation::default();
@@ -775,10 +801,12 @@ impl Live {
                     job,
                     cancel: cancellation,
                     deadline,
+                    reserved,
                 }),
                 Err(error) => {
                     completed.push(json!([id,{"error":error.to_string()}]));
                     retired += 1;
+                    released += reserved;
                 }
             }
         }
@@ -787,6 +815,7 @@ impl Live {
             let result=if aborted.contains(&request.id)||Instant::now()>=request.deadline {request.cancel.cancel();request.job.cancel();Some(Err(Error::Host("Aborted or timed out".into())))}else{request.job.poll()};
             if let Some(result)=result {
                 retired+=1;
+                released+=request.reserved;
                 let data=match result {
                     Ok(response) if response.body.len()<=config.limits.max_response_bytes && response.headers.iter().map(|(a,b)|a.len()+b.len()).sum::<usize>()<=config.limits.max_op_bytes =>{
                         // The body goes over as bytes (`__body`), not JSON.
@@ -801,9 +830,7 @@ impl Live {
         {
             let mut n = self.vm.native.lock().unwrap();
             n.in_flight = n.in_flight.saturating_sub(retired);
-            n.reserved = n
-                .reserved
-                .saturating_sub(retired * config.limits.max_response_bytes);
+            n.reserved = n.reserved.saturating_sub(released);
             // Room that just came free goes to waiting fetches; the next pump starts them.
             n.admit_deferred();
             n.bodies.extend(bodies);

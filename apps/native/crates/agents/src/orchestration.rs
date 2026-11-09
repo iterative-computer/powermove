@@ -163,6 +163,107 @@ impl Scope {
     pub fn raw(&self) -> &Value {
         &self.archive
     }
+    /// The root or a task run of this scope.
+    pub fn has_run(&self, run: &str) -> bool {
+        self.requests.contains_key(run)
+    }
+    pub fn request(&self, run: &str) -> Option<&Value> {
+        self.requests.get(run)
+    }
+    /// Replace a task run's request (task_send's new direction or settings).
+    pub fn set_request(&mut self, run: &str, request: Value) {
+        if let Some(current) = self.requests.get_mut(run) {
+            *current = request;
+        }
+    }
+    /// The task a run carries out (`None` for the root).
+    pub fn task_of(&self, run: &str) -> Option<&Value> {
+        records(&self.archive)
+            .iter()
+            .find(|r| r["task"]["childRunId"] == run)
+            .map(|r| &r["task"])
+    }
+    /// The task `parent` owns, by id.
+    pub fn owned(&self, parent: &str, task: &str) -> io::Result<&Value> {
+        let index = self.owned_index(parent, task)?;
+        Ok(&records(&self.archive)[index]["task"])
+    }
+    /// Live state (status, progress) shown on the task row; saved with the
+    /// next publication. Terminal records never change.
+    pub fn note(&mut self, run: &str, change: impl FnOnce(&mut Value)) -> Option<Value> {
+        let record = self.archive["records"]
+            .as_array_mut()?
+            .iter_mut()
+            .find(|r| r["task"]["childRunId"] == run && !terminal(r))?;
+        change(&mut record["task"]);
+        Some(record["task"].clone())
+    }
+    /// Whether any of this root's tasks still runs.
+    pub fn working(&self) -> bool {
+        records(&self.archive)
+            .iter()
+            .any(|r| r["task"]["requestId"] == self.root["id"] && !terminal(r))
+    }
+    /// The fingerprint a task_send `clientRequestId` was first used with.
+    pub fn update_seen(&self, parent: &str, task: &str, key: &str) -> io::Result<Option<String>> {
+        let index = self.owned_index(parent, task)?;
+        Ok(records(&self.archive)[index]["updates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|u| u["id"] == key)
+            .and_then(|u| u["fingerprint"].as_str().map(str::to_owned)))
+    }
+    /// Durably record a delivered task_send (main's `updates`, at most 64).
+    pub fn record_update(
+        &mut self,
+        host: &mut impl Host,
+        parent: &str,
+        task: &str,
+        key: Option<(&str, &str)>,
+        selection: &Selection,
+    ) -> io::Result<Value> {
+        let index = self.owned_index(parent, task)?;
+        let mut archive = self.archive.clone();
+        let record = &mut archive["records"][index];
+        if let Some((id, fingerprint)) = key {
+            if record.get("updates").is_none() {
+                record["updates"] = json!([]);
+            }
+            let updates = record["updates"]
+                .as_array_mut()
+                .ok_or_else(|| error("Malformed task updates"))?;
+            if updates.len() >= 64 {
+                return Err(error(
+                    "A task can receive up to 64 updates. Delegate a new task for more work.",
+                ));
+            }
+            updates.push(json!({"id":id,"fingerprint":fingerprint}));
+        }
+        let task = &mut record["task"];
+        task["providerInstanceId"] = json!(selection.provider);
+        task["model"] = json!(selection.model);
+        task["reasoningEffort"] = json!(selection.reasoning_effort);
+        task["progress"] = json!("Updating the task with new direction…");
+        let snapshot = task.clone();
+        self.publish(host, archive)?;
+        Ok(snapshot)
+    }
+    /// task_cancel acknowledges a result, terminal or not.
+    pub fn acknowledge(
+        &mut self,
+        host: &mut impl Host,
+        parent: &str,
+        task: &str,
+    ) -> io::Result<()> {
+        let index = self.owned_index(parent, task)?;
+        if records(&self.archive)[index]["acknowledged"] == true {
+            return Ok(());
+        }
+        let mut archive = self.archive.clone();
+        archive["records"][index]["acknowledged"] = json!(true);
+        self.publish(host, archive)
+    }
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
@@ -432,6 +533,27 @@ impl Scope {
         self.stopped.extend(runs);
         Ok(commands)
     }
+    /// The person stopped a task from its row (main's `cancelTask`): it and
+    /// its descendants stop, and its owner still receives the outcome.
+    pub fn stop_task(&mut self, host: &mut impl Host, task: &str) -> io::Result<Vec<Command>> {
+        let parent_thread = records(&self.archive)
+            .iter()
+            .find(|r| r["task"]["taskId"] == task)
+            .map(|r| r["task"]["parentThreadId"].clone())
+            .ok_or_else(|| error("This task does not belong to the active conversation."))?;
+        let owner = self
+            .requests
+            .iter()
+            .find(|(_, r)| r["threadId"] == parent_thread)
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| error("The agent that started this subagent has finished."))?;
+        let commands = self.cancel(host, &owner, task)?;
+        let index = self.owned_index(&owner, task)?;
+        let mut archive = self.archive.clone();
+        archive["records"][index]["acknowledged"] = json!(false);
+        self.publish(host, archive)?;
+        Ok(commands)
+    }
     /// Run after a parent turn. A result is delivered once, after all children
     /// settle. Status reads acknowledge terminal tasks; timeouts never cancel.
     pub fn after_turn(&mut self, host: &mut impl Host, parent: &str) -> io::Result<Barrier> {
@@ -551,6 +673,30 @@ impl Scope {
         self.stopped.extend(runs);
         Ok(commands)
     }
+    /// Durably record that the host is handing `delivery` to `parent` (its
+    /// continuation turn), before it starts that turn. `false` when it already
+    /// was: the handoff happened, so the host must not start it again.
+    pub fn accept_delivery(
+        &mut self,
+        host: &mut impl Host,
+        parent: &str,
+        delivery: &str,
+    ) -> io::Result<bool> {
+        self.parent(parent)?;
+        let mut archive = self.archive.clone();
+        let pending = archive["nativePendingDeliveries"]
+            .as_array_mut()
+            .ok_or_else(|| error("Unknown delivery"))?
+            .iter_mut()
+            .find(|d| d["id"] == delivery && d["run"] == parent)
+            .ok_or_else(|| error("Unknown delivery"))?;
+        if pending["accepted"] == true {
+            return Ok(false);
+        }
+        pending["accepted"] = json!(true);
+        self.publish(host, archive)?;
+        Ok(true)
+    }
     /// Release only the run-specific leases contained in a durably accepted
     /// continuation, leaving unrelated/new watches in place.
     pub fn acknowledge_with_watches(
@@ -620,6 +766,17 @@ impl Scope {
         }
         self.publish(host, archive)
     }
+}
+/// Main's task_send fingerprint: `{message, target}` without absent fields.
+pub fn update_fingerprint(message: Option<&str>, target: Option<&Value>) -> String {
+    let mut value = json!({});
+    if let Some(message) = message {
+        value["message"] = json!(message);
+    }
+    if let Some(target) = target {
+        value["target"] = target.clone();
+    }
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
 }
 fn validate(archive: &Value) -> io::Result<()> {
     if serde_json::to_vec(archive)?.len() > crate::persistence::MAX_STORE_BYTES {

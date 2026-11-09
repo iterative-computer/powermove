@@ -477,7 +477,7 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
         return false;
     }
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
-    window.makeKeyAndOrderFront(None);
+    gpui_macos::child_window::present(window, true);
     // A group of two or more must show its tab bar. AppKit can leave it hidden
     // (unified-compact toolbars, windows grouped before they were on screen).
     unsafe {
@@ -2502,6 +2502,8 @@ impl Popup {
         unsafe {
             window.setReleasedWhenClosed(false);
         }
+        // A child of the editor window while shown, never above other apps (P-CHILD).
+        gpui_macos::child_window::apply(&window);
         window.setTitle(&NSString::from_str(if surface == Surface::Palette {
             "Command Palette"
         } else {
@@ -2725,15 +2727,16 @@ impl Popup {
         ));
         unsafe {
             let _: () = msg_send![NSObject::class(),cancelPreviousPerformRequestsWithTarget:&*self.window,selector:sel!(orderOut:),object:std::ptr::null::<AnyObject>()];
-            self.parent
-                .addChildWindow_ordered(&self.window, NSWindowOrderingMode::Above);
         }
-        self.window.makeKeyAndOrderFront(None);
+        gpui_macos::child_window::attach(&self.window, &self.parent);
+        // Only while the app is active, never over other apps (P-CHILD).
+        gpui_macos::child_window::show(&self.window, true);
         self.window.makeFirstResponder(Some(&self.search));
         animate(&self.window, true, &self.tokens, &mut self.spring);
     }
     fn hide(&mut self) {
         self.model.open = false;
+        gpui_macos::child_window::forget(&self.window);
         let duration = animate(&self.window, false, &self.tokens, &mut self.spring);
         unsafe {
             let _: () = msg_send![&*self.window,performSelector:sel!(orderOut:),withObject:std::ptr::null::<AnyObject>(),afterDelay:duration];

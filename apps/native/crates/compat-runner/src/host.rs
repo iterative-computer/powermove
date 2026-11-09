@@ -34,6 +34,8 @@ use std::{
     time::Duration,
 };
 
+mod export;
+
 /// Every host gets its own kernel writer; one window's retirement is its own.
 static NEXT_REALM: AtomicU32 = AtomicU32::new(1000);
 const PANEL: u64 = 1;
@@ -101,8 +103,13 @@ enum Input {
     /// A batch of layers the viewer or an export needs override answers for:
     /// `{needs, ask}`.
     Rasters(u64, Value),
-    /// An export's frozen project (realized wire JSON), for its overrides.
-    Pin(String, u64),
+    /// An export's first override: its own realm starts (`export.rs`).
+    Export(
+        String,
+        Arc<pm_kernel::Published>,
+        Arc<AtomicBool>,
+        (Sender<export::RunInput>, Receiver<export::RunInput>),
+    ),
     /// The shell's tool and the viewer's navigation, for built-in services.
     Shell(Value),
     Menu(String, Value, u64),
@@ -118,6 +125,8 @@ enum Input {
     /// The watchdog's question about one running task, and the user's answer.
     Unresponsive(u32, u64),
     StopTask(u64, bool),
+    /// The realm's page settled these faces (`family|weight|italic` keys).
+    FontsLoaded(Value),
     Close,
 }
 
@@ -159,6 +168,8 @@ struct Shared {
     /// The generation whose page is reading batches. Canvases encode only for it.
     reader: AtomicU64,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// Running exports' realms and their pages.
+    exports: Mutex<export::Exports>,
 }
 impl Shared {
     fn update(&self, change: impl FnOnce(&mut Published)) {
@@ -420,12 +431,32 @@ impl TrySink<AdmittedDomBatch> for PageQueue<'_> {
 pub struct RasterInbox {
     inbox: Arc<Mutex<Sender<Input>>>,
     native: Arc<Mutex<Option<Arc<NativeHost>>>>,
+    shared: Arc<Shared>,
 }
 impl RasterInbox {
     /// `needs`: `[{composition, layer, seconds, scale, crop?}]`; `ask`:
-    /// `{revision}` (viewer) or `{job, epoch}` (export). Answered through
-    /// `RasterHooks::answers` with `batch`.
+    /// `{revision}` (viewer) or `{job}` (an export started with
+    /// [`Self::export`]). Answered through `RasterHooks::answers` with `batch`.
     pub fn ask(&self, batch: u64, needs: Value, ask: Value) {
+        if let Some(job) = ask["job"].as_str() {
+            let route = self.shared.exports.lock().unwrap().route(job);
+            if let Some((inbox, capturing)) = route {
+                // A capture its realm waits for: answered inline there.
+                let wire = json!({"needs": needs, "ask": {}});
+                let pending = match capturing {
+                    Some(host) => host.nested_ask(batch, wire).err(),
+                    None => Some(wire),
+                };
+                if let Some(wire) = pending {
+                    let _ = inbox.send(export::RunInput::Ask(batch, wire["needs"].clone()));
+                }
+            } else if let Some(native) = self.native.lock().unwrap().clone() {
+                // A capture the window's realm waits for (`export` kept no
+                // route for it): answered inline there; otherwise the job is over.
+                let _ = native.nested_ask(batch, json!({"needs": needs, "ask": {}}));
+            }
+            return;
+        }
         let wire = json!({"needs": needs, "ask": ask});
         let native = self.native.lock().unwrap().clone();
         let wire = match native {
@@ -437,17 +468,49 @@ impl RasterInbox {
         };
         let _ = self.inbox.lock().unwrap().send(Input::Rasters(batch, wire));
     }
-    /// An export's frozen project, from its canonical document text, as the
-    /// realm's mirror shows a project. Call off the main thread.
-    /// An export froze its project at `revision`: the realm answers for it
-    /// only while it is at that revision (behind: again; past: the export
-    /// fails rather than mix revisions).
-    pub fn pin(&self, job: &str, revision: u64) -> std::result::Result<(), String> {
+    /// The export `job` froze `published`: its overrides are answered by a
+    /// realm of its own (`export.rs`), started now, until `cancel` is set
+    /// (the export ended) or the window's extensions stop.
+    pub fn export(
+        &self,
+        job: &str,
+        published: Arc<pm_kernel::Published>,
+        cancel: Arc<AtomicBool>,
+    ) -> std::result::Result<(), String> {
+        // A capture the window's realm is waiting for, at its own revision
+        // (`renderFrameTo`, a snapshot): that realm answers inline.
+        let native = self.native.lock().unwrap().clone();
+        if native.and_then(|n| n.capturing_at())
+            == Some((published.snapshot.doc_id, published.revision()))
+        {
+            return Ok(());
+        }
+        let mut exports = self.shared.exports.lock().unwrap();
+        let at = (published.snapshot.doc_id, published.revision());
+        if exports.inbox(job).is_some() || exports.adopt_capture(job, at) {
+            return Ok(());
+        }
+        let (tx, rx) = mpsc::channel();
+        exports.insert(
+            job.to_owned(),
+            export::Route {
+                inbox: tx.clone(),
+                view: export::next_view(),
+                batches: VecDeque::new(),
+                host: None,
+            },
+        );
+        drop(exports);
+        // The window makes the realm's page when it next looks.
+        (self.shared.wake)();
         self.inbox
             .lock()
             .unwrap()
-            .send(Input::Pin(job.to_owned(), revision))
-            .map_err(|_| "The project's extensions stopped".to_owned())
+            .send(Input::Export(job.to_owned(), published, cancel, (tx, rx)))
+            .map_err(|_| {
+                self.shared.exports.lock().unwrap().remove(job);
+                "The project's extensions stopped".to_owned()
+            })
     }
 }
 
@@ -476,6 +539,7 @@ impl ExtensionHost {
             sessions: Mutex::default(),
             reader: AtomicU64::new(0),
             wake: config.wake.clone(),
+            exports: Mutex::default(),
         });
         let transport = Arc::new(Mutex::new(None));
         let moved = Arc::new(AtomicU8::new(0));
@@ -509,6 +573,7 @@ impl ExtensionHost {
             deferred: VecDeque::new(),
             disk: 0,
             store_revision: None,
+            closing: Arc::default(),
             config,
         };
         let worker = thread::Builder::new()
@@ -628,6 +693,50 @@ impl ExtensionHost {
         RasterInbox {
             inbox: Arc::new(Mutex::new(self.inbox.clone())),
             native: self.transport.clone(),
+            shared: self.shared.clone(),
+        }
+    }
+    /// Running exports' realms (job, view): each gets a hidden page in the
+    /// window for the layout reads its overrides make.
+    pub fn export_pages(&self) -> Vec<(String, u64)> {
+        self.shared.exports.lock().unwrap().pages()
+    }
+    pub fn take_export_batches(&self, job: &str) -> VecDeque<AdmittedDomBatch> {
+        let mut exports = self.shared.exports.lock().unwrap();
+        let taken = exports.batches(job).map(std::mem::take).unwrap_or_default();
+        if let Some(inbox) = exports.inbox(job) {
+            let _ = inbox.send(export::RunInput::Dom);
+        }
+        taken
+    }
+    pub fn return_export_batches(&self, job: &str, mut rest: VecDeque<AdmittedDomBatch>) {
+        let mut exports = self.shared.exports.lock().unwrap();
+        if let Some(queue) = exports.batches(job) {
+            rest.append(queue);
+            *queue = rest;
+        }
+    }
+    /// The page under `key` (`""`: the window's realm; `export:<job>`: an
+    /// export's) settled the faces `keys` (loaded, or failed to load).
+    pub fn fonts_loaded(&self, key: &str, keys: Value) {
+        match key.strip_prefix("export:") {
+            None => {
+                let _ = self.inbox.send(Input::FontsLoaded(keys));
+            }
+            Some(job) => {
+                if let Some(inbox) = self.shared.exports.lock().unwrap().inbox(job) {
+                    let _ = inbox.send(export::RunInput::FontsLoaded(keys));
+                }
+            }
+        }
+    }
+    /// Feedback from an export realm's page, on a forwarding thread.
+    pub fn export_page_sink(&self, job: &str) -> impl Fn(Value) + Send + 'static + use<> {
+        let inbox = self.shared.exports.lock().unwrap().inbox(job);
+        move |message| {
+            if let Some(inbox) = &inbox {
+                let _ = inbox.send(export::RunInput::Page(message));
+            }
         }
     }
     /// One menu from several locations: `[[location, context], ...]`, gathered
@@ -797,6 +906,8 @@ struct Owner {
     deferred: VecDeque<String>,
     disk: u64,
     store_revision: Option<u64>,
+    /// Set when this window's extensions stop; its export realms end too.
+    closing: Arc<AtomicBool>,
 }
 impl Owner {
     fn run(mut self, input: Receiver<Input>) {
@@ -847,6 +958,8 @@ impl Owner {
         for store in std::mem::take(&mut self.stores) {
             self.stop_store(store);
         }
+        self.closing.store(true, Ordering::Release);
+        self.shared.exports.lock().unwrap().clear();
         self.retire_realm();
     }
     /// Ends the current generation: its open entry is sealed, its contributions
@@ -978,8 +1091,30 @@ impl Owner {
                     wire["needs"]
                 ));
             }
-            Input::Pin(job, revision) => {
-                self.eval(&format!("__compat.pinProject({},{revision})", json!(job)));
+            Input::Export(job, frozen, cancel, (tx, rx)) => {
+                let start = export::Start {
+                    job,
+                    frozen,
+                    cancel,
+                    records: self.trusted_records(),
+                    storage: crate::adapter::storage_of(&self.config.kernel),
+                    frames: self.config.frames.clone(),
+                    viewport: self.viewport,
+                    text: self.config.text.as_ref().map(|text| text()),
+                    rasters: self.config.rasters.clone(),
+                    kernel: self.config.kernel.clone(),
+                    shared: self.shared.clone(),
+                    closing: self.closing.clone(),
+                };
+                let spawned = thread::Builder::new()
+                    .name("pm-compat-export".into())
+                    .spawn(move || export::run(start, tx, rx));
+                if spawned.is_err() {
+                    self.shared.update(|p| {
+                        p.toasts
+                            .push("The export's extensions could not start".into())
+                    });
+                }
             }
             Input::Menu(location, context, key) => {
                 self.eval(&format!(
@@ -1011,6 +1146,9 @@ impl Owner {
                 self.reopen_panels(None);
             }
             Input::Rescan => self.rescan(),
+            Input::FontsLoaded(keys) => {
+                self.eval(&format!("__compat.fontsLoaded({keys})"));
+            }
             Input::Failed(generation) if generation == self.writer.generation => {
                 let culprit = self.activating_now();
                 self.restart(culprit)
@@ -1369,7 +1507,7 @@ impl Owner {
             self.sync_stores();
             self.publish_store();
         } else {
-            let records = self.trusted_records();
+            let records = self.realm_plan();
             self.eval(&format!(
                 "__compat.update({records},{},\"enable\")",
                 json!([id])
@@ -1720,11 +1858,21 @@ impl Owner {
         self.sync_stores();
         self.publish_records();
         self.publish_store();
-        let records = self.trusted_records();
+        let records = self.realm_plan();
         if let Some((width, height, scale)) = self.viewport {
             self.eval(&format!("__compat.viewport({width},{height},{scale})"));
         }
         self.eval(&format!("__compat.boot({records})"));
+    }
+    /// The trusted records the window realm is about to run: its wrappers
+    /// report their code identity from them (the disk render cache keys
+    /// override frames by it; export realms pin these same records).
+    fn realm_plan(&self) -> Value {
+        let records = self.trusted_records();
+        if let Some(live) = &self.realm {
+            live.host.set_code(&records);
+        }
+        records
     }
     /// The plan of the trusted realm. Confined records never enter it.
     fn trusted_records(&self) -> Value {
@@ -1763,7 +1911,7 @@ impl Owner {
         self.sync_stores();
         self.publish_records();
         self.publish_store();
-        let records = self.trusted_records();
+        let records = self.realm_plan();
         self.eval(&format!(
             "__compat.update({records},{},\"rescan\")",
             Value::Array(changed)
@@ -1873,7 +2021,7 @@ impl Owner {
         match self.start_realm(Some(clock)) {
             Ok(()) => {
                 self.publish_records();
-                let records = self.trusted_records();
+                let records = self.realm_plan();
                 if let Some((width, height, scale)) = self.viewport {
                     self.eval(&format!("__compat.viewport({width},{height},{scale})"));
                 }
@@ -1912,10 +2060,24 @@ mod tests {
     }
     impl Fixture {
         fn start(root: tempfile::TempDir) -> Self {
+            Self::start_with(root, crate::initial()["document"].clone(), None)
+        }
+        fn start_with(
+            root: tempfile::TempDir,
+            document: Value,
+            rasters: Option<crate::RasterHooks>,
+        ) -> Self {
+            Self::start_full(root, document, rasters, None)
+        }
+        fn start_full(
+            root: tempfile::TempDir,
+            document: Value,
+            rasters: Option<crate::RasterHooks>,
+            frames: Option<crate::FrameRenderer>,
+        ) -> Self {
             let actor = KernelActor::spawn(KernelConfig::default());
             let kernel = actor.handle();
-            let document =
-                pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+            let document = pm_model::json::parse(&document.to_string()).unwrap();
             kernel
                 .open("window", OpenSource::Untitled(document))
                 .wait()
@@ -1928,8 +2090,8 @@ mod tests {
                 cache: root.path().join("cache"),
                 owner: None,
                 text: None,
-                frames: None,
-                rasters: None,
+                frames,
+                rasters,
                 wake: Arc::new(|| ()),
             });
             Self {
@@ -2619,6 +2781,378 @@ mod tests {
         );
     }
     /// A page that answers before the read starts waiting is not missed.
+    type Answers = Arc<Mutex<Vec<(u64, Value)>>>;
+    /// A window whose project has one text layer `t1`, the given extensions,
+    /// and raster hooks that log every answer as `(batch, width | error)`.
+    fn export_window(
+        extensions: &[(&str, &str)],
+        text: &str,
+        frames: Option<crate::FrameRenderer>,
+    ) -> (Fixture, Answers) {
+        let root = tempfile::tempdir().unwrap();
+        for (id, source) in extensions {
+            extension(&root.path().join("extensions"), id, &[("index.ts", source)]);
+        }
+        let mut document = crate::initial()["document"].clone();
+        document["layers"] = json!([{"id":"t1","type":"text","name":"T1","from":0,"dur":5,
+            "d":{"text":text}}]);
+        let answered: Answers = Arc::default();
+        let log = answered.clone();
+        let hooks = crate::RasterHooks {
+            base: Arc::new(|_| Ok(None)),
+            answers: Arc::new(move |batch, answers| {
+                for answer in answers {
+                    log.lock().unwrap().push((
+                        batch,
+                        match answer {
+                            crate::RasterAnswer::Raster { width, .. } => json!(width),
+                            crate::RasterAnswer::Failed(error) => json!(error),
+                            other => json!(format!("{:?}", std::mem::discriminant(&other))),
+                        },
+                    ));
+                }
+            }),
+            producing: Arc::new(|_, _, _| ()),
+        };
+        let fixture = Fixture::start_full(root, document, Some(hooks), frames);
+        fixture.until("activation", |host| host.is_ready());
+        (fixture, answered)
+    }
+    fn needs(fixture: &Fixture) -> Value {
+        let comp = fixture
+            .kernel
+            .published("window")
+            .unwrap()
+            .snapshot
+            .render_comp();
+        json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}])
+    }
+    fn answer_of(answered: &Answers, batch: u64, wait: Duration) -> Value {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Some((_, answer)) = answered.lock().unwrap().iter().find(|(b, _)| *b == batch) {
+                return answer.clone();
+            }
+            assert!(Instant::now() < deadline, "batch {batch} was answered");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn edit_text(fixture: &Fixture, command: &str, text: &str) {
+        fixture.host.run_command(command, json!([text]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let p = fixture.kernel.published("window").unwrap();
+            if pm_model::json::to_canonical_string(&p.snapshot.document.to_value().unwrap())
+                .contains(text)
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the edit reached the kernel");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    const SPY: &str = "export default function activate(api: any){
+       api.commands.register({id:'spy.text',label:'Text',run(text: string){
+         api.history.do('Text',()=>{api.project.get().layers[0].d.text=text})}});
+       api.commands.register({id:'spy.store',label:'Store',run(v: string){ api.storage.set('extra', v) }});
+       api.services.register('raster',(L: any)=>{
+         if (L.id === 't1' && globalThis.capture && !globalThis.inside) {
+           globalThis.inside = true;
+           try { globalThis.capture(); } finally { globalThis.inside = false; }
+         }
+         const c=document.createElement('canvas');
+         c.width=L.d.text.length + String(api.storage.get('extra') ?? '').length; c.height=1;
+         api.project.get().name='written by '+L.d.text;
+         return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0}});}";
+    /// The wrappers report the identity of the compiled code they run (the
+    /// records an export realm pins): the same in another launch over the same
+    /// files, different once the code changes. The disk render cache keys
+    /// override frames by it.
+    #[test]
+    fn producing_reports_the_code_identity_of_the_records_the_realm_runs() {
+        const RASTER: &str = "export default function(api: any){
+           api.services.register('raster',(L: any)=>{
+             const c=document.createElement('canvas'); c.width=1; c.height=1;
+             return {cv:c,w:1,h:1,anchorX:0,anchorY:0}});}";
+        type Calls = Arc<Mutex<Vec<(bool, u64)>>>;
+        let launch = |source: &str| {
+            let root = tempfile::tempdir().unwrap();
+            extension(
+                &root.path().join("extensions"),
+                "wrap",
+                &[("index.ts", source)],
+            );
+            let calls: Calls = Arc::default();
+            let log = calls.clone();
+            let hooks = crate::RasterHooks {
+                base: Arc::new(|_| Ok(None)),
+                answers: Arc::new(|_, _| ()),
+                producing: Arc::new(move |on, _, code| log.lock().unwrap().push((on, code))),
+            };
+            let fixture =
+                Fixture::start_with(root, crate::initial()["document"].clone(), Some(hooks));
+            fixture.until("producing", |_| calls.lock().unwrap().iter().any(|c| c.0));
+            let calls = calls.lock().unwrap().clone();
+            assert!(calls.iter().all(|(_, code)| *code != 0), "{calls:?}");
+            calls.iter().rev().find(|c| c.0).unwrap().1
+        };
+        let first = launch(RASTER);
+        assert_eq!(launch(RASTER), first, "unchanged code: the same identity");
+        assert_ne!(launch(&RASTER.replace("c.width=1", "c.width=2")), first);
+    }
+    #[test]
+    fn an_export_realm_answers_from_its_frozen_project_code_and_storage_while_the_window_edits() {
+        let (fixture, answered) = export_window(&[("spy", SPY)], "frozen", None);
+        fixture.host.run_command("spy.store", json!(["ab"]));
+        fixture.until("storage", |_| {
+            fixture.kernel.state().settings.contains_key("ext.spy")
+        });
+        let frozen = fixture.kernel.published("window").unwrap();
+        let needs = needs(&fixture);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        // The export starts: its realm pins the extensions' code and storage now.
+        inbox
+            .export("job-1", frozen.clone(), cancel.clone())
+            .unwrap();
+        // The person edits the project and the extension's storage meanwhile.
+        fixture.host.run_command("spy.store", json!(["abcdef"]));
+        edit_text(&fixture, "spy.text", "edited meanwhile");
+        inbox.ask(1, needs.clone(), json!({"job":"job-1"}));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(2, needs.clone(), json!({"revision": live}));
+        // The export draws its frozen project and storage; the viewer the edits.
+        assert_eq!(
+            answer_of(&answered, 1, Duration::from_secs(30)),
+            json!(6 + 2)
+        );
+        assert_eq!(
+            answer_of(&answered, 2, Duration::from_secs(30)),
+            json!(16 + 6)
+        );
+        assert_eq!(fixture.host.export_pages().len(), 1);
+        // Neither the export realm's write nor its registrations reached the kernel.
+        thread::sleep(Duration::from_millis(200));
+        assert_ne!(fixture.name(), "written by frozen");
+        let commands = fixture
+            .kernel
+            .state()
+            .registries
+            .get("commands")
+            .map_or(0, Vec::len);
+        assert_eq!(commands, 2, "only the window's realm registers");
+        // The export ends: its realm and page go, and nothing answers it again.
+        cancel.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.host.export_pages().is_empty() {
+            assert!(Instant::now() < deadline, "the export realm ended");
+            thread::sleep(Duration::from_millis(10));
+        }
+        inbox.ask(3, needs, json!({"job":"job-1"}));
+        thread::sleep(Duration::from_millis(100));
+        assert!(!answered.lock().unwrap().iter().any(|(b, _)| *b == 3));
+    }
+    #[test]
+    fn an_export_realms_capture_renders_its_frozen_project_and_asks_it_inline() {
+        // The renderer stands in for the app's engine job: it checks which
+        // project it was given and asks the realm waiting for it to draw t1.
+        type Wiring = Arc<Mutex<Option<(RasterInbox, Answers)>>>;
+        let wiring: Wiring = Arc::default();
+        let rendered: Arc<Mutex<Vec<u64>>> = Arc::default();
+        let (w, r) = (wiring.clone(), rendered.clone());
+        let frames: crate::FrameRenderer = Arc::new(move |frame: &crate::FrameRequest| {
+            let published = frame
+                .published
+                .clone()
+                .ok_or("a frame of the window's project")?;
+            r.lock().unwrap().push(published.revision());
+            let (inbox, answered) = w.lock().unwrap().clone().unwrap();
+            let comp = published.snapshot.render_comp();
+            inbox.export("capture-1", published, Arc::default())?;
+            inbox.ask(
+                77,
+                json!([{"composition":comp,"layer":"t1","seconds":0,"scale":1}]),
+                json!({"job":"capture-1"}),
+            );
+            answer_of(&answered, 77, Duration::from_secs(10));
+            let mut png = vec![];
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0, 0, 255, 255])
+                .unwrap();
+            Ok(png)
+        });
+        let capturer = "export default function activate(){
+            globalThis.capture = () => { globalThis.PM.renderFrameTo(0, 1, 1) } }";
+        let (fixture, answered) = export_window(
+            &[("spy", SPY), ("capturer", capturer)],
+            "frozen",
+            Some(frames),
+        );
+        *wiring.lock().unwrap() = Some((fixture.host.raster_inbox(), answered.clone()));
+        let frozen = fixture.kernel.published("window").unwrap();
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox
+            .export("job-2", frozen.clone(), cancel.clone())
+            .unwrap();
+        edit_text(&fixture, "spy.text", "edited meanwhile");
+        inbox.ask(5, needs(&fixture), json!({"job":"job-2"}));
+        // The capture inside the export's override drew the export's project,
+        // its t1 answered inline by the export realm (frozen text: 6).
+        assert_eq!(answer_of(&answered, 5, Duration::from_secs(40)), json!(6));
+        assert_eq!(answer_of(&answered, 77, Duration::from_secs(1)), json!(6));
+        assert_eq!(*rendered.lock().unwrap(), vec![frozen.revision()]);
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn an_extension_that_runs_in_the_window_but_not_for_the_export_fails_it_by_name() {
+        let flaky = "export default function activate(api: any){
+            if (api.project.get().layers?.[0]?.d?.text === 'boom') throw Error('boom') }";
+        let (fixture, answered) = export_window(&[("spy", SPY), ("flaky", flaky)], "fine", None);
+        assert_eq!(fixture.health("flaky"), "ok");
+        edit_text(&fixture, "spy.text", "boom");
+        let inbox = fixture.host.raster_inbox();
+        let frozen = fixture.kernel.published("window").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox.export("job-3", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-3"}));
+        let answer = answer_of(&answered, 1, Duration::from_secs(30));
+        assert_eq!(answer, json!("flaky could not start for the export"));
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn an_export_realm_reads_the_network_but_never_sends_changes() {
+        // Activation tries a POST; the realm notes whether it was refused as a
+        // delivery, and the override's width says so (3: refused).
+        let poster = "export default function activate(api: any){
+            globalThis.refused = false;
+            fetch('http://127.0.0.1:9/record', {method:'POST', body:'x'})
+              .catch((e: any) => { globalThis.refused = /only read the network/.test(String(e?.message ?? e)) });
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=globalThis.refused ? 3 : 1; c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("poster", poster)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        thread::sleep(Duration::from_millis(500));
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(10)), json!(1));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-5", frozen, cancel.clone()).unwrap();
+        inbox.ask(2, needs(&fixture), json!({"job":"job-5"}));
+        assert_eq!(answer_of(&answered, 2, Duration::from_secs(40)), json!(3));
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn a_layout_read_no_page_answers_fails_the_export() {
+        let measure = "export default function activate(api: any){
+            const base = api.services.get('raster');
+            api.services.register('raster',(L: any, ...rest: any[])=>{
+              const d=document.createElement('div'); d.textContent='x'; document.body.append(d);
+              const w=d.getBoundingClientRect().width; d.remove();
+              const c=document.createElement('canvas'); c.width=1+Math.round(w); c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("measure", measure)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-4", frozen, cancel.clone()).unwrap();
+        // No window shows the export's page here: the read cannot be answered.
+        inbox.ask(1, needs(&fixture), json!({"job":"job-4"}));
+        let answer = answer_of(&answered, 1, Duration::from_secs(40));
+        assert!(
+            answer.as_str().unwrap().contains("stopped answering"),
+            "{answer}"
+        );
+        cancel.store(true, Ordering::Release);
+    }
+    #[test]
+    fn the_projects_text_faces_and_pm_fonts_reach_the_window() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "fonts",
+            &[(
+                "index.ts",
+                "export default function activate(api: any){
+                   const fonts = api.media.fonts;
+                   api.commands.register({id:'fonts.ensure',label:'Ensure',run(){
+                     void fonts.ensure('Probe Serif', 700).then(() => api.storage.set('ensured', true)) }});
+                   api.commands.register({id:'fonts.list',label:'List',run(){
+                     api.storage.set('seen', {system: fonts.system.length, has: fonts.families.includes('Helvetica')}) }});
+                 }",
+            )],
+        );
+        let mut document = crate::initial()["document"].clone();
+        document["layers"] = json!([{"id":"t1","type":"text","name":"T1","from":0,"dur":5,
+            "d":{"text":"a","font":{"v":"Probe Sans","kf":[]},"weight":{"v":600,"kf":[]}}}]);
+        let fixture = Fixture::start_with(root, document, None);
+        fixture.until("activation", |host| host.is_ready());
+        let mut requests = vec![];
+        let mut take = |want: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                requests.extend(fixture.host.take_requests());
+                let found = requests
+                    .iter()
+                    .filter(|r| r["kind"] == "fonts")
+                    .flat_map(|r| r["faces"].as_array().cloned().unwrap_or_default())
+                    .find(|f| f["family"] == want);
+                if let Some(found) = found {
+                    return found;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{want} was asked for: {requests:?}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        // The project's text face, as its layer animates it (`{v}`).
+        assert_eq!(
+            take("Probe Sans"),
+            json!({"family":"Probe Sans","weight":600,"italic":false})
+        );
+        fixture.host.run_command("fonts.ensure", json!([]));
+        assert_eq!(
+            take("Probe Serif"),
+            json!({"family":"Probe Serif","weight":700,"italic":false})
+        );
+        // `ensure` waits for its own face, not for any page answer.
+        let ensured = || {
+            fixture
+                .kernel
+                .state()
+                .settings
+                .get("ext.fonts")
+                .is_some_and(|v| pm_model::json::to_canonical_string(v).contains("ensured"))
+        };
+        fixture.host.fonts_loaded("", json!(["Probe Sans|600|0"]));
+        thread::sleep(Duration::from_millis(300));
+        assert!(!ensured(), "another face settling does not resolve ensure");
+        fixture.host.fonts_loaded("", json!(["Probe Serif|700|0"]));
+        fixture.until("ensure resolved", |_| ensured());
+        fixture.host.run_command("fonts.list", json!([]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let stored = fixture.kernel.state().settings.get("ext.fonts").map(|v| {
+                serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(v)).unwrap()
+            });
+            if let Some(seen) = stored.map(|v| v["seen"].clone()).filter(|v| !v.is_null()) {
+                assert!(seen["system"].as_u64().unwrap() > 0, "this Mac's families");
+                assert_eq!(seen["has"], true);
+                break;
+            }
+            assert!(Instant::now() < deadline, "PM.Fonts answered");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     #[test]
     fn a_layout_answer_that_comes_before_its_read_waits_is_kept() {
         let mut measures = Measures::default();

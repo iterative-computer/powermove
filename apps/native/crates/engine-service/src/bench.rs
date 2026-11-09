@@ -350,7 +350,8 @@ fn fill_range(
     let queued = loop {
         pm_node::fonts::render::serve(font_service, fonts.take_asks());
         viewer.display_tick(pm_engine_service::trace::now() + 1. / hz, 1. / hz)?;
-        match disk.start_fill(seconds(start), seconds(end), &exe, Default::default()) {
+        // No window publication: the bench's overrides (none) need no pin.
+        match disk.start_fill(seconds(start), seconds(end), &exe, Default::default(), None) {
             Ok(n) => break n,
             Err(e)
                 if wait.elapsed() < Duration::from_secs(120)

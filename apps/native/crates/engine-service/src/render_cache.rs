@@ -472,6 +472,7 @@ impl DiskFrames {
         to: f64,
         executable: &Path,
         activity: crate::jobs::Activity,
+        frozen: Option<(u64, Arc<dyn std::any::Any + Send + Sync>)>,
     ) -> Result<u64, String> {
         let mut running = self.inner.running.lock().unwrap();
         if running.as_ref().is_some_and(|r| !r.thread.is_finished()) {
@@ -529,7 +530,16 @@ impl DiskFrames {
             height: size.height,
             frames: missing.into_iter().map(|m| m.1).collect(),
         };
-        let request = fill_request(&source, rate, fill).map_err(|e| e.to_string());
+        // The window's publication at the fill's revision: its overrides
+        // answer from it whatever is edited meanwhile.
+        let request = fill_request(&source, rate, fill)
+            .map(|mut request| {
+                request.frozen = frozen
+                    .filter(|(revision, _)| *revision == request.revision)
+                    .map(|(_, frozen)| frozen);
+                request
+            })
+            .map_err(|e| e.to_string());
         let cancel = Arc::new(AtomicBool::new(false));
         let (stop, weak, exe) = (
             cancel.clone(),
@@ -715,6 +725,8 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
+        frozen: None,
+        look: false,
     })
 }
 
@@ -1241,7 +1253,7 @@ mod tests {
         disk.observe(&scene, &[], None, None, 1);
         ready(&disk);
         let queued = disk
-            .start_fill(1., 1.2, &exe, crate::jobs::Activity::default())
+            .start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), None)
             .unwrap();
         assert_eq!(queued, 6);
         let bars = settle(&disk, |b| !b.running);
@@ -1255,7 +1267,7 @@ mod tests {
             "the frame has drawn pixels"
         );
         // Nothing is left to render.
-        let again = disk.start_fill(1., 1.2, &exe, crate::jobs::Activity::default());
+        let again = disk.start_fill(1., 1.2, &exe, crate::jobs::Activity::default(), None);
         assert_eq!(again, Ok(0));
     }
 
@@ -1274,7 +1286,7 @@ mod tests {
             .unwrap();
         disk.observe(scene, &[], None, None, 1);
         ready(&disk);
-        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default())
+        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default(), None)
             .unwrap();
         let bars = settle(&disk, |b| !b.running);
         assert_eq!(bars.error.as_deref(), None, "{bars:?}");
@@ -1322,7 +1334,7 @@ mod tests {
         let scene = scene();
         disk.observe(&scene, &[], None, None, 1);
         ready(&disk);
-        disk.start_fill(0., 3., &exe, crate::jobs::Activity::default())
+        disk.start_fill(0., 3., &exe, crate::jobs::Activity::default(), None)
             .unwrap();
         settle(&disk, |b| b.done >= 1);
         disk.delete_all().unwrap();

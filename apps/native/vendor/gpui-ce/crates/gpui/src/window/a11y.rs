@@ -153,10 +153,24 @@ pub(crate) struct A11y {
     /// At the end of the frame, we re-call [`Self::sync_active_flag`] to
     /// determine whether we should actually send the finished [`TreeUpdate`].
     active_this_frame: bool,
+    /// Powermove P-A11Y-CACHE: whether the last drawn frame built a tree. Its
+    /// nodes are what a reused cached view replays; without them (the first
+    /// frame after activation) every cached view renders.
+    built_last_draw: bool,
+    /// Powermove P-A11Y-CACHE: whether the adapter holds the last tree built,
+    /// so the next update can carry only changed nodes. Cleared when assistive
+    /// technology (re)activates, since the adapter then starts from its
+    /// initial tree.
+    adapter_synced: Arc<AtomicBool>,
     pub(crate) nodes: A11yNodeBuilder,
     pub(crate) focus_ids: FxHashMap<NodeId, FocusId>,
     pub(crate) node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
     pub(crate) action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
+    /// The last frame's side tables, from which a reused view's entries move
+    /// back when its nodes are replayed.
+    rendered_focus_ids: FxHashMap<NodeId, FocusId>,
+    rendered_node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
+    rendered_action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
     /// The window's title, used to label the root node so assistive
     /// technology can tell windows apart.
     window_title: Option<SharedString>,
@@ -174,6 +188,7 @@ pub(crate) struct A11y {
 impl A11y {
     pub(crate) fn new(
         active_flag: Arc<AtomicBool>,
+        adapter_synced: Arc<AtomicBool>,
         before_activation: Arc<parking_lot::Mutex<Option<TreeUpdate>>>,
         force_disabled: bool,
         forced: bool,
@@ -185,10 +200,15 @@ impl A11y {
             active_flag,
             before_activation,
             active_this_frame: false,
+            built_last_draw: false,
+            adapter_synced,
             nodes: A11yNodeBuilder::new(),
             focus_ids: FxHashMap::default(),
             node_bounds: FxHashMap::default(),
             action_listeners: FxHashMap::default(),
+            rendered_focus_ids: FxHashMap::default(),
+            rendered_node_bounds: FxHashMap::default(),
+            rendered_action_listeners: FxHashMap::default(),
             window_title,
             last_focus_without_node: None,
             debug: debug::A11yDebug::default(),
@@ -234,6 +254,89 @@ impl A11y {
 
     pub(crate) fn is_active(&self) -> bool {
         self.active_this_frame
+    }
+
+    /// Whether this frame's tree can't come from the last frame's nodes, so
+    /// cached views must render rather than replay (Powermove P-A11Y-CACHE).
+    pub(crate) fn rebuilding(&self) -> bool {
+        self.active_this_frame && !self.built_last_draw
+    }
+
+    /// Where the next node lands in this frame's node log; a prepaint range
+    /// records it so a reused view can replay its nodes.
+    pub(crate) fn node_index(&self) -> usize {
+        self.nodes.all_nodes.len()
+    }
+
+    /// Powermove P-A11Y-CACHE: a cached view (or deferred draw) whose prepaint
+    /// is reused replays the nodes it built last frame, unchanged, under the
+    /// current parent, with their bounds, focus registrations and action
+    /// listeners, instead of rendering again to rebuild them.
+    pub(crate) fn replay(&mut self, range: std::ops::Range<usize>, focused: Option<FocusId>) {
+        if !self.active_this_frame || range.is_empty() {
+            return;
+        }
+        let Some(rendered) = self.debug.rendered_tree_mut() else {
+            return;
+        };
+        let rendered_meta = std::mem::take(&mut self.nodes.rendered_meta);
+        if range.end > rendered.nodes.len() || range.end > rendered_meta.len() {
+            debug_assert!(false, "a11y replay range outside the last frame's tree");
+            self.nodes.rendered_meta = rendered_meta;
+            return;
+        }
+        let meta = &rendered_meta[range.clone()];
+        let top = meta.iter().map(|meta| meta.depth).min().unwrap_or(0);
+        let base = self.nodes.ids_stack.len() as u32;
+        let replayed_descendant = self.nodes.rendered_active_descendant.filter(|descendant| {
+            rendered.nodes[range.clone()]
+                .iter()
+                .any(|(id, _)| id == descendant)
+        });
+        for (index, meta) in range.zip(meta) {
+            let id = rendered.nodes[index].0;
+            if !self.nodes.can_push(id) {
+                continue;
+            }
+            let node = std::mem::take(&mut rendered.nodes[index].1);
+            if meta.depth == top
+                && let Some(parent) = self.nodes.nodes_stack.last_mut()
+            {
+                parent.push_child(id);
+            }
+            self.nodes.all_nodes.push((id, node));
+            self.nodes.meta.push(EntryMeta {
+                depth: base + (meta.depth - top),
+                fresh: false,
+            });
+            #[cfg(debug_assertions)]
+            if let Some(info) = self.nodes.rendered_node_info.remove(&id) {
+                self.nodes.node_info.insert(id, info);
+            }
+            if let Some(bounds) = self.rendered_node_bounds.remove(&id) {
+                self.node_bounds.insert(id, bounds);
+            }
+            if let Some(listeners) = self.rendered_action_listeners.remove(&id) {
+                self.action_listeners.insert(id, listeners);
+            }
+            if let Some(focus_id) = self.rendered_focus_ids.remove(&id) {
+                self.focus_ids.insert(id, focus_id);
+                if focused == Some(focus_id) {
+                    self.last_focus_without_node = None;
+                    self.nodes.set_focus(id);
+                }
+            }
+        }
+        self.nodes.rendered_meta = rendered_meta;
+        // The focused container of an active descendant may sit inside the
+        // replayed range, after the descendant (nodes are logged post-order).
+        if let Some(id) = replayed_descendant
+            && let Some(focus) = self.nodes.focus
+            && focus != id
+            && self.nodes.has_node(focus)
+        {
+            self.nodes.set_active_descendant(id);
+        }
     }
 
     pub(crate) fn set_focusable(&mut self, node_id: NodeId, focus_id: FocusId) {
@@ -286,12 +389,35 @@ impl A11y {
         }
     }
 
-    /// Clear per-frame state and push the root node to start a new frame.
+    /// Start a frame: the last frame's side tables become what reused views
+    /// replay from, and the root node is pushed. A frame that builds no tree
+    /// makes the next one rebuild every view.
     pub(crate) fn begin_frame(&mut self) {
-        self.focus_ids.clear();
-        self.node_bounds.clear();
-        self.action_listeners.clear();
+        if !self.active_this_frame {
+            self.built_last_draw = false;
+            return;
+        }
+        self.rendered_focus_ids = std::mem::take(&mut self.focus_ids);
+        self.rendered_node_bounds = std::mem::take(&mut self.node_bounds);
+        self.rendered_action_listeners = std::mem::take(&mut self.action_listeners);
+        if !self.built_last_draw {
+            self.rendered_focus_ids.clear();
+            self.rendered_node_bounds.clear();
+            self.rendered_action_listeners.clear();
+        }
         self.nodes.begin_frame(self.window_title.as_ref());
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn simulate_activation(&mut self) {
+        self.adapter_synced.store(false, Ordering::SeqCst);
+        self.active_flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether this frame's update goes to the platform adapter now, rather
+    /// than being kept for activation.
+    pub(crate) fn adapter_listening(&self) -> bool {
+        !(self.forced && !self.active_flag.load(Ordering::SeqCst))
     }
 
     /// A forced tree the adapter would drop (nothing connected yet) is kept
@@ -305,24 +431,47 @@ impl A11y {
         Some(update)
     }
 
-    /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
-    pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
-        let update = self.nodes.finalize();
+    /// Finalize the frame's tree. Returns the update for the platform: only the
+    /// nodes that changed when `to_adapter` and the adapter holds the last
+    /// tree (`None` when nothing changed), otherwise the whole tree. The whole
+    /// tree is kept as the last frame's, for replay and inspection.
+    pub(crate) fn end_frame(
+        &mut self,
+        frame: debug::FrameDebugInfo,
+        to_adapter: bool,
+    ) -> Option<TreeUpdate> {
+        self.built_last_draw = true;
+        let tree = self.nodes.finalize();
+        let incremental = to_adapter && self.adapter_synced.load(Ordering::SeqCst);
+        let update = match self.debug.last_tree_update() {
+            Some(last) if incremental => {
+                let changed = self.nodes.changed_since(&tree, last);
+                (!changed.is_empty() || tree.focus != last.focus).then(|| TreeUpdate {
+                    nodes: changed,
+                    tree: None,
+                    tree_id: tree.tree_id,
+                    focus: tree.focus,
+                })
+            }
+            _ => Some(tree.clone()),
+        };
+        self.nodes.retire_frame(&tree);
         self.debug.capture(
-            &update,
+            tree,
             self.nodes.focus,
             self.nodes.active_descendant,
             self.window_title.as_ref(),
             frame,
-            &self.node_bounds,
         );
-        #[cfg(debug_assertions)]
-        self.debug.capture_node_info(&self.nodes.node_info);
+        self.adapter_synced.store(to_adapter, Ordering::SeqCst);
         update
     }
 
     pub(crate) fn debug_tree_json(&self) -> Option<String> {
-        self.debug.to_json()
+        #[cfg(debug_assertions)]
+        return self.debug.to_json(&self.node_bounds, &self.nodes.node_info);
+        #[cfg(not(debug_assertions))]
+        self.debug.to_json(&self.node_bounds)
     }
 
     pub(crate) fn last_tree_update(&self) -> Option<&TreeUpdate> {
@@ -330,7 +479,7 @@ impl A11y {
     }
 
     pub(crate) fn last_node_bounds(&self, id: NodeId) -> Option<Bounds<Pixels>> {
-        self.debug.node_bounds(id)
+        self.node_bounds.get(&id).copied()
     }
 
     pub(crate) fn frame_number(&self) -> u64 {
@@ -447,6 +596,14 @@ pub(crate) struct A11yNodeBuilder {
     /// This is the exact type required by accesskit, so we can't just make it a
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
     all_nodes: Vec<(NodeId, accesskit::Node)>,
+    /// Per `all_nodes` entry (Powermove P-A11Y-CACHE): its depth and whether
+    /// this frame built it. A replayed range's shallowest entries are the
+    /// children of the node it sits under.
+    meta: Vec<EntryMeta>,
+    /// `meta` of the last frame's tree, and where each of its nodes sits in it.
+    rendered_meta: Vec<EntryMeta>,
+    rendered_index: FxHashMap<NodeId, usize>,
+    rendered_active_descendant: Option<NodeId>,
     seen_ids: FxHashSet<NodeId>,
     /// The node that GPUI considers focused. Note that this may be different to
     /// what is reported to accesskit - see [`Self::active_descendant`]
@@ -457,7 +614,15 @@ pub(crate) struct A11yNodeBuilder {
     /// focused.
     active_descendant: Option<NodeId>,
     #[cfg(debug_assertions)]
-    node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
+    pub(crate) node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
+    #[cfg(debug_assertions)]
+    rendered_node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct EntryMeta {
+    depth: u32,
+    fresh: bool,
 }
 
 impl A11yNodeBuilder {
@@ -466,12 +631,52 @@ impl A11yNodeBuilder {
             ids_stack: SmallVec::new(),
             nodes_stack: SmallVec::new(),
             all_nodes: Vec::new(),
+            meta: Vec::new(),
+            rendered_meta: Vec::new(),
+            rendered_index: FxHashMap::default(),
+            rendered_active_descendant: None,
             seen_ids: FxHashSet::default(),
             focus: None,
             active_descendant: None,
             #[cfg(debug_assertions)]
             node_info: FxHashMap::default(),
+            #[cfg(debug_assertions)]
+            rendered_node_info: FxHashMap::default(),
         }
+    }
+
+    /// Clones of this frame's built nodes that differ from `last`'s.
+    fn changed_since(
+        &self,
+        tree: &TreeUpdate,
+        last: &TreeUpdate,
+    ) -> Vec<(NodeId, accesskit::Node)> {
+        tree.nodes
+            .iter()
+            .zip(&self.meta)
+            .filter(|((id, node), meta)| {
+                meta.fresh
+                    && self
+                        .rendered_index
+                        .get(id)
+                        .and_then(|&index| last.nodes.get(index))
+                        .is_none_or(|(last_id, last_node)| last_id != id || last_node != node)
+            })
+            .map(|(entry, _)| entry.clone())
+            .collect()
+    }
+
+    /// This frame's tree becomes the one the next frame replays from.
+    fn retire_frame(&mut self, tree: &TreeUpdate) {
+        self.rendered_meta = std::mem::take(&mut self.meta);
+        self.rendered_index.clear();
+        self.rendered_index.extend(
+            tree.nodes
+                .iter()
+                .enumerate()
+                .map(|(index, (id, _))| (*id, index)),
+        );
+        self.rendered_active_descendant = self.active_descendant;
     }
 
     /// Records provenance for a node already pushed this frame. Debug builds only.
@@ -526,6 +731,10 @@ impl A11yNodeBuilder {
             parent.push_child(id);
         }
         self.all_nodes.push((id, node));
+        self.meta.push(EntryMeta {
+            depth: self.ids_stack.len() as u32,
+            fresh: true,
+        });
         true
     }
 
@@ -538,19 +747,24 @@ impl A11yNodeBuilder {
     pub(crate) fn pop(&mut self) {
         debug_assert!(self.ids_stack.len() > 1, "pop would remove the root node");
 
+        let depth = self.ids_stack.len() as u32 - 1;
         if let (Some(id), Some(node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
             self.all_nodes.push((id, node));
+            self.meta.push(EntryMeta { depth, fresh: true });
         }
     }
 
     /// Push the root node to start a new frame.
     fn begin_frame(&mut self, window_title: Option<&SharedString>) {
         self.all_nodes.clear();
+        self.meta.clear();
         self.ids_stack.clear();
         self.nodes_stack.clear();
         self.seen_ids.clear();
         #[cfg(debug_assertions)]
-        self.node_info.clear();
+        {
+            self.rendered_node_info = std::mem::take(&mut self.node_info);
+        }
         let mut root_node = accesskit::Node::new(accesskit::Role::Window);
         if let Some(title) = window_title {
             root_node.set_label(title.to_string());
@@ -629,8 +843,10 @@ impl A11yNodeBuilder {
 
         // Pop remaining nodes (should just be the root).
         while !self.ids_stack.is_empty() {
+            let depth = self.ids_stack.len() as u32 - 1;
             if let (Some(id), Some(node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
                 self.all_nodes.push((id, node));
+                self.meta.push(EntryMeta { depth, fresh: true });
             }
         }
 

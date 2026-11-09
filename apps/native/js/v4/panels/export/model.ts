@@ -559,6 +559,7 @@ export class ExportModel {
     if (this.current.run.phase === "idle") {
       this.open = false;
       this.changed();
+      await this.command("export.dismiss");
       return;
     }
     if (
@@ -574,6 +575,7 @@ export class ExportModel {
     this.accept((await this.command("export.closeFailure")).value);
     this.open = false;
     this.changed();
+    await this.command("export.dismiss");
   }
   async retry() {
     if (this.current.run.phase !== "failed" || this.busy || this.fault) return;

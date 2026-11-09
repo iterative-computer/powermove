@@ -304,6 +304,7 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
     if moved {
         state.delta_base = Some(name);
         state.latest_pass = Some(pass.snapshot.clone());
+        state.latest_pass_base = Some(pass.base_hash.clone());
     }
     // Always: this capture is merged, so the next launch owes it nothing.
     state.source_stamp = stamp.or(state.source_stamp.take());
@@ -683,4 +684,100 @@ fn unseal(shared: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A folder macOS guards whose originals weren't brought in: never asked
+/// (`Pending`, a later launch found it), skipped, unanswered or refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingFolder {
+    /// Resolved through symlinks, as the persisted outcomes are keyed.
+    pub path: PathBuf,
+    /// The name Finder shows.
+    pub name: String,
+    /// Originals there that are offline because of it.
+    pub files: usize,
+    pub outcome: crate::source_access::Outcome,
+}
+
+/// Guarded folders holding originals the last media pass didn't reach, with
+/// how many each holds. Reads only metadata: no guarded file is opened.
+pub fn waiting_folders(config: &Config) -> Result<Vec<WaitingFolder>> {
+    use crate::source_access::{Outcome as Folder, default_roots, resolve};
+    let (_, native) = validate(config)?;
+    if !native.join("migration.json").is_file() {
+        return Ok(vec![]);
+    }
+    let state: State = disk::json(&native.join("migration.json"))?;
+    let pass = crate::report::latest_pass(&native, &state)?;
+    let unreached: BTreeSet<PathBuf> = pass
+        .as_ref()
+        .and_then(|pass| pass["closure"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|e| e["status"] == "not-reached")
+        .filter_map(|e| e["reference"]["sourcePath"].as_str())
+        .map(|p| resolve(Path::new(p)))
+        .collect();
+    let names: Vec<(PathBuf, String)> = default_roots()
+        .into_iter()
+        .map(|(root, name)| (resolve(&root), name))
+        .collect();
+    Ok(state
+        .folder_outcomes
+        .iter()
+        .filter(|(_, outcome)| **outcome != Folder::Granted)
+        .filter_map(|(root, outcome)| {
+            let files = unreached.iter().filter(|p| p.starts_with(root)).count();
+            (files > 0).then(|| WaitingFolder {
+                path: root.clone(),
+                name: names
+                    .iter()
+                    .find(|(r, _)| r == root)
+                    .map(|(_, name)| name.clone())
+                    .or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| root.to_string_lossy().into_owned()),
+                files,
+                outcome: *outcome,
+            })
+        })
+        .collect())
+}
+
+/// The person read why and chose Allow Access for `folders` (Settings ›
+/// Media): each is opened in the foreground, which shows macOS's prompt,
+/// and the media pass runs again over the current base so originals there
+/// come in. Other folders keep their answers. Runs with the library open.
+pub fn allow_folders(
+    config: &Config,
+    folders: &[PathBuf],
+    mut hook: impl FnMut(Event) -> Result<()>,
+) -> Result<Outcome> {
+    use crate::source_access::{Choice, Outcome as Folder, outcomes, remember, resolve};
+    let (source, native) = validate(config)?;
+    let mut state = load_state(&native, &source)?;
+    let _lock = lease(&native)?;
+    for folder in folders {
+        let root = resolve(folder);
+        if state.folder_outcomes.get(&root) != Some(&Folder::Granted) {
+            state.folder_outcomes.insert(root, Folder::Allowed);
+        }
+    }
+    publish(&native, &state)?;
+    let _scope = crate::source_access::ensure(Choice::Allow);
+    remember(&state.folder_outcomes);
+    let base = base_root(&native, &state);
+    let cp = Checkpoint::load(&base)?;
+    let batches = read_batches(&cp, &base)?;
+    // A fresh availability in memory: the base's own stays as it was captured.
+    let closure = closure::inventory(&cp, &base, &batches, &mut |_, _| Ok(()))?;
+    state.folder_outcomes.extend(outcomes());
+    publish(&native, &state)?;
+    hook(Event::Started(Step::Media))?;
+    let pass = media(&native, &base, &batches, &closure, &mut hook)?;
+    state.folder_outcomes.extend(outcomes());
+    state.latest_pass = Some(pass.snapshot.clone());
+    state.latest_pass_base = Some(pass.base_hash.clone());
+    publish(&native, &state)?;
+    hook(Event::Complete)?;
+    Ok(summary(&state, &pass))
 }

@@ -87,3 +87,39 @@ fn fill(q: &mut QueryContext) -> bool {
     }
     true
 }
+
+/// The faces the engine lays out the project's text with, for the compat
+/// page: `(family, weight, italic)` resolved as a text layer resolves it (the
+/// family, else `system-ui`, else the standard font) and served under the
+/// family's own name, so a hidden element an extension measures matches what
+/// the engine draws. Off main only: it waits on the registry.
+pub fn page_faces(wanted: &[(String, u16, bool)]) -> Vec<pm_compat_host::PageFace> {
+    use pm_text::font::{FontDesc, FontResolver};
+    let Some(fonts) = FONTS.get() else {
+        return vec![];
+    };
+    let mut resolver = BrokerResolver::new(fonts.broker.clone(), fonts.health.clone());
+    wanted
+        .iter()
+        .filter_map(|(family, weight, italic)| {
+            let desc = FontDesc {
+                weight: f32::from(*weight),
+                italic: *italic,
+                size: 16.,
+            };
+            let id = resolver
+                .family(family, &desc)
+                .or_else(|| resolver.family("system-ui", &desc))
+                .or_else(|| resolver.standard(&desc))?;
+            let face = resolver.face(id);
+
+            let bytes = pm_text::subset::whole_face(face.data.as_slice(), face.index).ok()?;
+            Some(pm_compat_host::PageFace {
+                family: family.clone(),
+                weight: *weight,
+                italic: *italic,
+                bytes: bytes.into(),
+            })
+        })
+        .collect()
+}

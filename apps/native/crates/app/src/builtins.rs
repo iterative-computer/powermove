@@ -49,6 +49,9 @@ pub struct Host {
     media_probe_serial: u64,
     updating: bool,
     again: bool,
+    /// The status line asked for the missing files; the next update hands it
+    /// to the panels' workers (never their locks on the main thread).
+    pub(crate) show_missing: bool,
     /// The application Agent panel's runs while a project is open.
     agent_carry: Option<pm_builtins::AgentCarry>,
 }
@@ -408,6 +411,7 @@ impl Controller {
         let facts = self.facts();
         let originals = self.media.originals.clone();
         let observed = self.rendition_runtime();
+        let show_missing = std::mem::take(&mut self.builtins.show_missing);
         self.builtins.updating = true;
         let check = runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -416,6 +420,9 @@ impl Controller {
                 .spawn(async move {
                     runtime.update_facts(facts);
                     runtime.update_media(originals, observed);
+                    if show_missing {
+                        runtime.show_missing_media();
+                    }
                     runtime.publish()
                 })
                 .await;
@@ -679,6 +686,10 @@ impl Controller {
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.start_builtins(cx);
+        if id == "settings" {
+            // Settings › Media shows the protected folders as they are now.
+            self.refresh_waiting_folders(cx);
+        }
         if self.builtins.opening_windows.contains(id) {
             return;
         }
@@ -724,6 +735,9 @@ impl Controller {
         .into();
         let id = id.to_owned();
         let popover = (id == "agent").then(|| self.host.borrow().tokens.clone());
+        // Export is a sheet on the window that asked for it; the Agent popover
+        // sits above it as its child window (P-CHILD).
+        let parent = (kind != WindowKind::Normal).then(|| window.window_handle());
         // Opening GPUI renders the new root synchronously. Do it after this
         // Controller update so the window can acquire its published panel safely.
         cx.spawn(async move |this, cx| {
@@ -749,6 +763,7 @@ impl Controller {
                 return;
             }
             let mut options = WindowOptions::new().kind(kind);
+            options.parent = parent;
             if popover.is_some() {
                 // Clear GPUI content over the popover material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
@@ -788,6 +803,13 @@ impl Controller {
             });
         })
         .detach();
+    }
+    /// The Export sheet ends (Cancel, or the export finished or was cancelled);
+    /// a failure keeps it, showing why. A sheet has no close button.
+    pub(crate) fn close_export_sheet(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.builtins.windows.remove("export") {
+            let _ = handle.update(cx, |_, w, _| w.remove_window());
+        }
     }
     pub fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(p) = &self.published else {
@@ -936,11 +958,16 @@ impl Controller {
                         job.cancel.store(true, std::sync::atomic::Ordering::Release);
                     } else {
                         let _ = runtime.observe_export(json!({"phase":"cancelled"}));
+                        self.close_export_sheet(cx);
                     }
                     Ok(Value::Null)
                 }
                 "export.reveal" => {
                     self.show_builtin("export", window, cx);
+                    Ok(Value::Null)
+                }
+                "export.dismiss" => {
+                    self.close_export_sheet(cx);
                     Ok(Value::Null)
                 }
                 "activatePanel" => {
@@ -1015,11 +1042,32 @@ impl Controller {
                     self.show_builtin("agent", window, cx);
                     Ok(Value::Null)
                 }
+                "agent.visual" => {
+                    let input = &request.input;
+                    let dark = self.host.borrow().tokens.scheme == pm_design::Scheme::Dark;
+                    let document = pm_agents::visual::document(
+                        input["html"].as_str().unwrap_or_default(),
+                        dark,
+                    );
+                    let parent = crate::platform::ns_window(window)
+                        .unwrap_or_else(|| self.host.borrow().window.clone());
+                    let viewer = pm_compat_host::visual::show(
+                        Some(&parent),
+                        input["id"].as_str().unwrap_or_default(),
+                        input["title"].as_str().unwrap_or("Visualization"),
+                        &document,
+                        input["height"].as_f64().unwrap_or(360.),
+                    );
+                    // An ordinary window: forward only while Powermove is
+                    // active, otherwise behind the other apps (P-CHILD).
+                    gpui_macos::child_window::present(&viewer, true);
+                    Ok(Value::Null)
+                }
                 "agent.close" => {
                     if let Some(handle) = self.builtins.windows.remove("agent") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
                     }
-                    self.host.borrow().window.makeKeyAndOrderFront(None);
+                    gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
                     Ok(Value::Null)
                 }
                 "settings.present" => {
@@ -1030,7 +1078,7 @@ impl Controller {
                     if let Some(handle) = self.builtins.windows.remove("settings") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
                     }
-                    self.host.borrow().window.makeKeyAndOrderFront(None);
+                    gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
                     Ok(Value::Null)
                 }
                 "settings.title" => {

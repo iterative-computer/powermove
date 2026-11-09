@@ -76,6 +76,8 @@ pub struct NativeHost {
     text: Mutex<Option<CanvasText>>,
     frames: Mutex<Option<crate::FrameRenderer>>,
     rasters: Mutex<Option<crate::RasterHooks>>,
+    /// [`crate::code_identity`] of the records this realm runs (0: unknown).
+    code: std::sync::atomic::AtomicU64,
     /// The capture (`renderFrameTo`, `PM.Export.snapshot`) the realm waits for.
     capture: Mutex<Option<Capture>>,
     /// While a capture runs, override asks for this realm come here: the
@@ -178,6 +180,7 @@ impl NativeHost {
             text: Mutex::new(None),
             frames: Mutex::new(None),
             rasters: Mutex::new(None),
+            code: std::sync::atomic::AtomicU64::new(0),
             capture: Mutex::new(None),
             nested: Mutex::new(None),
         }
@@ -195,6 +198,11 @@ impl NativeHost {
             None => Err(ask),
         }
     }
+    /// While the realm waits for a capture: the document and revision it is at.
+    pub(crate) fn capturing_at(&self) -> Option<(u64, u64)> {
+        self.nested.lock().unwrap().as_ref()?;
+        self.kernel.try_lock().ok()?.sent_revision()
+    }
     fn end_capture(&self) {
         *self.nested.lock().unwrap() = None;
         if let Some(capture) = self.capture.lock().unwrap().take() {
@@ -205,6 +213,14 @@ impl NativeHost {
     }
     pub fn set_rasters(&self, hooks: Option<crate::RasterHooks>) {
         *self.rasters.lock().unwrap() = hooks;
+    }
+    /// The records this realm boots with or updates to, before it evaluates
+    /// them: what its `producing` calls report as the wrappers' code.
+    pub fn set_code(&self, records: &Value) {
+        self.code.store(
+            crate::code_identity(records),
+            std::sync::atomic::Ordering::Release,
+        );
     }
     /// A recorder canvas holding straight RGBA8 pixels, as a surface id.
     fn canvas_of(&self, width: u32, height: u32, rgba: Vec<u8>) -> Result<String> {
@@ -254,7 +270,6 @@ impl NativeHost {
             seconds: number(2, self.transport.time()),
             scale: number(1, 1.).max(1e-6),
             crop,
-            job: spec["job"].as_str().map(str::to_owned),
         })
         .map_err(Error::Host)?;
         let Some(reply) = reply else {
@@ -298,6 +313,7 @@ impl NativeHost {
                 _ if item["native"] == true => crate::RasterAnswer::Native,
                 _ if item["hidden"] == true => crate::RasterAnswer::Hidden,
                 _ if item["retry"] == true => crate::RasterAnswer::Retry,
+                _ if item["moved"] == true => crate::RasterAnswer::Moved,
                 _ if item["error"].is_string() => {
                     crate::RasterAnswer::Failed(item["error"].as_str().unwrap_or_default().into())
                 }
@@ -385,6 +401,7 @@ impl NativeHost {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopped = stop.clone();
         *self.nested.lock().unwrap() = Some(tx.clone());
+        let published = self.kernel.lock().unwrap().frozen_publication();
         std::thread::Builder::new()
             .name("pm-compat-capture".into())
             .spawn(move || {
@@ -395,6 +412,7 @@ impl NativeHost {
                     height,
                     motion_blur,
                     stop: &stop,
+                    published,
                 });
                 let _ = tx.send(CaptureEvent::Frame(png));
             })
@@ -1472,11 +1490,16 @@ impl EngineProxy for NativeHost {
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "compat.producing" => {
                 if let Some(hooks) = self.rasters.lock().unwrap().clone() {
-                    (hooks.producing)(input["on"] == true, input["epoch"].as_u64().unwrap_or(0));
+                    (hooks.producing)(
+                        input["on"] == true,
+                        input["epoch"].as_u64().unwrap_or(0),
+                        self.code.load(std::sync::atomic::Ordering::Acquire),
+                    );
                 }
                 return Ok(Value::Null);
             }
             "compat.answers" => return self.raster_answers(input),
+            "fonts.families" => return Ok(json!(crate::font_families())),
             "extension.health" => {
                 self.events
                     .health(input["id"].as_str().unwrap_or_default(), &input["health"]);
@@ -1610,12 +1633,23 @@ impl KernelHooks for NativeHost {
 }
 impl HostProxy for NativeHost {
     /// Local and trusted extensions hold no network restriction, as in the shipped app.
+    /// An export's realm (a delivery) reads but never changes anything outside
+    /// it: the window's realm already did whatever its extensions send, and an
+    /// export must not do it again for every frame.
     fn fetch(
         &self,
         _: &Generation,
         request: FetchRequest,
         cancel: Cancellation,
     ) -> Result<Box<dyn HostRequest>> {
+        if self.kernel.lock().unwrap().frozen_publication().is_some()
+            && !matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD")
+        {
+            return Err(Error::Host(format!(
+                "An export's extensions only read the network ({} refused while exporting)",
+                request.method
+            )));
+        }
         crate::net::fetch(request, crate::net::Reach::Open, cancel)
     }
     fn console(&self, _: &Generation, _: &str, _: &str) {}

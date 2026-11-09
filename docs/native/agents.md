@@ -64,6 +64,11 @@ clicked the rendered Settings button. No real provider has
 run: `live-provider-check` is unexecuted, and the Claude model request is unproven
 against the real binary.
 
+Subagents and watches (`builtins/src/agent_tasks.rs`) follow main's
+orchestrator over `ProviderRuns`; see p0-decisions (Agents lane). Proof:
+`agent_tests.rs` (`a_delegated_task_runs_…`, `wait_mode_…`,
+`a_watched_thread_run_…`, `stopping_a_run_…`) and `mcp/tests/agent_run.rs`.
+
 Open:
 
 - Provider `model` efforts aren't per model; the pop-up shows the provider's union.

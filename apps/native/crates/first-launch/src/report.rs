@@ -36,6 +36,31 @@ fn sign_in_name(id: &str) -> String {
             .unwrap_or_else(|| "Extension".into())
     }
 }
+/// The media pass that describes the library now: the latest snapshot's, and
+/// of its passes the one with the recorded base (older states recorded none,
+/// and had one pass per snapshot).
+pub(crate) fn latest_pass(native: &Path, state: &State) -> Result<Option<serde_json::Value>> {
+    let manifest = native.join("Media Store/migration.json");
+    if !manifest.is_file() {
+        return Ok(None);
+    }
+    let passes: serde_json::Value = disk::json(&manifest)?;
+    Ok(passes
+        .get("passes")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|passes| {
+            passes
+                .values()
+                .find(|p| {
+                    p["snapshot"].as_str() == state.latest_pass.as_deref()
+                        && state
+                            .latest_pass_base
+                            .as_deref()
+                            .is_none_or(|base| p["baseHash"].as_str() == Some(base))
+                })
+                .cloned()
+        }))
+}
 pub fn load(native: &Path) -> Result<Report> {
     let state: State = disk::json(&native.join("migration.json"))?;
     let library = LibraryStore::open(native);
@@ -67,16 +92,7 @@ pub fn load(native: &Path) -> Result<Report> {
             ReportKind::MissingProjects,
         );
     }
-    let passes: serde_json::Value = disk::json(&native.join("Media Store/migration.json"))?;
-    if let Some(pass) = passes
-        .get("passes")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|passes| {
-            passes
-                .values()
-                .find(|p| p["snapshot"].as_str() == state.latest_pass.as_deref())
-        })
-    {
+    if let Some(pass) = latest_pass(native, &state)? {
         if let Some(owners) = pass.get("blockedOwners").and_then(|v| v.as_array()) {
             for owner in owners.iter().filter_map(serde_json::Value::as_str) {
                 let name = state

@@ -55,6 +55,9 @@ pub(crate) struct Models {
     /// Moves with every new observation, so the Project panel asks for rows
     /// again when readiness lands without a document revision.
     pub media_sequence: u64,
+    /// The status line asked the Project panel to list only missing files;
+    /// applied on the panel's next request.
+    pub show_missing: bool,
     pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
     pub export_probe_stamp: String,
     timeline_job: Option<TimelineJob>,
@@ -118,6 +121,7 @@ impl Models {
             project_reply: None,
             media_runtime: Default::default(),
             media_sequence: 0,
+            show_missing: false,
             originals: Default::default(),
             export_probe_stamp: String::new(),
         })
@@ -468,6 +472,17 @@ impl Backend {
         self.native
             .project
             .refresh(&catalog, &self.native.media_runtime);
+        if std::mem::take(&mut self.native.show_missing) {
+            // Project-wide: from the top folder, every missing file, flat.
+            let filter = pm_panel_media::Filter {
+                missing_only: true,
+                ..Default::default()
+            };
+            self.native
+                .project
+                .apply_host_filter(&catalog, &self.native.media_runtime, filter)
+                .map_err(|e| format!("{e:?}"))?;
+        }
         let mut reply = self
             .native
             .project
@@ -1164,6 +1179,23 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "openVisual" {
+                        // A saved reply is checked again before it's shown (main's
+                        // readVisualReply); the window opens its own viewer.
+                        let id = action["id"].as_str().unwrap_or_default();
+                        let reply = state
+                            .panel
+                            .visual_reply(&thread, id)
+                            .ok()
+                            .and_then(|v| pm_agents::visual::read(&v))
+                            .ok_or("This visualization can't be shown.")?;
+                        drop(state);
+                        self.native.platform.push((
+                            "agent.visual".into(),
+                            json!({"id":id,"title":reply.title,"html":reply.html,"height":reply.height}),
+                        ));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     crate::agent_host::admit(action, link.available(provider), live)?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
@@ -1289,7 +1321,8 @@ impl Backend {
                 self.native.export["run"] = json!({"phase":"idle"});
                 self.command_reply(command)?
             }
-            "export.reveal" => {
+            // The sheet's window shows (reveal) or ends (dismiss) on the host.
+            "export.reveal" | "export.dismiss" => {
                 self.native.platform.push((command.into(), args.clone()));
                 self.export_snapshot()?
             }
