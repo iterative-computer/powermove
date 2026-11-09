@@ -342,9 +342,9 @@ def build(out, samples):
         bpy.ops.mesh.primitive_uv_sphere_add(segments=48, ring_count=24, radius=fog['distance']*scale,
                                            location=vector(data['camera']['position'])*scale)
         obj = bpy.context.object
-        obj.name = 'finite atmosphere (mapping approximation)'
+        obj.name = 'finite camera-centered atmosphere'
         obj.data.materials.append(fog_material('atmosphere', fog['density'], fog['color'], fog['anisotropy'], fog))
-        warnings.append('Global fog: camera-centered finite sphere approximates Studio per-segment distance cap')
+        warnings.append('Global fog: shared camera-centered sphere; Cycles tessellation approximates the analytic boundary')
     for i, volume in enumerate(data['world']['volumes']):
         if volume['shape'] == 'box':
             bpy.ops.mesh.primitive_cube_add(size=2, location=vector(volume['center'])*scale)

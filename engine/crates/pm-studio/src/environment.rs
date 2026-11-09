@@ -329,7 +329,9 @@ pub struct Atmosphere {
     pub anisotropy: f32,
     pub base_height: f32,
     pub height_falloff: f32,
-    /// Finite atmosphere distance, in scene units, also used for miss rays.
+    /// Radius of the finite camera-centered global atmosphere, in scene units.
+    /// All continuation and shadow rays use this same boundary. Local volumes
+    /// retain their own bounds and are not truncated by this radius.
     pub distance: f32,
 }
 impl Default for Atmosphere {
