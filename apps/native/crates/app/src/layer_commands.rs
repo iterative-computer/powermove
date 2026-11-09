@@ -249,7 +249,7 @@ pub const PLANNED: [&str; 24] = [
     "splitTextLines",
 ];
 /// Menu rows with no working path yet. They stay visible and disabled.
-pub const UNAVAILABLE: [&str; 3] = ["help", "importSequence", "importFolder"];
+pub const UNAVAILABLE: [&str; 2] = ["help", "importFolder"];
 fn selection_plan(ids: Vec<String>) -> Plan {
     Plan {
         label: "Select".into(),
@@ -664,7 +664,8 @@ const SELECTION: [&str; 16] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 18] = [
+const DOCUMENT: [&str; 19] = [
+    "importSequence",
     "delete",
     "copyLayers",
     "cutLayers",

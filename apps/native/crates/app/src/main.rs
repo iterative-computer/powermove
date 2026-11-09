@@ -26,6 +26,7 @@ mod mcp;
 mod mcp_services;
 mod media;
 mod media_import;
+mod media_sequence;
 mod media_refresh;
 mod migration_report;
 mod notifications;

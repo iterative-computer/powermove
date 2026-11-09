@@ -1516,11 +1516,7 @@ impl Controller {
             }
             "import" => self.pick_media(None, true, cx),
             "importFolder" => self.pick_media_folder(None, cx),
-            // The engine draws no sequence yet; say so rather than do nothing.
-            "importSequence" => {
-                self.message = "Image sequences can't be imported yet".into();
-                cx.notify();
-            }
+            "importSequence" => self.pick_sequence(cx),
             "open" => {
                 let rx = platform::paths(&self.host.borrow().window, false);
                 cx.spawn(async move |this, cx| {

@@ -10,7 +10,10 @@ use pm_model::{Map, Value};
 use serde_json::json;
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// `shared/media-formats.ts`. Formats the engine decodes natively need no proxy.
@@ -179,6 +182,96 @@ pub struct ImportRequest {
     pub models: bool,
     /// The layer definition an extension asked its asset to place as.
     pub layer_definition: Option<String>,
+    /// Import Image Sequence: `paths` are the frames, encoded into one clip.
+    pub sequence: Option<SequenceImport>,
+}
+/// File ▸ Import Image Sequence…'s choice, with the line its progress reads from.
+#[derive(Debug, Default)]
+pub struct SequenceImport {
+    pub fps: f64,
+    pub progress: Arc<Mutex<String>>,
+}
+/// `chooseSequence`'s ordering, in today's words: frame-number order, gaps
+/// skipped (the available images play consecutively).
+pub fn order_sequence(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    use pm_media::image::sequence::ImageSequence;
+    if paths.len() < 2 {
+        return Err("Choose at least 2 numbered image frames".into());
+    }
+    match ImageSequence::from_paths(paths) {
+        Ok(sequence) => Ok(sequence.frames.into_iter().map(|(_, path)| path).collect()),
+        Err(error) => {
+            let error = error.to_string();
+            Err(match error.split("duplicate frame number ").nth(1) {
+                Some(number) => format!("Duplicate frame number {number}"),
+                None => "Choose images with the same name and extension, ending in frame \
+                    numbers (for example frame_0001.png)"
+                    .into(),
+            })
+        }
+    }
+}
+/// `<prefix> sequence.webm`, the clip's name in the Project panel.
+pub fn sequence_name(first: &Path) -> String {
+    let name = first
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let stem = name
+        .rsplit_once('.')
+        .map_or(name.as_str(), |(stem, _)| stem);
+    let prefix = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+    let prefix = prefix.trim_end_matches(['-', '_', '.', ' ']);
+    format!(
+        "{} sequence.webm",
+        if prefix.is_empty() { "Image" } else { prefix }
+    )
+}
+/// The frames encoded into a scratch WebM (removed when dropped), and the
+/// asset facts today's importer adds to it.
+struct EncodedSequence {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    fps: f64,
+    frames: u64,
+}
+fn encode_sequence(
+    paths: &[PathBuf],
+    sequence: &SequenceImport,
+    cancel: &AtomicBool,
+) -> Result<EncodedSequence, String> {
+    use pm_export::stills::{Stage, encode_still_sequence};
+    let frames = order_sequence(paths)?;
+    let dir = tempfile::Builder::new()
+        .prefix("powermove-image-sequence-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let path = dir.path().join(sequence_name(&frames[0]));
+    let say = |line: String| {
+        if let Ok(mut progress) = sequence.progress.lock() {
+            *progress = line;
+        }
+    };
+    let encoded = encode_still_sequence(&frames, sequence.fps, &path, cancel, &mut |stage| {
+        say(match stage {
+            Stage::Checking { done, total } => format!("Checking frames · {done} of {total}"),
+            Stage::Creating { done, total } => {
+                format!("Creating sequence · {done} of {total} frames")
+            }
+        })
+    })
+    .map_err(|error| match error {
+        pm_export::Error::InvalidFrame(why) | pm_export::Error::InvalidSpec(why) => why,
+        pm_export::Error::Io(why) => why,
+        pm_export::Error::Cancelled => "Import cancelled".into(),
+        other => format!("Could not create the image sequence: {other}"),
+    })?;
+    say("Importing image sequence…".into());
+    Ok(EncodedSequence {
+        _dir: dir,
+        path,
+        fps: sequence.fps,
+        frames: encoded.frames,
+    })
 }
 /// A 3D model's type, for imports that take models.
 fn model_mime(path: &Path) -> Option<&'static str> {
@@ -241,6 +334,21 @@ impl Builtins {
         let archive = Archive::open(profile).map_err(|e| e.to_string())?;
         let mut outcome = Outcome::default();
         let mut items = vec![];
+        let encoded = match &request.sequence {
+            Some(sequence) => match encode_sequence(&request.paths, sequence, cancel) {
+                Ok(encoded) => Some(encoded),
+                Err(_) if cancel.load(Ordering::Acquire) => {
+                    outcome.cancelled = true;
+                    return Ok(outcome);
+                }
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        let paths = match &encoded {
+            Some(encoded) => vec![encoded.path.clone()],
+            None => expand(request.paths),
+        };
         let previous = match &request.replace {
             Some(id) => {
                 let published = self.broker.kernel.published(&project).ok_or(SWITCHED)?;
@@ -252,7 +360,7 @@ impl Builtins {
             }
             None => None,
         };
-        for path in expand(request.paths) {
+        for path in paths {
             if cancel.load(Ordering::Acquire) {
                 outcome.cancelled = true;
                 break;
@@ -281,6 +389,14 @@ impl Builtins {
                 };
                 if let Some(definition) = &request.layer_definition {
                     asset["layerDefinition"] = json!(definition);
+                }
+                if let Some(encoded) = &encoded {
+                    // Generated in scratch: no source file to relink to.
+                    if let Some(asset) = asset.as_object_mut() {
+                        asset.remove("sourcePath");
+                    }
+                    asset["fps"] = json!(encoded.fps);
+                    asset["imageSequence"] = json!({"fps": encoded.fps, "frames": encoded.frames});
                 }
                 crate::data::model(&asset)
             })
@@ -593,6 +709,100 @@ mod tests {
         assert_eq!(
             published.selection.primary(),
             layer.get("id").and_then(Value::as_str)
+        );
+    }
+
+    #[test]
+    fn an_image_sequence_becomes_one_lossless_webm_clip_skipping_missing_numbers() {
+        let f = fixture();
+        // Frames 1, 2, 3, 5 (4 missing), chosen out of order with mixed padding.
+        let frames: Vec<_> = ["shot_005.png", "shot_1.png", "shot_003.png", "shot_02.png"]
+            .iter()
+            .map(|name| write(&f.root, name, PNG))
+            .collect();
+        let progress = Arc::new(Mutex::new(String::new()));
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: frames.clone(),
+                    place_at: Some(1.),
+                    sequence: Some(SequenceImport {
+                        fps: 12.,
+                        progress: progress.clone(),
+                    }),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["shot sequence.webm"], "{outcome:?}");
+        assert_eq!(*progress.lock().unwrap(), "Importing image sequence…");
+        for frame in &frames {
+            std::fs::remove_file(frame).unwrap();
+        }
+        let published = f.actor.handle().published("p").unwrap();
+        let root = published.snapshot.root().unwrap().to_value();
+        let ids = pm_kernel::asset_order::keys(&root);
+        assert_eq!(ids.len(), 1);
+        let asset = root.get("assets").unwrap().get(&ids[0]).unwrap();
+        let field = |key: &str| asset.get(key).and_then(Value::as_f64);
+        assert_eq!(asset.get("kind").unwrap().as_str(), Some("video"));
+        assert_eq!(field("w"), Some(2.));
+        assert_eq!(field("fps"), Some(12.));
+        let sequence = asset.get("imageSequence").unwrap();
+        assert_eq!(sequence.get("fps").and_then(Value::as_f64), Some(12.));
+        // Four images, not five numbers: missing numbers are skipped.
+        assert_eq!(sequence.get("frames").and_then(Value::as_f64), Some(4.));
+        assert!((field("dur").unwrap() - 4. / 12.).abs() < 0.01);
+        assert!(asset.get("sourcePath").is_none());
+        let copied = f.root.join("copied.webm");
+        published
+            .media
+            .get(&ids[0])
+            .unwrap()
+            .copy_to(&copied)
+            .unwrap();
+        assert_eq!(&std::fs::read(&copied).unwrap()[..4], b"\x1a\x45\xdf\xa3");
+        let open = published.snapshot.open_comp();
+        let composition =
+            pm_kernel::model::comp_node(published.snapshot.root().unwrap(), open.as_deref())
+                .unwrap()
+                .to_value();
+        let layer = &composition.get("layers").unwrap().as_array().unwrap()[0];
+        assert_eq!(layer.get("type").unwrap().as_str(), Some("video"));
+        assert_eq!(layer.get("from").unwrap().as_f64(), Some(1.));
+    }
+
+    #[test]
+    fn sequence_choices_read_in_todays_words() {
+        let p = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(
+            order_sequence(&p(&["/a/f_10.png", "/a/f_9.png"])).unwrap(),
+            p(&["/a/f_9.png", "/a/f_10.png"])
+        );
+        assert_eq!(
+            order_sequence(&p(&["/a/f_1.png"])).unwrap_err(),
+            "Choose at least 2 numbered image frames"
+        );
+        assert_eq!(
+            order_sequence(&p(&["/a/f_1.png", "/a/f_01.png"])).unwrap_err(),
+            "Duplicate frame number 1"
+        );
+        assert!(
+            order_sequence(&p(&["/a/f_1.png", "/a/g_2.png"]))
+                .unwrap_err()
+                .starts_with("Choose images with the same name and extension")
+        );
+        assert_eq!(
+            sequence_name(Path::new("/a/render_v2-0001.png")),
+            "render_v2 sequence.webm"
+        );
+        assert_eq!(
+            sequence_name(Path::new("/a/0001.png")),
+            "Image sequence.webm"
         );
     }
 
