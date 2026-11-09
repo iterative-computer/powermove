@@ -572,6 +572,17 @@ impl Controller {
                     self.host.borrow().send_command(name, args);
                 }
             }
+            // The `viewer` service's writable showControls: the viewer's layer controls.
+            Some("viewerControls") => {
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    let shown = request["shown"] == true;
+                    gizmos.update(cx, |g, cx| {
+                        if g.controls() != shown {
+                            g.toggle_controls(cx)
+                        }
+                    });
+                }
+            }
             // The `viewer` service's setZoom: the viewer leaves fit at that zoom
             // (as far as the display can show it) and reports where it landed.
             Some("viewerZoom") => {
@@ -592,6 +603,31 @@ impl Controller {
                 self.extensions.stage_sent = None;
                 self.sync_viewer_stage();
                 cx.notify();
+            }
+            // The `timeline` service's writable view and its actions.
+            Some("timeline") => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return;
+                };
+                let time = self.time();
+                timeline.update(cx, |t, cx| {
+                    let number = |key: &str| request[key].as_f64();
+                    if ["pps", "scrollT", "scrollY"].iter().any(|k| number(k).is_some()) {
+                        t.set_view(number("pps"), number("scrollT"), number("scrollY"), cx);
+                    }
+                    if request["graph"].is_boolean() {
+                        t.command("graph", time, None, false, cx);
+                    }
+                    if request["frameView"] == true {
+                        t.fit_time(cx);
+                    }
+                    if let Some(layer) = request["reveal"]["layer"].as_str() {
+                        let keys = request["reveal"]["keys"].as_array().map_or(vec![], |keys| {
+                            keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect()
+                        });
+                        t.reveal(layer.to_owned(), keys, cx);
+                    }
+                });
             }
             Some("fonts") => self.ensure_page_fonts(&request["faces"], cx),
             Some("download") => {

@@ -778,6 +778,13 @@ impl KernelAdapter {
                 );
                 Ok(hit.map_or(Value::Null, |hit| json!(hit.layer_id)))
             }
+            // The inspector's `@param` annotations, as the kernel parses them.
+            Some("shader.parameters") => {
+                let code = model(&args["code"]).to_js_string();
+                Ok(wire(&pm_model::Value::Array(
+                    pm_kernel::commands::shader::parameters(&code),
+                )))
+            }
             method => Err(Error::Host(format!(
                 "{} is not attached",
                 method.unwrap_or("query")

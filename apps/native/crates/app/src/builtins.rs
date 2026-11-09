@@ -1254,6 +1254,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             other => v.message = format!("Not available yet: {other:?}"),
         });
     }
+    fn view_facts(&self, facts: serde_json::Value, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(host) = &controller.read(cx).extensions.host
+        {
+            host.shell_state(serde_json::json!({ "timeline": facts }));
+        }
+    }
     fn report(&self, message: String, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             v.message = message;

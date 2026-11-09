@@ -38,6 +38,9 @@ pub trait Delegate: 'static {
     /// Asks extension clip painters (`timeline.paint`) for decorations of
     /// `clips`; `done` gets `{clipId: shapes}` merged, on the main thread.
     fn paint_clips(&self, _clips: serde_json::Value, _done: PaintDone, _cx: &mut App) {}
+    /// What v1–3's `timeline` service reports moved: view, mode and the
+    /// visible rows' layers in window points.
+    fn view_facts(&self, _facts: serde_json::Value, _cx: &mut App) {}
     /// Moves when a clip painter arrives or leaves.
     fn painters_revision(&self, _cx: &App) -> u64 {
         0
@@ -110,6 +113,10 @@ enum Job {
         time: f64,
     },
     Persist(Viewed),
+    Reveal {
+        layer: String,
+        keys: Vec<String>,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Viewed {
@@ -189,6 +196,8 @@ pub struct TimelineSurface {
     painted: Option<(u64, String)>,
     painting: bool,
     late: Option<std::time::Instant>,
+    /// The service facts last told to the delegate.
+    told: Option<serde_json::Value>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -238,6 +247,7 @@ impl TimelineSurface {
             decorations: Default::default(),
             painted: None,
             painting: false,
+            told: None,
             late: None,
         };
         this.restore_view();
@@ -551,8 +561,79 @@ impl TimelineSurface {
             if let Some(frame) = self.frame.clone() {
                 self.ask_painters(&frame, cx);
             }
+            self.tell_service(cx);
         }
         self.frame.clone()
+    }
+    /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
+    /// `keySelectionActive`, and each visible row's layer with its top and
+    /// bottom in window points (`layerAtPoint`).
+    fn service_facts(&self) -> serde_json::Value {
+        use pm_panel_timeline::{RowId, v4::parse_row};
+        let b = self.bounds;
+        let (x, y) = (f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64);
+        let (w, h) = (f32::from(b.size.width) as f64, f32::from(b.size.height) as f64);
+        let ruler = self.tokens.metrics.ruler as f64;
+        let mut rows = vec![];
+        if let (Some(scene), Some((start, end))) = (&self.scene, self.visible_rows()) {
+            for i in start..end {
+                let Some((row, top, bottom)) = scene.span(i) else {
+                    break;
+                };
+                let layer = match parse_row(&row.id) {
+                    Ok(RowId::Layer(id)) => id,
+                    Ok(RowId::Property { layer_id, .. }) => layer_id,
+                    Err(_) => continue,
+                };
+                let at = |v: f64| ((y + ruler + v - self.view.scroll_y) * 100.).round() / 100.;
+                rows.push(serde_json::json!([layer, at(top), at(bottom)]));
+            }
+        }
+        serde_json::json!({
+            "graph": self.model.graph_display != pm_panel_timeline::GraphDisplay::DopeSheet,
+            "pps": self.view.pps,
+            "scrollT": self.view.scroll_time,
+            "scrollY": self.view.scroll_y,
+            "keySelectionActive": self.model.key_selection_active,
+            "rect": [x, y, w, h],
+            "ruler": ruler,
+            "column": self.view.layer_column,
+            "rows": rows,
+        })
+    }
+    fn tell_service(&mut self, cx: &mut Context<Self>) {
+        let facts = self.service_facts();
+        if self.told.as_ref() != Some(&facts) {
+            self.told = Some(facts.clone());
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.view_facts(facts, cx));
+        }
+    }
+    /// The service's writable `pps`, `scrollT` and `scrollY`, as main's fields.
+    pub fn set_view(
+        &mut self,
+        pps: Option<f64>,
+        scroll_time: Option<f64>,
+        scroll_y: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pps) = pps.filter(|p| p.is_finite()) {
+            self.view.pps = pps.clamp(PPS.0, PPS.1);
+            self.fitted = true;
+        }
+        if let Some(time) = scroll_time.filter(|t| t.is_finite()) {
+            self.view.scroll_time = time;
+        }
+        if let Some(y) = scroll_y.filter(|y| y.is_finite()) {
+            self.view.scroll_y = y.max(0.);
+            self.clamp_scroll();
+        }
+        self.changed(true, cx);
+    }
+    /// `TimelineService.reveal`: open `layer` and show `keys` too.
+    pub fn reveal(&mut self, layer: String, keys: Vec<String>, cx: &mut Context<Self>) {
+        self.queue.push_back(Job::Reveal { layer, keys });
+        self.pump(cx);
     }
     pub fn time_mapping(&self) -> (f64, f64, f64) {
         self.shown
@@ -1464,6 +1545,14 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 client.publish_view().await.map_err(text)?;
             }
             Ok(effects)
+        }
+        Job::Reveal { layer, keys } => {
+            client
+                .model
+                .reveal_paths(&layer, &keys)
+                .map_err(|e| e.to_string())?;
+            client.publish_view().await.map_err(text)?;
+            Ok(vec![])
         }
         Job::Persist(view) => {
             use pm_kernel::state::{StateOp, StateTransaction};

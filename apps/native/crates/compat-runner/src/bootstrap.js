@@ -617,6 +617,8 @@ globalThis.__compat = {
       // Window points: the viewer's area and the composition frame in it.
       stage: null,
       frame: null,
+      // The native timeline's view and visible rows (`[layerId, top, bottom]`).
+      timeline: null,
     };
     const compat = this;
     const stage = { el: null, inner: null, ov: null, ovUsed: false };
@@ -683,16 +685,20 @@ globalThis.__compat = {
     };
     this.shellState = (state) => {
       const tool = state.tool !== undefined && state.tool !== shell.tool;
-      const placed = ["stage", "frame", "zoom", "pan", "fit"].some(
+      const placed = ["stage", "frame", "zoom", "pan", "fit", "showControls"].some(
         (key) => key in state && JSON.stringify(state[key]) !== JSON.stringify(shell[key]),
       );
       const resized =
         "stage" in state &&
         JSON.stringify(state.stage?.slice(2)) !== JSON.stringify(shell.stage?.slice(2));
+      const timeline =
+        "timeline" in state && JSON.stringify(state.timeline) !== JSON.stringify(shell.timeline);
       Object.assign(shell, state);
       if (placed) placeStage();
       this.realm.task(() => {
         if (tool) this.realm.PM.bus.emit("tool", shell.tool);
+        // As main: scrolling, zooming or revealing redraws the timeline.
+        if (timeline) this.realm.PM.bus.emit("draw:timeline");
         if (!placed) return;
         // As main: a panel size change is a layout; pan and zoom repaint the overlay.
         if (resized) this.realm.PM.bus.emit("layout");
@@ -729,6 +735,112 @@ globalThis.__compat = {
         });
       },
     });
+    // Main's timeline service over the native timeline: its view reads back
+    // at once and the timeline follows; rows come from what it last drew.
+    const lane = () => (shell.timeline ??= {});
+    const timeline = (request) => call("ui.request", { kind: "timeline", ...request });
+    const view = (key, min, max) => ({
+      get: () => lane()[key] ?? (key === "pps" ? 100 : 0),
+      set: (value) => {
+        const number = Number(value);
+        if (!Number.isFinite(number)) return;
+        lane()[key] = Math.min(max, Math.max(min, number));
+        timeline({ [key]: lane()[key] });
+      },
+      enumerable: true,
+    });
+    // timeline.ts edges(): ends of the composition, layers and keyframes.
+    const edges = () => {
+      const PM = this.realm.PM;
+      const round = (v) => Math.round(v * 1e4) / 1e4;
+      const project = PM.proj;
+      const all = new Set([0, project.dur]);
+      for (const layer of project.layers) {
+        all.add(round(layer.from));
+        all.add(round(layer.from + layer.dur));
+        for (const { prop } of PM.allProps(layer))
+          for (const key of prop.kf ?? []) all.add(round(layer.from + key.t));
+      }
+      return [...all].sort((a, b) => a - b);
+    };
+    const timelineService = {
+      get graph() {
+        return !!lane().graph;
+      },
+      set graph(value) {
+        if (!!value === !!lane().graph) return;
+        lane().graph = !!value;
+        timeline({ graph: !!value });
+      },
+      // The native timeline draws in Metal; v4's timeline.paint replaces cv.
+      cv: null,
+      get keySelectionActive() {
+        return !!lane().keySelectionActive;
+      },
+      nextEdge: () => {
+        const now = this.realm.PM.time;
+        return edges().find((t) => t > now + 1e-4) ?? this.realm.PM.proj.dur;
+      },
+      prevEdge: () => {
+        const now = this.realm.PM.time;
+        return [...edges()].reverse().find((t) => t < now - 1e-4) ?? 0;
+      },
+      layerAtPoint: (clientX, clientY) => {
+        const facts = lane();
+        const [x, y, w, h] = facts.rect ?? [0, 0, 0, 0];
+        if (clientX < x || clientX > x + w || clientY < y + (facts.ruler ?? 0) || clientY > y + h)
+          return null;
+        const row = (facts.rows ?? []).find(([, top, bottom]) => clientY >= top && clientY < bottom);
+        return row ? (this.realm.PM.L?.(row[0]) ?? null) : null;
+      },
+      frameView: () => timeline({ frameView: true }),
+      reveal: (layer, keys) => {
+        const id = typeof layer === "string" ? layer : layer?.id;
+        if (id) timeline({ reveal: { layer: id, keys: [...(keys ?? [])].map(String) } });
+      },
+    };
+    Object.defineProperties(timelineService, {
+      pps: view("pps", 4, 4000),
+      scrollT: view("scrollT", -Infinity, Infinity),
+      scrollY: view("scrollY", 0, Infinity),
+    });
+    this.realm.services.register("timeline", timelineService);
+    // Main's inspector service. The native Properties panel and Effect
+    // Controls draw the inspector; v1–3 sections live in their own panel.
+    const notAttached = (name) => () => {
+      throw new PowermoveCompat.HostError(
+        "Unavailable",
+        `inspector.${name}: the effect clipboard belongs to Effect Controls`,
+      );
+    };
+    const syncShaderUniforms = (layer) => {
+      // As main (inspector/shader.ts:39), with the kernel's parser.
+      const PM = this.realm.PM;
+      const content = layer.d ?? (layer.d = {});
+      const definitions = host.query("shader.parameters", { code: String(content.code ?? "") });
+      PM.UIState?.setShaderMeta?.(layer, { udefs: definitions });
+      const uniforms = content.uniforms ?? (content.uniforms = {});
+      for (const definition of definitions)
+        if (!uniforms[definition.name]) uniforms[definition.name] = PM.P(definition.def);
+      for (const name of Object.keys(uniforms))
+        if (!definitions.some((definition) => definition.name === name)) delete uniforms[name];
+    };
+    this.realm.services.register("inspector", {
+      refresh: () => this.panels?.refresh(PowermoveCompat.SECTIONS_PANEL),
+      body: null,
+      syncs: [],
+      // As main: select the layer and bring its text into view to type in.
+      focusText: (layer) => {
+        if (!layer?.id) return;
+        this.realm.PM.selectLayers([layer.id]);
+        call("ui.request", { kind: "panel", id: "inspector", open: true });
+      },
+      copySelectedEffects: notAttached("copySelectedEffects"),
+      clearEffectClipboard: notAttached("clearEffectClipboard"),
+      pasteCopiedEffects: notAttached("pasteCopiedEffects"),
+      syncShaderUniforms,
+    });
+    this.realm.services.register("shaderHooks", { syncShaderUniforms });
     this.realm.services.register("viewer", {
       get pan() {
         return [...shell.pan];
@@ -744,7 +856,23 @@ globalThis.__compat = {
         const project = compat.realm.PM.proj;
         return shell.frame && project?.w ? shell.frame[2] / project.w : shell.zoom;
       },
-      showControls: true,
+      // The viewer's layer controls (View ▸ Layer Controls).
+      get showControls() {
+        return shell.showControls !== false;
+      },
+      set showControls(value) {
+        shell.showControls = !!value;
+        call("ui.request", { kind: "viewerControls", shown: !!value });
+      },
+      // Main's source monitor; the native viewer has none, so nothing shows.
+      preview: {
+        show: () => false,
+        toggle: () => undefined,
+        clear: () => undefined,
+        dispose: () => undefined,
+        activeId: null,
+        playing: false,
+      },
       get stage() {
         return ensureStage();
       },

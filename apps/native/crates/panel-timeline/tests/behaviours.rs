@@ -1066,6 +1066,24 @@ fn reveal_single_shift_toggle_and_double_tap_are_ui_only() {
     assert_eq!(c.model.index.revision, revision);
     assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
 }
+/// v1–3's `TimelineService.reveal`: opens the layer and adds the keys to
+/// what it showed (its animated channels), UI state only.
+#[test]
+fn service_reveal_adds_keys_to_the_animated_channels() {
+    let (_a, mut c) = client();
+    let revision = c.model.index.revision;
+    c.model.reveal_paths("a", &strings(&["rotation"])).unwrap();
+    let shown = &c.model.reveal.layers["a"];
+    assert!(!shown.collapsed);
+    assert_eq!(shown.paths, Some(strings(&["opacity", "position.x", "scale.x", "scale.y", "rotation"])));
+    c.model.reveal_paths("a", &strings(&["rotation"])).unwrap();
+    assert_eq!(
+        c.model.reveal.layers["a"].paths,
+        Some(strings(&["opacity", "position.x", "scale.x", "scale.y", "rotation"]))
+    );
+    assert!(c.model.reveal_paths("missing", &[]).is_err());
+    assert_eq!(c.model.index.revision, revision);
+}
 #[test]
 fn reveal_double_u_includes_schema_reported_modified_properties() {
     let mut m = model(fixture());

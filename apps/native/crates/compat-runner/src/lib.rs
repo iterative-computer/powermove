@@ -992,6 +992,65 @@ mod tests {
             .unwrap();
         assert_eq!(value, json!([true, "box", true, null, "box"]));
     }
+    /// Main's `timeline` service over the native timeline's reported view and
+    /// rows; its edges come from the project as timeline.ts computes them.
+    #[test]
+    fn timeline_service_reads_the_native_view_and_rows() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const t=api.services.get('timeline');
+                api.edit.apply([{type:'add_layer',id:'a',layerType:'solid',from:.5,duration:1}]);
+                let redraws=0;api.events.on('invalidate',w=>{if(w==='timeline')redraws++});
+                __compat.shellState({timeline:{graph:true,pps:50,scrollT:1,scrollY:0,keySelectionActive:true,rect:[10,500,600,200],ruler:24,column:200,rows:[['a',524,550]]}});
+                const read=[t.graph,t.pps,t.scrollT,t.keySelectionActive,t.cv,redraws];
+                t.pps=1e6;t.scrollY=-5;const written=[t.pps,t.scrollY];
+                PM.setTime(.2);const early=[t.prevEdge(),t.nextEdge()];PM.setTime(1);const mid=[t.prevEdge(),t.nextEdge()];
+                const hits=[t.layerAtPoint(100,530)?.id,t.layerAtPoint(100,505),t.layerAtPoint(5,530),t.layerAtPoint(100,560)];
+                return [read,written,early,mid,hits,typeof t.frameView,typeof t.reveal]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                [true, 50, 1, true, null, 1],
+                [4000, 0],
+                [0, 0.5],
+                [0.5, 1.5],
+                ["a", null, null, null],
+                "function",
+                "function"
+            ])
+        );
+    }
+    /// shaderHooks reconciles `d.uniforms` with the kernel's `@param` parser,
+    /// as main's inspector did; the inspector's effect clipboard says it is
+    /// Effect Controls', not a silent success.
+    #[test]
+    fn shader_hooks_and_inspector_service() {
+        let runner = dom_runner();
+        let value = runner
+            .json(r#"(()=>{const api=__compat.realm.extension('probe',3).api;const h=api.services.get('shaderHooks'),i=api.services.get('inspector');
+                api.edit.apply([{type:'add_layer',id:'sh',layerType:'shader',from:0,duration:2}]);
+                const before=Object.keys(PM.L('sh').d.uniforms).sort();
+                api.history.do('Code',()=>{const L=PM.L('sh');L.d.code='uniform float uGain; // @param 2 0 4\nuniform vec3 uTint; // @param #ff0000\nvoid main(){}';h.syncShaderUniforms(L);});
+                const L=api.model.layer('sh');const after=Object.keys(L.d.uniforms).sort();
+                let refused=null;try{i.pasteCopiedEffects()}catch(e){refused=e.message}
+                return [before,after,L.d.uniforms.uGain.v,L.d.uniforms.uTint.v,i===api.services.get('inspector'),i.body,i.syncs.length,typeof i.refresh,refused]})()"#)
+            .unwrap();
+        assert_eq!(
+            value,
+            json!([
+                ["uScale", "uSpeed", "uTint"],
+                ["uGain", "uTint"],
+                2,
+                "#FF6B1A",
+                true,
+                null,
+                0,
+                "function",
+                "inspector.pasteCopiedEffects: the effect clipboard belongs to Effect Controls"
+            ])
+        );
+    }
     #[test]
     fn ui_modal_keeps_main_semantics_with_native_frame_data() {
         let runner = dom_runner();
