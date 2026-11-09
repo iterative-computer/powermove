@@ -1,24 +1,31 @@
 //! Publishing an extension from this Mac to the Store (S079–S082; v1.2.0
-//! main/cloud/publish.ts). The folder is read and frozen once: the snapshot
-//! the confirmation names is the tree that uploads. Secrets block, waived
-//! random strings carry their reasons, undeclared permissions refuse, and an
-//! extension must have run cleanly here (the native stand-in for v1's sandbox
-//! check). Upload is the registry's git protocol: ask which objects it lacks,
-//! send them as loose objects, then put the release. Worker threads only.
+//! main/cloud/publish.ts). The folder is opened once (a linked folder is
+//! refused, and every read is relative to that held directory, so swapping
+//! the folder or a link inside it can't redirect a read) and its bytes are
+//! frozen when the sheet opens: the checks, the confirmation's snapshot and
+//! the upload all use those bytes, and the folder isn't read again. Secrets
+//! block, waived random strings carry their reasons, undeclared permissions
+//! refuse, and an extension must have run cleanly here (the native stand-in
+//! for v1's sandbox check). Upload is the registry's git protocol: ask which
+//! objects it lacks, send them as loose objects, then put the release.
+//! Worker threads only.
 use crate::cloud::Http;
 use pm_services::surfaces::{
     publish_tree::{self, Input, Kind},
     publishing::{Draft, Finding, Plan, SandboxState},
 };
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::{ffi::CString, fs::File, io::Read, os::fd::AsRawFd, path::Path};
 
 /// What a publish needs after `prepare`, held on the worker side.
 pub struct Prepared {
     pub plan: Plan,
     handle: String,
     publisher_id: String,
-    folder: PathBuf,
+    /// The extension's folder, opened once without following links.
+    root: File,
+    /// Its files as `prepare` read and checked them: what publishes.
+    inputs: Vec<Input>,
     /// The release the next one follows (repository, release, commit).
     existing: Option<(String, String, Option<String>)>,
 }
@@ -59,33 +66,150 @@ fn size_text(bytes: usize) -> String {
     }
 }
 
-/// Every regular file under `folder` (links and dot folders are not followed).
-fn read_folder(folder: &Path) -> Result<Vec<Input>, String> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<Input>) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || name == "node_modules" || kind.is_symlink() {
+const UNREADABLE: &str = "Powermove couldn’t read this extension’s folder.";
+fn name(text: &str) -> std::io::Result<CString> {
+    CString::new(text).map_err(|_| std::io::ErrorKind::InvalidInput.into())
+}
+/// `name` in the directory `dir`, never through a link.
+fn open_at(dir: &File, name: &CString, flags: i32) -> std::io::Result<File> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: `name` is NUL-terminated; a returned descriptor is owned here.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+/// `<profile>/extensions/<id>`, held open. A link in its place is refused.
+fn open_folder(profile: &Path, id: &str) -> Result<File, String> {
+    let extensions = File::open(profile.join("extensions")).map_err(|_| UNREADABLE)?;
+    let folder = open_at(
+        &extensions,
+        &name(id).map_err(|_| UNREADABLE)?,
+        libc::O_RDONLY | libc::O_DIRECTORY,
+    );
+    match folder {
+        Ok(folder) => Ok(folder),
+        Err(e)
+            if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) =>
+        {
+            Err("This extension’s folder is a link. Only a real folder can be published.".into())
+        }
+        Err(_) => Err(UNREADABLE.into()),
+    }
+}
+/// The names in an open directory.
+fn names(dir: &File) -> std::io::Result<Vec<(String, u8)>> {
+    // SAFETY: fdopendir owns the duplicate and closedir releases it.
+    let fd = unsafe { libc::dup(dir.as_raw_fd()) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(e);
+    }
+    unsafe { libc::rewinddir(stream) };
+    let mut out = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let entry = unsafe { &*entry };
+        let text = unsafe { std::ffi::CStr::from_ptr(entry.d_name.as_ptr()) };
+        out.push((text.to_string_lossy().into_owned(), entry.d_type));
+    }
+    unsafe { libc::closedir(stream) };
+    Ok(out)
+}
+/// Every regular file under the held folder (links, dot names and
+/// `node_modules` are skipped; nothing is reached through a link).
+fn read_folder(root: &File) -> Result<Vec<Input>, String> {
+    fn walk(dir: &File, prefix: &str, out: &mut Vec<Input>) -> std::io::Result<()> {
+        for (entry, kind) in names(dir)? {
+            if entry.starts_with('.') || entry == "node_modules" || kind == libc::DT_LNK {
                 continue;
             }
-            let path = entry.path();
-            if kind.is_dir() {
-                walk(root, &path, out)?;
-            } else if kind.is_file() {
-                let relative = path.strip_prefix(root).unwrap_or(&path);
-                out.push(Input {
-                    path: relative.to_string_lossy().replace('\\', "/"),
-                    bytes: std::fs::read(&path)?,
-                });
+            let path = format!("{prefix}{entry}");
+            let c = name(&entry)?;
+            if kind == libc::DT_DIR {
+                walk(
+                    &open_at(dir, &c, libc::O_RDONLY | libc::O_DIRECTORY)?,
+                    &format!("{path}/"),
+                    out,
+                )?;
+            } else if kind == libc::DT_REG {
+                // Opened without following a link, then checked by its
+                // descriptor: a file swapped for a link or a folder fails.
+                let mut file = open_at(dir, &c, libc::O_RDONLY | libc::O_NONBLOCK)?;
+                if !file.metadata()?.is_file() {
+                    return Err(std::io::ErrorKind::InvalidInput.into());
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                out.push(Input { path, bytes });
             }
         }
         Ok(())
     }
     let mut out = Vec::new();
-    walk(folder, folder, &mut out)
-        .map_err(|_| "Powermove couldn’t read this extension’s folder.".to_owned())?;
+    walk(root, "", &mut out).map_err(|_| UNREADABLE.to_owned())?;
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+/// What blocks a publish of exactly these files: unwaived secrets (with the
+/// random-looking values that carry a reason), and undeclared permissions.
+struct Checks {
+    blocked: Vec<Value>,
+    permissions: Vec<Value>,
+    waivable: Vec<Finding>,
+    reasons: Vec<(String, String)>,
+}
+fn check(inputs: &[Input], manifest: &Value) -> Checks {
+    let texts: Vec<(String, String)> = inputs
+        .iter()
+        .filter_map(|i| Some((i.path.clone(), String::from_utf8(i.bytes.clone()).ok()?)))
+        .collect();
+    let secrets: Vec<_> = texts
+        .iter()
+        .flat_map(|(path, text)| publish_tree::scan_secrets(path, text))
+        .collect();
+    Checks {
+        blocked: secrets
+            .iter()
+            .filter(|f| f.waived.is_none() && f.kind != "high_entropy")
+            .map(|f| json!({"path":f.path,"line":f.line,"kind":f.kind}))
+            .collect(),
+        permissions: publish_tree::permission_findings(&texts, manifest)
+            .into_iter()
+            .map(|(path, line, needs, text)| json!({"path":path,"line":line,"needs":needs,"text":text}))
+            .collect(),
+        waivable: secrets
+            .iter()
+            .filter(|f| f.kind == "high_entropy")
+            .map(|f| Finding { path: f.path.clone(), line: f.line })
+            .collect(),
+        reasons: secrets
+            .iter()
+            .filter_map(|f| Some((format!("{}:{}", f.path, f.line), f.waived.clone()?)))
+            .collect(),
+    }
+}
+fn manifest_of(inputs: &[Input]) -> Option<Value> {
+    inputs
+        .iter()
+        .find(|i| i.path == "manifest.json")
+        .and_then(|i| serde_json::from_slice(&i.bytes).ok())
 }
 fn provenance(profile: &Path) -> Value {
     std::fs::read(profile.join("extensions-provenance.json"))
@@ -124,8 +248,16 @@ pub fn prepare(
     if !pm_compat_runner::manifest::extension_id(id) {
         return Err("That extension isn’t on this Mac.".into());
     }
-    let folder = profile.join("extensions").join(id);
-    if pm_compat_runner::store_host::marker(&folder).is_some() {
+    let root = open_folder(profile, id)?;
+    let inputs = read_folder(&root)?;
+    // The Store's install marker is a dot file, so it isn't among the inputs.
+    if open_at(
+        &root,
+        &name(pm_compat_runner::store_host::STORE_MARKER).map_err(|_| UNREADABLE)?,
+        libc::O_RDONLY,
+    )
+    .is_ok()
+    {
         return Err("Only extensions made on this Mac can be published.".into());
     }
     let me = http
@@ -137,11 +269,7 @@ pub fn prepare(
     ) else {
         return Err("Choose a handle in Settings › Accounts before you publish.".into());
     };
-    let inputs = read_folder(&folder)?;
-    let manifest: Value = inputs
-        .iter()
-        .find(|i| i.path == "manifest.json")
-        .and_then(|i| serde_json::from_slice(&i.bytes).ok())
+    let manifest = manifest_of(&inputs)
         .ok_or("This extension’s manifest.json isn’t valid JSON. Fix it and try again.")?;
     if manifest["id"] != id {
         return Err(format!(
@@ -175,15 +303,8 @@ pub fn prepare(
         .as_ref()
         .and_then(|d| d["latest"]["version"].as_str())
         .map(str::to_owned);
-    let snap = publish_tree::snapshot(&inputs).map_err(|(p, path)| p.text(&path))?;
-    let texts: Vec<(String, String)> = inputs
-        .iter()
-        .filter_map(|i| Some((i.path.clone(), String::from_utf8(i.bytes.clone()).ok()?)))
-        .collect();
-    let secrets: Vec<_> = texts
-        .iter()
-        .flat_map(|(path, text)| publish_tree::scan_secrets(path, text))
-        .collect();
+    publish_tree::snapshot(&inputs).map_err(|(p, path)| p.text(&path))?;
+    let checks = check(&inputs, &manifest);
     let plan = Plan {
         local_id: id.into(),
         coordinate: format!("{handle}/{id}"),
@@ -195,20 +316,9 @@ pub fn prepare(
         first_publish: detail.is_none(),
         listing: json!({"name":manifest["name"],"tagline":manifest["description"].as_str().unwrap_or(""),
             "category":category(&manifest)}),
-        blocked_findings: secrets
-            .iter()
-            .filter(|f| f.waived.is_none() && f.kind != "high_entropy")
-            .map(|f| json!({"path":f.path,"line":f.line,"kind":f.kind}))
-            .collect(),
-        permission_findings: publish_tree::permission_findings(&texts, &manifest)
-            .into_iter()
-            .map(|(path, line, needs, text)| json!({"path":path,"line":line,"needs":needs,"text":text}))
-            .collect(),
-        waivable_findings: secrets
-            .iter()
-            .filter(|f| f.kind == "high_entropy")
-            .map(|f| Finding { path: f.path.clone(), line: f.line })
-            .collect(),
+        blocked_findings: checks.blocked,
+        permission_findings: checks.permissions,
+        waivable_findings: checks.waivable,
         sandbox: if manifest["permissions"]
             .as_array()
             .is_some_and(|p| p.iter().any(|p| p == "full-access"))
@@ -220,12 +330,12 @@ pub fn prepare(
             SandboxState::CouldNotRun
         },
     };
-    let _ = snap;
     Ok(Prepared {
         plan,
         handle: handle.into(),
         publisher_id: publisher_id.into(),
-        folder,
+        root,
+        inputs,
         existing,
     })
 }
@@ -248,26 +358,23 @@ fn category(manifest: &Value) -> &'static str {
 }
 /// Waivers carry the reason the code gives (`// powermove-secret-ok: …`).
 pub fn draft_reasons(prepared: &Prepared, draft: &mut Draft) {
-    let Ok(inputs) = read_folder(&prepared.folder) else {
-        return;
-    };
-    for input in inputs {
-        let Ok(text) = String::from_utf8(input.bytes) else {
-            continue;
-        };
-        for finding in publish_tree::scan_secrets(&input.path, &text) {
-            if let Some(reason) = finding.waived {
-                draft
-                    .reasons
-                    .insert(format!("{}:{}", finding.path, finding.line), reason);
-            }
-        }
-    }
+    let manifest = manifest_of(&prepared.inputs).unwrap_or_default();
+    draft
+        .reasons
+        .extend(check(&prepared.inputs, &manifest).reasons);
 }
-/// The release to upload for a validated form, frozen now.
+/// The release to upload for a validated form: the files `prepare` read,
+/// with the form's version in manifest.json, checked again as they upload.
 pub fn freeze(prepared: &Prepared, form: &Value, now: u64) -> Result<Frozen, String> {
     let version = form["version"].as_str().unwrap_or_default().to_owned();
-    let mut inputs = read_folder(&prepared.folder)?;
+    let mut inputs: Vec<Input> = prepared
+        .inputs
+        .iter()
+        .map(|i| Input {
+            path: i.path.clone(),
+            bytes: i.bytes.clone(),
+        })
+        .collect();
     let mut local_manifest = None;
     if let Some(input) = inputs.iter_mut().find(|i| i.path == "manifest.json") {
         let mut raw: Value = serde_json::from_slice(&input.bytes)
@@ -278,6 +385,14 @@ pub fn freeze(prepared: &Prepared, form: &Value, now: u64) -> Result<Frozen, Str
             local_manifest = Some((input.bytes.clone(), text.clone()));
             input.bytes = text;
         }
+    }
+    let manifest = manifest_of(&inputs).unwrap_or_default();
+    let checks = check(&inputs, &manifest);
+    let mut plan = prepared.plan.clone();
+    plan.blocked_findings = checks.blocked;
+    plan.permission_findings = checks.permissions;
+    if let Some(problem) = plan_problem(&plan) {
+        return Err(problem);
     }
     let snap = publish_tree::snapshot(&inputs).map_err(|(p, path)| p.text(&path))?;
     let coordinate = prepared.plan.coordinate.clone();
@@ -388,18 +503,47 @@ pub fn upload(
     // The published version goes back into manifest.json, unless it was
     // edited meanwhile (an edit wins).
     if let Some((before, after)) = frozen.local_manifest {
-        let target = prepared.folder.join("manifest.json");
-        if std::fs::read(&target).ok().as_deref() == Some(&before[..]) {
-            let temporary = prepared.folder.join(".manifest.json.publish");
-            if std::fs::write(&temporary, &after).is_ok() {
-                let _ = std::fs::rename(&temporary, &target);
-            }
-        }
+        write_back_manifest(&prepared.root, &before, &after);
     }
     Ok(format!(
         "Published {} {}.",
         frozen.coordinate, frozen.version
     ))
+}
+/// manifest.json in the held folder becomes `after` when it still reads
+/// `before`, through a temporary file renamed in that same folder.
+fn write_back_manifest(root: &File, before: &[u8], after: &[u8]) {
+    use std::io::Write;
+    let (Ok(target), Ok(temporary)) = (name("manifest.json"), name(".manifest.json.publish"))
+    else {
+        return;
+    };
+    let mut current = Vec::new();
+    let unchanged = open_at(root, &target, libc::O_RDONLY | libc::O_NONBLOCK)
+        .and_then(|mut f| f.read_to_end(&mut current))
+        .is_ok()
+        && current == before;
+    if !unchanged {
+        return;
+    }
+    // SAFETY: names are NUL-terminated; both are relative to the held folder.
+    unsafe { libc::unlinkat(root.as_raw_fd(), temporary.as_ptr(), 0) };
+    let written = open_at(
+        root,
+        &temporary,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+    )
+    .and_then(|mut f| f.write_all(after));
+    if written.is_ok() {
+        unsafe {
+            libc::renameat(
+                root.as_raw_fd(),
+                temporary.as_ptr(),
+                root.as_raw_fd(),
+                target.as_ptr(),
+            )
+        };
+    }
 }
 /// At most 64 parts and 24 MB per request (the registry's upload envelope).
 fn batches(parts: Vec<(String, Vec<u8>)>) -> Vec<Vec<(String, Vec<u8>)>> {
