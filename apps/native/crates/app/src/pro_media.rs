@@ -1511,6 +1511,31 @@ impl crate::session::Controller {
     }
 
     /// The open project's asset ids.
+    /// Project files that can't be played from here (the Project panel's
+    /// Missing), for the status line.
+    pub(crate) fn offline_count(&self) -> usize {
+        let Some(pm_model::NodeKind::Object(assets)) = self
+            .published
+            .as_ref()
+            .and_then(|p| p.snapshot.root())
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.kind())
+        else {
+            return 0;
+        };
+        self.builtins
+            .media_runtime
+            .missing(assets.keys().filter_map(|k| k.as_str()))
+    }
+    /// The status line's offline count, pressed: the Project panel lists the
+    /// missing files.
+    pub(crate) fn show_offline_media(&mut self, cx: &mut gpui::Context<Self>) {
+        self.host.borrow().send_command("panel:show:assets", vec![]);
+        if let Some(runtime) = &self.builtins.runtime {
+            runtime.show_missing_media();
+        }
+        self.update_builtins(cx);
+    }
     pub(crate) fn project_assets(&self) -> Vec<String> {
         self.published
             .as_ref()

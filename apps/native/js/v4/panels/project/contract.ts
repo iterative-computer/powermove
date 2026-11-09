@@ -160,7 +160,14 @@ export type Input =
   | { DeleteAsset: string }
   | { BeginRename: string }
   | { CommitRename: { folder: string; value: string } }
-  | { Filter: { query: string; kind: null; missing_only: false; proxy: null } }
+  | {
+      Filter: {
+        query: string;
+        kind: null;
+        missing_only: boolean;
+        proxy: null;
+      };
+    }
   | { ConfirmDelete: { token: number; approved: boolean } }
   | { DragStart: { id: ItemId; nested_control: boolean } }
   | { DragOver: { target: string | null; files: boolean } }
@@ -200,6 +207,8 @@ export interface Projection {
   drop_target: null | { folder: string | null };
   external_drag: boolean;
   composition_count: number;
+  /** Only missing files are listed (opened from the status line). */
+  missing_only: boolean;
 }
 export type Action =
   | { Page: { offset: number; limit: number } }

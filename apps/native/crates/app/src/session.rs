@@ -222,6 +222,12 @@ impl pm_shell::integration::Integration for Bridge {
         }
         panels::format_facts(c.dimensions, c.rate.to_f64())
     }
+    fn status_alert(&self, cx: &App) -> String {
+        panels::offline_summary(self.0.read(cx).offline_count())
+    }
+    fn status_alert_pressed(&self, _window: &mut Window, cx: &mut App) {
+        self.0.update(cx, |v, cx| v.show_offline_media(cx));
+    }
     fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
         self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
     }

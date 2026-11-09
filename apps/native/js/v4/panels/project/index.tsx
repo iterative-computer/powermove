@@ -4,6 +4,7 @@ import {
   List,
   SegmentedControl,
   TextField,
+  PushButton,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -162,10 +163,15 @@ export function ProjectView(props: ProjectViewProps) {
     );
     if (folder) setRename(itemName(folder));
   }, [view?.renaming]);
-  const filter = (value: string) => {
+  const filter = (value: string, missingOnly = !!view?.missing_only) => {
     setQuery(value);
     input({
-      Filter: { query: value, kind: null, missing_only: false, proxy: null },
+      Filter: {
+        query: value,
+        kind: null,
+        missing_only: missingOnly,
+        proxy: null,
+      },
     });
   };
   const invoke = (command: import("./contract").Command) =>
@@ -638,6 +644,34 @@ export function ProjectView(props: ProjectViewProps) {
             }}
             onKeyDown={searchEscape}
             preventDefault={{ keydown: ["Escape"] }}
+          />
+        </div>
+      ) : null}
+      {view?.missing_only ? (
+        <div
+          style={{
+            height: token("metrics.row"),
+            paddingLeft: token("metrics.inset"),
+            paddingRight: token("metrics.inset"),
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <text
+            role="status"
+            style={{
+              color: token("colors.danger"),
+              fontSize: token("typography.minimum"),
+            }}
+          >
+            Missing files only
+          </text>
+          <PushButton
+            label="Show All"
+            title="Show all media"
+            onClick={() => filter(query, false)}
           />
         </div>
       ) : null}

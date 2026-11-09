@@ -32,6 +32,8 @@ pub struct Projection {
     pub drop_target: Option<DropTarget>,
     pub external_drag: bool,
     pub composition_count: usize,
+    /// Only missing files are listed (the status line's offline count).
+    pub missing_only: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DropTarget {
@@ -83,6 +85,7 @@ impl ProjectBridge {
                 .map(|folder| DropTarget { folder }),
             external_drag: self.panel.file_drop_active(),
             composition_count: c.compositions.len(),
+            missing_only: self.panel.filter.missing_only,
         })
     }
     pub fn request(

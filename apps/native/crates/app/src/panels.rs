@@ -198,6 +198,14 @@ pub fn format_facts(dimensions: [f64; 2], fps: f64) -> String {
         dimensions[1].round()
     )
 }
+/// The status line's offline files, as a person counts them; empty for none.
+pub fn offline_summary(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => "1 file offline".into(),
+        n => format!("{n} files offline"),
+    }
+}
 pub fn status_line(dirty: bool, saved_path: bool, layers: usize, keyframes: usize) -> String {
     let counts = format!(
         "{} · {}",
@@ -269,6 +277,13 @@ mod tests {
         assert!(needs_frame_outline(parse_background("#ffffff80"), 0x0e0e0e));
         assert_eq!(parse_background("#abc"), Some(0xaabbcc));
         assert_eq!(parse_background("transparent"), None);
+    }
+
+    #[test]
+    fn offline_files_read_as_a_person_counts_them() {
+        assert_eq!(offline_summary(0), "");
+        assert_eq!(offline_summary(1), "1 file offline");
+        assert_eq!(offline_summary(2), "2 files offline");
     }
 
     #[test]

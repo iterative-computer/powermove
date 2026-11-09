@@ -472,3 +472,32 @@ test("menu copy, separators, shortcuts and eligibility match the spec", async ()
     ).map((e) => e.label),
   ).toEqual(["Locate File…", "Delete Selected Media…"]);
 });
+test("missing-only listing says so; Show All and search keep or clear it", async () => {
+  const { root } = recorder();
+  const inputs: Input[] = [];
+  const view = { ...projection([asset()]), missing_only: true };
+  await root.render(
+    <ProjectView
+      view={view}
+      input={(i) => inputs.push(i)}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={layout}
+    />,
+  );
+  expect(JSON.stringify(root.inspect().nodes)).toContain("Missing files only");
+  await event(root, find(root, "Search Media").id, "click");
+  await event(root, find(root, "Search media").id, "input", {
+    value: "clip",
+    composing: false,
+  });
+  expect(inputs.at(-1)).toEqual({
+    Filter: { query: "clip", kind: null, missing_only: true, proxy: null },
+  });
+  await event(root, find(root, "Show All").id, "click");
+  expect(inputs.at(-1)).toEqual({
+    Filter: { query: "clip", kind: null, missing_only: false, proxy: null },
+  });
+  await root.dispose();
+});

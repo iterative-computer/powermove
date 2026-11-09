@@ -1892,6 +1892,33 @@ impl Render for Editor {
             .children(
                 self.integration
                     .as_ref()
+                    .map(|i| i.status_alert(cx))
+                    .filter(|s| !s.is_empty())
+                    .map(|alert| {
+                        div()
+                            .id("status-alert")
+                            .accessibility_id("shell.status.alert")
+                            .role(Role::Button)
+                            .aria_label(alert.clone())
+                            .flex_none()
+                            .px(px(m.gap))
+                            .h(px(m.hit))
+                            .flex()
+                            .items_center()
+                            .rounded(px(m.control_radius))
+                            .text_color(rgb(c.danger))
+                            .hover_style(|s| s.bg(rgb(c.hover)))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                if let Some(i) = this.integration.clone() {
+                                    i.status_alert_pressed(window, cx);
+                                }
+                            }))
+                            .child(alert)
+                    }),
+            )
+            .children(
+                self.integration
+                    .as_ref()
                     .map(|i| i.status_trailing(cx))
                     .filter(|s| !s.is_empty())
                     .map(|facts| {

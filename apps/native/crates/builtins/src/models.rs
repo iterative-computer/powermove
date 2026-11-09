@@ -55,6 +55,9 @@ pub(crate) struct Models {
     /// Moves with every new observation, so the Project panel asks for rows
     /// again when readiness lands without a document revision.
     pub media_sequence: u64,
+    /// The status line asked the Project panel to list only missing files;
+    /// applied on the panel's next request.
+    pub show_missing: bool,
     pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
     pub export_probe_stamp: String,
     timeline_job: Option<TimelineJob>,
@@ -118,6 +121,7 @@ impl Models {
             project_reply: None,
             media_runtime: Default::default(),
             media_sequence: 0,
+            show_missing: false,
             originals: Default::default(),
             export_probe_stamp: String::new(),
         })
@@ -468,6 +472,25 @@ impl Backend {
         self.native
             .project
             .refresh(&catalog, &self.native.media_runtime);
+        if std::mem::take(&mut self.native.show_missing) {
+            let filter = pm_panel_media::Filter {
+                missing_only: true,
+                ..Default::default()
+            };
+            self.native
+                .project
+                .request(
+                    &catalog,
+                    &self.native.media_runtime,
+                    pm_panel_media::v4::Request {
+                        owner: catalog.stamp.clone(),
+                        action: pm_panel_media::v4::Action::Input(pm_panel_media::Input::Filter(
+                            filter,
+                        )),
+                    },
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
         let mut reply = self
             .native
             .project

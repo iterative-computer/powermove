@@ -8,6 +8,17 @@ pub struct ObservedRuntime {
     states: BTreeMap<String, RuntimeState>,
 }
 impl ObservedRuntime {
+    /// How many of `assets` are missing (the Project panel's offline filter).
+    pub fn missing<'a>(&self, assets: impl IntoIterator<Item = &'a str>) -> usize {
+        assets
+            .into_iter()
+            .filter(|id| {
+                self.states
+                    .get(*id)
+                    .is_some_and(|s| s.availability.is_missing())
+            })
+            .count()
+    }
     pub fn new(stamp: Stamp, states: BTreeMap<String, RuntimeState>) -> Self {
         Self {
             stamp: Some(stamp),
@@ -41,6 +52,30 @@ impl MediaRuntime for ObservedRuntime {
 mod tests {
     use super::*;
     use crate::Availability;
+    #[test]
+    fn missing_counts_files_the_offline_filter_lists() {
+        let stamp = Stamp {
+            project: "p".into(),
+            document: 1,
+            revision: 2,
+        };
+        let with = |availability| RuntimeState {
+            availability,
+            ..Default::default()
+        };
+        let observed = ObservedRuntime::new(
+            stamp,
+            BTreeMap::from([
+                ("ready".into(), with(Availability::Ready)),
+                ("gone".into(), with(Availability::Offline)),
+                ("broken".into(), with(Availability::Failed("x".into()))),
+                ("loading".into(), with(Availability::Loading)),
+            ]),
+        );
+        assert_eq!(observed.missing(["ready", "gone", "broken", "loading"]), 2);
+        // Only the project's own assets count.
+        assert_eq!(observed.missing(["gone"]), 1);
+    }
     #[test]
     fn readiness_does_not_cross_relink_document_or_project_boundaries() {
         let stamp = Stamp {

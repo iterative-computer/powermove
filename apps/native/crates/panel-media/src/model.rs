@@ -408,15 +408,7 @@ impl MediaPanel {
                 }
                 if self.filter.missing_only || self.filter.proxy.is_some() {
                     let s = runtime.state(&c.stamp, &a.id);
-                    if self.filter.missing_only
-                        && !matches!(
-                            s.availability,
-                            Availability::Offline
-                                | Availability::Changed { .. }
-                                | Availability::Failed(_)
-                                | Availability::Cloud { .. }
-                        )
-                    {
+                    if self.filter.missing_only && !s.availability.is_missing() {
                         return false;
                     }
                     if self.filter.proxy.as_ref().is_some_and(|p| p != &s.proxy) {
