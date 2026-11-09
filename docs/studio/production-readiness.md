@@ -66,8 +66,8 @@ output size, shutter quality or material features to obtain a pass.
 Entry point: `node scripts/verify-studio-package.mjs <Powermove.app>` from
 `apps/desktop` ([source](../../apps/desktop/scripts/verify-studio-package.mjs)) establishes the
 real executable, ordinary-window profile, backend and shared-texture assertions.
-The performance lane should extend that entry with a `--benchmark` mode and
-write raw timestamp samples plus a summary JSON outside Git. Existing scene
+The `--benchmark` mode drives a normal visible editor window and writes raw
+timestamp samples plus a summary JSON outside Git. Existing scene
 builders are [the product corpus](../../engine/crates/pm-studio/src/corpus.rs),
 [editor environment acceptance](../../apps/desktop/e2e/studio-environments.spec.ts)
 and the **default Landscape UI action** in
@@ -83,7 +83,35 @@ three independent runs per scene after 30 warmup frames. Record cold start
 separately. Each run includes 30 seconds continuous camera/object dragging and
 30 seconds timeline playback at 60 fps. Include hero, edge, macro, back, chrome,
 materials, caustics, wet, and the default Landscape at its **unchanged default
-scatter density**, plus a second run at 2× density for stress.
+scatter density**, plus a second run at 2× density for stress. Also measure a
+room interior, a street with many lights, and the four-view layout. Each pane
+must meet the frame gate; updates to different panes cannot be added together
+to claim 60 fps.
+
+From `apps/desktop`, after building the host and editor:
+
+```sh
+PM_STUDIO_SHOTS=/tmp/pm-shots/studio3d/laneP4/acceptance node scripts/verify-studio-package.mjs --benchmark --dev --stress-minutes 30
+```
+
+Omit `--dev` and supply a `.app` path to measure a disposable packaged copy.
+The harness enables the inspector only in that disposable copy. Dev mode
+uses the built editor and bundled native host, with no development server.
+Both modes assert `native-studio` for every pane and real shared-texture
+transfers. `--diagnostic` permits concurrent workloads and cannot establish a
+quiet-machine acceptance result. `--cpu-profile` writes editor CPU profiles.
+`--scenes`, `--seconds`, `--runs` and `--final-frames` support reproductions;
+shortened runs do not satisfy the full gates.
+
+Product, room and street geometry enters through the normal GLB import
+pipeline. The harness reverses import normalization with ordinary layer
+transforms and installs the corpus camera, materials and lights. Imported
+glTF material/light representations are representative editor scenes, not a
+replacement for the canonical native/Cycles image regression. Default
+Landscape comes from the real Add ▸ Terrain action: currently **18,620**
+scatter candidates, including **18,000** grass candidates. The separate
+100,000-tree/54,000-ground-cover forest fixture must not be described as that
+UI default.
 
 | Metric | Required gate in every normal-density scene | Measurement |
 | --- | --- | --- |

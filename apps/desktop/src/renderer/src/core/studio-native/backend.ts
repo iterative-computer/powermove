@@ -30,6 +30,13 @@ export class NativeStudioBackend implements StudioBackend {
   private sceneRevision=0;
   private uploadedSceneRevision=-1;
   private supportsViewPatch=false;
+  private supportsChunkedUpload=false;
+  private supportsInstanceParts=false;
+  private supportsCancelRefine=false;
+  private interrupting:Promise<unknown>|null=null;
+  private cancelledRefineFrames=0;
+  private refineGeneration=0;
+  private hostPid:number|undefined;
   private geometryKey: string | null = null;
   private uploadedMaps: StudioTextureSource[] = [];
   private uploadedMapSize=0;
@@ -49,6 +56,12 @@ export class NativeStudioBackend implements StudioBackend {
   private rendered = '';
   /** Last measurements are available to the diagnostic harness, outside product UI. */
   lastFrame: { host: any; roundTripMs: number; uploadMs: number; pixelsMs: number } | null = null;
+  diagnostics() { return { session:this.session,hostPid:this.hostPid,native:this.lastFrame,cancelledRefineFrames:this.cancelledRefineFrames }; }
+  cancelRefine():void{
+    if(this.closed)return;this.refineGeneration++;
+    if(!this.supportsCancelRefine||this.interrupting)return;
+    this.interrupting=this.send({op:'cancelRefine'}).catch(()=>{}).finally(()=>{this.interrupting=null;});
+  }
   constructor(private readonly bridge: StudioNativeBridge) {}
 
   async initialize(): Promise<void> {
@@ -65,6 +78,10 @@ export class NativeStudioBackend implements StudioBackend {
       for(const [key,old] of this.textureFrames){if(this.textureFrames.size<=3)break;old.width=0;old.height=0;this.textureFrames.delete(key);}
     })??null;
     const hello = await this.send({ op: 'hello' }); this.generation = hello.generation;this.supportsViewPatch=hello.result?.capabilities?.includes('preparedView')??false;
+    this.supportsChunkedUpload=hello.result?.capabilities?.includes('preparedUpload')??false;
+    this.supportsInstanceParts=hello.result?.capabilities?.includes('instanceParts')??false;
+    this.supportsCancelRefine=hello.result?.capabilities?.includes('cancelRefine')??false;
+    this.hostPid=hello.result?.pid;
     if(hello.result?.layout?.materialBytes!==STUDIO_MATERIAL_FLOATS*4 || hello.result?.layout?.triangleBytes!==STUDIO_TRIANGLE_FLOATS*4)throw new Error('Native Studio needs a matching renderer build');
   }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription): void {
@@ -129,13 +146,24 @@ export class NativeStudioBackend implements StudioBackend {
         await this.send({op:'preparedView',key:nativeKey,view:this.packedView()});
       }else{
         const writer = new StudioBinaryWriter();
-        const small = { key: nativeKey, sdata: writer.append(scene.sdata), materials: writer.append(scene.materials), view: this.packedView() };
+        const parts:Record<string,unknown>={};
+        if(this.supportsInstanceParts&&scene.instancePolicies){
+          const names:(string|null)[]=[],ids=new Map<string|null,number>(),indices=new Uint32Array(scene.instancePolicies.length);
+          for(let i=0;i<indices.length;i++){const part=scene.instancePolicies[i]!.part;let index=ids.get(part);if(index===undefined){index=names.length;ids.set(part,index);names.push(part);}indices[i]=index;}
+          parts.instanceParts={names,indices:writer.append(indices)};
+        }else parts.instancePolicies=scene.instancePolicies;
+        const small = { key: nativeKey, sdata: writer.append(scene.sdata), materials: writer.append(scene.materials), view: this.packedView(),...parts };
         if (this.geometryKey === nativeKey) {
-          await this.send({ op: 'preparedPatch', ...small, top: writer.append(scene.tlasNodes), instancePolicies:scene.instancePolicies }, writer.finish());
+          await this.send({ op: 'preparedPatch', ...small, top: writer.append(scene.tlasNodes) }, writer.finish());
         } else {
-          const nodes = new Uint8Array(scene.tlasNodes.byteLength + scene.blasNodes.byteLength);
-          nodes.set(new Uint8Array(scene.tlasNodes)); nodes.set(new Uint8Array(scene.blasNodes), scene.tlasNodes.byteLength);
-          await this.send({ op: 'prepared', ...small, positions: writer.append(scene.positions), tris: writer.append(scene.tris), nodes: writer.append(nodes), topNodes: scene.tlasNodes.byteLength / 64, instanceCount: scene.instanceCount, lightCount: scene.lightCount, objects: scene.objects.map(layer => ({ layer, part: '' })), instancePolicies: scene.instancePolicies }, writer.finish());
+          const positions=writer.append(scene.positions),tris=writer.append(scene.tris);
+          const top=writer.append(scene.tlasNodes),bottom=writer.append(scene.blasNodes);
+          const upload={ ...small, positions, tris, nodes:{offset:top.offset,length:top.length+bottom.length}, topNodes: scene.tlasNodes.byteLength / 64, instanceCount: scene.instanceCount, lightCount: scene.lightCount, objects: scene.objects.map(layer => ({ layer, part: '' })) };
+          if(this.supportsChunkedUpload && writer.byteLength>1024*1024){
+            await this.send({op:'preparedBegin',upload,bytes:writer.byteLength});
+            for(const chunk of writer.chunks())await this.send({op:'preparedChunk',offset:chunk.offset},chunk.bytes);
+            await this.send({op:'preparedCommit'});
+          }else await this.send({op:'prepared',...upload},writer.finish());
           this.geometryKey = nativeKey;
         }
         this.uploadedSceneRevision=sceneRevision;
@@ -175,12 +203,16 @@ export class NativeStudioBackend implements StudioBackend {
     this.uploadedMaps = [...maps];this.uploadedMapSize=mapSize;
   }
   render(request: StudioRenderRequest): Promise<StudioFrame> {
+    const generation=this.refineGeneration;
+    const cancelled=()=>{if(request.tier==='refine'&&generation!==this.refineGeneration)throw Object.assign(new Error('Studio Refine superseded by input'),{name:'StudioFrameCancelled'});};
     return this.serial(async () => {
+      cancelled();
       if (request.signal?.aborted) throw new Error('Studio frame cancelled');
       const width=Math.round(request.size.width),height=Math.round(request.size.height);
       if(width/height!==this.width/this.height)this.revision++;
       this.width = width; this.height = height;
       const start = performance.now(); await this.upload(); const uploadMs = performance.now() - start;
+      cancelled();
       const objects = this.prepared?.objects ?? (this.document ?? this.description?.())?.layer_ids ?? [];
       const index = request.layer === undefined ? undefined : objects.indexOf(request.layer);
       // World/fog layers own no triangles. A nonmatching mask keeps only the
@@ -189,7 +221,9 @@ export class NativeStudioBackend implements StudioBackend {
       const renderKey=`${this.revision}:${this.time}:${this.width}:${this.height}:${request.tier}:${request.samples}:${request.denoise!==false}`;
       const reply = await this.send({ op: 'render', width: this.width, height: this.height, tier: request.tier, samples: request.samples, reset: request.accumulate === false && this.rendered!==renderKey, goal: true, denoise: request.denoise !== false, layer, background: request.background === true, sharedTexture: !!this.textureUnsubscribe, time: this.time });
       if (request.signal?.aborted) throw new Error('Studio frame cancelled');
+      cancelled();
       const meta = reply.result;
+      if(meta.cancelled){this.cancelledRefineFrames++;throw Object.assign(new Error('Studio Refine superseded by input'),{name:'StudioFrameCancelled'});}
       const pixelsAt = performance.now();
       let source:HTMLCanvasElement;
       if(meta.transport==='sharedTexture' && typeof meta.surface==='number') {
@@ -209,7 +243,7 @@ export class NativeStudioBackend implements StudioBackend {
       }
       this.lastFrame = { host: meta, roundTripMs: reply.roundTripMs, uploadMs, pixelsMs:meta.transport==='sharedTexture'?this.lastTextureMs:performance.now()-pixelsAt };
       this.rendered=renderKey;
-      return { source, width: this.width, height: this.height, samples: meta.samples, version: `${this.revision}:${this.time}:${request.tier}:${meta.samples}:${request.layer ?? '*'}`, release: () => { source.width = 0; source.height = 0; } };
+      return { source, width: this.width, height: this.height, samples: meta.samples, diagnostics:{native:this.lastFrame,time:meta.time,tier:meta.tier,inputAt:request.inputAt}, version: `${this.revision}:${this.time}:${request.tier}:${meta.samples}:${request.layer ?? '*'}`, release: () => { source.width = 0; source.height = 0; } };
     });
   }
   pick(x: number, y: number): Promise<StudioPick | null> {

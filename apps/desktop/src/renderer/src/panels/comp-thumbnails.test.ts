@@ -40,6 +40,15 @@ function fixture(count = 3) {
 }
 
 describe('composition thumbnails', () => {
+  it('prepares 3D thumbnails asynchronously and skips readback when navigation starts',async()=>{
+    const {PM,cache,comps,viewer}=fixture(1);comps[0].layers=[{type:'extension',d:{definition:'powermove.3d.object'}}];PM.proj.layers=comps[0].layers;
+    let complete!:()=>void;PM.GL.prepareStudioFrame=vi.fn(()=>new Promise<void>(resolve=>{complete=resolve;}));
+    cache.refresh('native');await vi.advanceTimersByTimeAsync(400);
+    expect(PM.GL.prepareStudioFrame).toHaveBeenCalledOnce();expect(PM.GL.renderToPixels).not.toHaveBeenCalled();
+    viewer.isNavigating.mockReturnValue(true);await vi.advanceTimersByTimeAsync(50);
+    expect(PM.GL.prepareStudioFrame.mock.calls[0][2].signal.aborted).toBe(true);
+    complete();await Promise.resolve();await Promise.resolve();expect(PM.GL.renderToPixels).not.toHaveBeenCalled();
+  });
   it('reuses one detached canvas across every composition while keeping independent encoded images', () => {
     const { PM, cache } = fixture(200);
     cache.refresh('first'); vi.runAllTimers();

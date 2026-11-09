@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { finishBlas, finishBlasInWorker, finishGeometryInWorker, disposeStudioGeometryWorkers, WORKER_TRIANGLES, type BlasData } from './blas';
+import { finishBlas, finishBlasInWorker, finishGeometryInWorker, finishTopInWorker, disposeStudioGeometryWorkers, WORKER_TRIANGLES, type BlasData } from './blas';
 import { partKeyOf, partsRoot } from '../scene3d/model-parts';
 import { gather, geometryPayload } from './gather';
 import { buildBvh } from './bvh';
@@ -78,7 +78,33 @@ function meshesOf(scene: THREE.Scene, include: (id: string) => boolean): { mesh:
   return out;
 }
 
-export type ExtractOptions={onReady:()=>void;hiddenPrimary?:Set<string>};
+export type ExtractOptions={onReady:()=>void;hiddenPrimary?:Set<string>;synchronous?:boolean};
+
+type Extraction={key:string;result:StudioScene|StudioPending};
+let extractions=new WeakMap<THREE.Scene,Map<string,Extraction>>();
+let extractionGeneration=0;
+const extractionTasks=new Set<Promise<void>>();
+export async function studioExtractionIdle():Promise<void>{await Promise.allSettled([...extractionTasks]);}
+function graphKey(scene:THREE.Scene,meshes:ReturnType<typeof meshesOf>,background:ExtractOptions):string {
+ const material=(m:any)=>Object.entries(m??{}).flatMap(([k,v]:[string,any])=>{
+  if(v===null || ['number','string','boolean'].includes(typeof v))return [k,v];
+  if(v?.isTexture)return [k,idOf(v),v.source?.version,v.channel,v.matrix?.elements,v.offset?.toArray(),v.repeat?.toArray(),v.rotation,v.flipY,v.wrapS,v.wrapT];
+  if(v?.isColor || v?.isVector2 || v?.isVector3 || v?.isVector4)return [k,v.toArray()];
+  if(k==='userData')return [k,Object.fromEntries(Object.entries(v).filter(([,value])=>value===null || ['number','string','boolean'].includes(typeof value))),v.materialAmbientUniform?.value];
+  if(Array.isArray(v) && v.every(x=>typeof x==='number'))return [k,v];
+  return [];
+ });
+ const lights:any[]=[];
+ scene.traverseVisible((o:any)=>{if(o.isLight)lights.push(o.uuid,o.matrixWorld.elements,o.target?.matrixWorld.elements,o.color.toArray(),o.intensity,o.width,o.height,o.angle,o.penumbra,o.distance,o.decay,o.castShadow);});
+ return JSON.stringify([meshes.map(({mesh,id},i)=>{
+  const skinned=mesh as THREE.SkinnedMesh,instanced=mesh as THREE.InstancedMesh;
+  const parents:string[]=[];for(let o:THREE.Object3D|null=mesh;o&&o!==scene;o=o.parent)parents.push(o.name,o.userData.studioPart??'');
+  return [id,mesh.uuid,blasKey(mesh.geometry,[],i),mesh.matrixWorld.elements,instanced.count,instanced.instanceMatrix?.version,instanced.instanceColor?.version,
+   mesh.castShadow,mesh.receiveShadow,mesh.userData.studioPrimaryVisible,mesh.userData.studioInstanceLayerNames,parents,
+   skinned.isSkinnedMesh?Array.from(skinned.skeleton.boneMatrices):null,mesh.morphTargetInfluences,
+   (Array.isArray(mesh.material)?mesh.material:[mesh.material]).map(material)];
+ }),lights,[...(background.hiddenPrimary??[])].sort()]);
+}
 
 /**
  * The scene's buffers. With `background`, meshes of WORKER_TRIANGLES or more
@@ -91,6 +117,37 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
 export function extractScene(scene: THREE.Scene, include: (id: string) => boolean, environment: EnvironmentInput, background?: ExtractOptions): StudioScene | StudioPending {
   scene.updateMatrixWorld(true);
   const meshes = meshesOf(scene, include);
+  const steps=()=>extractSteps(scene,meshes,environment,background?.synchronous?undefined:background,background?.hiddenPrimary);
+  if(!background || background.synchronous){const iterator=steps();let next=iterator.next();while(!next.done)next=iterator.next();return next.value;}
+  let cache=extractions.get(scene);if(!cache){cache=new Map();extractions.set(scene,cache);}
+  const slot=JSON.stringify(meshes.map(m=>m.id)),key=graphKey(scene,meshes,background)+JSON.stringify([environment.sky.toArray(),environment.ground.toArray(),environment.intensity]),previous=cache.get(slot);
+  if(previous?.key===key)return previous.result;
+  const total=meshes.reduce((n,{mesh})=>n+(mesh.geometry.index?.count??mesh.geometry.getAttribute('position')?.count??0)/3,0);
+  const entry:Extraction={key,result:{total,pending:Math.max(1,total)}};cache.set(slot,entry);
+  while(cache.size>4)cache.delete(cache.keys().next().value!);
+  const iterator=steps(),generation=extractionGeneration;
+  const advance=()=>{const start=performance.now();let next=iterator.next();while(!next.done && !next.value && performance.now()-start<4)next=iterator.next();return next;};
+  const finish=(result:StudioScene|StudioPending)=>{
+    if(cache.get(slot)!==entry || generation!==extractionGeneration)return;
+    if(isPending(result))cache.delete(slot);else entry.result=result;
+  };
+  const first=advance();if(first.done){finish(first.value);return first.value;}
+  const pending=(async()=>{
+    let next:IteratorResult<void|Promise<void>,StudioScene|StudioPending>=first;
+    while(!next.done){
+      if(next.value)await next.value;
+      await new Promise<void>(resolve=>setTimeout(resolve,0));
+      if(cache.get(slot)!==entry || generation!==extractionGeneration)return;
+      next=advance();
+    }
+    finish(next.value);background.onReady();
+  })().catch(error=>{if(cache.get(slot)===entry)cache.delete(slot);reportLayerFailure(scene,meshes[0]?.id??'scene','scene preparation',error);background.onReady();}).finally(()=>extractionTasks.delete(pending));
+  extractionTasks.add(pending);return entry.result;
+}
+
+/** The same extraction for interactive and Final paths. Interactive callers
+ * yield between bounded copies/instance batches and build dense TLASes off-thread. */
+function* extractSteps(scene:THREE.Scene,meshes:ReturnType<typeof meshesOf>,environment:EnvironmentInput,background?:ExtractOptions,hiddenPrimary?:Set<string>):Generator<void|Promise<void>,StudioScene|StudioPending> {
   const objects: string[] = [];
   const objectIndex = new Map<string, number>();
   const materials: number[] = [];
@@ -168,6 +225,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   let pending = 0, total = 0;
   const residentBlases=new Set<Blas>();let residentBytes=0;
   for (const { mesh, id } of meshes) {
+    yield;
     const materialStart=materials.length, mapStart=maps.length, blasStart=blases.length, instanceStart=instances.length, previousBounds=bounds.clone();
     const rollback=()=>{
       materials.length=materialStart;maps.length=mapStart;blases.length=blasStart;instances.length=instanceStart;bounds.copy(previousBounds);
@@ -242,6 +300,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       throw new Error('Studio scene exceeds the geometry memory budget; reduce mesh detail or scatter count');
     blases.push(blas);
     for(let instance=0;instance<count;instance++){
+      if(instance%128===0)yield;
       const world=mesh.matrixWorld.clone();if(instanced.isInstancedMesh){const local=new THREE.Matrix4();instanced.getMatrixAt(instance,local);world.multiply(local);}
       const inverse=world.clone().invert();
       if(!world.elements.every(v=>Number.isFinite(Math.fround(v))) || world.determinant()===0 || !inverse.elements.every(v=>Number.isFinite(Math.fround(v)))){reportLayerFailure(mesh,id,'instance preparation','Invalid or singular mesh transform');continue;}
@@ -251,7 +310,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       if(![...worldBounds.min.toArray(),...worldBounds.max.toArray()].every(v=>Number.isFinite(Math.fround(v)))){reportLayerFailure(mesh,id,'instance preparation','Invalid transformed mesh bounds');continue;}
       const layerName=mesh.userData.studioInstanceLayerNames?.[instance];let layerOverride:number|undefined;
       if(layerName){layerOverride=objectIndex.get(layerName);if(layerOverride===undefined){layerOverride=objects.length;objects.push(layerName);objectIndex.set(layerName,layerOverride);}}
-      instances.push({blas,world,part,layerOverride,primaryVisible:!background?.hiddenPrimary?.has(id) && mesh.userData.studioPrimaryVisible!==false,castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,...(color?{color:color.toArray() as [number,number,number]}:{})});
+      instances.push({blas,world,part,layerOverride,primaryVisible:!hiddenPrimary?.has(id) && mesh.userData.studioPrimaryVisible!==false,castShadow:mesh.castShadow,receiveShadow:mesh.receiveShadow,...(color?{color:color.toArray() as [number,number,number]}:{})});
       bounds.union(worldBounds);
     }
     if(instances.length===instanceStart)rollback();
@@ -274,16 +333,16 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     const roots = new Map<Blas, number>();
     let triOffset = 0, nodeOffset = 0;
     for (const b of unique) {
-      positions.set(b.positions, triOffset * 12);
-      tris.set(b.tris, triOffset * STUDIO_TRIANGLE_FLOATS);
+      yield* copyFloats(positions,b.positions,triOffset*12);
+      yield* copyFloats(tris,b.tris,triOffset*STUDIO_TRIANGLE_FLOATS);
       const src = new Uint32Array(b.nodes), count = b.nodes.byteLength / 64;
-      nu.set(src, nodeOffset * 16);
+      yield* copyFloats(nu,src,nodeOffset*16);
       // Re-base child links: interior → absolute node (after the top level), leaf → absolute triangle.
-      for (let n = 0; n < count; n++) for (const side of [0, 8]) {
+      for (let n = 0; n < count; n++) {if(n%4096===0)yield;for (const side of [0, 8]) {
         const o = (nodeOffset + n) * 16 + side, c = nu[o + 7]!;
         if (c === 0xffffffff) continue;
         nu[o + 3] = c === 0 ? nu[o + 3]! + tlasCapacity + nodeOffset : nu[o + 3]! + triOffset;
-      }
+      }}
       roots.set(b, tlasCapacity + nodeOffset);
       triOffset += b.triangles; nodeOffset += count;
     }
@@ -295,13 +354,17 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
 
   // Top level over the instances' world bounds (a box as a degenerate triangle).
   const instanceBoxes = new Float32Array(instances.length * 9);
-  instances.forEach(({ blas, world }, i) => {
+  for(let i=0;i<instances.length;i++){
+    if(i%128===0)yield;
+    const {blas,world}=instances[i]!;
     const b = blas.bounds.clone().applyMatrix4(world);
     instanceBoxes.set([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z, b.min.x, b.min.y, b.min.z], i * 9);
-  });
-  const top = instances.length ? buildBvh(instanceBoxes) : { nodes: new ArrayBuffer(64), order: new Uint32Array(0) };
+  }
+  let top:{nodes:ArrayBuffer;order:Uint32Array};
+  if(background && instances.length>=1024)yield finishTopInWorker(instanceBoxes).then(result=>{top=result;});
+  else top=buildBvh(instanceBoxes);
   const tlasNodes = new ArrayBuffer(geometry.tlasCapacity * 64);
-  new Uint8Array(tlasNodes).set(new Uint8Array(top.nodes).subarray(0, Math.min(top.nodes.byteLength, tlasNodes.byteLength)));
+  yield* copyFloats(new Uint8Array(tlasNodes),new Uint8Array(top!.nodes).subarray(0,Math.min(top!.nodes.byteLength,tlasNodes.byteLength)),0);
 
   // Lights.
   const lights: number[] = [];
@@ -349,14 +412,15 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   sdata.set(lights, 0);
   const nm = new THREE.Matrix3(), inv = new THREE.Matrix4();
   for (let k = 0; k < instances.length; k++) {
-    const { blas, world, color, primaryVisible } = instances[top.order[k]!]!;
+    if(k%128===0)yield;
+    const { blas, world, color, primaryVisible } = instances[top!.order[k]!]!;
     const o = lights.length + k * 36, w = world.elements, iv = inv.copy(world).invert().elements, n = nm.getNormalMatrix(world).elements;
     for (let r = 0; r < 3; r++) {
       sdata.set([iv[r]!, iv[4 + r]!, iv[8 + r]!, iv[12 + r]!], o + r * 4);
       sdata.set([n[r]!, n[3 + r]!, n[6 + r]!, 0], o + 12 + r * 4);
       sdata.set([w[r]!, w[4 + r]!, w[8 + r]!, color?.[r] ?? 0], o + 24 + r * 4);
     }
-    sdata[o + 15] = geometry.roots.get(blas)!;sdata[o + 19]=(color?1:0)+2*((instances[top.order[k]!]!.layerOverride ?? -1)+1);sdata[o+23]=primaryVisible?0:1;
+    sdata[o + 15] = geometry.roots.get(blas)!;sdata[o + 19]=(color?1:0)+2*((instances[top!.order[k]!]!.layerOverride ?? -1)+1);sdata[o+23]=primaryVisible?0:1;
   }
 
   void environment;
@@ -364,13 +428,18 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     positions: geometry.positions, tris: geometry.tris, blasNodes: geometry.blasNodes, tlasNodes, geometryKey,
     sdata, instanceCount: instances.length,
     materials: new Float32Array(materials.length ? materials : [...[0,0,0,0,1,0,.03,0,0,0,0,0,1.5,1,1,0,-1,-1,-1,-1,0,0,0,0,1,7,0,0,-1,-1,-1,1],...new Array(STUDIO_MATERIAL_FLOATS-32).fill(0)]),
-    instancePolicies: Array.from(top.order,k=>{const m=instances[k]!;return {part:m.part,castShadow:m.castShadow,receiveShadow:m.receiveShadow,primaryVisible:m.primaryVisible};}),
+    instancePolicies: Array.from(top!.order,k=>{const m=instances[k]!;return {part:m.part,castShadow:m.castShadow,receiveShadow:m.receiveShadow,primaryVisible:m.primaryVisible};}),
     materialPolicies: Array.from({length:materials.length/STUDIO_MATERIAL_FLOATS},(_,i)=>({ambientResponse:materials[i*STUDIO_MATERIAL_FLOATS+24]!,doubleSided:(materials[i*STUDIO_MATERIAL_FLOATS+25]!&4)!==0,alphaTest:materials[i*STUDIO_MATERIAL_FLOATS+26]!})),
     lightPolicies,
     lightCount: lights.length / 16,
     maps, mapSize:planStudioTextures(maps.map(map=>'source' in map?{width:(map.source as any).videoWidth || (map.source as any).width,height:(map.source as any).videoHeight || (map.source as any).height}:{width:MAP_SIZE,height:MAP_SIZE}),geometry.positions.byteLength+geometry.tris.byteLength+geometry.blasNodes.byteLength+tlasNodes.byteLength+sdata.byteLength+materials.length*4,{memoryGB:(globalThis as any).navigator?.deviceMemory}).size,
     objects, triangles: geometry.triangles, bounds,
   };
+}
+
+function* copyFloats(target:Float32Array|Uint32Array|Uint8Array,source:Float32Array|Uint32Array|Uint8Array,offset:number):Generator<void>{
+ const chunk=1024*1024/source.BYTES_PER_ELEMENT;
+ for(let at=0;at<source.length;at+=chunk){target.set(source.subarray(at,at+chunk),offset+at);yield;}
 }
 
 type Blas = BlasData & { key: string; bounds: THREE.Box3 };
@@ -388,6 +457,7 @@ let buildingFor = new WeakMap<THREE.Object3D, { key: string; triangles: number }
 let failedFor = new WeakMap<THREE.Object3D, string>();
 const geometryCache = new Map<string, { positions: Float32Array; tris: Float32Array; blasNodes: ArrayBuffer; roots: Map<Blas, number>; triangles: number; tlasCapacity: number }>();
 export function clearStudioGeometryCaches(): void {
+  extractions=new WeakMap();extractionGeneration++;
   buildingFor = new WeakMap(); failedFor = new WeakMap(); blasCache = new WeakMap();
   sharedBlases.clear(); sharedBlasBytes = 0; geometryCache.clear();
   disposeStudioGeometryWorkers();

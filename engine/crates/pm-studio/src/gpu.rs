@@ -204,6 +204,8 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl Renderer {
+    #[cfg(not(all(feature="metalfx",target_os="macos")))]
+    pub fn allocated_gpu_bytes(&self)->Option<u64>{None}
     pub fn new(width: u32, height: u32) -> Result<Renderer, String> {
         crate::validation::target_bytes(width,height,u64::MAX)?;
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -693,6 +695,11 @@ impl Renderer {
     /// Trace `spp` samples per pixel with up to `bounces` bounces; `reset`
     /// starts a new accumulation. Returns GPU wall time in ms.
     pub fn trace(&mut self, spp: u32, bounces: u32, reset: bool, clamp: u32) -> f64 {
+        self.trace_interruptible(spp,bounces,reset,clamp,&||false)
+    }
+    /// Refine may yield to new input between the existing four-sample GPU
+    /// submissions. Uninterrupted sampling order and Final output are identical.
+    pub fn trace_interruptible(&mut self,spp:u32,bounces:u32,reset:bool,clamp:u32,cancelled:&dyn Fn()->bool)->f64 {
         let (w, h) = (self.width, self.height);
         // Several dispatches of at most 4 samples keep each submission short.
         let start = Instant::now();
@@ -705,6 +712,7 @@ impl Renderer {
         let mut left = spp;
         let mut first = true;
         while left > 0 {
+            if cancelled(){break;}
             let n = left.min(4);
             self.frame = self.frame.wrapping_add(1);
             let mut p = self.base;

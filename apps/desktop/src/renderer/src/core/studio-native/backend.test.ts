@@ -11,6 +11,30 @@ const view: StudioView = { camera: { position: [0, 0, 5], forward: [0, 0, -1], r
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 
 describe('native Studio adapter', () => {
+  it('drops Refine interrupted during an upload before submitting GPU work',async()=>{
+    let complete!:()=>void;const uploading=new Promise<void>(resolve=>{complete=resolve;}),calls:string[]=[];
+    const bridge:StudioNativeBridge={request:async(_session,command)=>{calls.push(command.op);if(command.op==='prepared')await uploading;return {result:command.op==='hello'?{capabilities:['cancelRefine'],layout:{materialBytes:STUDIO_MATERIAL_FLOATS*4,triangleBytes:STUDIO_TRIANGLE_FLOATS*4}}:null,binary:new Uint8Array(),generation:1,roundTripMs:0};},release:async()=>{},status:async()=>({available:true,running:true,generation:1,failure:null})};
+    const graph=new THREE.Scene(),geometry=new THREE.BoxGeometry(),material=new THREE.MeshStandardMaterial(),mesh=new THREE.Mesh(geometry,material);mesh.userData.sceneId='box';graph.add(mesh);
+    const backend=new NativeStudioBackend(bridge);await backend.initialize();backend.setPreparedScene(extractScene(graph,()=>true,{sky:new THREE.Color(),ground:new THREE.Color(),intensity:0}),[],()=>{throw new Error('binary path');});backend.setView(view);
+    const pending=expect(backend.render({tier:'refine',samples:32,size:{width:64,height:64}})).rejects.toMatchObject({name:'StudioFrameCancelled'});
+    await vi.waitFor(()=>expect(calls).toContain('prepared'));backend.cancelRefine();complete();await pending;
+    expect(calls).toContain('cancelRefine');expect(calls).not.toContain('render');backend.dispose();geometry.dispose();material.dispose();
+  });
+  it('streams large scenes in bounded packets and sends repeated part identities as binary indices',async()=>{
+    const calls:{command:StudioNativeCommand;binary:Uint8Array}[]=[];
+    const bridge:StudioNativeBridge={request:async(_session,command,binary)=>{calls.push({command,binary:binary?.slice()??new Uint8Array()});return {result:command.op==='hello'?{capabilities:['preparedUpload','instanceParts'],layout:{materialBytes:STUDIO_MATERIAL_FLOATS*4,triangleBytes:STUDIO_TRIANGLE_FLOATS*4}}:null,binary:new Uint8Array(),generation:1,roundTripMs:0};},release:async()=>{},status:async()=>({available:true,running:true,generation:1,failure:null})};
+    const graph=new THREE.Scene(),mesh=new THREE.Mesh(new THREE.SphereGeometry(1,128,64),new THREE.MeshStandardMaterial());mesh.userData.sceneId='sphere';graph.add(mesh);
+    const scene=extractScene(graph,()=>true,{sky:new THREE.Color(),ground:new THREE.Color(),intensity:0});
+    const backend=new NativeStudioBackend(bridge);await backend.initialize();backend.setPreparedScene(scene,[],()=>{throw new Error('JSON mesh copy');});backend.setView(view);await backend.bounds();
+    const begin=calls.find(c=>c.command.op==='preparedBegin')!,chunks=calls.filter(c=>c.command.op==='preparedChunk');
+    expect(begin).toBeTruthy();expect(chunks.length).toBeGreaterThan(1);expect(chunks.every(c=>c.binary.length<=1024*1024)).toBe(true);
+    let offset=0;for(const chunk of chunks){expect(chunk.command.offset).toBe(offset);offset+=chunk.binary.length;}expect(offset).toBe(begin.command.bytes);
+    expect((begin.command.upload as any).instanceParts.names).toHaveLength(1);expect(begin.command.upload).not.toHaveProperty('instancePolicies');
+    expect(calls.findIndex(c=>c.command.op==='preparedCommit')).toBeGreaterThan(calls.map(c=>c.command.op).lastIndexOf('preparedChunk'));
+    const all=new Uint8Array(offset);for(const c of chunks)all.set(c.binary,c.command.offset as number);
+    const range=(begin.command.upload as any).positions;expect(all.slice(range.offset,range.offset+range.length)).toEqual(new Uint8Array(scene.positions.buffer));
+    backend.dispose();mesh.geometry.dispose();mesh.material.dispose();
+  });
   it('sends edits made while geometry and textures are uploading on the next frame', async () => {
     let finish!: () => void;
     const held = new Promise<void>(resolve => { finish = resolve; });

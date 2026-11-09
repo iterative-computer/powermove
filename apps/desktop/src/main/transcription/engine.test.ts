@@ -494,11 +494,14 @@ describe('TranscriptionEngine', () => {
     const b = new AbortController();
     const first = instance.transcribe({ path: media }, undefined, a.signal);
     const second = instance.transcribe({ path: media }, undefined, b.signal);
+    const settled=Promise.all([
+      expect(first).rejects.toBeInstanceOf(TranscriptionAbortedError),
+      expect(second).rejects.toBeInstanceOf(TranscriptionAbortedError),
+    ]);
     await until(() => workers[0]?.posted.length === 1);
     a.abort();
     b.abort();
-    await expect(first).rejects.toBeInstanceOf(TranscriptionAbortedError);
-    await expect(second).rejects.toBeInstanceOf(TranscriptionAbortedError);
+    await settled;
     expect(workers[0]!.posted.filter((message) => message.type === 'cancel')).toHaveLength(1);
     instance.dispose();
   });

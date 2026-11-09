@@ -30,6 +30,12 @@ function audioLayer(): any {
 }
 
 describe('legacy audio install', () => {
+  it('avoids opening an audio device for silent playback and opens it when a clip is added',()=>{
+    const opened=vi.fn(),context={currentTime:0,state:'running',destination:{},createGain:()=>({gain:{value:1},connect:vi.fn()})};
+    const PM=audioRegistry({host:{AudioContext:class{constructor(){opened();return context;}}}});
+    PM.playing=true;PM.Audio.start(0);expect(opened).not.toHaveBeenCalled();
+    PM.proj.layers.push(audioLayer());PM.bus.emit('layers');expect(opened).toHaveBeenCalledOnce();
+  });
   it('starts a strip before zero at the matching source offset and ends on time', () => {
     const PM = audioRegistry();
     const layer = { ...audioLayer(), from: -3, dur: 5, d: { asset: 'asset-1', trim: 1 } };

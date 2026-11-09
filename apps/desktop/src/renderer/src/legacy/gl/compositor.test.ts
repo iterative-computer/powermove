@@ -27,6 +27,13 @@ function compositorRegistry(): PMRegistry {
 }
 
 describe('Studio frame preparation', () => {
+  it('scopes preparation flags to the render pass while native work is pending',async()=>{
+    const PM=compositorRegistry();PM.proj.layers=[{type:'extension',d:{definition:'fixture'}}];PM.layerDefinition=()=>({renderer:{kind:'mesh'}});
+    let complete!:()=>void;const native=new Promise<void>(resolve=>{complete=resolve;});
+    PM.GL.renderProject=vi.fn(()=>{expect(PM._studioPreparing).toBe(true);return null;});
+    const spies=[vi.spyOn(studio,'studioReady').mockResolvedValue(),vi.spyOn(studio,'beginStudioCapture').mockImplementation(()=>{}),vi.spyOn(studio,'beginStudioCapturePass').mockImplementation(()=>{}),vi.spyOn(studio,'studioPending').mockReturnValue(false),vi.spyOn(studio,'studioIdle').mockReturnValue(native)];
+    try{const pending=PM.GL.prepareStudioFrame(PM.proj,0);await vi.waitFor(()=>expect(PM.GL.renderProject).toHaveBeenCalled());expect(PM._studioPreparing).toBeUndefined();expect(PM.GL.render(0)).toBe(false);complete();await pending;}finally{complete();for(const spy of spies)spy.mockRestore();}
+  });
   it('prepares again when the document changes during native rendering', async () => {
     const PM = compositorRegistry(), rendered: number[] = [];
     let revision = 0;
@@ -44,6 +51,7 @@ describe('Studio frame preparation', () => {
     try {
       await PM.GL.prepareStudioFrame(PM.proj, 0);
       expect(rendered).toEqual([0, 1]);
+      expect(studio.studioPending).toHaveBeenLastCalledWith(PM,true);
       expect(PM._studioPreparing).toBeUndefined();
     } finally { for (const spy of spies) spy.mockRestore(); }
   });

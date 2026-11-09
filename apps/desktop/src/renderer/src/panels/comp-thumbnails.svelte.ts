@@ -7,6 +7,8 @@
  * is ready, so edits never flash the placeholder icon. */
 import { viewerService } from '../legacy/core/services';
 import { prepareThumbnailVideoFrames, type ThumbnailVideoFrames } from './thumbnail-video-frames';
+import {layer3DRole} from '../core/scene3d/layers';
+import {isExtrudedLayer,isShared3DPlane} from '../core/scene3d/extrusion-data';
 
 const WIDTH = 320;
 const SETTLE_MS = 400;
@@ -50,7 +52,7 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
   let captureMonitor = 0;
 
   const blocked = () => PM.interactionActive?.() || viewerService(PM as any)?.isNavigating?.() || PM.playing
-    || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active;
+    || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active || PM.Studio?.status?.().preparing;
 
   const schedule = (delay: number) => {
     if (disposed) return;
@@ -63,12 +65,18 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     const comp = project?.compId === id ? project : PM.Comps?.get?.(id);
     if (!comp || !Array.isArray(comp.layers) || !PM.GL?.renderToPixels) return null;
     const pending = prepareThumbnailVideoFrames(PM, comp, posterTime(comp), () => (capture ??= new AbortController()).signal);
-    if (!pending) return encode(comp);
-    return pending.then(prepared => {
+    const studio=typeof PM.GL.prepareStudioFrame==='function'&&comp.layers.some((layer:any)=>layer3DRole(layer)||isExtrudedLayer(layer)||isShared3DPlane(comp,layer)||PM.layerDefinition?.(layer.d?.definition)?.renderer?.kind==='mesh');
+    if (!pending&&!studio) return encode(comp);
+    return Promise.resolve(pending??undefined).then(async prepared => {
       try {
         if (disposed || PM.proj !== project || key !== renderedKey || blocked()) return null;
+        if(studio){
+          const {width,height}=thumbnailSize(comp.w||project.w,comp.h||project.h);
+          await PM.GL.prepareStudioFrame(comp,posterTime(comp),{width,height,mblur:false,signal:(capture??=new AbortController()).signal,thumbnailVideo:prepared??{frames:EMPTY_VIDEO_FRAMES,version:'thumbnail:empty'}});
+          if(disposed||PM.proj!==project||key!==renderedKey||blocked())return null;
+        }
         return encode(comp, prepared);
-      } finally { prepared.dispose(); }
+      } finally { prepared?.dispose(); }
     });
   }
 

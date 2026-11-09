@@ -75,7 +75,7 @@ function releaseReferenceScan(scan:ReferenceScan,complete:boolean):void {
 export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):SceneRuntime {
   let pool=runtimes.get(PM);if(!pool){pool=new Map();runtimes.set(PM,pool);}
   const comp=composition || PM._renderComposition3D || PM.curComp?.() || PM.proj,key=`composition:${comp.compId || comp.id || 'root'}`;
-  let runtime=pool.get(key);if(!runtime){runtime=new SceneRuntime();pool.set(key,runtime);}
+  let runtime=pool.get(key);if(!runtime){runtime=new SceneRuntime(()=>PM.invalidate?.('render'));pool.set(key,runtime);}
   const cached=compositionCache.get(runtime),revision=PM._scene3dRevision || 0;
   let scan=referenceScans.get(runtime);
   if(!scan){scan=newReferenceScan();referenceScans.set(runtime,scan);}
@@ -202,7 +202,7 @@ export function sceneForLayer(PM:any,layer:any,time:number):Scene3D|null {
 export function sceneRuntime(PM:any,layer:any,time=PM.time || 0):SceneRuntime|null {
   const scene=sceneForLayer(PM,layer,time);if(!scene)return null;
   let pool=runtimes.get(PM);if(!pool){pool=new Map();runtimes.set(PM,pool);}
-  let runtime=pool.get(layer.id);if(!runtime){runtime=new SceneRuntime();pool.set(layer.id,runtime);}
+  let runtime=pool.get(layer.id);if(!runtime){runtime=new SceneRuntime(()=>PM.invalidate?.('render'));pool.set(layer.id,runtime);}
   // Retain geometry across edits and frame changes; refresh only evaluated channels.
   runtime.sync(scene,(id:string)=>PM.assets?.get?.(id), (prop:any,path:string)=>PM.evP?PM.evP(layer,prop,time,path):prop.v,time-layer.from,false,undefined,(_id,map)=>compositionTextureFrame(PM,layer,map,time));
   return runtime;
@@ -211,7 +211,11 @@ export function pruneSceneRuntimes(PM:any):void {
   const pool=runtimes.get(PM);if(!pool)return;
   const all=PM.ProjectIndex?.allLayers?.() || [...(PM.proj?.layers || []),...Object.values<any>(PM.proj?.comps || {}).flatMap(c=>c.layers || [])];
   const keep=new Set(all.filter((l:any)=>l.type==='extension').map((l:any)=>l.id));
-  for(const [id,runtime] of pool)if(!id.startsWith('composition:')&&!keep.has(id)){runtime.dispose();pool.delete(id);}
+  const compositions=new Set([PM.proj,...Object.values<any>(PM.proj?.comps || {})].filter(Boolean).map(comp=>`composition:${comp.compId || comp.id || 'root'}`));
+  for(const [id,runtime] of pool)if(id.startsWith('composition:')?!compositions.has(id):!keep.has(id)){
+    const studioId=(runtime as any).studioId;if(studioId!==undefined)pruneStudio(PM,key=>!key.startsWith(`${studioId}:`));
+    runtime.dispose();pool.delete(id);
+  }
 }
 export function disposeSceneRuntimes(PM:any):void {
   clearStudioGeometryCaches();

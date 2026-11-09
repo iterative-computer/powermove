@@ -2162,32 +2162,56 @@ function reportLayerFailure(layer: any, error: unknown): void {
   PM.toast?.(`${layer.name ?? 'A layer'} could not be rendered. See the console for details.`);
 }
 
+let studioPreparation:{controller:AbortController;thumbnail:boolean;done:Promise<void>}|null=null;
 GL.prepareStudioFrame = async (project:any,time:number,options:any={}) => {
+  const thumbnail=!!options.thumbnailVideo;
+  while(studioPreparation){
+    if(thumbnail&&!studioPreparation.thumbnail)throw new DOMException('Thumbnail superseded by capture','AbortError');
+    studioPreparation.controller.abort();await studioPreparation.done.catch(()=>{});
+    await new Promise<void>(resolve=>setTimeout(resolve,0));
+  }
+  if(options.signal?.aborted || thumbnail&&(PM.agentFrameCapture||PM.Export?.busy))throw new DOMException('Thumbnail superseded by capture','AbortError');
+  const controller=new AbortController(),signal=options.signal?AbortSignal.any([controller.signal,options.signal]):controller.signal;
+  const job={controller,thumbnail,done:Promise.resolve()};studioPreparation=job;
+  job.done=prepareStudioFrame(project,time,{...options,signal});
+  try{await job.done;}finally{if(studioPreparation===job)studioPreparation=null;}
+};
+const prepareStudioFrame = async (project:any,time:number,options:any={}) => {
   const has3D=(comp:any):boolean=>(comp.layers || []).some((l:any)=>layer3DRole(l) || isExtrudedLayer(l) || isShared3DPlane(comp,l) || PM.layerDefinition?.(l.d?.definition)?.renderer?.kind==='mesh');
   if(![project,...Object.values<any>(PM.proj?.comps || {})].some(has3D))return;
   await studioReady(PM);
+  PM.Studio?.interruptRefine?.();
   beginStudioCapture(PM);
   const width=options.width || project.w,height=options.height || project.h;
-  const preparing=PM._studioPreparing;PM._studioPreparing=true;
   try{
   for(let attempt=0;attempt<8;attempt++){
     beginStudioCapturePass(PM);
     if(options.signal?.aborted)throw new Error('Studio frame cancelled');
     const revision=PM.animVersion?.();
-    const f=GL.renderProject(project,time,width,height,{...options,exporting:!!options.exporting || !!PM.Export?.busy || !!PM.agentFrameCapture,transparent:true});
+    let f:any;
+    const preparing=PM._studioPreparing;
+    const oldFrames=PM.preparedVideoFrames,oldVersion=PM.preparedVideoVersion,hadFrames=Object.hasOwn(PM,'preparedVideoFrames'),hadVersion=Object.hasOwn(PM,'preparedVideoVersion');
+    try{
+      PM._studioPreparing=true;
+      if(options.thumbnailVideo){PM.preparedVideoFrames=options.thumbnailVideo.frames;PM.preparedVideoVersion=options.thumbnailVideo.version;}
+      f=GL.renderProject(project,time,width,height,{...options,exporting:!!options.exporting || !!PM.Export?.busy || !!PM.agentFrameCapture,transparent:true});
+    }finally{
+      PM._studioPreparing=preparing;
+      if(options.thumbnailVideo){if(hadFrames)PM.preparedVideoFrames=oldFrames;else delete PM.preparedVideoFrames;if(hadVersion)PM.preparedVideoVersion=oldVersion;else delete PM.preparedVideoVersion;}
+    }
     free(f);await studioIdle(PM);
     // An edit can arrive while a native image is in flight. Its capture key
     // belongs to the old document, so prepare the new revision before readback.
     if(PM.animVersion?.()!==revision)continue;
-    if(!studioPending(PM))return;
+    if(!studioPending(PM,true))return;
   }
   throw new Error('Studio frame did not become ready');
-  }finally{PM._studioPreparing=preparing;PM.invalidate?.('render');}
+  }finally{PM.invalidate?.('render');}
 };
 
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(proj===PM.proj && !opt.groupParent && !opt.mattePass)pruneSceneRuntimes(PM);
-  const previousStudio=[PM._studioFinal,PM._studioStill,PM._studioShutterSamples,PM._studioSyncCapture];
+  const previousStudio=[PM._studioFinal,PM._studioStill,PM._studioShutterSamples,PM._studioSyncCapture,PM._studioRefineCapture];
   const previous3DComposition=PM._renderComposition3D,previous3DPass=PM._renderComposition3DPass,previous3DCamera=PM._renderCamera3D;PM._renderComposition3D=proj;
   const previousInputs = layerInputs, previousInputFrameOptions = inputFrameOptions;
   if (inputFrameOptions || hasLayerInputs(proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))) inputFrameOptions = { signal:opt.signal, mblur: opt.mblur, mbSamples: opt.mbSamples, shutter: opt.shutter };
@@ -2225,6 +2249,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   // captures, thumbnails) get a fixed, repeatable Studio frame.
   // An explicit fresh frame (previewReuse: false) is a still too, even through the editor's camera.
   PM._studioStill=!PM._studioFinal&&(!opt.editorViewport||opt.previewReuse===false);
+  PM._studioRefineCapture=opt.studioTier==='refine'?Math.max(32,Math.round(opt.studioSamples||32)):previousStudio[4];
   if(opt.editorViewport && opt.previewReuse===false)PM._studioSyncCapture=true;
   // Motion blur renders each frame at several shutter times; Studio splits its samples across them.
   PM._studioShutterSamples=opt.studioShutterSamples || 1;
@@ -2447,7 +2472,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     }
     layerInputs = previousInputs; inputFrameOptions = previousInputFrameOptions;
     PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;
-    [PM._studioFinal,PM._studioStill,PM._studioShutterSamples,PM._studioSyncCapture]=previousStudio;}
+    [PM._studioFinal,PM._studioStill,PM._studioShutterSamples,PM._studioSyncCapture,PM._studioRefineCapture]=previousStudio;}
 };
 
 const requestSourceWarmup = createPreviewWarmup(
@@ -2481,7 +2506,7 @@ const requestSourceWarmup = createPreviewWarmup(
 );
 
 GL.render = (T: any, opt: any = {}) => {
-  if(PM._studioPreparing)return false;
+  if(PM._studioPreparing || studioPreparation)return false;
   visibleTextures.clear();
   framePrograms.clear(); compileSubmitMs = 0;
   const gl = GL.gl; if (!gl) return;

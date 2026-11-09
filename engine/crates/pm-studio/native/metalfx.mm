@@ -78,3 +78,4 @@ extern "C" bool studio_metalfx_send(void *context,void *rawTexture,uint64_t fram
 }
 extern "C" void studio_metalfx_release(void*context,uint64_t frame){auto*ctx=static_cast<StudioMetalFX*>(context);for(auto&slot:ctx->surfaces){if(slot.frame==frame)slot.frame=0;}}
 extern "C" void studio_metalfx_destroy(void *context) {auto*ctx=static_cast<StudioMetalFX*>(context);if(ctx->surfaceReceiver!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),ctx->surfaceReceiver);for(auto&slot:ctx->surfaces)if(slot.surface)CFRelease(slot.surface);delete ctx;}
+extern "C" uint64_t studio_metal_allocated_bytes(void *rawDevice){id<MTLDevice>device=(__bridge id<MTLDevice>)rawDevice;return device.currentAllocatedSize;}

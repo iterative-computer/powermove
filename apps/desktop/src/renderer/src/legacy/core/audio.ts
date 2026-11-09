@@ -829,6 +829,9 @@ function voiceDrift(voice: any, layer: any, time: any, ctx: any) {
 
 function sync(time: any, force: any = false) {
   if (!state.running || !PM.proj) { stopAll(); showLoading(false); return; }
+  // A silent 3D composition needs no audio device. If a clip is added while
+  // playing, initialize and resume it through the ordinary start path.
+  if (!state.context && audioLayers().length) { start(time); return; }
   const generation: any = state.generation;
   const desired: any = new Set();
   const strips: any = new Set<string>();
@@ -870,6 +873,7 @@ function start(time: any) {
   state.running = true;
   state.project = PM.proj || null;
   const generation: any = ++state.generation;
+  if (!audioLayers().length) { sync(time, true); return; }
   let ctx: any;
   try { ctx = context(); }
   catch (error: any) { state.running = false; publishState(); PM.toast && PM.toast(error.message, 5000); return; }

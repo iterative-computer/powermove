@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn studio_metalfx_send(context: *mut c_void, texture: *mut c_void, frame: u64) -> bool;
     fn studio_metalfx_release(context: *mut c_void, frame: u64);
     fn studio_metalfx_destroy(context: *mut c_void);
+    fn studio_metal_allocated_bytes(device:*mut c_void)->u64;
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -305,6 +306,15 @@ impl MetalFX {
             empty_layout,
             valid: false,
         })
+    }
+}
+impl Renderer {
+    /// Metal's allocations for this process/device; unified allocations can
+    /// overlap RSS and must not be added to it as an independent resident sum.
+    pub fn allocated_gpu_bytes(&self)->Option<u64>{
+        let hal=unsafe{self.device.as_hal::<wgpu::hal::api::Metal>()}?;
+        let raw=(&**hal.raw_device() as *const _ as *mut c_void).cast();
+        Some(unsafe{studio_metal_allocated_bytes(raw)})
     }
 }
 impl Renderer {

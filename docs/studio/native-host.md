@@ -188,7 +188,22 @@ The manager bounds pending requests, times out a stuck process, rejects work
 on exit, and starts a new process/generation on the next connection. The
 recovering backend replays its scene into WebGPU when native work fails.
 Navigating, closing or crashing an editor releases its sessions and surfaces.
-There are at most two native sessions per editor to bound memory.
+There are at most four native sessions across all editor windows to bound
+memory while supporting a native session for each pane of the 4 Views layout.
+
+Large prepared scenes use capability-negotiated `preparedBegin`, sequential
+`preparedChunk` packets (at most 1 MiB), and an atomic `preparedCommit`.
+Invalid/incomplete uploads leave the installed scene intact. Repeated part
+identities use a binary index into a small string dictionary. The original
+4 MiB JSON and 256 MiB binary limits remain enforced.
+
+`cancelRefine` interrupts Refine between existing four-sample submissions and
+through OIDN's progress callback. The pipe reader can observe cancellation
+while the render thread is busy; queued input has both count and byte limits.
+Final never uses this cancellation policy. Its sample order, bounce count,
+denoiser quality and output dimensions are unchanged. OIDN reuses its filter
+and working storage across frames, with regression coverage for resize,
+rebinding and recovery after cancellation.
 
 Scene and prepared-binary boundaries reject non-finite coordinates, invalid
 physical material/light ranges, singular transforms and BVHs deeper than the

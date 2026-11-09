@@ -90,7 +90,7 @@ test('a 1M-triangle assembly prepares in the background, then Studio draws it', 
   });
   console.log(`large scene: ${first.status.preparing.total} triangles; first draw ${first.ms.toFixed(0)} ms; longest main-thread task while preparing ${longest.toFixed(0)} ms; Studio ready ${readyMs} ms after the first frame; Final frame ${result.finalMs.toFixed(0)} ms`);
   // The editor stays responsive: no frame waits for the BVH builds.
-  expect(longest).toBeLessThan(400);
+  expect(longest).toBeLessThanOrEqual(50);
   expect(result.studioDrew).toBe(true);
   expect(result.declined).toBe('');
   expect(result.covered).toBeGreaterThan(5000);

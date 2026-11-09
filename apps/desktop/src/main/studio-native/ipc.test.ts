@@ -58,6 +58,8 @@ describe('Studio IPC session ownership', () => {
     const other = {sender: Object.assign(new EventEmitter(), {id:2})};
     await request(s.event, 'studio-1', {op:'hello'});
     await request(other, 'studio-1', {op:'hello'});
+    await request(other, 'studio-3', {op:'hello'});
+    await request(other, 'studio-4', {op:'hello'});
     await expect(request(other, 'studio-2', {op:'hello'})).rejects.toThrow('Too many');
     s.event.sender.emit('did-start-navigation', {}, 'app://editor/#x', true, true);
     s.event.sender.emit('did-start-navigation', {}, 'app://frame', false, false);
@@ -68,6 +70,6 @@ describe('Studio IPC session ownership', () => {
     await request(other, 'studio-2', {op:'hello'});
     other.sender.emit('render-process-gone');
     expect(mock.workers[1].dispose).toHaveBeenCalledOnce();
-    expect(mock.workers[2].dispose).toHaveBeenCalledOnce(); s.stop();
+    expect(mock.workers.slice(2).every(worker=>worker.dispose.mock.calls.length===1)).toBe(true); s.stop();
   });
 });

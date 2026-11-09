@@ -19,7 +19,7 @@ fn main() {
     let scene = if let Some(path) = arg(&args, "--scene-file") {
         serde_json::from_slice(&std::fs::read(path).expect("scene file")).expect("valid scene JSON")
     } else {
-        corpus::scene(&name).expect("environment scene name")
+        corpus::scene(&name).or_else(||pm_studio::scene::preset(&name,"blue",0.)).expect("corpus scene name")
     };
     let scene = if args.iter().any(|s| s == "--expand") {
         scene.expanded().expect("valid environment geometry")
@@ -50,6 +50,10 @@ fn main() {
         }
     }
     if args.iter().any(|s| s == "--json-only") {
+        if scene.materials.iter().any(|m|m.screen) {
+            image::RgbaImage::from_raw(512,512,pm_studio::scene::screen_wallpaper(512,512,0.)).unwrap()
+                .save(out.join(format!("{name}-screen.png"))).unwrap();
+        }
         return;
     }
     let size = arg(&args, "--size").unwrap_or_else(|| "960x540".into());

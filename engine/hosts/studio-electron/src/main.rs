@@ -13,6 +13,7 @@ use scene::{Identity, MeshBuffers, ResidentScene, Transform};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{io, time::Instant};
+use std::sync::{Arc,atomic::{AtomicU64,AtomicUsize,Ordering}};
 
 #[derive(Deserialize)]
 struct Request {
@@ -24,6 +25,7 @@ struct Request {
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Command {
     Hello,
+    CancelRefine,
     ImportFbx,
     ReleaseFrame {
         frame: u64,
@@ -33,6 +35,9 @@ enum Command {
         #[serde(flatten)]
         upload: packed::Upload,
     },
+    PreparedBegin { upload:packed::Upload, bytes:usize },
+    PreparedChunk { offset:usize },
+    PreparedCommit,
     PreparedPatch {
         #[serde(flatten)]
         patch: packed::Patch,
@@ -131,6 +136,10 @@ struct Target {
     time: f64,
 }
 struct Host {
+    cancel_revision:Arc<AtomicU64>,
+    request_generation:u64,
+    peak_gpu_bytes:u64,
+    upload:Option<(packed::Upload,Vec<u8>,usize)>,
     packed: Option<packed::PackedScene>,
     resident: Option<ResidentScene>,
     live: Option<Target>,
@@ -148,6 +157,8 @@ struct Host {
 impl Host {
     fn new() -> Self {
         Self {
+            cancel_revision:Arc::new(AtomicU64::new(0)),request_generation:0,peak_gpu_bytes:0,
+            upload:None,
             packed: None,
             resident: None,
             live: None,
@@ -203,6 +214,27 @@ impl Host {
     fn handle(&mut self, command: Command, binary: &[u8]) -> Result<(Value, Vec<u8>), String> {
         let begin = Instant::now();
         let value = match command {
+            Command::CancelRefine=>json!({"cancelledRefine":true}),
+            Command::PreparedBegin{upload,bytes}=>{
+                self.upload=None;
+                if bytes==0 || bytes>protocol::MAX_BINARY {return Err("invalid prepared upload size".into());}
+                let mut data=Vec::new();data.try_reserve_exact(bytes).map_err(|_|"prepared upload exceeds available memory")?;
+                self.upload=Some((upload,data,bytes));
+                json!({"accepted":bytes})
+            }
+            Command::PreparedChunk{offset}=>{
+                let Some((_,data,total))=&mut self.upload else{return Err("no prepared upload".into())};
+                if binary.is_empty() || binary.len()>1024*1024 || offset!=data.len() || binary.len()>total.saturating_sub(offset){
+                    self.upload=None;return Err("invalid prepared upload chunk".into());
+                }
+                data.extend_from_slice(binary);
+                json!({"received":data.len()})
+            }
+            Command::PreparedCommit=>{
+                let (upload,data,total)=self.upload.take().ok_or("no prepared upload")?;
+                if data.len()!=total{return Err("incomplete prepared upload".into());}
+                return self.handle(Command::Prepared{upload},&data);
+            }
             Command::ImportFbx => {
                 let bytes=binary.to_vec();
                 let imported=std::thread::Builder::new().name("fbx-import".into()).stack_size(8*1024*1024)
@@ -246,7 +278,7 @@ impl Host {
                 json!({"released":frame})
             }
             Command::Hello => {
-                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries","preparedView","environments"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
+                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries","preparedView","preparedUpload","instanceParts","cancelRefine","environments"],"peakRssMiB":peak_memory_mib(),"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
             }
             Command::Scene {
                 scene,
@@ -493,6 +525,9 @@ impl Host {
                     return Err("samples must be 1–4096".into());
                 }
                 let is_live = tier == "live";
+                let cancellation=self.cancel_revision.clone();let generation=self.request_generation;
+                let cancelled=||tier=="refine"&&cancellation.load(Ordering::Relaxed)!=generation;
+                if cancelled(){return Ok((json!({"cancelled":true}),vec![]));}
                 let (w, h) = if is_live {
                     // Keep Live within a predictable pixel budget for small worlds.
                     // Final/Refine always render at the requested output size.
@@ -590,13 +625,15 @@ impl Host {
                 let trace_ms = if spp == 0 {
                     0.
                 } else {
-                    renderer.trace(
+                    renderer.trace_interruptible(
                         spp,
                         if is_live { 3 } else { 8 },
                         reset || changed || is_live,
                         if is_live { 12 } else { 64 },
+                        &cancelled,
                     )
                 };
+                if cancelled(){return Ok((json!({"cancelled":true}),vec![]));}
                 renderer.last_surface = None;
                 let mut denoiser = target.denoiser;
                 let mut frame_size = (w, h);
@@ -637,11 +674,12 @@ impl Host {
                     }
                     denoiser = "oidn";
                     let d = self.oidn.as_ref().unwrap();
-                    renderer.finish_with(&|c, a, n| d.run(c, a, n, 4, w as usize, h as usize))
+                    renderer.finish_with(&|c, a, n| d.run_interruptible(c,a,n,4,w as usize,h as usize,if tier=="refine"{Some((&cancellation,generation))}else{None}))
                 } else {
                     denoiser = if is_live && denoise { "atrous" } else { "none" };
                     renderer.finish(if is_live && denoise { 3 } else { 0 })
                 };
+                if cancelled(){return Ok((json!({"cancelled":true}),vec![]));}
                 #[cfg(not(feature = "oidn"))]
                 let (pixels, post_ms) = if let Some(frame) = metal_result {
                     frame
@@ -658,8 +696,9 @@ impl Host {
                 target.quality_denoise = denoise;
                 target.time = time;
                 target.tier = tier.clone();
+                let gpu_bytes=renderer.allocated_gpu_bytes();self.peak_gpu_bytes=self.peak_gpu_bytes.max(gpu_bytes.unwrap_or(0));
                 return Ok((
-                    json!({"width":frame_size.0,"height":frame_size.1,"outputWidth":width,"outputHeight":height,"inputWidth":w,"inputHeight":h,"format":"rgba8","premultiplied":false,"surface":renderer.last_surface,"tier":tier,"samples":renderer.samples,"revision":self.revision,"time":time,"hardwareRt":renderer.uses_hardware_rt(),"adapter":renderer.adapter,"denoiser":denoiser,"timings":{"initMs":init_ms,"traceMs":trace_ms,"postMs":post_ms,"hostMs":begin.elapsed().as_secs_f64()*1000.}}),
+                    json!({"pid":std::process::id(),"width":frame_size.0,"height":frame_size.1,"outputWidth":width,"outputHeight":height,"inputWidth":w,"inputHeight":h,"format":"rgba8","premultiplied":false,"surface":renderer.last_surface,"tier":tier,"samples":renderer.samples,"revision":self.revision,"time":time,"hardwareRt":renderer.uses_hardware_rt(),"adapter":renderer.adapter,"denoiser":denoiser,"gpuAllocatedMiB":gpu_bytes.map(|b|b as f64/1048576.),"peakGpuMiB":self.peak_gpu_bytes as f64/1048576.,"peakRssMiB":peak_memory_mib(),"timings":{"initMs":init_ms,"traceMs":trace_ms,"postMs":post_ms,"hostMs":begin.elapsed().as_secs_f64()*1000.}}),
                     pixels,
                 ));
             }
@@ -762,14 +801,37 @@ fn dimensions(w: u32, h: u32) -> Result<(), String> {
     }
 }
 fn main() {
-    let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
     let mut host = Host::new();
+    let cancellation=host.cancel_revision.clone();
+    // Read ahead by four bounded packets so input can interrupt a running
+    // Refine. GPU ownership and all scene mutation remain on this thread.
+    let (sender,receiver)=std::sync::mpsc::sync_channel(4);
+    let queued_bytes=Arc::new(AtomicUsize::new(0));let queued=queued_bytes.clone();
+    std::thread::spawn(move||{
+        let mut input=io::stdin().lock();
+        loop{
+            match protocol::read(&mut input){
+                Ok(Some(packet))=>{
+                    if matches!(packet.json.get("op").and_then(Value::as_str),Some("cancelRefine"|"shutdown")){cancellation.fetch_add(1,Ordering::Relaxed);}
+                    let generation=cancellation.load(Ordering::Relaxed);
+                    let bytes=packet.binary.len()+packet.json.to_string().len();
+                    if queued.fetch_add(bytes,Ordering::Relaxed)+bytes>protocol::MAX_BINARY+4*protocol::MAX_JSON{
+                        queued.fetch_sub(bytes,Ordering::Relaxed);cancellation.fetch_add(1,Ordering::Relaxed);
+                        let _=sender.send(Err("queued Studio input exceeds memory budget".into()));break;
+                    }
+                    if sender.send(Ok((packet,generation,bytes))).is_err(){break;}
+                }
+                Ok(None)=>break,
+                Err(error)=>{let _=sender.send(Err(error.to_string()));break;}
+            }
+        }
+    });
     loop {
-        let Packet { json, binary } = match protocol::read(&mut input) {
-            Ok(Some(p)) => p,
-            Ok(None) => break,
-            Err(e) => {
+        let Packet { json, binary } = match receiver.recv() {
+            Ok(Ok((packet,generation,bytes)))=>{queued_bytes.fetch_sub(bytes,Ordering::Relaxed);host.request_generation=generation;packet},
+            Err(_)=>break,
+            Ok(Err(e)) => {
                 eprintln!("Studio protocol: {e}");
                 std::process::exit(2)
             }
@@ -875,6 +937,32 @@ mod tests {
     }
 
     #[test]
+    fn chunked_prepared_upload_is_atomic_and_preserves_part_ids() {
+        let mut h=Host::new();h.handle(Command::Preset{name:"hero".into(),finish:blue(),time:0.},&[]).unwrap();
+        let (mut value,mut binary)=h.snapshot().unwrap();value["key"]=json!("chunks");
+        let count=value["instanceCount"].as_u64().unwrap() as usize;
+        let offset=binary.len();for _ in 0..count{binary.extend_from_slice(&0u32.to_le_bytes());}
+        value["instanceParts"]=json!({"names":["body"],"indices":{"offset":offset,"length":count*4}});
+        let upload=serde_json::from_value(value).unwrap();let revision=h.revision;
+        h.handle(Command::PreparedBegin{upload,bytes:binary.len()},&[]).unwrap();
+        for (i,chunk) in binary.chunks(65536).enumerate(){h.handle(Command::PreparedChunk{offset:i*65536},chunk).unwrap();}
+        assert_eq!(h.revision,revision);assert!(h.resident.is_some());
+        h.handle(Command::PreparedCommit,&[]).unwrap();
+        assert_eq!(h.revision,revision+1);assert!(h.resident.is_none());
+        assert_eq!(h.packed.as_ref().unwrap().parts,vec![Some("body".into());count]);assert!(h.upload.is_none());
+    }
+    #[test]
+    fn bad_or_incomplete_upload_preserves_the_installed_scene() {
+        let mut h=Host::new();h.handle(Command::Preset{name:"hero".into(),finish:blue(),time:0.},&[]).unwrap();
+        let (mut value,binary)=h.snapshot().unwrap();value["key"]=json!("bad-chunks");let revision=h.revision;
+        let upload=serde_json::from_value(value.clone()).unwrap();h.handle(Command::PreparedBegin{upload,bytes:binary.len()},&[]).unwrap();
+        assert!(h.handle(Command::PreparedChunk{offset:1},&[1,2]).is_err());assert!(h.upload.is_none());
+        let upload=serde_json::from_value(value.clone()).unwrap();h.handle(Command::PreparedBegin{upload,bytes:binary.len()},&[]).unwrap();
+        assert!(h.handle(Command::PreparedCommit,&[]).is_err());assert!(h.upload.is_none());
+        let upload=serde_json::from_value(value).unwrap();assert!(h.handle(Command::PreparedBegin{upload,bytes:protocol::MAX_BINARY+1},&[]).is_err());
+        assert_eq!(h.revision,revision);assert!(h.resident.is_some());
+    }
+    #[test]
     fn prepared_bounds_and_identity_survive_binary_upload() {
         let mut h = Host::new();
         h.handle(
@@ -970,5 +1058,16 @@ mod tests {
             assert_eq!(result["denoiser"], "oidn");
             assert_eq!(pixels.len(), 64 * 64 * 4);
         }
+    }
+    #[cfg(feature="oidn")]
+    #[test]
+    fn cancelled_refine_yields_to_input_and_final_keeps_its_sample_budget() {
+        let mut host=Host::new();
+        host.handle(Command::Preset{name:"hero".into(),finish:blue(),time:0.},&[]).unwrap();
+        host.cancel_revision.store(1,Ordering::Relaxed);
+        let refine=serde_json::from_value(json!({"op":"render","width":64,"height":64,"tier":"refine","samples":32,"reset":true,"denoise":true})).unwrap();
+        let (result,pixels)=host.handle(refine,&[]).unwrap();assert_eq!(result["cancelled"],true);assert!(pixels.is_empty());
+        let final_frame=serde_json::from_value(json!({"op":"render","width":64,"height":64,"tier":"final","samples":64,"reset":true,"denoise":true})).unwrap();
+        let (result,pixels)=host.handle(final_frame,&[]).unwrap();assert_eq!(result["samples"],64);assert_eq!(result["denoiser"],"oidn");assert_eq!(pixels.len(),64*64*4);
     }
 }

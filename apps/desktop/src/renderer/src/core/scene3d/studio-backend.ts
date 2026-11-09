@@ -85,10 +85,13 @@ export type StudioRenderRequest = {
   layer?: string; background?: boolean;
   /** Accumulate from the previous refine request; scene/camera/time edits reset it. */
   accumulate?: boolean; denoise?: boolean; signal?: AbortSignal;
+  /** Renderer clock when this evaluated input first requested a new image. */
+  inputAt?:number;
 };
 export type StudioFrame = {
   source: CanvasImageSource; width: number; height: number;
   samples: number; version: string; release?: () => void;
+  diagnostics?: Record<string, unknown>;
 };
 export type StudioPick = { layer: string; part: string | null; point: StudioVec3; normal: StudioVec3 };
 export type StudioBounds = { min: StudioVec3; max: StudioVec3 };
@@ -109,6 +112,9 @@ export interface StudioBackend {
   /** Normalized frame coordinates, top-left (0,0), bottom-right (1,1). */
   pick?(x: number, y: number): StudioResult<StudioPick | null>;
   bounds?(layer?: string): StudioResult<StudioBounds | null>;
+  /** Read-only timing/resource evidence for the editor acceptance harness. */
+  diagnostics?(): Record<string, unknown>;
+  cancelRefine?():void;
   dispose(): void;
 }
 export type StudioTextureSource = HTMLCanvasElement | OffscreenCanvas | Uint8Array;

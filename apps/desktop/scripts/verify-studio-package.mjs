@@ -14,6 +14,12 @@ import { _electron, chromium } from 'playwright';
 import { verifyStudioRuntime } from './verify-studio-runtime.mjs';
 import { flipFuses, FuseVersion, FuseV1Options, FuseState, getCurrentFuseWire } from '@electron/fuses';
 
+if(process.argv.includes('--benchmark')) {
+  const {runEditorBenchmark}=await import('./studio-editor-benchmark.mjs');
+  await runEditorBenchmark(process.argv.find(arg=>arg.endsWith('.app')));
+  process.exit(0);
+}
+
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const evidence = path.resolve(process.env.PM_STUDIO_SHOTS ?? '/tmp/pm-shots/studio3d/laneP1');
 const source = path.resolve(process.argv[2] ?? path.join(desktop, 'dist/mac-arm64/Powermove.app'));

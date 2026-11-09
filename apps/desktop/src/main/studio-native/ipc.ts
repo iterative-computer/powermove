@@ -43,7 +43,9 @@ export function registerStudioNativeIpc(ipc: Pick<IpcMain, 'handle' | 'removeHan
     if (!manager) {
       // Bound the native memory budget; the backend releases idle sessions.
       const active = [...sessions.values()].reduce((n, entries) => n + entries.size, 0);
-      if (active >= 2) throw new Error('Too many active Studio sessions');
+      // One session for each pane of the supported 4 Views layout. Keep the
+      // same process-wide cap across windows, rather than allowing four each.
+      if (active >= 4) throw new Error('Too many active Studio sessions');
       const surface=StudioSurfaceReceiver.open(executable);
       manager = new StudioHostManager({ executable, surfaceService:surface?.service }); owner.set(id, manager);
       if(surface)surfaces.set(manager,surface);

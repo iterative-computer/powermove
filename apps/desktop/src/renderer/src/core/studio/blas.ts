@@ -1,6 +1,7 @@
 import { gatherPayload, type GeometryPayload } from './gather';
-import { buildBvh } from './bvh';
+import { buildBvh, type Bvh } from './bvh';
 import { STUDIO_TRIANGLE_FLOATS } from './layout';
+import {environmentPreparationIdle,disposeEnvironmentWorkers} from '../scene3d/environment-worker';
 
 /*
  * One mesh's bottom-level BVH: its triangles' corners and shading data in BVH
@@ -33,10 +34,11 @@ export function finishBlas(corners: Float32Array, shading: Float32Array): BlasDa
 /** Meshes at least this large build in a worker; smaller ones build at once. */
 export const WORKER_TRIANGLES = 20_000;
 
-type Payload={corners:Float32Array;shading:Float32Array}|{geometry:GeometryPayload};
+type Payload={corners:Float32Array;shading:Float32Array}|{geometry:GeometryPayload}|{top:Float32Array};
 export type GeometryBlas=BlasData & {bounds:number[]};
 type Job={payload:Payload;bytes:number;resolve:(b:any)=>void;reject:(e:unknown)=>void};
-export function prepareBlasPayload(payload:Payload):BlasData|GeometryBlas {
+export function prepareBlasPayload(payload:Payload):BlasData|GeometryBlas|Bvh {
+ if('top' in payload)return buildBvh(payload.top);
  if('geometry' in payload){const g=gatherPayload(payload.geometry);return {...finishBlas(g.corners,g.shading),bounds:[...g.bounds.min.toArray(),...g.bounds.max.toArray()]};}
  return finishBlas(payload.corners,payload.shading);
 }
@@ -48,7 +50,7 @@ let retainedBytes = 0;
 const WORKER_BYTES = 512 * 1024 ** 2;
 const pendingBuilds=new Set<Promise<unknown>>();
 function track<T>(promise:Promise<T>):Promise<T>{const pending=promise.finally(()=>pendingBuilds.delete(pending));pendingBuilds.add(pending);return pending;}
-export async function studioGeometryIdle():Promise<void>{await Promise.allSettled([...pendingBuilds]);}
+export async function studioGeometryIdle():Promise<void>{await environmentPreparationIdle();await Promise.allSettled([...pendingBuilds]);}
 const maxWorkers = Math.max(1, Math.min(4, ((globalThis as any).navigator?.hardwareConcurrency ?? 4) - 1));
 
 function retire(worker:Worker):void {
@@ -58,12 +60,13 @@ function retire(worker:Worker):void {
 /** The pool belongs to this renderer page. Project close cancels its retained
  * inputs and callbacks; the next project starts a fresh bounded pool. */
 export function disposeStudioGeometryWorkers():void {
+  disposeEnvironmentWorkers();
   for(const {job,timer} of active.values()){clearTimeout(timer);job.reject(new Error('Studio project closed'));}
   for(const job of queue)job.reject(new Error('Studio project closed'));
   queue.length=0;active.clear();retainedBytes=0;
   for(const worker of [...workers])retire(worker);
 }
-function finish(worker:Worker,result?:BlasData,error?:unknown):void {
+function finish(worker:Worker,result?:unknown,error?:unknown):void {
   const running=active.get(worker);if(!running)return;
   clearTimeout(running.timer);active.delete(worker);retainedBytes-=running.job.bytes;
   // Resolved promises can retain their large result. Never leave a completed
@@ -87,16 +90,16 @@ function pump(): void {
     active.set(w,{job,timer});
     w.onmessage=e=>finish(w,e.data);
     w.onerror=e=>finish(w,undefined,e);
-    const payload=job.payload,transfers='geometry' in payload?[...Object.values(payload.geometry.attributes).map(a=>a.array.buffer),...(payload.geometry.index?[payload.geometry.index.buffer]:[])]:[payload.corners.buffer,payload.shading.buffer];
+    const payload=job.payload,transfers='top' in payload?[payload.top.buffer]:'geometry' in payload?[...Object.values(payload.geometry.attributes).map(a=>a.array.buffer),...(payload.geometry.index?[payload.geometry.index.buffer]:[])]:[payload.corners.buffer,payload.shading.buffer];
     try {w.postMessage(payload,[...new Set(transfers)]);}
     catch(error){finish(w,undefined,error);}
   }
 }
 function enqueue<T>(payload:Payload):Promise<T>{
   const geometry='geometry' in payload?payload.geometry:null;
-  const input=geometry?Object.values(geometry.attributes).reduce((n,a)=>n+a.array.byteLength,geometry.index?.byteLength??0):('corners' in payload?payload.corners.byteLength+payload.shading.byteLength:0);
+  const input='top' in payload?payload.top.byteLength:geometry?Object.values(geometry.attributes).reduce((n,a)=>n+a.array.byteLength,geometry.index?.byteLength??0):('corners' in payload?payload.corners.byteLength+payload.shading.byteLength:0);
   const triangles=geometry?(geometry.index?.length??((geometry.attributes.position?.array.length??0)/3))/3:('corners' in payload?payload.corners.length/9:0);
-  const bytes=input+triangles*320;
+  const bytes=input+('top' in payload?payload.top.length/9*320:triangles*320);
   if(!Number.isFinite(bytes) || retainedBytes+bytes>WORKER_BYTES)return Promise.reject(new Error('Studio geometry preparation exceeds the memory budget; simplify the model'));
   retainedBytes+=bytes;
   return track(new Promise((resolve,reject)=>{queue.push({payload,bytes,resolve,reject});pump();}));
@@ -110,4 +113,9 @@ export function finishBlasInWorker(corners: Float32Array, shading: Float32Array)
 export function finishGeometryInWorker(geometry:GeometryPayload):Promise<GeometryBlas>{
   if(typeof Worker==='undefined')return Promise.resolve(prepareBlasPayload({geometry}) as GeometryBlas);
   return enqueue({geometry});
+}
+/** A dense scatter's TLAS is preparation work too, never an editor task. */
+export function finishTopInWorker(top:Float32Array):Promise<Bvh>{
+ if(typeof Worker==='undefined')return Promise.resolve(buildBvh(top));
+ return enqueue({top});
 }

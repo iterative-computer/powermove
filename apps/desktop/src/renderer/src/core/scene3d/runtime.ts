@@ -1,6 +1,9 @@
 import { makeNature,natureGeometry,natureMesh } from '../studio/nature';
 import { channelValues } from './environment-data';
-import { environmentImage,environmentImageKey,terrainSettings,makeTerrain,syncEnvironmentGraph } from './environment-render';
+import { environmentImage,environmentImageKey,terrainSettings,terrainJob,makeTerrain,syncEnvironmentGraph } from './environment-render';
+import {prepareEnvironmentInWorker} from './environment-worker';
+import type {TerrainPart} from './environment-preparation';
+import {terrainResolution} from '../studio/environment-geometry';
 import { disposeStudioSplats } from '../studio/splat-raster';
 import { buildExtrusionGeometry } from './extrusion-geometry';
 import { reportLayerFailure } from './layer-diagnostic';
@@ -92,8 +95,11 @@ export class SceneRuntime {
   revision = 0;
   /** Loading captures must be retried even when project/time are unchanged. */
   materialsPending = false;
+  geometryPending=0;
+  private generation=0;
+  get preparationGeneration(){return this.generation;}
 
-  constructor() { this.scene.add(this.ambient); }
+  constructor(public onGeometryReady:()=>void=()=>{}) { this.scene.add(this.ambient); }
 
   private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null,nativeArtwork=false): THREE.Texture|null {
     if (!id) return null;
@@ -142,7 +148,17 @@ export class SceneRuntime {
 
   private makeObject(node: SceneObject,camera?:{position:{x:number;y:number;z:number};fov:number}): THREE.Object3D {
     if(node.world || node.fog || node.scatter)return new THREE.Group();
-    if(node.terrain)return makeTerrain(node,terrainSettings(node.terrain,environmentImage(node.terrain.heightSource,node.id,this.getter,this.compositionGetter),camera));
+    if(node.terrain){
+      const settings=terrainSettings(node.terrain,environmentImage(node.terrain.heightSource,node.id,this.getter,this.compositionGetter),camera,typeof Worker!=='undefined');
+      if(typeof Worker==='undefined')return makeTerrain(node,settings);
+      const group=new THREE.Group(),generation=this.generation;group.userData.studioTerrainPending=true;this.geometryPending++;
+      void prepareEnvironmentInWorker<TerrainPart[]>(terrainJob(node,settings),group).then(parts=>{
+        if(generation!==this.generation || this.objects.get(node.id)!==group)return;
+        const prepared=makeTerrain(node,settings,parts);for(const mesh of [...prepared.children])group.add(mesh);
+        group.userData.studioTerrainPending=false;this.scene.updateMatrixWorld(true);this.revision++;this.refreshEnvironment();
+      },error=>{if(generation===this.generation&&this.objects.get(node.id)===group){group.userData.studioTerrainPending=false;reportLayerFailure(this,node.id,'terrain preparation',error);}}).finally(()=>{if(generation===this.generation){this.geometryPending--;this.onGeometryReady();}});
+      return group;
+    }
     if ('nature' in node.source)return makeNature(node.source.nature,node.source.seed);
     if ('assetId' in node.source) {
       const asset = this.getter(node.source.assetId);
@@ -194,7 +210,9 @@ export class SceneRuntime {
     if(importedVertices>30_000_000)throw new Error('Imported scene exceeds 30 million vertices; simplify or split the models');
     for (const node of data.objects) {
       const terrainImage=node.terrain?environmentImage(node.terrain.heightSource,node.id,assets,compositionGetter):null;
-      const terrainDetail=node.terrain?terrainSettings(node.terrain,terrainImage,terrainCamera).resolution:0;
+      // Selecting a grid density is cheap. Baking its noise/erosion here used
+      // to repeat 50–120 ms of work on every evaluated time/camera update.
+      const terrainDetail=node.terrain?terrainResolution({size:[node.terrain.p.width!.v,node.terrain.p.depth!.v],resolution:Math.round(node.terrain.p.resolution!.v),adaptive:node.terrain.p.adaptive!.v},terrainCamera):0;
       const source = signature(node.source)+':'+node.useSourceMaterials+(node.terrain?JSON.stringify([node.terrain,environmentImageKey(terrainImage),terrainDetail]):''),asset='assetId' in node.source ? assets(node.source.assetId) : null;
       let object = this.objects.get(node.id);
       if (!object || this.sources.get(node.id)!==source || this.assetRefs.get(node.id)!==asset) {
@@ -471,6 +489,7 @@ export class SceneRuntime {
     const mixer=this.mixers.get(id)?.mixer;if(mixer){mixer.stopAllAction();mixer.uncacheRoot(object);}this.mixers.delete(id);
   }
   dispose():void {
+    this.generation++;this.geometryPending=0;
     disposeStudioSplats(this);
     for(const [id,object] of this.objects)this.remove(id,object);
     for(const {texture} of this.textures.values())texture.dispose();this.textures.clear();

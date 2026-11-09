@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { makePM } from '../../legacy/__tests__/make-pm';
 import { editScene } from './operations';
 import { LAYER3D_DEFINITIONS } from './layers';
-import { compositionRuntime, disposeSceneRuntimes } from './service';
+import { compositionRuntime, disposeSceneRuntimes,pruneSceneRuntimes } from './service';
 import { install as installCompositor } from '../../legacy/gl/compositor';
 
 const editors: any[] = [], sourceMeshes: THREE.Mesh[] = [];
@@ -31,6 +31,12 @@ function model(width: number) {
 }
 
 describe('composition runtime reference observation', () => {
+  it('releases the previous project composition and retains the open one',()=>{
+    const PM=editor(),old=compositionRuntime(PM),disposed=vi.spyOn(old,'dispose');
+    PM.proj=PM.mkProject({name:'Next project',w:320,h:180,dur:3});PM.scope=[];PM.touch();
+    const current=compositionRuntime(PM),currentDisposed=vi.spyOn(current,'dispose');pruneSceneRuntimes(PM);
+    expect(disposed).toHaveBeenCalledOnce();expect(currentDisposed).not.toHaveBeenCalled();expect(compositionRuntime(PM)).toBe(current);
+  });
   it('reuses warm scan storage without rebuilding maps or per-layer sets', () => {
     const PM = editor(20), runtime = compositionRuntime(PM), revision = runtime.revision;
     const original = runtime.objects.get('model0'), NativeMap = Map, NativeSet = Set;

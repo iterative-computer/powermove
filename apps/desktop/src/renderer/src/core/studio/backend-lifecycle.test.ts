@@ -16,6 +16,27 @@ import { beginStudioCapture,beginStudioCapturePass,studioIdle, studioLayer, stud
 function fixture(){const PM:any={time:0,_studioFinal:true,invalidate:vi.fn(),store:{get:()=> 'quality'}};const runtime=new SceneRuntime();const scene=createScene();scene.objects=[createObject('model')];runtime.sync(scene);return {PM,runtime,draw:(time=0)=>studioLayer(PM,runtime,64,64,'model',new Set(['model']),true,runtime.camera,undefined,time)};}
 afterEach(()=>{registerStudioBackend(null);vi.unstubAllGlobals();});
 describe('Studio backend lifecycle',()=>{
+ it('clears preparation for a deleted depth set after importing or removing a model',async()=>{
+  const {PM,runtime,draw}=fixture();runtime.geometryPending=1;draw();expect(PM.Studio.status().preparing).toBeTruthy();
+  const scene=createScene();scene.objects=[createObject('other')];runtime.geometryPending=0;runtime.sync(scene);
+  studioLayer(PM,runtime,64,64,'other',new Set(['other']),true,runtime.camera);await studioIdle(PM);
+  studioLayer(PM,runtime,64,64,'other',new Set(['other']),true,runtime.camera);
+  expect(PM.Studio.status().preparing).toBeNull();disposeSceneRuntimes(PM);
+ });
+ it('coalesces Live input while displaying completed frames during a continuous drag',async()=>{
+  const requests:any[]=[],release=vi.fn();let complete:any;
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:(r:any)=>{requests.push(r);return new Promise(resolve=>{complete=resolve;});},dispose:()=>{}} as unknown as StudioBackend));
+  const {PM,draw}=fixture();PM._studioFinal=false;PM.store.get=()=> 'fast';
+  draw();await studioIdle(PM);draw(0);
+  for(let time=1;time<=100;time++)draw(time);
+  expect(requests).toHaveLength(1);
+  complete({source:document.createElement('canvas'),width:64,height:64,samples:1,version:'completed-during-drag',release});
+  await vi.waitFor(()=>expect(requests).toHaveLength(2));
+  expect(draw(100)?.version).toContain('completed-during-drag');
+  expect(release).not.toHaveBeenCalled();
+  disposeSceneRuntimes(PM);
+  complete({source:document.createElement('canvas'),width:64,height:64,samples:1,version:'closed',release});
+ });
  it('restarts a lost portable device and replaces stale completed frames',async()=>{
   registerStudioBackend(null);
   const {PM,draw}=fixture();draw();await studioIdle(PM);draw();await studioIdle(PM);expect(draw()).toBeTruthy();

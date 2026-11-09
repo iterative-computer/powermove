@@ -831,7 +831,7 @@ let lightMarkers: LightMarker[] = [];
 let lightHoverId: string | null = null;
 let lightAccent: { at: number; value: string } | null = null;
 let lightsPainted = false;
-V.isNavigating = () => !disposed && (!!activeDrag || window.performance.now() < navigationUntil);
+V.isNavigating = () => !disposed && (!!activeDrag || !!sceneNavigation?.active() || !!V.sceneGizmo?.active?.() || window.performance.now() < navigationUntil);
 let presentation: { time: number; version: number | undefined; project: any; quality: number; width: number; height: number } | null = null;
 const presentationIsCurrent = () => {
   const project = api.project.get();
@@ -1253,7 +1253,7 @@ listen('frame:rendered', (frame: { viewport: PreviewViewport | null; time: numbe
 });
 listen('overlay', () => drawOverlay());
 /* Free View orbits and Active Camera switches move every light marker. */
-if (api.scene3d?.onViewChange) { const view = api.scene3d.onViewChange(() => schedulePresentation()); eventOffs.push(() => view.dispose()); }
+if (api.scene3d?.onViewChange) { const view = api.scene3d.onViewChange(() => {navigationUntil=window.performance.now()+250;schedulePresentation();}); eventOffs.push(() => view.dispose()); }
 
 function drawOverlay() {
   if (drawOverlayContent() !== false) drawLights();
@@ -1896,6 +1896,7 @@ function bindStage(stage: any, inner: any): () => void {
   }),true);
   listen(stage, 'pointerdown', guarded(onDown), capture);
   listen(stage, 'pointermove', guarded((e: any) => {
+    if(e.buttons || sceneNavigation?.active() || sceneGizmo?.active()){hoverPointer=null;return;}
     const navigationMode=api.scene3d?.getNavigationMode?.();
     if(navigationMode && navigationMode!=='select' && api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object')){
       setStageCursor(navigationMode==='dolly'?'ns-resize':'grab');return;
@@ -2164,7 +2165,7 @@ function scheduleHover(): void {
 
 /** The layer a plain click at the last pointer position would select. */
 function hoverTargetId(): string | null {
-  if (!hoverPointer || !V.pointerOver || activeDrag || V.textSession || !V.stage) return null;
+  if (!hoverPointer || !V.pointerOver || V.isNavigating() || V.textSession || !V.stage) return null;
   if ((V.temporaryTool || toolService()?.tool || 'select') !== 'select') return null;
   const T = api.transport.time();
   const point = pointerComp(hoverPointer);

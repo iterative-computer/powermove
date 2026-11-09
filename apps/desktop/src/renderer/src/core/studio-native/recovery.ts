@@ -13,9 +13,10 @@ export class RecoveringStudioBackend implements StudioBackend {
   private time = 0;
   private camera: [StudioCameraDescription, StudioCameraOptions] | null = null;
   private closed = false;
+  private nativeFailure:string|null=null;
   get id(): string { return this.fallback?.id ?? this.native.id; }
   constructor(private native: StudioBackend, private fallbackFactory: StudioBackendFactory, private context: StudioBackendContext) {}
-  async initialize(): Promise<void> { try { await this.native.initialize(); } catch (error) { console.warn('Native Studio initialization failed; using WebGPU',error);await this.recover(); } }
+  async initialize(): Promise<void> { try { await this.native.initialize(); } catch (error) { this.nativeFailure=String(error);console.warn('Native Studio initialization failed; using WebGPU',error);await this.recover(); } }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription) {
     this.input = { scene, maps, description }; this.camera = null;
     const active = this.fallback ?? this.native;
@@ -35,7 +36,8 @@ export class RecoveringStudioBackend implements StudioBackend {
     if (request.signal?.aborted) throw new Error('Studio frame cancelled');
     try { return await (this.fallback ?? this.native).render(request); }
     catch (error) {
-      if (request.signal?.aborted || this.fallback) throw error;
+      if (this.closed || request.signal?.aborted || this.fallback || (error as Error)?.name==='StudioFrameCancelled') throw error;
+      this.nativeFailure=String(error);
       console.warn('Native Studio frame failed; using WebGPU',error);
       return (await this.recover()).render(request);
     }
@@ -43,6 +45,8 @@ export class RecoveringStudioBackend implements StudioBackend {
   async pick(x: number, y: number) { return await (this.fallback ?? this.native).pick?.(x, y) ?? null; }
   async bounds(layer?: string) { return await (this.fallback ?? this.native).bounds?.(layer) ?? null; }
   async liveHistory() { return await (this.fallback ?? this.native as any).liveHistory?.() ?? null; }
+  diagnostics() { return {...((this.fallback ?? this.native).diagnostics?.() ?? {}),nativeFailure:this.nativeFailure}; }
+  cancelRefine(){(this.fallback??this.native).cancelRefine?.();}
   private recover(): Promise<StudioBackend> {
     this.switching ??= (async () => {
       if (this.closed) throw new Error('Studio backend is closed');

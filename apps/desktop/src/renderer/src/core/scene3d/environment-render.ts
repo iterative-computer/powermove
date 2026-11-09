@@ -5,6 +5,10 @@ import { packWorld,worldSun,type StudioWorld } from '../studio/environment';
 import {selectNatureLod} from '../studio/nature';
 import type { StudioScene } from '../studio/extract';
 import type { Scene3D,SceneObject } from './schema';
+import {prepareEnvironmentInWorker} from './environment-worker';
+import {prepareEnvironment,type TerrainJob,type TerrainPart,type ScatterPart,type ScatterJob} from './environment-preparation';
+import {geometryPayload} from '../studio/gather';
+import {reportLayerFailure} from './layer-diagnostic';
 
 const rgb=(color:string)=>{const c=new THREE.Color(color);return {x:c.r,y:c.g,z:c.b};};
 const imageCache=new WeakMap<object,ReturnType<typeof environmentImage>>();
@@ -59,10 +63,10 @@ export function worldForNode(node:any,image:ReturnType<typeof environmentImage>)
 }
 type TerrainSettings={size:[number,number];resolution:number;amplitude:number;frequency:number;octaves:number;seed:number;ridged:boolean;detail:number;erosion:number;adaptive:boolean;blend:number;natural:boolean;water_level:number;snow_level:number;heights:number[];material:number;layers:{material:number;min_height:number;max_height:number;min_slope:number;max_slope:number}[];center?:{x:number;y:number;z:number}};
 const terrainSettingsCache=new WeakMap<object,{key:string;heights:any;result:any}>();
-export function terrainSettings(node:any,image:ReturnType<typeof environmentImage>,camera?:{position:{x:number;y:number;z:number};fov:number}){
+export function terrainSettings(node:any,image:ReturnType<typeof environmentImage>,camera?:{position:{x:number;y:number;z:number};fov:number},defer=false){
   const p=channelValues(node.p),resolution=Math.round(p.resolution),heights:number[]=[];
   const selected=terrainResolution({size:[p.width,p.depth],resolution,adaptive:p.adaptive},camera);
-  const key=JSON.stringify([p,node.regions,environmentImageKey(image),selected]);
+  const key=JSON.stringify([p,node.regions,environmentImageKey(image),selected,defer]);
   const cached=terrainSettingsCache.get(node);if(cached?.key===key && cached.heights===node.heights)return cached.result as TerrainSettings;
   if(image){
     const stride=image.pixels.length/(image.width*image.height);
@@ -74,25 +78,60 @@ export function terrainSettings(node:any,image:ReturnType<typeof environmentImag
   }
   const settings={size:[p.width,p.depth] as [number,number],resolution,amplitude:p.amplitude,frequency:p.frequency,octaves:Math.round(p.octaves),seed:Math.round(p.seed),ridged:p.ridged,detail:p.detail??0,erosion:Math.round(p.erosion??0),adaptive:p.adaptive??false,blend:p.blend??0,natural:p.natural??false,water_level:p.waterLevel??-100000,snow_level:p.snowLevel??100000,heights:image?heights:node.heights,
     material:0,layers:node.regions.map((region:any,i:number)=>{const p=channelValues(region.p);return {material:i+1,min_height:p.minHeight,max_height:p.maxHeight,min_slope:p.minSlope,max_slope:p.maxSlope};})};
-  const result=(settings.adaptive || settings.erosion?bakeTerrain(settings,selected):settings) as TerrainSettings;
+  const result=(defer?(settings.adaptive||settings.erosion?{...settings,bake_resolution:selected}:settings):settings.adaptive || settings.erosion?bakeTerrain(settings,selected):settings) as TerrainSettings;
   terrainSettingsCache.set(node,{key,heights:node.heights,result});return result;
 }
-export function makeTerrain(node:SceneObject,settings:ReturnType<typeof terrainSettings>):THREE.Group{
-  const group=new THREE.Group();
+export function terrainJob(node:SceneObject,settings:ReturnType<typeof terrainSettings>):TerrainJob{
   const palette=[rgb(node.material.p.color!.v),...node.terrain!.regions.map(r=>rgb(channelValues(r.p).color))];
-  for(const part of terrainMeshes(settings,palette,[{roughness:node.material.p.roughness!.v,metallic:node.material.p.metalness!.v},...node.terrain!.regions.map(r=>{const p=channelValues(r.p);return {roughness:p.roughness,metallic:p.metalness};})])){
-    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(part.mesh.positions.flatMap(v=>[v.x,v.y,v.z]),3));
-    g.setAttribute('normal',new THREE.Float32BufferAttribute(part.mesh.normals.flatMap(v=>[v.x,v.y,v.z]),3));g.setAttribute('uv',new THREE.Float32BufferAttribute(part.mesh.uvs.flat(),2));if(part.mesh.colors)g.setAttribute('color',new THREE.Float32BufferAttribute(part.mesh.colors.flatMap(v=>[v.x,v.y,v.z]),3));g.setIndex(part.mesh.indices.flat());
+  return {kind:'terrain',settings,palette,materials:[{roughness:node.material.p.roughness!.v,metallic:node.material.p.metalness!.v},...node.terrain!.regions.map(r=>{const p=channelValues(r.p);return {roughness:p.roughness,metallic:p.metalness};})]};
+}
+export function makeTerrain(node:SceneObject,settings:ReturnType<typeof terrainSettings>,prepared?:TerrainPart[]):THREE.Group{
+  const group=new THREE.Group();
+  for(const part of prepared??prepareEnvironment(terrainJob(node,settings)) as TerrainPart[]){
+    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(part.positions,3));
+    g.setAttribute('normal',new THREE.BufferAttribute(part.normals,3));g.setAttribute('uv',new THREE.BufferAttribute(part.uvs,2));if(part.colors)g.setAttribute('color',new THREE.BufferAttribute(part.colors,3));g.setIndex(new THREE.BufferAttribute(part.indices,1));
     const material=new THREE.MeshPhysicalMaterial(),region=node.terrain!.regions[part.material-1];
     if(region){const p=channelValues(region.p);material.color.set(p.color);material.roughness=p.roughness;material.metalness=p.metalness;}
-    if(part.mesh.colors){material.color.setRGB(1,1,1);material.vertexColors=true;material.metalness=0;material.roughness=.88;material.userData.studioProcedural=1;}
+    if(part.colors){material.color.setRGB(1,1,1);material.vertexColors=true;material.metalness=0;material.roughness=.88;material.userData.studioProcedural=1;}
     material.userData.sourceMaterialIndex=part.material;
-    const mesh=new THREE.Mesh(g,material);mesh.userData.studioNaturalGround=!!part.mesh.colors;mesh.userData.terrainRegion=region?channelValues(region.p):null;group.add(mesh);
+    const mesh=new THREE.Mesh(g,material);mesh.userData.studioNaturalGround=!!part.colors;mesh.userData.terrainRegion=region?channelValues(region.p):null;mesh.userData.sceneId=node.id;mesh.castShadow=node.castShadow;mesh.receiveShadow=node.receiveShadow;group.add(mesh);
   }
   return group;
 }
 export function clearScatterChildren(object:THREE.Object3D):void{for(const child of [...object.children]){object.remove(child);(child as any).dispose?.();if(child.userData.studioOwnsMaterial)for(const material of Array.isArray((child as any).material)?(child as any).material:[(child as any).material])material.dispose();if(child.userData.studioOwnsGeometry)(child as any).geometry.dispose();}}
 function prototypeMeshes(root:THREE.Object3D,visit:(mesh:any)=>void):void{const walk=(object:THREE.Object3D,visible:boolean)=>{const show=visible && (object===root || object.visible);if(!show)return;visit(object);for(const child of object.children)walk(child,show);};walk(root,true);}
+function prepareScatter(runtime:any,node:SceneObject,object:THREE.Object3D,source:THREE.Object3D,surface:THREE.Object3D,p:any,signature:string):boolean{
+ if(typeof Worker==='undefined')return false;
+ const surfaces:THREE.Mesh[]=[],prototypes:THREE.Mesh[]=[];
+ prototypeMeshes(surface,(mesh:any)=>{if(mesh.isMesh)surfaces.push(mesh);});
+ // Posed surfaces keep the established evaluated-vertex path until their
+ // pose buffers are available to workers; never scatter over a rest pose.
+ if(surfaces.some((mesh:any)=>mesh.isSkinnedMesh||mesh.morphTargetInfluences?.some((v:number)=>v!==0)))return false;
+ if(source.userData.studioNature){for(const child of source.children)if((child as any).isMesh)prototypes.push(child as THREE.Mesh);}
+ else prototypeMeshes(source,(mesh:any)=>{if(mesh.isMesh)prototypes.push(mesh);});
+ const inverse=object.matrixWorld.clone().invert(),sourceInverse=source.matrixWorld.clone().invert(),scale=source.getWorldScale(new THREE.Vector3());
+ let diameter=0;
+ if(source.userData.studioNature&&prototypes[0]){const g=prototypes[0].geometry;if(!g.boundingBox)g.computeBoundingBox();const size=g.boundingBox!.getSize(new THREE.Vector3());diameter=Math.max(size.x,size.y,size.z)*Math.max(Math.abs(scale.x),Math.abs(scale.y),Math.abs(scale.z));}
+ const input:ScatterJob={kind:'scatter',settings:{objects:[0],surface:0,count:Math.round(p.count),density:p.density,seed:Math.round(p.seed),scale:[p.scaleMin,p.scaleMax],rotation:[p.rotationMin,p.rotationMax],min_height:p.minHeight,max_height:p.maxHeight,min_slope:p.minSlope,max_slope:p.maxSlope},
+  surfaces:surfaces.map(mesh=>({geometry:geometryPayload(mesh.geometry,[],0),matrix:mesh.matrixWorld.toArray()})),inverse:inverse.toArray(),rotation:new THREE.Matrix4().makeRotationFromQuaternion(source.getWorldQuaternion(new THREE.Quaternion())).toArray(),scale:scale.toArray(),
+  prototypes:prototypes.map(mesh=>({relative:sourceInverse.clone().multiply(mesh.matrixWorld).toArray(),level:mesh.userData.studioNatureLevel})),diameter,camera:runtime.camera.position.toArray()};
+ const generation=runtime.preparationGeneration;runtime.geometryPending++;
+ void prepareEnvironmentInWorker<ScatterPart[]>(input,object).then(parts=>{
+  if(runtime.objects.get(node.id)!==object||scatterCache.get(object)!==signature)return;
+  clearScatterChildren(object);
+  const options=node.materialOptions?channelValues(node.materialOptions.p):null;
+  for(const part of parts){if(!part.matrices.length)continue;const mesh=prototypes[part.prototype]!;
+   const material=options?(Array.isArray(mesh.material)?mesh.material.map((m:any)=>m.clone()):mesh.material.clone()):mesh.material;
+   if(options)for(const m of Array.isArray(material)?material:[material]){m.userData.studioAcceptsLights=options.acceptsLights;m.userData.studioReflections=options.appearsInReflections;}
+   const instanced=new THREE.InstancedMesh(mesh.geometry,material,part.matrices.length/16);instanced.instanceMatrix.array.set(part.matrices);instanced.instanceMatrix.needsUpdate=true;
+   instanced.userData.sceneId=node.id;instanced.userData.studioSharedPrototype=true;instanced.userData.studioOwnsMaterial=!!options;instanced.userData.studioPrimaryVisible=options?.castsShadows!=='only';instanced.userData.studioPart=mesh.userData.studioPart;
+   instanced.castShadow=options?options.castsShadows!=='off':node.castShadow&&mesh.castShadow;instanced.receiveShadow=options?options.acceptsShadows:node.receiveShadow&&mesh.receiveShadow;object.add(instanced);
+  }
+  runtime.scene.updateMatrixWorld(true);runtime.revision++;
+ },error=>{if(runtime.objects.get(node.id)===object&&scatterCache.get(object)===signature)reportLayerFailure(runtime,node.id,'scatter preparation',error);})
+ .finally(()=>{if(runtime.preparationGeneration===generation){runtime.geometryPending--;runtime.onGeometryReady();}});
+ return true;
+}
 const scatterCache=new WeakMap<object,string>();
 const scatterPlacements=new WeakMap<object,{signature:string;placements:ReturnType<typeof generateScatter>}>();
 /** Called after main has installed its world matrices, so surfaces and prototypes
@@ -117,12 +156,14 @@ export function syncEnvironmentGraph(runtime:any,data:Scene3D,assets:(id:string)
     if(!node.scatter)continue;
     const source=runtime.objects.get(node.scatter.model),surface=runtime.objects.get(node.scatter.surface),p=channelValues(node.scatter.p);
     if(!source || !surface){clearScatterChildren(object);scatterCache.delete(object);scatterPlacements.delete(object);runtime.warnings.push('Scatter model or surface is unavailable');continue;}
+    if(surface.userData.studioTerrainPending)continue;
     const geometryKey=(root:THREE.Object3D)=>{const keys:any[]=[];prototypeMeshes(root,(mesh:any)=>{if(mesh.isMesh)keys.push(mesh.geometry.uuid,mesh.geometry.getAttribute('position')?.version,mesh.geometry.index?.version,mesh.matrixWorld.elements,mesh.morphTargetInfluences,mesh.skeleton?Array.from(mesh.skeleton.boneMatrices):null,(Array.isArray(mesh.material)?mesh.material:[mesh.material]).map((m:any)=>m.uuid));});return keys;};
     const placementSignature=JSON.stringify([p,node.materialOptions,node.castShadow,node.receiveShadow,source.matrixWorld.elements,surface.matrixWorld.elements,source.uuid,surface.uuid,geometryKey(source),geometryKey(surface)]);
     const camera=runtime.camera.position as THREE.Vector3;
     const signature=placementSignature+(source.userData.studioNature?`:${Math.floor(camera.x/8)},${Math.floor(camera.y/8)},${Math.floor(camera.z/8)}`:'');
     if(scatterCache.get(object)===signature)continue;
     scatterCache.set(object,signature);
+    if(prepareScatter(runtime,node,object,source,surface,p,signature))continue;
     clearScatterChildren(object);
     let cached=scatterPlacements.get(object);
     if(!cached || cached.signature!==placementSignature){
@@ -163,16 +204,19 @@ export function syncEnvironmentGraph(runtime:any,data:Scene3D,assets:(id:string)
   runtime.scene.updateMatrixWorld(true);
 }
 const worldTrailers=new Map<string,Float32Array>();
+const worldBases=new WeakMap<StudioScene,{sdata:Float32Array;lightCount:number;key?:string}>();
 const pixelIds=new WeakMap<object,number>();let nextPixelId=1;
 /** Append exactly the same world/light trailer consumed by both native and WebGPU. */
 export function attachStudioWorld(scene:StudioScene,world:StudioWorld|undefined,metersPerUnit=.1):void{
+  let base=worldBases.get(scene);if(!base){base={sdata:scene.sdata,lightCount:scene.lightCount};worldBases.set(scene,base);}
   scene.metersPerUnit=metersPerUnit;scene.world=world;
-  if(!world)return;
-  const lights=Array.from(scene.sdata.subarray(0,scene.lightCount*16));lights.push(...worldSun(world));
+  if(!world){scene.sdata=base.sdata;scene.lightCount=base.lightCount;base.key=undefined;return;}
+  const lights=Array.from(base.sdata.subarray(0,base.lightCount*16));lights.push(...worldSun(world));
   const pixels=world.hdri?.pixels;if(pixels && !pixelIds.has(pixels))pixelIds.set(pixels,nextPixelId++);
   const key=JSON.stringify([{...world,hdri:world.hdri?{...world.hdri,pixels:pixelIds.get(pixels!)}:null},lights]);
+  if(base.key===key)return;base.key=key;
   let trailer=worldTrailers.get(key);if(!trailer){trailer=packWorld(world,lights);worldTrailers.set(key,trailer);while(worldTrailers.size>4 || [...worldTrailers.values()].reduce((n,v)=>n+v.byteLength,0)>96*1024*1024){const oldest=worldTrailers.keys().next().value!;if(oldest===key)break;worldTrailers.delete(oldest);}}
-  const instances=scene.sdata.subarray(scene.lightCount*16,scene.lightCount*16+scene.instanceCount*36);
+  const instances=base.sdata.subarray(base.lightCount*16,base.lightCount*16+scene.instanceCount*36);
   const packed=new Float32Array(lights.length+instances.length+trailer.length);packed.set(lights);packed.set(instances,lights.length);packed.set(trailer,lights.length+instances.length);
   scene.sdata=packed;scene.lightCount=lights.length/16;
 }

@@ -19,6 +19,15 @@ function editor(){
 }
 function edit(PM:any,args:any){const r=editScene(PM,args,{origin:'agent'});expect(r.ok,r.message).toBe(true);return r;}
 describe('environment documents and guarded agent edits',()=>{
+  it('reuses a world trailer without duplicating the sun and restores the base scene',()=>{
+    const PM=editor();edit(PM,{operation:'add_object',object:{id:'sphere',source:{primitive:'sphere'}}});
+    const runtime=compositionRuntime(PM),scene=extractScene(runtime.scene,()=>true,{sky:new THREE.Color(),ground:new THREE.Color(),intensity:0}),base=scene.sdata,lights=scene.lightCount;
+    const world={sky:{elevation:30,intensity:1}};
+    attachStudioWorld(scene,world);const first=scene.sdata,count=scene.lightCount;
+    attachStudioWorld(scene,world);expect(scene.sdata).toBe(first);expect(scene.lightCount).toBe(count);
+    attachStudioWorld(scene,{sky:{elevation:40,intensity:1}});expect(scene.lightCount).toBe(count);
+    attachStudioWorld(scene,undefined);expect(scene.sdata).toBe(base);expect(scene.lightCount).toBe(lights);
+  });
   it('carries hundreds of practical lights through document parsing and scene preparation',()=>{
     const lights=Array.from({length:240},(_,i)=>({id:`practical_${i}`,type:'point',p:{x:i%12,y:2,z:-Math.floor(i/12),intensity:3}}));
     const scene=parseScene({lights});

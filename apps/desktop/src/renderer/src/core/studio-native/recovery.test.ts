@@ -8,6 +8,13 @@ function backend(id: string): StudioBackend {
   return { id, initialize: vi.fn(async () => {}), setScene: vi.fn(), patchScene: vi.fn(), setTime: vi.fn(), setCamera: vi.fn(), setView: vi.fn(), dispose: vi.fn(), render: vi.fn(() => ({ source: {} as HTMLCanvasElement, width: 1920, height: 1080, samples: 1, version: id })) };
 }
 describe('native Studio fallback', () => {
+  it('keeps the native renderer when input interrupts Refine',async()=>{
+    const native=backend('native'),factory=vi.fn(()=>backend('webgpu'));
+    native.render=vi.fn(async()=>{throw Object.assign(new Error('new input'),{name:'StudioFrameCancelled'});});
+    const recovering=new RecoveringStudioBackend(native,factory,{invalidate:vi.fn()});
+    await expect(recovering.render({...request,tier:'refine'})).rejects.toMatchObject({name:'StudioFrameCancelled'});
+    expect(factory).not.toHaveBeenCalled();expect(recovering.id).toBe('native');recovering.dispose();
+  });
   it('replays scene and time before rendering after a host crash', async () => {
     const native = backend('native'), portable = backend('webgpu'), invalidate = vi.fn();
     native.render = vi.fn(async () => { throw new Error('process exited'); });

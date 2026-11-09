@@ -57,6 +57,15 @@ pub struct InstanceIdentity {
     pub part: Option<String>,
 }
 #[derive(Deserialize)]
+pub struct InstanceParts { pub names:Vec<Option<String>>,pub indices:Range }
+impl InstanceParts {
+    fn read(&self,binary:&[u8],count:usize)->Result<Vec<Option<String>>,String>{
+        let indices=self.indices.typed::<u32>(binary)?;
+        if indices.len()!=count || self.names.len()>count+1{return Err("instance parts do not match instances".into());}
+        indices.iter().map(|&i|self.names.get(i as usize).cloned().ok_or_else(||"invalid instance part index".into())).collect()
+    }
+}
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
     pub key: String,
@@ -71,6 +80,7 @@ pub struct Upload {
     pub objects: Vec<Identity>,
     #[serde(default)]
     pub instance_policies: Vec<InstanceIdentity>,
+    pub instance_parts:Option<InstanceParts>,
     pub view: View,
 }
 #[derive(Deserialize)]
@@ -82,6 +92,7 @@ pub struct Patch {
     pub materials: Range,
     pub view: View,
     pub instance_policies: Option<Vec<InstanceIdentity>>,
+    pub instance_parts:Option<InstanceParts>,
 }
 
 pub struct PackedScene {
@@ -238,7 +249,7 @@ impl PackedScene {
             sdata,
         };
         let (geometries, placements) = placements(&prepared, u.instance_count)?;
-        let parts = if u.instance_policies.is_empty() {
+        let parts = if let Some(parts)=u.instance_parts {parts.read(binary,u.instance_count)?} else if u.instance_policies.is_empty() {
             vec![None; u.instance_count]
         } else {
             if u.instance_policies.len() != u.instance_count {
@@ -283,6 +294,7 @@ impl PackedScene {
             return Err("native geometry key is stale; upload scene again".into());
         }
         p.view.validate()?;
+        let instance_parts=p.instance_parts.as_ref().map(|parts|parts.read(binary,self.placements.len())).transpose()?;
         if p.instance_policies
             .as_ref()
             .is_some_and(|policies| policies.len() != self.placements.len())
@@ -326,7 +338,7 @@ impl PackedScene {
             self.prepared.nodes[..self.top_nodes].copy_from_slice(&nodes);
             self.prepared.materials = materials;
             self.view = p.view;
-            if let Some(policies) = p.instance_policies {
+            if let Some(parts)=instance_parts {self.parts=parts;} else if let Some(policies) = p.instance_policies {
                 self.parts = policies.into_iter().map(|p| p.part).collect();
             }
             return Ok(content_changed);
@@ -354,7 +366,7 @@ impl PackedScene {
         self.prepared.nodes[..self.top_nodes].copy_from_slice(&nodes);
         self.prepared.materials = materials;
         self.view = p.view;
-        if let Some(policies) = p.instance_policies {
+        if let Some(parts)=instance_parts {self.parts=parts;} else if let Some(policies) = p.instance_policies {
             self.parts = policies.into_iter().map(|p| p.part).collect();
         }
         for (i, l) in self.prepared.lights.iter_mut().enumerate() {
