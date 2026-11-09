@@ -24,6 +24,10 @@ pub struct Host {
     pub views: BTreeMap<String, Entity<SurfaceView>>,
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
+    /// Where the shell last placed the timeline panel, and its header height;
+    /// `None` while it isn't drawn. The native playhead and timecode follow it.
+    pub timeline_place: Option<(pm_shell::layout::Rect, f32)>,
+    frame_outline: crate::playback::FrameOutline,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
     /// The window's open panels, and closed built-ins whose isolates are going.
     open: BTreeSet<String>,
@@ -613,12 +617,7 @@ impl Controller {
             if let Some(timeline) = self.builtins.timeline.clone() {
                 timeline.update(cx, |timeline, cx| timeline.set_tokens(t.clone(), cx));
             }
-            crate::playback::set_timeline(
-                cx.entity_id(),
-                bounds,
-                t.metrics.layer_column,
-                t.metrics.header,
-            );
+            self.builtins.timeline_place = Some((bounds, t.metrics.header));
         }
         if id == "viewer" {
             let body_h = (bounds.h - t.metrics.header).max(1.);
@@ -640,7 +639,7 @@ impl Controller {
                 .viewer_transform(self.dimensions, Some(scale), self.view.pan);
             // A cropped canvas has its edges outside the pane: no outline.
             let cropped = self.host.borrow().viewer_crop.get().is_some();
-            crate::playback::frame_outline(
+            self.builtins.frame_outline.show(
                 &self.host.borrow(),
                 !cropped && crate::panels::needs_frame_outline(self.background, t.colors.viewer),
                 t.colors.separator,

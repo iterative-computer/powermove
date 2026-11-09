@@ -181,6 +181,8 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
+            // Each layout pass places the timeline again, if it draws it.
+            v.builtins.timeline_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
         });

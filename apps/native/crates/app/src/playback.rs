@@ -2,26 +2,10 @@
 use crate::session::Controller;
 use gpui::*;
 use objc2::{MainThreadMarker, msg_send};
+use objc2::{rc::Retained, runtime::AnyObject};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use pm_engine_service::layers::PlaybackLayers;
-use pm_shell::layout::Rect;
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    rc::Rc,
-};
-thread_local! {static TIMELINES: RefCell<HashMap<EntityId,(Rect,f32,f32)>>=RefCell::new(HashMap::new());}
-pub fn set_timeline(id: EntityId, r: Rect, x: f32, y: f32) {
-    TIMELINES.with(|t| {
-        t.borrow_mut().insert(id, (r, x, y));
-    });
-}
-thread_local! {static VIEW: Cell<(f64, f64, f64)> = const { Cell::new((100., 0., 0.)) };}
-/// Timeline time mapping for the native playhead: pps, first second, column.
-pub fn set_view(pps: f64, scroll_time: f64, column: f64) {
-    VIEW.with(|v| v.set((pps, scroll_time, column)));
-}
-
+use std::{cell::RefCell, rc::Rc};
 /// When panels hear about the transport: every paused time change, and only
 /// the start and end of playback (S3: no GPUI repaint while playing).
 #[derive(Default)]
@@ -68,17 +52,17 @@ macro_rules! cg {
     }};
 }
 
-thread_local! {static OUTLINE: RefCell<Option<objc2::rc::Retained<objc2::runtime::AnyObject>>> = const { RefCell::new(None) };}
 /// A `width` pt outline just outside the composition frame (the viewer's
 /// Metal layer), shown only when the comp cannot be told from the surround.
-pub fn frame_outline(host: &pm_shell::Host, visible: bool, color: u32, width: f32) {
-    let metal = host.viewer_layer();
-    let parent = foreign_types::ForeignType::as_ptr(&metal) as *mut objc2::runtime::AnyObject;
-    OUTLINE.with(|o| {
-        let mut o = o.borrow_mut();
-        let outline = o.get_or_insert_with(|| unsafe {
-            let l: objc2::rc::Retained<objc2::runtime::AnyObject> =
-                objc2::rc::Retained::from_raw(msg_send![objc2::class!(CALayer), new]).unwrap();
+#[derive(Default)]
+pub struct FrameOutline(Option<Retained<AnyObject>>);
+impl FrameOutline {
+    pub fn show(&mut self, host: &pm_shell::Host, visible: bool, color: u32, width: f32) {
+        let metal = host.viewer_layer();
+        let parent = foreign_types::ForeignType::as_ptr(&metal) as *mut AnyObject;
+        let outline = self.0.get_or_insert_with(|| unsafe {
+            let l: Retained<AnyObject> =
+                Retained::from_raw(msg_send![objc2::class!(CALayer), new]).unwrap();
             let _: () = msg_send![parent, addSublayer: &*l];
             // kCALayerWidthSizable | kCALayerHeightSizable: tracks the shell's frame changes.
             let _: () = msg_send![&*l, setAutoresizingMask: 2u32 | 16u32];
@@ -97,7 +81,16 @@ pub fn frame_outline(host: &pm_shell::Host, visible: bool, color: u32, width: f3
             let _: () = msg_send![&**outline, setHidden: !visible];
             let _: () = msg_send![objc2::class!(CATransaction), commit];
         }
-    });
+    }
+}
+impl Drop for FrameOutline {
+    fn drop(&mut self) {
+        if let Some(layer) = &self.0 {
+            unsafe {
+                let _: () = msg_send![&**layer, removeFromSuperlayer];
+            }
+        }
+    }
 }
 
 pub fn install(entity: &Entity<Controller>, cx: &mut App) {
@@ -237,17 +230,16 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*layers.playhead,setBackgroundColor:&*cg!(colors.accent)];
                         let _:()=msg_send![&*head,setBackgroundColor:&*cg!(colors.accent)];
                         let _:()=msg_send![&*head,setContentsScale:scale];
-                        let geometry=TIMELINES.with(|t|t.borrow().get(&cx.entity_id()).copied());
-                        let (pps,scroll_time,column)=VIEW.with(Cell::get);
+                        let geometry=v.builtins.timeline_place;
+                        let (pps,scroll_time,column)=v.builtins.timeline.as_ref().map_or((100.,0.,0.),|t|t.read(cx).time_mapping());
                         let seconds=clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
                         // Opaque on the header's colour: it covers the panel's paused text
                         // while playing, so that text never repaints.
                         let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*cg!(colors.panel)];
                         let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||!playing];
-                        let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_,_)|offset<column||offset>r.w as f64)];
-                        if let Some((r,_,y))=geometry {
-                            // Timecode sits in the timeline header (the shell's) after the play button.
+                        let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_)|offset<column||offset>r.w as f64)];
+                        if let Some((r,y))=geometry {
                             let slot=timecode_slot(&host.tokens);
                             let top=r.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
