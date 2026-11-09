@@ -452,6 +452,12 @@ impl TransportClock {
     }
 }
 
+/// How long after a play command the native transport waits for the audio
+/// device clock before it falls back to the host clock (the audio-start
+/// policy that drives [`crate::transport`]). It lives beside the clock it
+/// fences, not in a render loop.
+pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,9 +801,3 @@ mod tests {
         assert!(!clock.stop_at_end(10_200_000 + PREROLL_US + 2_000_000));
     }
 }
-
-/// How long after a play command the native transport waits for the audio
-/// device clock before it falls back to the host clock (the audio-start
-/// policy that drives [`crate::transport`]). It lives beside the clock it
-/// fences, not in a render loop.
-pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;

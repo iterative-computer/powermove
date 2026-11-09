@@ -46,6 +46,8 @@ serde_json = "1"
 half = "2"
 
 [dev-dependencies]
+# The audio-status test holds and fails decoders (pm-audio's test hooks).
+pm-audio = { path = "../../../../engine/crates/pm-audio", features = ["test-hooks"] }
 # Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
 pm-glsl = { path = "../../../../engine/crates/pm-glsl", features = ["test-admission"] }
 pm-perf = { path = "../../../../engine/crates/pm-perf" }

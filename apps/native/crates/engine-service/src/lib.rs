@@ -1,6 +1,8 @@
 //! In-process native rendering. No Node, napi entrypoints, bridge or GPUI.
 //! Callers own below-slot placement and pump native layers on the main thread.
+pub mod audio;
 pub mod clock;
+pub mod media;
 pub mod color;
 pub mod compat;
 pub mod frame_codec;
@@ -41,7 +43,7 @@ impl Snapshot {
             .map(str::to_owned)
     }
 }
-pub use pm_node::present::document::MediaMap;
+pub use crate::media::MediaMap;
 use pm_protocol::{
     clock::{AudioLevels, ClockSample, TransportCommand},
     common::{Size, Ticks},

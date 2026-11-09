@@ -1,9 +1,7 @@
 //! Reuse the existing presenter policy without its bridge transport.
 use crate::clock::TransportClock;
-use pm_node::present::{
-    audio::{AudioCtl, AudioLink},
-    document::MediaMap,
-};
+use crate::media::MediaMap;
+use crate::audio::{AudioCtl, AudioLink};
 use pm_protocol::{
     clock::{ClockSample, TransportCommand, TransportState},
     common::PlaybackRate,
@@ -85,7 +83,7 @@ impl Transport {
         doc: &pm_model::Document,
         comp: String,
         media: MediaMap,
-        levels: pm_node::present::audio::LevelsSink,
+        levels: crate::audio::LevelsSink,
     ) -> anyhow::Result<()> {
         self.audible =
             pm_audio::graph::audible(doc, &comp, &mut pm_eval::Evaluator::new()).unwrap_or(false);
@@ -101,13 +99,11 @@ impl Transport {
                 .unwrap_or(false);
         if let Some(audio) = &self.audio {
             // Composition identity is fixed for a viewer.
-            audio.send(AudioCtl::Document(
-                pm_engine::document::DocumentUpdate::Replace {
-                    root: snapshot.document.root().cloned(),
-                    revision: pm_protocol::common::Revision::new(snapshot.revision)
-                        .expect("kernel revision"),
-                },
-            ));
+            audio.send(AudioCtl::Document {
+                root: snapshot.document.root().cloned(),
+                revision: pm_protocol::common::Revision::new(snapshot.revision)
+                    .expect("kernel revision"),
+            });
             audio.send(AudioCtl::Media(media));
         }
     }
