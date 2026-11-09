@@ -513,7 +513,9 @@ impl KernelData for Data {
                 }
                 Query::Project => {
                     let p = p.as_ref().ok_or("No open project")?;
-                    json!({"project":p.project,"document":p.snapshot.doc_id.to_string(),"revision":p.revision()})
+                    // The timeline's workspace facts too: a chrome change
+                    // alone moves no document revision.
+                    json!({"project":p.project,"document":p.snapshot.doc_id.to_string(),"revision":p.revision(),"layerNumbers":crate::models::layer_numbers(p)})
                 }
                 Query::Selection => {
                     let p = p.as_ref().ok_or("No open project")?;

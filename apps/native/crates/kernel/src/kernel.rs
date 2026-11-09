@@ -507,7 +507,10 @@ impl Kernel {
                 "Project metadata requires durable journal admission".into(),
             ));
         }
-        let workspace_write = matches!(request.call, Call::Workspace(WorkspaceCall::Mutate { .. }));
+        let workspace_write = matches!(
+            request.call,
+            Call::Workspace(WorkspaceCall::Mutate { .. } | WorkspaceCall::Replace { .. })
+        );
         let mut handled = slot.project.handle(request);
         if let (Some(journal), Some(durability)) = (&mut slot.journal, &self.durability) {
             let taps = slot.project.store_mut().take_tap();

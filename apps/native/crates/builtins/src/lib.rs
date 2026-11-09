@@ -1622,16 +1622,6 @@ impl EngineProxy for Broker {
                 }
             }
             "timeline.chrome" => {
-                // The native timeline doesn't draw these yet: refuse rather
-                // than accept a change nobody sees.
-                if ["showLayerNumbers", "showTypeBadges", "toolbarDensity"]
-                    .iter()
-                    .any(|key| input.get(key).is_some())
-                {
-                    return Err(Error::Invalid(
-                        "showLayerNumbers, showTypeBadges and toolbarDensity aren't drawn by the native timeline yet",
-                    ));
-                }
                 let patch = timeline_patch(input);
                 if patch.as_object().is_none_or(|p| p.is_empty()) {
                     return Err(Error::Invalid(

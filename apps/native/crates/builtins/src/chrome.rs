@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender};
 
+#[derive(Clone)]
 pub(crate) enum ChromeEdit {
     /// Fields from `timeline_patch` an extension's generation set.
     Set {
@@ -26,7 +27,7 @@ pub(crate) enum ChromeEdit {
 
 /// Per field (`timeline.rowHeight`, `timelineSurfaceOrder`): the value before
 /// any extension set it (`Null`: absent), then each owner's value in order.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct ChromeStacks(BTreeMap<String, (Value, Vec<Owner>)>);
 /// An extension's panel, its generation and the value it set.
 type Owner = (String, u64, Value);
@@ -142,33 +143,67 @@ pub(crate) fn spawn_writer(kernel: KernelHandle, project: String) -> Sender<Chro
 
 fn run(kernel: KernelHandle, project: String, rx: Receiver<ChromeEdit>) {
     let mut stacks = ChromeStacks::default();
-    let call = |call: WorkspaceCall| -> Option<Value> {
+    let call = |call: WorkspaceCall| -> Option<pm_model::Value> {
         let ack = kernel
             .call(&project, Request::new(Caller::native(), call))
             .wait()?
             .ok()?;
         match ack.reply {
-            Reply::Workspace(w) => {
-                serde_json::from_str(&pm_model::json::to_canonical_string(&w)).ok()
-            }
+            Reply::Workspace(w) => Some(w),
             _ => None,
         }
     };
     while let Ok(first) = rx.recv() {
         // Everything queued so far goes in one read and one write.
         let edits: Vec<ChromeEdit> = std::iter::once(first).chain(rx.try_iter()).collect();
-        let Some(mut workspace) = call(WorkspaceCall::Get) else {
-            continue;
+        write_batch(&mut stacks, &edits, &call);
+    }
+}
+
+/// Reads the workspace, applies `edits` and swaps the result in. Another
+/// writer (a v1–3 extension, the person, an agent) can land between the read
+/// and the write: the swap then changes nothing, and the batch applies again
+/// to what they left.
+fn write_batch(
+    stacks: &mut ChromeStacks,
+    edits: &[ChromeEdit],
+    call: &dyn Fn(WorkspaceCall) -> Option<pm_model::Value>,
+) {
+    let Some(mut current) = call(WorkspaceCall::Get) else {
+        return;
+    };
+    for _ in 0..MAX_SWAPS {
+        let Ok(mut workspace) =
+            serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(&current))
+        else {
+            return;
         };
+        let before = stacks.clone();
         let mut changed = false;
         for edit in edits {
-            changed |= stacks.apply(&mut workspace, edit);
+            changed |= stacks.apply(&mut workspace, edit.clone());
         }
-        if changed && let Ok(next) = pm_model::json::parse(&workspace.to_string()) {
-            call(WorkspaceCall::Mutate { next, threw: None });
+        if !changed {
+            return;
+        }
+        let Ok(next) = pm_model::json::parse(&workspace.to_string()) else {
+            return;
+        };
+        match call(WorkspaceCall::Replace {
+            expected: current,
+            next: next.clone(),
+        }) {
+            Some(now) if now == next => return,
+            Some(now) => {
+                *stacks = before;
+                current = now;
+            }
+            None => return,
         }
     }
 }
+/// A batch that keeps losing to other writers gives up after this many tries.
+const MAX_SWAPS: usize = 8;
 
 #[cfg(test)]
 mod tests {
@@ -185,6 +220,49 @@ mod tests {
             panel: panel.into(),
             generation: None,
         }
+    }
+    #[test]
+    fn a_writer_between_the_read_and_the_write_is_kept() {
+        use std::cell::{Cell, RefCell};
+        let parse = |v: Value| pm_model::json::parse(&v.to_string()).unwrap();
+        let store = RefCell::new(parse(json!({"chrome":{"timeline":{"rowHeight":26}}})));
+        let raced = Cell::new(false);
+        let call = |call: WorkspaceCall| -> Option<pm_model::Value> {
+            let mut w = store.borrow_mut();
+            match call {
+                WorkspaceCall::Get => {}
+                WorkspaceCall::Replace { expected, next } => {
+                    // The first swap loses: a v1–3 extension wrote just
+                    // after the read.
+                    if !raced.replace(true) {
+                        *w = parse(
+                            json!({"chrome":{"timeline":{"rowHeight":26}},"docks":{"left":300}}),
+                        );
+                    }
+                    if *w == expected {
+                        *w = next;
+                    }
+                }
+                WorkspaceCall::Mutate { .. } => unreachable!(),
+            }
+            Some(w.clone())
+        };
+        let mut stacks = ChromeStacks::default();
+        write_batch(&mut stacks, &[set("a", json!({"gutterWidth":340}))], &call);
+        let now: Value =
+            serde_json::from_str(&pm_model::json::to_canonical_string(&*store.borrow())).unwrap();
+        assert_eq!(
+            now,
+            json!({"chrome":{"timeline":{"rowHeight":26,"gutterWidth":340}},"docks":{"left":300}})
+        );
+        // The stacks counted the edit once: leaving puts back the original.
+        write_batch(&mut stacks, &[forget("a")], &call);
+        let now: Value =
+            serde_json::from_str(&pm_model::json::to_canonical_string(&*store.borrow())).unwrap();
+        assert_eq!(
+            now,
+            json!({"chrome":{"timeline":{"rowHeight":26}},"docks":{"left":300}})
+        );
     }
     #[test]
     fn owners_stack_per_field_and_leave_in_any_order() {

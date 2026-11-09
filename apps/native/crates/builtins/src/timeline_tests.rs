@@ -305,3 +305,49 @@ fn easing_library_actions_share_service_validation_and_never_drop_prior_versions
     assert_eq!(destination["presets"][0]["id"], "copy");
     assert_eq!(destination["presets"][0]["color"], "#aabbcc");
 }
+
+/// v1–3's `showLayerNumbers` (and v4 `timeline.chrome`): numbers show until
+/// the workspace says false, and come back when the extension leaves.
+#[test]
+fn layer_numbers_follow_the_workspace_chrome() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("timeline").unwrap());
+    // The app republishes its panels on each kernel publication.
+    let republish = |panels: &Builtins| {
+        for (_, ticket) in panels.publish() {
+            finish(ticket.unwrap());
+        }
+    };
+    let numbered = |panels: &Builtins, want: bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let shown = panels
+                .take_publications()
+                .into_iter()
+                .rev()
+                .find(|p| p.panel == "timeline")
+                .map(|p| p.surface.nodes().values().any(|n| n.text == "01"));
+            if shown == Some(want) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "layer number shown != {want}");
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    numbered(&panels, true);
+    let graph = graph_of(
+        "export function activate({ timeline }) { timeline.chrome({ showLayerNumbers: false }); }
+        export const view = () => jsx('text', { children: 'Numbers off' });",
+    );
+    finish(panels.mount_extension("numbers-off", &graph, None).unwrap());
+    chrome_when(&actor, |c| c["timeline"]["showLayerNumbers"] == false);
+    republish(&panels);
+    numbered(&panels, false);
+    panels.unmount_extension("numbers-off");
+    chrome_when(&actor, |c| c["timeline"].get("showLayerNumbers").is_none());
+    republish(&panels);
+    numbered(&panels, true);
+    panels.close();
+    actor.shutdown();
+}
