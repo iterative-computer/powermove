@@ -724,6 +724,8 @@ impl Controller {
         .into();
         let id = id.to_owned();
         let popover = (id == "agent").then(|| self.host.borrow().tokens.clone());
+        // Export is a sheet on the window that asked for it.
+        let parent = (kind == WindowKind::Dialog).then(|| window.window_handle());
         // Opening GPUI renders the new root synchronously. Do it after this
         // Controller update so the window can acquire its published panel safely.
         cx.spawn(async move |this, cx| {
@@ -749,6 +751,7 @@ impl Controller {
                 return;
             }
             let mut options = WindowOptions::new().kind(kind);
+            options.sheet_parent = parent;
             if popover.is_some() {
                 // Clear GPUI content over the popover material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);

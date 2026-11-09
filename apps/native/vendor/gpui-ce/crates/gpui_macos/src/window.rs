@@ -1223,6 +1223,7 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
+            sheet_parent: requested_parent,
             ..
         }: WindowParams,
         cursor_visible: Arc<AtomicBool>,
@@ -1486,6 +1487,19 @@ impl MacWindow {
                     );
                 }
                 WindowKind::Dialog => {
+                    // Powermove P-SHEET: the window that asked, else the main one.
+                    let requested: ObjcId = match requested_parent {
+                        Some(rwh::RawWindowHandle::AppKit(handle)) => {
+                            let view = handle.ns_view.as_ptr() as ObjcId;
+                            msg_send![view, window]
+                        }
+                        _ => NIL,
+                    };
+                    let main_window = if requested.is_null() {
+                        main_window
+                    } else {
+                        requested
+                    };
                     if !main_window.is_null() {
                         let parent = {
                             let active_sheet: ObjcId = msg_send![main_window, attachedSheet];

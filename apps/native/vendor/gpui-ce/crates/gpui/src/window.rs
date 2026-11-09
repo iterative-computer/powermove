@@ -1557,8 +1557,13 @@ impl Window {
             icon,
             #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
             tabbing_identifier,
+            sheet_parent,
             ..
         } = options;
+        let sheet_parent = sheet_parent
+            .and_then(|parent| cx.windows.get(parent.window_id())?.as_ref())
+            .and_then(|parent| parent.platform_window.window_handle().ok())
+            .map(|handle| handle.as_raw());
 
         let initial_window_title = titlebar
             .as_ref()
@@ -1583,6 +1588,7 @@ impl Window {
                 icon,
                 #[cfg(target_os = "macos")]
                 tabbing_identifier,
+                sheet_parent,
             },
         )?;
 
