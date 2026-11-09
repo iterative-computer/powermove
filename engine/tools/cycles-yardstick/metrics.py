@@ -96,10 +96,11 @@ def exposure_match(a, b, mask):
     return float(np.clip(np.exp(np.median(np.log(lb[valid])-np.log(la[valid]))), 1/16, 16))
 
 
-def score(a, b, masks, exposure=1):
+def score(a, b, masks, exposure=1, tone_map=True):
     """ΔE on common PBR Neutral display-linear RGB; raw errors stay linear HDR."""
     a, b = np.maximum(np.asarray(a, dtype=float), 0), np.maximum(np.asarray(b, dtype=float), 0)
-    display_a, display_b = neutral(a*exposure), neutral(b)
+    display_a, display_b = ((neutral(a*exposure), neutral(b)) if tone_map
+                            else (np.clip(a*exposure,0,1),np.clip(b,0,1)))
     de = delta_e2000(lab(display_a), lab(display_b))
     ssim = ssim_map(srgb(display_a), srgb(display_b))
     result = {}

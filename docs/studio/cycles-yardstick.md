@@ -13,10 +13,14 @@ comparisons on this Mac. The runner returns success with `SKIP` before importing
 optional Python packages when Blender is absent. An installed Blender that fails
 to render is a test failure, not a skip. CPU fallback is deliberately disabled.
 
+Install optional scoring packages with
+`python3 -m pip install -r engine/tools/cycles-yardstick/requirements.txt`.
+
 ```sh
 python3 engine/tools/cycles-yardstick/run.py
 python3 engine/tools/cycles-yardstick/run.py --scenes hero,env-room --size 320x180 --samples 256 --cycles-samples 512
 python3 -m unittest discover -s engine/tools/cycles-yardstick -p 'test_*.py'
+CARGO_TARGET_DIR=~/Developer/pm-target CARGO_BUILD_JOBS=2 nice -n 10 ~/.cargo/bin/cargo test --manifest-path engine/Cargo.toml -p pm-studio --features yardstick --test cycles_yardstick --release -- --nocapture
 ```
 
 `BLENDER` or `--blender` selects an executable; otherwise the runner checks
@@ -44,6 +48,20 @@ camera, the exporter, or image dimensions. `--score-only` recomputes reports
 from existing images. Report paths are `report.md`, `report.html`, aggregate
 `scores.json`, and one scene directory with linear EXRs, native Studio PNG,
 Cycles PNG, side-by-side PNG, region masks and replay scripts/logs.
+`--cycles-only` rerenders existing exports after changing the reference mapping.
+Reference reuse verifies the exact scene JSON, image size and exporter script.
+The Rust exporter also accepts `--input path/to/scene.json` for transport
+isolation experiments using the same scene.rs contract.
+
+The optional Rust test runs three 128×72 scenes (hero, chrome, room), with
+128 Studio samples and 256 Cycles samples. It uses `tolerances.json` to bound
+mean ΔE00, minimum SSIM and absolute fitted exposure separately for each scene.
+These are drift alarms with noise/mapping margins, not a parity target. Cargo
+tests detect Blender automatically and skip cleanly when it is absent. With
+the explicit `yardstick` feature Cargo supplies the exporter directly;
+otherwise the test runner builds that test-only feature after finding Blender.
+The normal app/build path has no Blender requirement. Python
+metric tests independently verify the absence skip without starting a child.
 
 ## What is measured
 
@@ -96,6 +114,9 @@ colors. Geometry is converted to metres in Blender, including instances,
 camera focus and volume coefficients, so DOF uses the same physical aperture.
 Meshes retain custom vertex normals and UVs; the screen's V coordinate is
 flipped for Blender's image-row convention.
+Shading normals are first aligned with each triangle's winding before
+face-forwarding, exactly as Studio does; this matters for inward-wound source
+meshes such as the stylus. It is a mapping correction, not a renderer fix.
 
 | Studio parameter | Cycles Principled mapping | Interpretation / remaining mismatch |
 |---|---|---|
@@ -176,3 +197,48 @@ features, global fog bounds, catcher policy, finite light tessellation and
 transport implementation must be separated before attributing a difference.
 Large ΔE at an unmapped droplet/film/dispersion feature is not grounds to tune
 unrelated engine lighting until that score falls.
+
+## Measured renderer changes
+
+M5 Metal, 320×180, Studio 1,024 samples / Cycles 2,048 samples, no denoising,
+2026-11-09. Before uses the `studio-3d-env` tracer; after includes the energy,
+Fresnel, coat and fog changes. Both use the same corrected reference exporter
+(including winding-aligned custom normals), scene parameters and Cycles images.
+Mean ΔE00 is exposure matched; the report also records unfitted energy ratios.
+
+| Scene | Mean ΔE00 before → after | SSIM before → after |
+|---|---:|---:|
+| hero | 0.628 → 0.497 | 0.9967 → 0.9972 |
+| edge | 1.242 → 0.681 | 0.9895 → 0.9960 |
+| macro | 2.581 → 0.574 | 0.9553 → 0.9682 |
+| back | 0.324 → 0.220 | 0.9934 → 0.9936 |
+| chrome | 1.681 → 1.116 | 0.9418 → 0.9403 |
+| materials | 7.984 → 7.966 | 0.8433 → 0.8442 |
+| caustics | 3.487 → 3.487 | 0.8896 → 0.8896 |
+| wet | 0.821 → 0.709 | 0.9394 → 0.9170 |
+| room | 5.168 → 3.174 | 0.4555 → 0.5917 |
+| street | 2.497 → 2.316 | 0.8237 → 0.8365 |
+| landscape | 2.480 → 1.209 | 0.9365 → 0.9554 |
+
+Controlled reproductions independently verify the changes:
+
+- White rough-metal furnace: 0.311 → 0.994 reflected radiance, target 1.
+- White rough-dielectric furnace: 0.883 → 0.998, target 1.
+- Absorbing-slab shadow RMS error at 16 samples: 0.02677 → 0.00023.
+- Opaque IOR 1 / 1.5 / 2.4 now gives normal reflection 0 / .0400 / .1695.
+- Coated emission at the tested oblique angle: 1 → .8526, target .8500.
+
+Full Refine/Final coat paths replace an incomplete one-bounce shortcut. This
+improves energy/appearance but can increase highlight noise at a fixed sample
+count; wet/chrome SSIM does not improve in this run. Live retains its shortcut.
+The large materials error remains dominated by different sheen, film,
+dispersion, anisotropy and subsurface models; caustic convergence and the photon
+grid remain separate gaps. Global fog bounds and the product shadow catcher
+remain mapping limitations. The shared baked sky is not an independent sky
+validation. **Cycles realism/parity remains an open quality gate.**
+
+Every scene stayed below the three-minute render budget (maximum measured
+Cycles render 33.2 seconds). These are bounded diagnostic sizes, not full-size
+export timings. Validation passed 55 Rust/GPU/host/reference tests, the optional
+regression without pre-enabling `yardstick`, and six Python metric/skip/LUT
+checks. No Blender dependency was added to app builds or packaging.

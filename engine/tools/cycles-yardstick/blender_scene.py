@@ -116,7 +116,16 @@ def build(out, samples):
         mesh.from_pydata([vector(p) * scale for p in m['positions']], [], m['indices'])
         mesh.update()
         mesh.polygons.foreach_set('use_smooth', [True] * len(mesh.polygons))
-        mesh.normals_split_custom_set_from_vertices([vector(p) for p in m['normals']])
+        normals = [vector(p) for p in m['normals']]
+        # Studio aligns the shading normal with geometric winding before its
+        # two-sided face-forward step. Preserve that order for inward-wound
+        # source meshes too (the product stylus is one such mesh).
+        loop_normals = []
+        for polygon in mesh.polygons:
+            for vertex in polygon.vertices:
+                n = normals[vertex]
+                loop_normals.append(-n if n.dot(polygon.normal) < 0 else n)
+        mesh.normals_split_custom_set(loop_normals)
         uv = mesh.uv_layers.new(name='UVMap')
         # Studio's first texture row is UV v=0; Blender's images start at the bottom.
         uv.data.foreach_set('uv', [c for face in m['indices'] for idx in face
@@ -196,8 +205,9 @@ def build(out, samples):
         elif spot:
             dot = nodes.new('ShaderNodeVectorMath')
             dot.operation = 'DOT_PRODUCT'
-            dot.inputs[1].default_value = spot['v'][:3]
-            # Incoming is the ray toward the light, as in Studio's spot contract.
+            dot.inputs[1].default_value = -Vector(spot['v'][:3])
+            # Cycles Incoming points back to the viewer; Studio stores the
+            # opposite (the ray travelling toward the light).
             links.new(geometry.outputs['Incoming'], dot.inputs[0])
             smooth = nodes.new('ShaderNodeMapRange')
             smooth.interpolation_type = 'SMOOTHSTEP'

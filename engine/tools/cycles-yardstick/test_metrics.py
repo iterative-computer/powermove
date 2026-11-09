@@ -34,6 +34,11 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(np.isfinite(neutral(np.zeros_like(a))).all())
         self.assertLess(np.max(delta_e2000(lab(neutral(a)),lab(neutral(a)))),1e-10)
 
+    def test_display_scores_do_not_apply_a_second_view_transform(self):
+        a, b = np.ones((16,16,3)), np.zeros((16,16,3))
+        result = score(a,b,{'whole':np.ones((16,16),bool)},tone_map=False)['whole']
+        self.assertAlmostEqual(result['delta_e_mean'],100,places=3)
+
     def test_energy_constants_match_quadrature(self):
         from pathlib import Path
         from generate_energy_lut import text

@@ -1,0 +1,11 @@
+{
+  "description": "Low-cost drift alarms, not a Cycles parity claim. Explicit per-scene margins allow sampling noise and labeled material/catcher/fog mapping differences.",
+  "size": "128x72",
+  "studio_samples": 128,
+  "cycles_samples": 256,
+  "scenes": {
+    "hero": {"max_mean_delta_e": 3.0, "min_ssim": 0.85, "max_abs_exposure_ev": 0.4},
+    "chrome": {"max_mean_delta_e": 4.5, "min_ssim": 0.65, "max_abs_exposure_ev": 0.5},
+    "env-room": {"max_mean_delta_e": 9.0, "min_ssim": 0.25, "max_abs_exposure_ev": 0.9}
+  }
+}
