@@ -50,6 +50,7 @@ mod raster_overrides;
 mod render_frames;
 mod rows;
 mod session;
+mod shader_panel;
 mod shape_tool;
 mod sheets;
 mod smoke;

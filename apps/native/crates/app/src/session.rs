@@ -74,6 +74,7 @@ pub struct Controller {
     pub perf: crate::perf_panel::State,
     pub mixer: crate::mixer_panel::State,
     pub captions: crate::captions_panel::State,
+    pub shader: crate::shader_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -176,6 +177,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
                 .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
                 .or_else(|| crate::captions_panel::panel(v, id, bounds, w, cx))
+                .or_else(|| crate::shader_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -423,6 +425,7 @@ impl Controller {
             perf: Default::default(),
             mixer: Default::default(),
             captions: Default::default(),
+            shader: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -1565,6 +1568,8 @@ impl Controller {
                     self.confirm_speech_delete(id, cx);
                 }
             }
+            "shader.compile" => return self.shader_command(&cmd.name, cx),
+            name if name.starts_with("shader.preset:") => return self.shader_command(name, cx),
             name if name.starts_with("captions.layer:") => {
                 return self.captions_command(name, window, cx);
             }
