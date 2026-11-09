@@ -1,4 +1,5 @@
 import { compositionExtrusions } from './extrusion-render';
+import { pruneStudio } from '../studio';
 import { isExtrudedLayer, isShared3DPlane } from './extrusion-data';
 import {mapImageId} from './material-maps';
 import {compositionTextureFrame,clearCompositionTextures} from './composition-textures';
@@ -201,6 +202,7 @@ export function pruneSceneRuntimes(PM:any):void {
   for(const [id,runtime] of pool)if(!id.startsWith('composition:')&&!keep.has(id)){runtime.dispose();pool.delete(id);}
 }
 export function disposeSceneRuntimes(PM:any):void {
+  pruneStudio(PM,()=>false);
   clearCompositionTextures(PM);
   const pool=runtimes.get(PM);for(const runtime of pool?.values() || [])runtime.dispose();pool?.clear();
 }

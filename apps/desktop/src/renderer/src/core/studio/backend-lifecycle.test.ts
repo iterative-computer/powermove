@@ -10,6 +10,7 @@ vi.mock('./webgpu-backend',()=>({WebGpuStudioBackend:class{
 }}));
 import { registerStudioBackend, type StudioBackend } from '../scene3d/studio-backend';
 import { SceneRuntime } from '../scene3d/runtime';
+import { disposeSceneRuntimes } from '../scene3d/service';
 import { createScene, createObject } from '../scene3d/schema';
 import { studioIdle, studioLayer, studioPending } from './index';
 function fixture(){const PM:any={time:0,_studioFinal:true,invalidate:vi.fn(),store:{get:()=> 'quality'}};const runtime=new SceneRuntime();const scene=createScene();scene.objects=[createObject('model')];runtime.sync(scene);return {PM,runtime,draw:(time=0)=>studioLayer(PM,runtime,64,64,'model',new Set(['model']),true,runtime.camera,undefined,time)};}
@@ -32,5 +33,13 @@ describe('Studio backend lifecycle',()=>{
   let description:any;registerStudioBackend(()=>({id:'json-test',initialize:async()=>{},setScene:(d:any)=>{description=d;},setCamera:()=>{},setTime:()=>{},render:(r:any)=>({source:document.createElement('canvas'),width:64,height:64,samples:r.samples,version:'json'}),dispose:()=>{}} as unknown as StudioBackend));
   const {PM,draw}=fixture();draw();await studioIdle(PM);draw();await studioIdle(PM);
   expect(description.version).toBe(1);expect(description.scene.objects[0].mesh.indices).toHaveLength(12);expect(description.layer_ids).toEqual(['model']);
+ });
+ it('releases renderer sessions and in-flight frames when a project closes',async()=>{
+  const dispose=vi.fn(),release=vi.fn();let complete:any;
+  registerStudioBackend(()=>({id:'native-test',initialize:async()=>{},setPreparedScene:()=>{},setView:()=>{},setTime:()=>{},render:()=>new Promise(resolve=>{complete=resolve;}),dispose} as unknown as StudioBackend));
+  const {PM,draw}=fixture();draw();await studioIdle(PM);draw();
+  disposeSceneRuntimes(PM);expect(dispose).toHaveBeenCalledOnce();
+  complete({source:document.createElement('canvas'),width:64,height:64,samples:64,version:'late',release});
+  await Promise.resolve();await Promise.resolve();expect(release).toHaveBeenCalledOnce();expect(studioPending(PM)).toBe(false);
  });
 });

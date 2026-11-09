@@ -12,7 +12,7 @@ const STUDIO_STILL_SAMPLES = 4, REFINE_SAMPLES = 256, REFINE_DELAY_MS = 140, JOB
 export type StudioPreview = 'fast' | 'quality';
 type Job = {
   runtime:any; uid:number; sceneKey: string; viewKey: string; scene: StudioScene; maps: StudioTextureSource[];
-  backend: StudioBackend; ready: boolean; chain: Promise<void> | null;
+  backend: StudioBackend; ready: boolean; disposed:boolean; chain: Promise<void> | null;
   frames: Map<string, StudioFrame>; pending: Map<string, Promise<void>>;
   screens: { layer: number; comp: string }[]; screenKey: string;
   changedAt: number; usedAt: number; refining: boolean; samples: number; refineGoal:number; generation: number;
@@ -143,6 +143,7 @@ function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3):
 
 
 function backendFailure(job:Job,PM:any,error:unknown):void {
+  if(job.disposed)return;
   if(job.backend.id==='webgpu'){job.failure=String(error);PM.invalidate?.('render');return;}
   job.backend.dispose();job.backend=new WebGpuStudioBackend();job.ready=false;job.sceneKey='';job.viewKey='';job.generation++;job.failure=null;
   state(PM).declined=`Native Studio: ${String(error)}; using WebGPU`;
@@ -152,11 +153,12 @@ function chain(job:Job,promise:Promise<void>):void {
   const pending=promise.then(()=>{if(job.chain===pending)job.chain=null;});job.chain=pending;
 }
 function queue(job: Job, operation: () => void | Promise<void>, PM: any): void {
-  if(job.chain){chain(job,job.chain.then(operation).catch(error=>backendFailure(job,PM,error)));return;}
-  try{const result=operation();if(result && typeof result.then==='function')chain(job,result.catch(error=>backendFailure(job,PM,error)));}
+  const run=()=>job.disposed?undefined:operation();
+  if(job.chain){chain(job,job.chain.then(run).catch(error=>backendFailure(job,PM,error)));return;}
+  try{const result=run();if(result && typeof result.then==='function')chain(job,result.catch(error=>backendFailure(job,PM,error)));}
   catch(error){backendFailure(job,PM,error);}
 }
-function disposeJob(job: Job): void { job.generation++; for (const f of job.frames.values()) f.release?.(); job.frames.clear(); job.backend.dispose(); }
+function disposeJob(job: Job): void { job.disposed=true;job.generation++; for (const f of job.frames.values()) f.release?.(); job.frames.clear(); job.backend.dispose(); }
 function schedule(PM: any): void {
   const s = state(PM); if (s.tick !== null || s.preview === 'fast') return;
   s.tick = requestAnimationFrame(() => {
@@ -231,7 +233,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     const maps = extracted.maps.map((m, layer) => { if ('screen' in m) { screens.push({ layer, comp: m.screen }); return renderScreen?.(m.screen) ?? new Uint8Array(MAP_SIZE * MAP_SIZE * 4); } return mapCanvas(m.source, m.flipY); });
     if (!job) {
       const backend = studioBackendFactory()?.({ invalidate: () => PM.invalidate?.('render') }) ?? new WebGpuStudioBackend();
-      job = { runtime, uid:nextJob++, sceneKey: '', viewKey: '', scene: extracted, maps, backend, ready: false, chain: null, frames: new Map(), pending: new Map(), screens, screenKey, changedAt: performance.now(), usedAt: performance.now(), refining: false, samples: 0, refineGoal:0, generation: 0, factoryRevision: studioBackendRevision(), completedGeneration: -1, failure: null };
+      job = { runtime, uid:nextJob++, sceneKey: '', viewKey: '', scene: extracted, maps, backend, ready: false, disposed:false, chain: null, frames: new Map(), pending: new Map(), screens, screenKey, changedAt: performance.now(), usedAt: performance.now(), refining: false, samples: 0, refineGoal:0, generation: 0, factoryRevision: studioBackendRevision(), completedGeneration: -1, failure: null };
       const created = job;
       if(backend.id==='webgpu' && studioGpuReady())created.ready=true;
       else chain(created,backend.initialize().then(() => { created.ready = true; PM.invalidate?.('render'); }, error => backendFailure(created,PM,error)));
