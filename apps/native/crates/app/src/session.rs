@@ -245,6 +245,25 @@ impl pm_shell::integration::Integration for Bridge {
     }
 }
 impl Controller {
+    /// A passing status note (v1's status toast): shown in the status line,
+    /// then the line returns to Saved/Edited unless something replaced it.
+    pub fn note(&mut self, text: String, cx: &mut Context<Self>) {
+        let hold = self.host.borrow().tokens.motion.note_hold;
+        self.message = text.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs_f64(hold))
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                if v.message == text {
+                    v.message.clear();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
     /// Status bar copy (language §14): a pending message or error, else
     /// `Saved`/`Edited` with layer and keyframe counts.
     pub fn status_text(&self) -> String {

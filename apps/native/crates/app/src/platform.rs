@@ -401,11 +401,25 @@ fn apple_events() -> *mut AnyObject {
 
 /// PNG sequences choose a parent directory; publication owns a fresh child
 /// folder, so existing frames are never overwritten.
+/// Development builds only: `--save-dir <dir>` (`PM_NATIVE_REVIEW_SAVE_DIR`)
+/// answers the export destination with `<dir>/<suggested name>` and shows no
+/// panel. The save panel runs out of process, so background review checks
+/// can't drive it; this lets them prove the sheet, render and file end to end.
+fn review_destination(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("PM_NATIVE_REVIEW_SAVE_DIR").filter(|_| cfg!(debug_assertions))?;
+    let name = PathBuf::from(name).file_name()?.to_owned();
+    Some(PathBuf::from(dir).join(name))
+}
 pub fn export_destination(
     window: &NSWindow,
     folder: bool,
     name: &str,
 ) -> async_channel::Receiver<Option<PathBuf>> {
+    if let Some(path) = review_destination(name) {
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tx.try_send(Some(path));
+        return rx;
+    }
     if !folder {
         return paths_named(window, true, name);
     }

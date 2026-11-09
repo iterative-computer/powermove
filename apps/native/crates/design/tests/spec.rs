@@ -336,6 +336,10 @@ const ROLES: &[(&str, &str)] = &[
         "Time window for an immediate tooltip swap to a neighbouring control (s)",
     ),
     (
+        "motion.note_hold",
+        "Time a status note holds before the status line returns (s)",
+    ),
+    (
         "translucency.window",
         "Window tint over the behind-window blur (1 = solid, Reduce Transparency)",
     ),
@@ -364,6 +368,41 @@ const ROLES: &[(&str, &str)] = &[
     (
         "translucency.offline_hatch",
         "Media Offline hatch on timeline clips, as `danger` ink",
+    ),
+    (
+        "translucency.hover",
+        "Hover wash and soft fills, as `text` ink",
+    ),
+    (
+        "translucency.selected",
+        "Neutral on state of a tab or segment, as `text` ink",
+    ),
+    ("translucency.pressed", "Pressed wash, as `text` ink"),
+    (
+        "colors.fill",
+        "Soft neutral fill: segmented tracks, search fields (derived)",
+    ),
+    (
+        "colors.fill_strong",
+        "Selected tab or segment over a raised track, never the accent (derived)",
+    ),
+    ("metrics.tab", "Text tab and full-height segmented control"),
+    (
+        "metrics.sheet_body_max",
+        "Tallest sheet option body before it scrolls",
+    ),
+    (
+        "metrics.segment_radius",
+        "Segment and tab corner inside a pill (concentric)",
+    ),
+    ("colors.hairline", "Opaque control and card edge (derived)"),
+    (
+        "metrics.pill_radius",
+        "Segmented track and tab-strip corner",
+    ),
+    (
+        "metrics.pill_inset",
+        "Track-to-segment padding and segment gap",
     ),
 ];
 
@@ -592,6 +631,12 @@ fn concentric_radii_and_grid() {
         assert!(m.inset >= m.panel_radius, "controls clear the panel corner");
         assert!(m.control_radius <= m.panel_radius, "control nests in panel");
         assert!(m.inner_radius <= m.control_radius - 2.);
+        assert_eq!(
+            m.segment_radius,
+            m.pill_radius - m.pill_inset,
+            "segments are concentric"
+        );
+        assert_eq!(m.tab, m.control, "a tab strip lines up with push buttons");
         assert_eq!(
             m.capsule_radius * 2.,
             34.,

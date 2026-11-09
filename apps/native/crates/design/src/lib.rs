@@ -4,6 +4,7 @@
 //! generated table in `docs/native/design/tokens.md` is checked against this file
 //! by `tests/spec.rs`. Change a value here, then regenerate the table with
 //! `PM_UPDATE_DESIGN_SNAPSHOT=1 cargo test -p pm-design`.
+pub mod motion;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
@@ -33,6 +34,15 @@ pub struct Colors {
     pub accent: u32,
     pub selected_text: u32,
     pub selected_fill: u32,
+    /// Soft neutral fill: segmented tracks, search fields, quiet wells
+    /// (`text` ink at `translucency.hover` over `panel`).
+    pub fill: u32,
+    /// Neutral on state: the selected tab or segment, a pressed toggle
+    /// (`text` ink at `translucency.selected` over `panel`). Never the accent.
+    pub fill_strong: u32,
+    /// Opaque hairline for control and card edges (`text` ink at
+    /// `translucency.edge` over `panel`; `separator` under Increase Contrast).
+    pub hairline: u32,
     /// Metadata on a selected row (`selected_fill`): ≥ 4.5:1 where `muted` is not.
     pub selected_secondary: u32,
     /// `danger` words on a selected row (`Missing`): ≥ 4.5:1 on `selected_fill`.
@@ -145,6 +155,15 @@ pub struct Metrics {
     pub menu_row: f32,
     /// Inner radius for a control nested in a control (segment in a segmented control).
     pub inner_radius: f32,
+    /// Text tabs and full-height segmented controls in sheets and Settings.
+    pub tab: f32,
+    /// Pill track of a segmented control or tab strip; its segments are
+    /// concentric inside it (`pill_radius − pill_inset`).
+    pub pill_radius: f32,
+    /// Padding between a pill track and its segments, and between segments.
+    pub pill_inset: f32,
+    /// Segment and tab corner inside a pill: `pill_radius − pill_inset`.
+    pub segment_radius: f32,
     /// Inspector value wells: height inside a `row`, and the shared column width.
     pub field: f32,
     pub value_column: f32,
@@ -181,6 +200,9 @@ pub struct Metrics {
     pub sheet_value_column: f32,
     /// Width of wide sheets (Export, Expression).
     pub sheet_width_wide: f32,
+    /// Tallest a sheet's option body grows before it scrolls, so the sheet
+    /// and its footer stay on screen.
+    pub sheet_body_max: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
@@ -249,6 +271,12 @@ pub struct Translucency {
     pub grid: f32,
     /// Media Offline hatch on timeline clips, as `danger` ink.
     pub offline_hatch: f32,
+    /// Hover wash under the pointer and soft fills, as `text` ink.
+    pub hover: f32,
+    /// Neutral on state (selected tab or segment), as `text` ink.
+    pub selected: f32,
+    /// Pressed wash, as `text` ink.
+    pub pressed: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -267,6 +295,9 @@ pub struct Motion {
     pub tooltip_delay: f64,
     /// Time window for an immediate tooltip swap to a neighbouring control (s).
     pub tooltip_warm: f64,
+    /// How long a status note (`Exported …`) holds before the status line
+    /// returns (s); errors stay until replaced.
+    pub note_hold: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -385,6 +416,9 @@ impl Tokens {
                 accent: 0xff6019,
                 selected_text: 0xffffff,
                 selected_fill: 0x3a3a3a,
+                fill: 0,
+                fill_strong: 0,
+                hairline: 0,
                 selected_secondary: 0xb4b4b4,
                 selected_danger: 0xff8a80,
                 focus: 0x9a9a9a,
@@ -423,6 +457,9 @@ impl Tokens {
                 accent: 0xf0580a,
                 selected_text: 0xffffff,
                 selected_fill: 0xd5d5da,
+                fill: 0,
+                fill_strong: 0,
+                hairline: 0,
                 selected_secondary: 0x52545a,
                 selected_danger: 0xa82319,
                 focus: 0x76767c,
@@ -484,6 +521,10 @@ impl Tokens {
                 menu_inset: 12.,
                 menu_row: 30.,
                 inner_radius: 4.,
+                tab: 28.,
+                pill_radius: 9.,
+                pill_inset: 2.,
+                segment_radius: 7.,
                 field: 22.,
                 value_column: 128.,
                 keyframe: 9.,
@@ -507,6 +548,7 @@ impl Tokens {
                 sheet_inset: 20.,
                 sheet_value_column: 240.,
                 sheet_width_wide: 600.,
+                sheet_body_max: 440.,
                 composer_max_lines: 10.,
                 group_radius: 10.,
                 form_row: 40.,
@@ -564,6 +606,7 @@ impl Tokens {
                 overlay_idle: 2.,
                 tooltip_delay: 0.38,
                 tooltip_warm: 0.6,
+                note_hold: 2.2,
             },
             translucency: match (scheme, accessibility.reduce_transparency) {
                 (Scheme::Dark, true) => Translucency {
@@ -576,6 +619,9 @@ impl Tokens {
                     tick_major: 0.3,
                     grid: 0.04,
                     offline_hatch: 0.28,
+                    hover: 0.06,
+                    selected: 0.1,
+                    pressed: 0.14,
                 },
                 (Scheme::Light, true) => Translucency {
                     ground: 0xeeeef1,
@@ -587,6 +633,9 @@ impl Tokens {
                     tick_major: 0.3,
                     grid: 0.04,
                     offline_hatch: 0.28,
+                    hover: 0.045,
+                    selected: 0.07,
+                    pressed: 0.1,
                 },
                 (Scheme::Dark, false) => Translucency {
                     ground: 0x080808,
@@ -598,6 +647,9 @@ impl Tokens {
                     tick_major: 0.3,
                     grid: 0.04,
                     offline_hatch: 0.28,
+                    hover: 0.06,
+                    selected: 0.1,
+                    pressed: 0.14,
                 },
                 (Scheme::Light, false) => Translucency {
                     ground: 0xeeeef1,
@@ -609,11 +661,28 @@ impl Tokens {
                     tick_major: 0.3,
                     grid: 0.04,
                     offline_hatch: 0.28,
+                    hover: 0.045,
+                    selected: 0.07,
+                    pressed: 0.1,
                 },
             },
         };
         tokens.enforce_accessibility();
+        tokens.derive_fills();
         tokens
+    }
+    /// `fill`, `fill_strong` and `hairline` are `text` ink over the panel (or
+    /// a raised track) at their alphas; they follow a theme's colour patch.
+    fn derive_fills(&mut self) {
+        let (ink, ground, t) = (self.colors.text, self.colors.panel, self.translucency);
+        self.colors.fill = mix(ground, ink, t.hover);
+        // The on state sits on raised tracks as well as panels.
+        self.colors.fill_strong = mix(self.colors.floating, ink, t.selected);
+        self.colors.hairline = if self.accessibility.increase_contrast {
+            self.colors.separator
+        } else {
+            mix(ground, ink, t.edge)
+        };
     }
     /// Increase Contrast always wins, including over a theme patch.
     fn enforce_accessibility(&mut self) {
@@ -641,6 +710,14 @@ impl Tokens {
         }
         self.metrics.border = 2.;
         self.metrics.drop_stroke = 2.;
+        // Washes and on states read at a glance under Increase Contrast.
+        let t = &mut self.translucency;
+        let dark = self.scheme == Scheme::Dark;
+        (t.hover, t.selected, t.pressed) = if dark {
+            (0.1, 0.16, 0.2)
+        } else {
+            (0.08, 0.12, 0.16)
+        };
     }
     patchable! {
         colors.window: color, colors.panel: color, colors.panel_secondary: color,
@@ -652,6 +729,8 @@ impl Tokens {
         colors.warning: color, colors.success: color,
         metrics.gap: size, metrics.inset: size, metrics.panel_radius: size,
         metrics.control_radius: size, metrics.inner_radius: size, metrics.header: size,
+        metrics.tab: size, metrics.pill_radius: size, metrics.pill_inset: size,
+        metrics.segment_radius: size,
         metrics.row: size, metrics.control: size, metrics.field: size,
         metrics.value_column: size, metrics.border: size, metrics.track_row: size,
         typography.minimum: size, typography.body: size, typography.label: size,
@@ -674,6 +753,7 @@ impl Tokens {
             next.set_field(name, value)?;
         }
         next.enforce_accessibility();
+        next.derive_fills();
         *self = next;
         Ok(())
     }
@@ -707,6 +787,18 @@ impl Tokens {
     pub fn translucent(&self) -> bool {
         self.translucency.window < 1.
     }
+    /// The spring for `preset` under the current accessibility settings:
+    /// Reduce Motion snaps anything that moves or scales and turns fades into
+    /// the `motion.reduced` cross-fade.
+    pub fn spring(&self, preset: motion::Preset) -> motion::Spring {
+        if !self.accessibility.reduce_motion {
+            preset.spring(&self.motion)
+        } else if preset.moves() {
+            motion::Spring::SNAP
+        } else {
+            motion::Spring::settling(self.motion.reduced)
+        }
+    }
     pub fn material(&self, surface: Surface, glass_available: bool) -> Material {
         if !surface.permits_glass() || self.accessibility.reduce_transparency {
             Material::Solid
@@ -717,7 +809,8 @@ impl Tokens {
         }
     }
 }
-/// `a` moved `amount` (0–1) of the way toward `b`, per sRGB channel.
+/// `b` composited onto `a` at `amount` (0–1): `a` moved that far toward `b`,
+/// per sRGB channel, as opaque 0xRRGGBB.
 pub fn mix(a: u32, b: u32, amount: f32) -> u32 {
     [0, 8, 16].into_iter().fold(0, |out, s| {
         let (x, y) = (((a >> s) & 255) as f32, ((b >> s) & 255) as f32);

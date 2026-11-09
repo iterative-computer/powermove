@@ -371,12 +371,12 @@ fn compile(
                 .p(px(recipe.track_padding.unwrap_or(0.)))
                 .bg(rgb(recipe.background))
                 .rounded(px(radius)),
+            // Segments fill their track's height (stretch), concentric inside it.
             Some(Component::Segment) => sheet
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .px(px(t.metrics.gap))
-                .h(px(t.metrics.field)),
+                .px(px(t.metrics.gap)),
             Some(Component::FormGroup) => sheet
                 .bg(rgb(recipe.background))
                 .rounded(px(t.metrics.group_radius))
@@ -445,17 +445,37 @@ fn compile(
     {
         compiled.sheet = compiled.sheet.flex_1().min_w(px(0.)).overflow_hidden();
     }
-    // A segmented control filling the value column shares it between its
-    // segments (Align: three equal cells, as wide as the wells beside it).
-    let in_filled_segments = component == Some(Component::Segment)
-        && node
-            .parent
-            .and_then(|p| surface.node(p))
-            .and_then(|p| p.parent)
-            .and_then(|g| surface.node(g))
-            .is_some_and(|g| g.props.get("data-pm-slot").and_then(Value::as_str) == Some("value"));
-    if in_filled_segments {
-        compiled.sheet = compiled.sheet.flex_1();
+    // In an inspector value column a segmented control is a compact,
+    // field-high track filling the column (above); its segments share it
+    // equally (Align: three cells, as wide as the wells beside it) and stay
+    // concentric (language §9).
+    let slot_of = |id: Option<Id>| {
+        id.and_then(|p| surface.node(p))
+            .and_then(|p| p.props.get("data-pm-slot"))
+            .and_then(Value::as_str)
+            == Some("value")
+    };
+    let compact = match component {
+        Some(Component::SegmentedControl) => in_value_slot,
+        Some(Component::Segment) => slot_of(node.parent.and_then(|p| surface.node(p)?.parent)),
+        _ => false,
+    };
+    if compact {
+        let inset = t.metrics.control_radius - t.metrics.inner_radius;
+        compiled.sheet = if component == Some(Component::Segment) {
+            compiled
+                .sheet
+                .flex_1()
+                .px(px(t.metrics.gap))
+                .rounded(px(t.metrics.inner_radius))
+        } else {
+            compiled
+                .sheet
+                .h(px(t.metrics.field))
+                .p(px(inset))
+                .gap(px(inset))
+                .rounded(px(t.metrics.control_radius))
+        };
     }
     // A host-menu trigger in the value column (Font, Fill) reads as a well.
     // Icon actions beside wells (Position's Pad) keep their hit square.
@@ -933,6 +953,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexShrink" => {
                 if n == Some(0.) {
                     e = e.flex_shrink_0();
+                } else if n.is_some_and(|n| n > 0.) {
+                    // Explicit, so a native control knows it may give way.
+                    e = e.flex_shrink(1.);
                 }
             }
             "flexBasis" => {

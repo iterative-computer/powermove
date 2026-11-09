@@ -73,10 +73,16 @@ impl Context {
             },
         })
     }
-    pub fn extending_layers(&self, duration: f64) -> Result<usize, DialogError> {
-        Ok(array(&self.comp()?, "layers")
+    /// Layers a shorter duration cuts off: those ending past it. Keeping or
+    /// lengthening the duration cuts none, so the sheet opens without a warning.
+    pub fn layers_cut_by(&self, duration: f64) -> Result<usize, DialogError> {
+        let comp = self.comp()?;
+        if duration.partial_cmp(&number(&comp, "dur", f64::NAN)) != Some(std::cmp::Ordering::Less) {
+            return Ok(0);
+        }
+        Ok(array(&comp, "layers")
             .iter()
-            .filter(|l| number(l, "from", 0.) + number(l, "dur", 0.) > duration)
+            .filter(|l| number(l, "from", 0.) + number(l, "dur", 0.) > duration + 1e-9)
             .count())
     }
     pub fn composition_edit(

@@ -217,7 +217,7 @@ fn picker_search_wrap_and_commit() {
 }
 #[test]
 fn spring_retarget_preserves_value_and_velocity() {
-    use pm_shell::transient::Spring;
+    use pm_design::motion::Analytic as Spring;
     let s = Spring {
         from: 0.96,
         velocity: 0.,

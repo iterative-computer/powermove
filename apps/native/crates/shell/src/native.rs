@@ -2465,8 +2465,11 @@ pub struct Popup {
     window: Retained<PopupWindow>,
     parent: Retained<NSWindow>,
     search: Retained<NSTextField>,
+    /// The magnifying glass before the query, and the hairline under them.
+    glyph: Retained<NSImageView>,
+    rule: Retained<NSBox>,
     body: Retained<NSView>,
-    spring: Option<(std::time::Instant, crate::transient::Spring)>,
+    spring: Option<(std::time::Instant, pm_design::motion::Analytic)>,
     rows: Vec<Retained<NSButton>>,
     /// Right-aligned shortcut labels for the visible rows.
     hints: Vec<Retained<NSTextField>>,
@@ -2522,29 +2525,34 @@ impl Popup {
         if let Some(layer) = mat.layer() {
             layer.setOpacity(0.);
         }
-        // NSSearchField: the system magnifying-glass glyph and clear button.
-        let search = NSSearchField::initWithFrame(
-            NSSearchField::alloc(mtm),
-            NSRect::new(
-                NSPoint::new(
-                    m.menu_inset as f64,
-                    (height - m.menu_inset - m.control) as f64,
-                ),
-                NSSize::new((width - m.menu_inset * 2.) as f64, m.control as f64),
-            ),
-        );
-        let search: Retained<NSTextField> = Retained::into_super(search);
+        let search = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
         search.setPlaceholderString(Some(&NSString::from_str(if surface == Surface::Palette {
             "Search commands…"
         } else {
             "Search fields…"
         })));
-        search.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
+        search.setFont(Some(&NSFont::systemFontOfSize(t.typography.heading as f64)));
         // The field is the menu's only input and always focused: no ring (owner rule:
-        // no accent focus rings), as Spotlight's field.
+        // no accent focus rings) and no bezel; a quiet query row over a hairline,
+        // as Spotlight's (v1's palette too).
         search.setFocusRingType(NSFocusRingType::None);
+        search.setBezeled(false);
+        search.setBordered(false);
+        search.setDrawsBackground(false);
         search.setAccessibilityLabel(Some(&NSString::from_str("Search")));
         body.addSubview(&search);
+        let glyph = NSImageView::imageViewWithImage(&symbol("magnifyingglass", "Search"), mtm);
+        glyph.setSymbolConfiguration(Some(
+            &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                t.typography.heading as f64,
+                unsafe { NSFontWeightRegular },
+            ),
+        ));
+        glyph.setContentTintColor(Some(&native_color(t.colors.muted)));
+        body.addSubview(&glyph);
+        let rule = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
+        rule.setBoxType(NSBoxType::Separator);
+        body.addSubview(&rule);
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
         glider.setBoxType(NSBoxType::Custom);
         glider.setFillColor(&native_color(t.colors.selected_fill));
@@ -2555,6 +2563,8 @@ impl Popup {
             window,
             parent: unsafe { Retained::retain(parent as *const _ as *mut _).unwrap() },
             search,
+            glyph,
+            rule,
             body,
             spring: None,
             rows: vec![],
@@ -2595,9 +2605,15 @@ impl Popup {
         let mat = material(MainThreadMarker::new().unwrap(), frame, t, surface);
         let body = contents(&mat);
         self.search.removeFromSuperview();
+        self.glyph.removeFromSuperview();
+        self.rule.removeFromSuperview();
         self.glider.removeFromSuperview();
         body.addSubview(&self.search);
+        body.addSubview(&self.glyph);
+        body.addSubview(&self.rule);
         body.addSubview(&self.glider);
+        self.glyph
+            .setContentTintColor(Some(&native_color(t.colors.muted)));
         self.glider
             .setFillColor(&native_color(t.colors.selected_fill));
         self.window.setContentView(Some(&mat));
@@ -2622,12 +2638,34 @@ impl Popup {
             frame.origin.y += frame.size.height - height;
             frame.size.height = height;
             self.window.setFrame_display(frame, self.model.open);
-            self.search.setFrameOrigin(NSPoint::new(
-                m.menu_inset as f64,
-                height - (m.menu_inset + m.control) as f64,
-            ));
         }
         let size = frame.size;
+        // The query row: glyph in a control-square at the rows' text inset,
+        // the field after it, the text centred on the row.
+        let (row_y, control) = (
+            size.height - (m.menu_inset + m.control) as f64,
+            m.control as f64,
+        );
+        // The glyph's ink, not its square, starts at the rows' text inset.
+        let glyph_x = (m.menu_inset + m.gap) as f64
+            - ((control - self.tokens.typography.heading as f64) / 2.).floor();
+        self.glyph.setFrame(NSRect::new(
+            NSPoint::new(glyph_x, row_y),
+            NSSize::new(control, control),
+        ));
+        let text_h = self.search.fittingSize().height.ceil();
+        let field_x = glyph_x + control + m.gap as f64;
+        self.search.setFrame(NSRect::new(
+            NSPoint::new(field_x, row_y + ((control - text_h) / 2.).round()),
+            NSSize::new(size.width - field_x - m.menu_inset as f64, text_h),
+        ));
+        self.rule.setFrame(NSRect::new(
+            NSPoint::new(
+                0.,
+                (size.height - (m.menu_inset * 1.5 + m.control) as f64).round(),
+            ),
+            NSSize::new(size.width, 1.),
+        ));
         let visible = max_rows;
         let start = self
             .model
@@ -2816,7 +2854,7 @@ fn animate(
     w: &NSWindow,
     enter: bool,
     t: &Tokens,
-    state: &mut Option<(std::time::Instant, crate::transient::Spring)>,
+    state: &mut Option<(std::time::Instant, pm_design::motion::Analytic)>,
 ) -> f64 {
     let duration = if t.accessibility.reduce_motion {
         t.motion.reduced
@@ -2875,7 +2913,7 @@ fn animate(
                     let damping: f64 = msg_send![&*spring, damping];
                     *state = Some((
                         std::time::Instant::now(),
-                        crate::transient::Spring {
+                        pm_design::motion::Analytic {
                             from: from_value,
                             velocity,
                             target: 1.,

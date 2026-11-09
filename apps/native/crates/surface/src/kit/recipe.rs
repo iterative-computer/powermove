@@ -236,11 +236,7 @@ impl Recipe {
             material: t.material(kind.surface(), glass_available),
             content_material: Material::Solid,
             background: if kind == FormGroup {
-                if t.scheme == pm_design::Scheme::Light {
-                    t.colors.field
-                } else {
-                    t.colors.floating
-                }
+                t.colors.fill
             } else if matches!(kind, PopoverAnchor | ColourPopover) {
                 t.colors.floating
             } else if kind == ToolbarItem {

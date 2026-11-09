@@ -5,6 +5,7 @@ use crate::{
     dialogs::{
         CompositionDraft, DialogId, WindowId,
         kernel::{Context as Dialog, DialogError},
+        number_text,
     },
     project_library::{Outbound, ProjectLibrary, Sink, current_format, default_format},
     session::Controller,
@@ -187,14 +188,14 @@ impl Controller {
         let Ok(draft) = context.composition_draft(settings) else {
             return;
         };
-        let extending = context.extending_layers(draft.duration).unwrap_or(0);
         let surface = draft.surface(
             DialogId(format!("composition:{project}")),
             owner,
             settings,
-            extending,
+            0,
         );
         let tokens = self.host.borrow().tokens.clone();
+        let (muted, warning) = (tokens.colors.muted, tokens.colors.warning);
         let open = OpenSheet::present(
             from_surface(&surface, &tokens),
             &self.host.borrow().window,
@@ -211,6 +212,9 @@ impl Controller {
                     }
                     "apply" => {
                         let draft = read_composition(&open, &draft);
+                        if !draft.errors().is_empty() {
+                            continue;
+                        }
                         let (context, kernel) = (context.clone(), kernel.clone());
                         let result =
                             cx.background_executor()
@@ -235,6 +239,13 @@ impl Controller {
                         let current = read_composition(&open, &draft);
                         open.select("resolution", current.resolution_index());
                         open.enable("apply", current.errors().is_empty());
+                        let cut = if settings {
+                            context.layers_cut_by(current.duration).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let (detail, warns) = current.duration_detail(cut);
+                        open.describe("duration", &detail, if warns { warning } else { muted });
                     }
                 }
             }
@@ -253,18 +264,9 @@ impl Controller {
         cx.notify();
     }
 }
-/// The sheet's fields as a draft. Unparseable numbers stay invalid, never zero.
+/// The sheet's fields as a draft (`CompositionDraft::read`).
 fn read_composition(open: &OpenSheet, seed: &CompositionDraft) -> CompositionDraft {
-    CompositionDraft {
-        name: open.text("name"),
-        width: open.number("size.0"),
-        height: open.number("size.1"),
-        fps: open.number("fps"),
-        duration: open.number("duration"),
-        background: open
-            .changed_colour("background")
-            .unwrap_or_else(|| seed.background.clone()),
-    }
+    seed.read(|id| open.text(id), open.changed_colour("background"))
 }
 /// A resolution preset fills the size fields. `Custom` leaves them alone.
 fn choose_resolution(open: &OpenSheet, seed: &CompositionDraft) {
@@ -273,8 +275,8 @@ fn choose_resolution(open: &OpenSheet, seed: &CompositionDraft) {
         return;
     };
     if draft.choose_resolution(label) {
-        open.set_text("size.0", &draft.width.to_string());
-        open.set_text("size.1", &draft.height.to_string());
+        open.set_text("size.0", &number_text(draft.width));
+        open.set_text("size.1", &number_text(draft.height));
     }
 }
 /// Off main: the scratch store rebuilds the document to prove the edit.

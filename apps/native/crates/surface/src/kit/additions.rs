@@ -2,7 +2,7 @@
 //! Missing pm-design tokens stay unresolved; no fallback visual literals are permitted.
 use super::{Component, Recipe, Transition};
 use crate::{Node, Surface};
-use pm_design::{Scheme, Tokens};
+use pm_design::Tokens;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -473,11 +473,8 @@ pub(crate) fn customize(recipe: &mut Recipe, node: &Node, t: &Tokens, table: &De
             recipe.radius = None;
         }
         Some(Component::FormGroup) => {
-            recipe.background = if t.scheme == Scheme::Light {
-                t.colors.field
-            } else {
-                t.colors.floating
-            };
+            // A soft neutral card in both appearances (v1 Settings cards).
+            recipe.background = t.colors.fill;
             recipe.radius = table.metric("metrics.group_radius").map(|n| n as f32);
         }
         Some(Component::FormRow) => {

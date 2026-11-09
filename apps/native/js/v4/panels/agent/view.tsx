@@ -38,6 +38,10 @@ const card = (popover: boolean) => ({
   borderRadius: t("metrics.control_radius"),
   padding: t("metrics.inset"),
 });
+// The composer's pop-ups give way (and truncate) before its buttons do, so
+// Send stays in a narrow popover.
+const shrink = { flexShrink: 1, overflow: "hidden" } as const;
+const keep = { flexShrink: 0 } as const;
 const copy = {
   editor: "Composition only",
   supervised: "Supervised",
@@ -714,6 +718,7 @@ export function AgentView({
         >
           <UI.ToolbarItem
             id="agent-attach"
+            style={keep}
             label="Add Attachments"
             attr={{ symbol: "plus" }}
             title="Add Attachments"
@@ -722,6 +727,7 @@ export function AgentView({
           />
           <UI.PopUpButton
             data-pm-variant="inline"
+            style={shrink}
             id="agent-access"
             label={`Agent access, ${copy[s.settings.access]}`}
             value={s.settings.access}
@@ -738,6 +744,7 @@ export function AgentView({
           />
           <UI.PopUpButton
             data-pm-variant="inline"
+            style={shrink}
             id="agent-provider"
             label="Agent provider"
             value={s.settings.provider}
@@ -750,6 +757,7 @@ export function AgentView({
           />
           <UI.PopUpButton
             data-pm-variant="inline"
+            style={shrink}
             id="agent-model"
             label="Model"
             value={s.settings.model}
@@ -767,6 +775,7 @@ export function AgentView({
           {s.catalog.efforts.length > 1 && (
             <UI.PopUpButton
               data-pm-variant="inline"
+              style={shrink}
               id="agent-effort"
               label="Reasoning effort"
               value={s.settings.effort}
@@ -791,7 +800,7 @@ export function AgentView({
               label="Stop current run"
               title="Stop Current Run"
               metadata={{ symbol: "stop.circle.fill" }}
-              style={{ symbolSize: t("metrics.symbol_panel") }}
+              style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
               disabled={s.stopping}
               onClick={() => {
                 if (!s.stopping) send({ type: "stop" });
@@ -803,7 +812,7 @@ export function AgentView({
               label="Send"
               title="Send"
               metadata={{ symbol: "arrow.up.circle.fill" }}
-              style={{ symbolSize: t("metrics.symbol_panel") }}
+              style={{ ...keep, symbolSize: t("metrics.symbol_panel") }}
               disabled={disabled || !s.sendable}
               onClick={() => {
                 if (!disabled && s.sendable) send({ type: "submit" });

@@ -9,7 +9,7 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSColorWell, NSColorWellStyle, NSControl, NSControlTextEditingDelegate, NSPopUpButton,
+    NSColorWell, NSControl, NSControlTextEditingDelegate, NSPopUpButton, NSTextField,
     NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
 };
 use objc2_foundation::{NSNotification, NSRect, NSString};
@@ -54,10 +54,16 @@ pub struct OpenSheet {
     _target: Retained<Target>,
     /// What each colour well showed when the sheet opened.
     seeded: BTreeMap<String, String>,
+    /// Each field's description line, which can change while the sheet is open.
+    descriptions: BTreeMap<String, Retained<NSTextField>>,
     pub actions: async_channel::Receiver<String>,
 }
 impl OpenSheet {
-    pub fn present(sheet: Sheet, owner: &NSWindow, first: Option<&str>) -> Self {
+    pub fn present(
+        (sheet, descriptions): (Sheet, BTreeMap<String, Retained<NSTextField>>),
+        owner: &NSWindow,
+        first: Option<&str>,
+    ) -> Self {
         let mtm = MainThreadMarker::new().unwrap();
         let (tx, actions) = async_channel::unbounded();
         let target: Retained<Target> = unsafe {
@@ -83,7 +89,15 @@ impl OpenSheet {
             owner: owner.into(),
             _target: target,
             seeded,
+            descriptions,
             actions,
+        }
+    }
+    /// Rewrites a field's description line (its reserved height stays).
+    pub fn describe(&self, id: &str, text: &str, rgb: u32) {
+        if let Some(label) = self.descriptions.get(id) {
+            label.setStringValue(&NSString::from_str(text));
+            label.setTextColor(Some(&crate::dialogs::sheet_layout::native::colour(rgb)));
         }
     }
     pub fn text(&self, id: &str) -> String {
@@ -92,9 +106,6 @@ impl OpenSheet {
             .get(id)
             .map(|f| f.stringValue().to_string())
             .unwrap_or_default()
-    }
-    pub fn number(&self, id: &str) -> f64 {
-        self.text(id).trim().parse().unwrap_or(f64::NAN)
     }
     pub fn popup(&self, id: &str) -> Option<usize> {
         let control = self.sheet.controls.get(id)?.clone();
@@ -151,25 +162,24 @@ pub fn hex_colour(hex: &str) -> Option<u32> {
 }
 /// The token rows a surface takes, so the footer sits below all of them.
 fn rows(surface: &Surface) -> usize {
-    let controls: usize = surface
+    // A size's two numbers share one row.
+    let controls = surface.fields.len();
+    let lines = surface
         .fields
         .iter()
-        .map(|f| match f.piece {
-            NativePiece::NumberField => f.values.len().max(1),
-            _ => 1,
-        })
-        .sum();
-    let errors = surface.fields.iter().filter(|f| f.error.is_some()).count();
-    controls
-        + errors
-        + surface.groups.len()
-        + usize::from(surface.line.is_some())
-        + usize::from(surface.warning.is_some())
+        .map(|f| usize::from(f.error.is_some()) + usize::from(f.description.is_some()))
+        .sum::<usize>();
+    controls + lines + surface.groups.len() + usize::from(surface.line.is_some())
 }
 /// `Surface` forms: labelled controls in spec order and its footer buttons.
 /// A multi-value number field makes one well per value: `{id}.0`, `{id}.1`.
-pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
+/// Returns the sheet and its fields' description lines.
+pub fn from_surface(
+    surface: &Surface,
+    tokens: &pm_design::Tokens,
+) -> (Sheet, BTreeMap<String, Retained<NSTextField>>) {
     let mtm = MainThreadMarker::new().unwrap();
+    let mut descriptions = BTreeMap::new();
     let mut sheet = Sheet::new(&surface.title, rows(surface), tokens, false, mtm);
     if let Some(line) = &surface.line {
         sheet.line(line, tokens.typography.body.into(), tokens.colors.secondary);
@@ -188,23 +198,27 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
             );
         }
         match field.piece {
-            NativePiece::NumberField if field.values.len() > 1 => {
-                for (index, value) in field.values.iter().enumerate() {
-                    let id = format!("{}.{index}", field.id);
-                    let label = if index == 0 { field.label.as_str() } else { "" };
-                    sheet.number(&id, label, value, &field.unit, field.enabled);
-                }
+            NativePiece::NumberField if field.values.len() == 2 => {
+                let (a, b) = (format!("{}.0", field.id), format!("{}.1", field.id));
+                sheet.pair(
+                    &field.label,
+                    [
+                        (&a, "Width", &field.values[0]),
+                        (&b, "Height", &field.values[1]),
+                    ],
+                    &field.unit,
+                    field.enabled,
+                );
             }
             NativePiece::NumberField => {
                 sheet.number(&field.id, &field.label, value, &field.unit, field.enabled)
             }
             NativePiece::ColourWell => {
                 let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), NSRect::ZERO);
-                well.setColorWellStyle(NSColorWellStyle::Minimal);
                 if let Some(rgb) = hex_colour(value) {
                     well.setColor(&crate::dialogs::sheet_layout::native::colour(rgb));
                 }
-                sheet.control(&field.id, &field.label, well.into_super());
+                sheet.swatch(&field.id, &field.label, well);
             }
             NativePiece::PopUpButton => {
                 let popup = NSPopUpButton::initWithFrame_pullsDown(
@@ -225,6 +239,21 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
         {
             control.setPlaceholderString(Some(&NSString::from_str(placeholder)));
         }
+        if let Some(text) = &field.description {
+            // Reserve the longest thing the line says (a duration's cut-off warning).
+            let reserve = if field.id == "duration" {
+                crate::dialogs::cut_many(99)
+            } else {
+                text.clone()
+            };
+            let rgb = if field.warning {
+                tokens.colors.warning
+            } else {
+                tokens.colors.muted
+            };
+            let label = sheet.line_reserving(text, &reserve, tokens.typography.minimum.into(), rgb);
+            descriptions.insert(field.id.clone(), label);
+        }
         if let Some(error) = field.error {
             sheet.line(
                 error,
@@ -232,13 +261,6 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
                 tokens.colors.danger,
             );
         }
-    }
-    if let Some(warning) = &surface.warning {
-        sheet.line(
-            warning,
-            tokens.typography.minimum.into(),
-            tokens.colors.warning,
-        );
     }
     let mut order = Vec::new();
     for button in &surface.buttons {
@@ -252,7 +274,7 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
         order.push(button.id);
     }
     sheet.footer(&order, None);
-    sheet
+    (sheet, descriptions)
 }
 #[cfg(test)]
 mod tests {
@@ -277,11 +299,11 @@ mod tests {
             background: "#000000".into(),
         };
         let (id, owner) = (DialogId("sheet".into()), WindowId("window".into()));
-        // Six fields, and Size takes two rows.
+        // Six fields (Size's two numbers share a row) and Duration's detail line.
         let plain = draft.surface(id.clone(), owner.clone(), false, 0);
         assert_eq!(rows(&plain), 7);
         let warned = draft.surface(id.clone(), owner.clone(), true, 2);
-        assert_eq!(rows(&warned), 8);
+        assert_eq!(rows(&warned), 7);
         let number = MixedNumber::new(&[1.]);
         let velocity = VelocityDraft {
             incoming_speed: number.clone(),

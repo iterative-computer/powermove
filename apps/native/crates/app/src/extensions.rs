@@ -447,11 +447,12 @@ impl Controller {
         {
             cx.notify();
         }
-        for toast in host.take_toasts() {
-            self.message = toast;
-            cx.notify();
+        let toasts = host.take_toasts();
+        let requests = host.take_requests();
+        for toast in toasts {
+            self.note(toast, cx);
         }
-        for request in host.take_requests() {
+        for request in requests {
             self.extension_request(request, cx);
         }
         // The trusted realm's document gets its page as soon as the realm
