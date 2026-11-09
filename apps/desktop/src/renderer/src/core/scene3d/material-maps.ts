@@ -109,7 +109,7 @@ export function materialLayerStatus(project:any,receiverId:string,sourceId:strin
   const owner=materialOwner(project,receiverId),source=owner?.layers?.find((l:any)=>l.id===sourceId);
   if(!source)return 'missing';
   if(sourceId===receiverId)return 'cycle';
-  if(!materialSourceEligible(source))return 'ineligible';
+  if(!materialSourceEligible(source) || materialSourceLayers(owner,sourceId).some(layer=>layer.threeD || layer.d?.definition?.startsWith('powermove.3d.') || layer.d?.data?.object || layer.d?.data?.camera || layer.d?.data?.scene || isExtrudedLayer(layer)))return 'ineligible';
   const key=(id:string)=>JSON.stringify(['layer',owner.id,id]);
   return reaches(materialGraph(project),key(sourceId),key(receiverId))?'cycle':'ready';
 }

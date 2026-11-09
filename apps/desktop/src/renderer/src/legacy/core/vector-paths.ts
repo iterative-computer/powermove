@@ -79,22 +79,31 @@ export function groupMatrix(PM:any,layer:any,path:VectorPath,time:number,seen=ne
 }
 export function pathRasterGeometry(PM:any,layer:any,time:number,scale:number,records = (layer.d.paths || []).map((path:VectorPath)=>({v:pathValues(PM,layer,path,time),matrix:groupMatrix(PM,layer,path,time)}))):any {
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  let sx0=Infinity,sy0=Infinity,sx1=-Infinity,sy1=-Infinity;
   for(const rec of records)for(let i=0;i<Math.min(256,Math.max(1,Math.round(rec.v.copies)));i++){
     const r=i*rec.v.repeatRotation*Math.PI/180,c=Math.cos(r),s=Math.sin(r),m=PM.mul(rec.matrix,[c,s,-s,c,i*rec.v.repeatX,i*rec.v.repeatY]);
-    const reach=Math.max(1,(rec.v.join??'miter')==='miter'?Math.min(100,Number(rec.v.miterLimit)||4):1,[rec.v.cap,rec.v.startCap,rec.v.endCap].some(cap=>/ARROW|TRIANGLE|DIAMOND|CIRCLE/.test(cap??''))?6:1);
-    for(const p of pathPoints(rec.v)){const x=m[0]*p[0]+m[2]*p[1]+m[4],y=m[1]*p[0]+m[3]*p[1]+m[5],pad=rec.v.strokeWidth*reach*Math.max(Math.hypot(m[0],m[1]),Math.hypot(m[2],m[3]))+4;
-      x0=Math.min(x0,x-pad);y0=Math.min(y0,y-pad);x1=Math.max(x1,x+pad);y1=Math.max(y1,y+pad);}
+    const reach=Math.max(1,rec.v.join==='miter'?Math.min(100,Number(rec.v.miterLimit)||4):1,[rec.v.cap,rec.v.startCap,rec.v.endCap].some(cap=>/ARROW|TRIANGLE|DIAMOND|CIRCLE/.test(cap??''))?6:1);
+    const stroke=rec.v.strokeWidth/2*Math.max(Math.hypot(m[0],m[1]),Math.hypot(m[2],m[3]));
+    const visualPad=stroke*reach+1;
+    // Canvas defaults to miter even for legacy paths without a join channel.
+    // Keep that extra raster room separate from their selection geometry.
+    const rasterPad=stroke*Math.max(reach,rec.v.join==null?4:1)+4;
+    for(const p of pathPoints(rec.v)){
+      const x=m[0]*p[0]+m[2]*p[1]+m[4],y=m[1]*p[0]+m[3]*p[1]+m[5];
+      sx0=Math.min(sx0,x-visualPad);sy0=Math.min(sy0,y-visualPad);sx1=Math.max(sx1,x+visualPad);sy1=Math.max(sy1,y+visualPad);
+      x0=Math.min(x0,x-rasterPad);y0=Math.min(y0,y-rasterPad);x1=Math.max(x1,x+rasterPad);y1=Math.max(y1,y+rasterPad);
+    }
   }
-  if(!Number.isFinite(x0)){x0=y0=0;x1=y1=1;}
+  if(!Number.isFinite(x0)){x0=y0=sx0=sy0=0;x1=y1=sx1=sy1=1;}
   const w=Math.max(1,x1-x0),h=Math.max(1,y1-y0),density=Math.min(scale,8192/w,8192/h);
-  return {records,x0,y0,x1,y1,w,h,density,width:Math.ceil(w*density),height:Math.ceil(h*density)};
+  return {records,x0,y0,x1,y1,w,h,density,width:Math.ceil(w*density),height:Math.ceil(h*density),selection:{x0:sx0,y0:sy0,x1:sx1,y1:sy1,w:sx1-sx0,h:sy1-sy0}};
 }
 export function rasterPaths(PM:any,layer:any,time:number,scale:number,geometry=pathRasterGeometry(PM,layer,time,scale)):any {
   const {records,x0,y0,x1,y1,w,h,density}=geometry;
   const cv=document.createElement('canvas');cv.width=Math.ceil(w*density);cv.height=Math.ceil(h*density);
   const ctx=cv.getContext('2d')!;ctx.scale(density,density);ctx.translate(-x0,-y0);
   paintVectorPaths(PM,ctx,records);
-  return {cv,w,h,anchorX:-x0,anchorY:-y0,selection:{x0,y0,x1,y1,w,h}};
+  return {cv,w,h,anchorX:-x0,anchorY:-y0,selection:geometry.selection};
 }
 
 /** Rasterize editable paths after their layer transform has been applied.

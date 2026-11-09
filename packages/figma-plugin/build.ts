@@ -10,5 +10,5 @@ if (!result.success) throw new AggregateError(result.logs, 'Figma plugin build f
 // used by desktop panels so both themes follow the app's control materials.
 const template = await Bun.file('ui.html').text();
 const tokens = await Bun.file('../tokens/tokens.css').text();
-await Bun.write('dist/ui.html', template.replace('/* POWERMOVE_TOKENS */', tokens));
+await Bun.write('dist/ui.html', template.replace('/* POWERMOVE_TOKENS */', () => tokens));
 export {};

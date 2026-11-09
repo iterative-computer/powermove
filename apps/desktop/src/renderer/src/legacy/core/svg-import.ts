@@ -88,15 +88,32 @@ function styleMap(element: Element) {
   return result;
 }
 
+/** Read top-level rules only; conditional/imported styles have no import context. */
+function cssRules(source:string):Array<[string,string]> {
+  const rules:Array<[string,string]>=[];
+  let start=0,depth=0,quote='',escaped=false,header='';
+  for(let i=0;i<source.length;i++){
+    const c=source[i]!;
+    if(escaped){escaped=false;continue;}
+    if(c==='\\'){escaped=true;continue;}
+    if(quote){if(c===quote)quote='';continue;}
+    if(c==='"'||c==="'"){quote=c;continue;}
+    if(c===';'&&depth===0){start=i+1;continue;}
+    if(c==='{'){if(depth===0){header=source.slice(start,i).trim();start=i+1;}depth++;}
+    else if(c==='}'&&depth>0){depth--;if(depth===0){if(!header.startsWith('@'))rules.push([header,source.slice(start,i)]);start=i+1;}}
+  }
+  return rules;
+}
+
 /** Resolve embedded author CSS without inserting the SVG into the page or
  * loading external sheets. Presentation attributes precede author rules. */
 function svgCascade(svg:Element) {
   const rules:Array<{selector:string;declarations:Record<string,string>;specificity:number;order:number}>=[];
   for(const sheet of Array.from(svg.querySelectorAll('style'))){
     const source=(sheet.textContent || '').replace(/\/\*[\s\S]*?\*\//g,'');
-    for(const match of source.matchAll(/([^{}]+)\{([^{}]*)\}/g)){
-      const declarations=styleMap({getAttribute:()=>match[2]} as unknown as Element);
-      for(const selector of match[1]!.split(',').map(s=>s.trim()).filter(s=>s&&!s.startsWith('@'))){
+    for(const [selectorList,body] of cssRules(source)){
+      const declarations=styleMap({getAttribute:()=>body} as unknown as Element);
+      for(const selector of selectorList.split(',').map(s=>s.trim()).filter(s=>s&&!s.startsWith('@'))){
         const specificity=(selector.match(/#[\w-]+/g)?.length || 0)*10000+(selector.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g)?.length || 0)*100+(selector.replace(/#[\w-]+|\.[\w-]+|\[[^\]]+\]|:[\w-]+(?:\([^)]*\))?/g,'').match(/[a-z_][\w-]*/ig)?.length || 0);
         rules.push({selector,declarations,specificity,order:rules.length});
       }
@@ -118,17 +135,27 @@ function svgCascade(svg:Element) {
 
 function normalizedColor(input: string | null, fallback: string) {
   const value = String(input || fallback).trim().toLowerCase();
-  const named: Record<string, string> = { black: '#000000', white: '#FFFFFF', red: '#FF0000', green: '#008000', blue: '#0000FF', transparent: '#00000000' };
+  const named: Record<string, string> = { black: '#000000', white: '#FFFFFF', red: '#FF0000', green: '#008000', blue: '#0000FF', transparent: '#000000' };
   if (named[value]) return named[value];
   if (/^#[0-9a-f]{3}$/i.test(value)) return ('#' + [...value.slice(1)].map(c => c + c).join('')).toUpperCase();
   if (/^#[0-9a-f]{6}$/i.test(value)) return value.toUpperCase();
-  if (/^#[0-9a-f]{8}$/i.test(value)) return value.toUpperCase();
+  if (/^#[0-9a-f]{8}$/i.test(value)) return value.slice(0,7).toUpperCase();
+  if (/^#[0-9a-f]{4}$/i.test(value)) return ('#'+[...value.slice(1,4)].map(c=>c+c).join('')).toUpperCase();
   const rgb = /^rgba?\(([^)]+)\)$/i.exec(value);
   if (rgb) {
     const channels = rgb[1]!.split(',').slice(0, 3).map(part => part.trim().endsWith('%') ? Number.parseFloat(part) * 2.55 : Number(part));
     if (channels.every(Number.isFinite)) return '#' + channels.map(channel => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0')).join('').toUpperCase();
   }
   return fallback;
+}
+
+function colorAlpha(input:string):number {
+  const value=input.trim().toLowerCase();
+  if(value==='transparent')return 0;
+  if(/^#[0-9a-f]{8}$/.test(value))return parseInt(value.slice(7),16)/255;
+  if(/^#[0-9a-f]{4}$/.test(value))return parseInt(value[4]!+value[4]!,16)/255;
+  const rgba=/^rgba\([^,]+,[^,]+,[^,]+,\s*([^)]*)\)$/.exec(value);
+  return rgba?Math.max(0,Math.min(1,parseFloat(rgba[1]!)/(rgba[1]!.includes('%')?100:1))):1;
 }
 
 function numberAttr(element: Element, name: string, fallback = 0) {
@@ -230,9 +257,9 @@ export function parseSvg(source: string,options:{legacy?:boolean}={}): ImportedS
           vertices: transformed, closed: subpath.closed,
           fill: normalizedColor(style.fill.toLowerCase()==='currentcolor'?style.color:style.fill, '#000000'), fillEnabled: (!options.legacy||subpath.closed)&&style.fill.toLowerCase() !== 'none',
           ...(!options.legacy?{fillGroup:group,fillOpen:true,fillRule:style.fillRule==='evenodd'?'evenodd' as const:'nonzero' as const}:{}),
-          fillOpacity: style.fillOpacity * style.opacity * 100,
+          fillOpacity: style.fillOpacity * style.opacity * colorAlpha(style.fill.toLowerCase()==='currentcolor'?style.color:style.fill) * 100,
           stroke: normalizedColor(style.stroke.toLowerCase()==='currentcolor'?style.color:style.stroke, '#000000'), strokeWidth: style.stroke === 'none' ? 0 : Math.max(0, style.strokeWidth * strokeScale),
-          strokeOpacity: style.strokeOpacity * style.opacity * 100,
+          strokeOpacity: style.strokeOpacity * style.opacity * colorAlpha(style.stroke.toLowerCase()==='currentcolor'?style.color:style.stroke) * 100,
           ...(!options.legacy?{cap:['round','square'].includes(style.cap)?style.cap.toUpperCase():'NONE',join:['round','bevel'].includes(style.join)?style.join as 'round'|'bevel':'miter' as const,miterLimit:Math.max(1,style.miterLimit || 4)}:{}),
         });
       });

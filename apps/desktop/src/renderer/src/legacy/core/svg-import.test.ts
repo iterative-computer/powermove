@@ -93,3 +93,15 @@ describe('SVG shape import', () => {
     expect(secondPath.vertices[0]!.id).not.toBe(firstPath.vertices[0]!.id);
   });
 });
+
+it('separates RGB and alpha for extrusion and other RGB consumers',()=>{
+  const parsed=parseSvg(`<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="#12345680" stroke="transparent"/><rect width="5" height="5" fill="transparent"/><rect width="2" height="2" fill="rgba(255,0,0,0.25)"/></svg>`);
+  expect(parsed.paths[0]).toMatchObject({fill:'#123456',stroke:'#000000',strokeOpacity:0});
+  expect(parsed.paths[0]!.fillOpacity).toBeCloseTo(128/255*100);
+  expect(parsed.paths[1]).toMatchObject({fill:'#000000',fillOpacity:0});
+  expect(parsed.paths[2]).toMatchObject({fill:'#FF0000',fillOpacity:25});
+});
+it('skips conditional CSS blocks and consumes statement at-rules independently',()=>{
+  const parsed=parseSvg(`<svg viewBox="0 0 10 10"><style>@import url("ignored.css"); .x{fill:red} @media (prefers-color-scheme:dark){.x{fill:white}} @supports (display:grid){.x{fill:blue}} .y{fill:green}</style><rect class="x" width="10" height="10"/><rect class="y" width="2" height="2"/></svg>`);
+  expect(parsed.paths.map(p=>p.fill)).toEqual(['#FF0000','#008000']);
+});

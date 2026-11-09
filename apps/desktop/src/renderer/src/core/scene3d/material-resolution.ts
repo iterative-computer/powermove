@@ -1,13 +1,16 @@
 import * as THREE from 'three';
 
+/** 4096² RGBA8 is at most 64 MiB per capture before mipmaps. */
+export const MATERIAL_TEXTURE_MAX_EDGE=4096;
+
 export interface MaterialTextureSize {width:number;height:number}
 
 /** Keep the source's aspect and native resolution, increasing vector/composite
- * density when the camera needs more texels. Only the device limit may reduce it. */
+ * density when the camera needs more texels. The capture budget and device limit may reduce it. */
 export function materialTextureSize(width:number,height:number,minimum?:MaterialTextureSize,limit=8192):MaterialTextureSize {
   const w=Number.isFinite(width) && width>0?width:2,h=Number.isFinite(height) && height>0?height:2;
   const demand=(value:number|undefined)=>Number.isFinite(value) && (value ?? 0)>0?value!:0;
-  const scale=Math.min(Math.max(2,limit)/Math.max(w,h),Math.max(1,demand(minimum?.width)/w,demand(minimum?.height)/h));
+  const scale=Math.min(Math.max(2,Math.min(MATERIAL_TEXTURE_MAX_EDGE,limit))/Math.max(w,h),Math.max(1,demand(minimum?.width)/w,demand(minimum?.height)/h));
   return {width:Math.max(2,Math.round(w*scale)),height:Math.max(2,Math.round(h*scale))};
 }
 

@@ -403,10 +403,10 @@ export class SceneRuntime {
         if(previous.image.width>=minimum.width && previous.image.height>=minimum.height)continue;
         const next=this.texture(request.id,true,request.objectId,request.imported,request.binding,request.original,request.nativeArtwork);
         if(!next || next===previous)continue;
-        this.traverseOwned(object,(child:any)=>{
+        this.scene.traverse((child:any)=>{
           if(!child.isMesh)return;
           for(const material of Array.isArray(child.material)?child.material:[child.material]){
-            for(const slot of ['map','emissiveMap'])if(material[slot]===previous){material[slot]=next;material.needsUpdate=true;}
+            for(const slot of Object.keys(material))if(material[slot]===previous){material[slot]=next;material.needsUpdate=true;}
             if(material.map===next && next.userData.materialHasAlpha){material.transparent=true;material.depthWrite=false;}
           }
         });

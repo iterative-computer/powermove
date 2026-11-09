@@ -171,7 +171,7 @@ export async function serializeSelection(): Promise<FigmaDoc> {
       // Auto-width text exposes its resolved line boxes directly. AUTO is
       // font-dependent (often much taller than 1.2em for CJK fonts); estimating
       // it moves glyphs relative to adjacent shapes on the first import.
-      const lineCount = n.characters.split('\n').length;
+      const lineCount = n.characters.split(/\r\n|[\n\r\u2028\u2029]/).length;
       const uniformAuto =
         n.textAutoResize === 'WIDTH_AND_HEIGHT' &&
         segments.length > 0 &&
