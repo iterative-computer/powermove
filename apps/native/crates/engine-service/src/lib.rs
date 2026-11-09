@@ -740,8 +740,11 @@ impl EngineService {
             gpu.queue.clone(),
             Some(fonts.clone()),
         )?;
-        let mut engine = render::Engine::with_shader_cache(gpu, shader_cache)?;
+        // Built-in definitions load first thing on the service thread
+        // (`run`): the app's window doesn't wait for a cold shader cache.
+        let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
         engine.set_fonts(fonts);
+        engine.builtins_pending = true;
         let mut service = Self::start_engine(device, engine)?;
         service.layer_rasters = Some(layer_rasters);
         Ok(service)
@@ -1120,6 +1123,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         objc2_foundation::NSThread::currentThread()
             .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
     });
+    if std::mem::take(&mut engine.builtins_pending)
+        && let Err(error) = engine.load_builtin_definitions()
+    {
+        // Frames still draw; effects report the failure where they're used.
+        eprintln!("Built-in effect definitions failed to load: {error:#}");
+        engine.definition_failure = Some(error.to_string());
+    }
     engine.set_waker(Some(shared.wake.clone()));
     engine.disk = Some(shared.disk.clone());
     shared.disk.set_wake(shared.wake.clone());

@@ -239,6 +239,7 @@ fn main() -> Result<()> {
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Engine initialization panicked"))??;
+    diag::line(serde_json::json!({"startup":"engine"}));
     // Filled once the library is attached; the MCP server waits for that too.
     let server = Arc::new(std::sync::Mutex::new(None));
     let handle = actor.handle();
@@ -258,6 +259,7 @@ fn main() -> Result<()> {
             let broker = broker.clone();
             move |host, window, cx| {
                 if !started.replace(true) {
+                    diag::line(serde_json::json!({"startup":"window"}));
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
                     notifications::install(cx);

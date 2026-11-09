@@ -19,7 +19,7 @@ Originals are never opened: only copies under --scratch. Usage:
 A folder argument adds every *.pmv inside it (the hostile corpus, a profile's
 projects). Results print as one JSON line per run.
 """
-import argparse, json, os, plistlib, shutil, subprocess, sys, time
+import argparse, json, os, plistlib, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -32,9 +32,10 @@ def front():
 
 
 def front_bundle():
-    asn = front()
-    out = subprocess.run(['lsappinfo', 'info', '-only', 'bundleid', asn], capture_output=True, text=True).stdout
-    return out.split('=')[-1].strip().strip('"')
+    out = subprocess.run(['lsappinfo', 'info', '-only', 'bundleid', front()], capture_output=True, text=True).stdout
+    m = re.search(r'(?:bundleID|CFBundleIdentifier)"?="([^"]+)"', out)
+    return m.group(1) if m else ''
+
 
 
 def bundle(binary, root, lane):
@@ -110,6 +111,8 @@ def run_one(app, lane, project, profile, log, timeout, env):
                 continue
             if 'open' in v:
                 result['events'].setdefault(v['open'], v)
+            if 'startup' in v:
+                result.setdefault('startup', {})[v['startup']] = v['t']
             if 'stall_ms' in v:
                 result['stalls'].append(round(v['stall_ms']))
         seen = text.rfind('\n') + 1

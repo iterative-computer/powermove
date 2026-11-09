@@ -157,6 +157,8 @@ pub struct Engine {
     resources: Arc<crate::resources::ResourceSnapshot>,
     /// Why a contributed definition cannot draw, for the viewer's status.
     pub definition_failure: Option<String>,
+    /// Built-in definitions still to load on the service thread.
+    pub(crate) builtins_pending: bool,
     /// Effects the document uses that no installed provider defines; the
     /// viewer draws their layers without them.
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
@@ -248,6 +250,24 @@ impl Engine {
     /// `shader_cache` keeps translated shaders across launches, so a launch
     /// after the first doesn't translate every built-in effect again.
     pub fn with_shader_cache(gpu: Gpu, shader_cache: Option<std::path::PathBuf>) -> Result<Self> {
+        let mut engine = Self::without_definitions(gpu, shader_cache)?;
+        engine.load_builtin_definitions()?;
+        Ok(engine)
+    }
+    /// Every built-in effect's definition. On a profile whose shader cache is
+    /// cold this translates each of them (about a second), so the service
+    /// does it on its own thread, never while the app waits to open a window.
+    pub fn load_builtin_definitions(&mut self) -> Result<()> {
+        self.renderer
+            .set_definitions(&pm_render::all_builtin_definitions())?;
+        Ok(())
+    }
+    /// An engine whose built-in definitions are loaded later
+    /// ([`Self::load_builtin_definitions`]).
+    pub(crate) fn without_definitions(
+        gpu: Gpu,
+        shader_cache: Option<std::path::PathBuf>,
+    ) -> Result<Self> {
         let lost = Arc::new(AtomicBool::new(false));
         let waker = Waker::default();
         let (flag, wake) = (lost.clone(), waker.clone());
@@ -293,7 +313,6 @@ impl Engine {
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.set_draw_reuse(true);
         renderer.set_program_cache_dir(shader_cache);
-        renderer.set_definitions(&pm_render::all_builtin_definitions())?;
         Ok(Self {
             mastering: Default::default(),
             // Use the producer's actual queue. Metal tracks the shared source
@@ -322,6 +341,7 @@ impl Engine {
             waker,
             resources: Arc::default(),
             definition_failure: None,
+            builtins_pending: false,
             missing_effects: Vec::new(),
             compat: None,
             compat_document: None,

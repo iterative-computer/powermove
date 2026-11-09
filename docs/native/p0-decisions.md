@@ -338,3 +338,8 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Palette and field menu: borderless query field at `heading` size after a muted magnifying glass, hairline under it; no bezeled search pill.
 - Native has no floating toasts: status notes (`Exported <file>`, extension toasts) show in the status line for `motion.note_hold` (2.2 s, v1's status toast); errors stay until replaced.
 - A native control whose node has `flexShrink` > 0 sits in a shrinking slot (basis = its fitting width) and truncates, so a narrow row keeps its later controls (agent composer).
+## Stability lane (wave 21)
+
+- The kernel actor serves each message under `catch_unwind`: a panic drops only that call's reply (its caller sees `None`), clears lock poison and emits `KernelEvent::Fault` (additive), which the app puts in the Error Log; journals already hold every acknowledged edit.
+- Project files open with `O_NONBLOCK` before the regular-file check, so a named pipe or device path is refused instead of blocking the kernel thread.
+- The engine service loads built-in effect definitions on its own thread before its first frame (`Engine::without_definitions` + `load_builtin_definitions`); a cold shader cache no longer holds the first window (fresh profile: window 1.5 s → 0.26 s, release).
