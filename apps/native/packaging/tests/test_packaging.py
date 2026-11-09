@@ -25,11 +25,9 @@ class PackagingTests(unittest.TestCase):
         # Canonicalizing also avoids macOS's root-owned /var and /tmp aliases.
         repo = self.root / "fixture-repo"
         native = repo / "apps/native"
-        resources = repo / "apps/desktop/resources"
-        resources.mkdir(parents=True)
-        for name in ("icon.icns", "document.icns"):
-            (resources / name).write_bytes(b"synthetic icon input")
         shutil.copytree(SOURCE.parent / "tests/fixtures/Assets.xcassets", native / "bundle/Assets.xcassets")
+        for name in ("icon.icns", "document.icns"):
+            (native / "bundle" / name).write_bytes(b"synthetic icon input")
         self.addCleanup(patch.stopall)
         patch.object(package, "ROOT", repo).start()
         patch.object(package, "NATIVE", native).start()

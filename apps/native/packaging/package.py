@@ -184,7 +184,7 @@ def bundle(executable, destination, channel, version, build, update_config,
         plistlib.dump(metadata, file, sort_keys=True)
     (contents / "PkgInfo").write_bytes(b"APPL????")
     for name in ("icon.icns", "document.icns"):
-        shutil.copy2(ROOT / "apps" / "desktop" / "resources" / name, resources / name)
+        shutil.copy2(NATIVE / "bundle" / name, resources / name)
     # Source catalog is owned by pm-design/Opus; never generate new colour values.
     shutil.copytree(NATIVE / "bundle" / "Assets.xcassets", resources / "Assets.xcassets")
     if compile_assets:
