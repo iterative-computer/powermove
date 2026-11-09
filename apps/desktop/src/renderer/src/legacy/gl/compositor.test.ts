@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import * as halfReadback from './half-readback';
+import * as studio from '../../core/studio';
 import {
   compositingLayers, compositingLevel, continuousRasterScale, effectParamValue, groupContainsSolo,
   hasRenderableEffects, install, paramUniformName, svgRasterDimensions, trackPresentedVideoFrames,
@@ -24,6 +25,29 @@ function compositorRegistry(): PMRegistry {
   install(PM);
   return PM;
 }
+
+describe('Studio frame preparation', () => {
+  it('prepares again when the document changes during native rendering', async () => {
+    const PM = compositorRegistry(), rendered: number[] = [];
+    let revision = 0;
+    PM.proj.layers = [{ type: 'extension', d: { definition: 'fixture' } }];
+    PM.layerDefinition = () => ({ renderer: { kind: 'mesh' } });
+    PM.animVersion = () => revision;
+    PM.GL.renderProject = vi.fn(() => { rendered.push(revision); return null; });
+    const spies = [
+      vi.spyOn(studio, 'studioReady').mockResolvedValue(),
+      vi.spyOn(studio, 'beginStudioCapture').mockImplementation(() => {}),
+      vi.spyOn(studio, 'beginStudioCapturePass').mockImplementation(() => {}),
+      vi.spyOn(studio, 'studioPending').mockReturnValue(false),
+      vi.spyOn(studio, 'studioIdle').mockImplementation(async () => { revision = 1; }),
+    ];
+    try {
+      await PM.GL.prepareStudioFrame(PM.proj, 0);
+      expect(rendered).toEqual([0, 1]);
+      expect(PM._studioPreparing).toBeUndefined();
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  });
+});
 
 /** Exercise the real source-key/upload path without a GPU. Programs and the
 * working target are already resident; only source texture uploads are faked. */

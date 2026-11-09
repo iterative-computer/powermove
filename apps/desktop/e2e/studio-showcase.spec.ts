@@ -8,6 +8,7 @@ import { expect, repoRoot, test } from './helpers/app';
  * start a long GPU job. Outputs always live outside the repository.
  * PM_SHOWCASE=stills|benchmark|mp4|prores; PM_SHOWCASE_ONLY=regex filters stills.
  * PM_SHOWCASE_STILL_MBLUR=1 checks the same two shutter samples as the film.
+ * PM_SHOWCASE_BENCHMARK_RANGE='[start,end]' limits any export for a shot repair.
  * Run with --global-timeout=7200000 for a full-resolution export. */
 test('authors and exports the original Studio showcase', async ({ session }) => {
   test.skip(!process.env.PM_SHOWCASE, 'Opt-in showcase render');
@@ -477,7 +478,8 @@ test('authors and exports the original Studio showcase', async ({ session }) => 
     const format = mode === 'prores' ? 'prores' : 'mp4';
     const filename = mode === 'benchmark' ? 'benchmark.mp4' : format === 'prores' ? 'powermove-studio-showcase-master.mov' : 'powermove-studio-showcase.mp4';
     await setDestination(path.join(folder, filename));
-    if (mode === 'benchmark') await page.evaluate(range => { const PM = (window as any).PM; PM.proj.work = range; }, JSON.parse(process.env.PM_SHOWCASE_BENCHMARK_RANGE || '[4,4.5]'));
+    const workRange = mode === 'benchmark' || !!process.env.PM_SHOWCASE_BENCHMARK_RANGE;
+    if (workRange) await page.evaluate(range => { const PM = (window as any).PM; PM.proj.work = range; }, JSON.parse(process.env.PM_SHOWCASE_BENCHMARK_RANGE || '[4,4.5]'));
     const started = Date.now();
     // Heartbeats make long unattended renders measurable without saving frames.
     const progress: any[] = [];
@@ -502,7 +504,7 @@ test('authors and exports the original Studio showcase', async ({ session }) => 
           const result = await PM.Export.run({ format, scale: 1, fps: 30, range: benchmark ? 'work' : 'all', quality: 'max', audio: false, alpha: false, mblur: true, mbSamples: 2, reportPath: true });
           return { result, stats: PM.Export.lastStats, studio: PM.Studio?.status(), frameTimes };
         } finally { observer.disconnect(); }
-      }, { format, benchmark: mode === 'benchmark' });
+      }, { format, benchmark: workRange });
     } finally { clearInterval(timer); }
     await writeFile(path.join(folder, `${mode}-timings.json`), JSON.stringify({ seconds: (Date.now() - started) / 1000, ...result, progress }, null, 2));
     expect(result.result).toMatchObject({ cancelled: false });

@@ -2173,8 +2173,12 @@ GL.prepareStudioFrame = async (project:any,time:number,options:any={}) => {
   for(let attempt=0;attempt<8;attempt++){
     beginStudioCapturePass(PM);
     if(options.signal?.aborted)throw new Error('Studio frame cancelled');
+    const revision=PM.animVersion?.();
     const f=GL.renderProject(project,time,width,height,{...options,exporting:!!options.exporting || !!PM.Export?.busy || !!PM.agentFrameCapture,transparent:true});
     free(f);await studioIdle(PM);
+    // An edit can arrive while a native image is in flight. Its capture key
+    // belongs to the old document, so prepare the new revision before readback.
+    if(PM.animVersion?.()!==revision)continue;
     if(!studioPending(PM))return;
   }
   throw new Error('Studio frame did not become ready');
