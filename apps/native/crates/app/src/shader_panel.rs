@@ -366,7 +366,7 @@ impl Controller {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
                     .await;
-                let _ = entity.update(cx, |v, cx| v.shader_compile(cx));
+                entity.update(cx, |v, cx| v.shader_compile(cx));
             })
             .detach();
             return;
@@ -615,7 +615,7 @@ fn render(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{CompileInput, Compiler, DocumentStamp, EngineCompiler, status_line};
     #[test]
     fn the_engine_checks_shader_source_and_counts_its_uniforms() {
         let good = pm_render::shader_layers::builtins().presets[0].code.clone();

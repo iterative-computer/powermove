@@ -323,6 +323,11 @@ pub struct State {
     followed: Option<usize>,
     focus: Option<FocusHandle>,
     pub generating: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// An added cue opens its editor once the layer shows it.
+    pending_edit: bool,
+    /// The cue under the playhead last drawn, and whether its watcher runs.
+    drawn_cue: Option<usize>,
+    watching: bool,
 }
 
 pub fn panel(
@@ -931,11 +936,44 @@ impl State {
         self.selection.cues = [cue].into_iter().collect();
         self.cursor = None;
         self.followed = None;
-        PENDING.with(|p| *p.borrow_mut() = true);
+        self.pending_edit = true;
     }
 }
-thread_local! {
-    static PENDING: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+/// While playing, redraws the panel only when the cue under the playhead
+/// changes (the mark and the follow), ten times a second at most.
+fn watch(cx: &mut Context<Controller>) {
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            let alive = this.update(cx, |v, cx| {
+                let playing = v.viewer.as_ref().is_some_and(|viewer| {
+                    viewer
+                        .status()
+                        .clock
+                        .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing)
+                });
+                if !playing {
+                    v.captions.watching = false;
+                    cx.notify();
+                    return false;
+                }
+                let time = v.time();
+                let under = v
+                    .captions_layer()
+                    .and_then(|l| pm_captions::cue_index_at(&l.cues, time - l.from));
+                if under != v.captions.drawn_cue {
+                    cx.notify();
+                }
+                true
+            });
+            if !matches!(alive, Ok(true)) {
+                break;
+            }
+        }
+    })
+    .detach();
 }
 
 fn render(
@@ -995,14 +1033,12 @@ fn render(
         .into_any_element();
     };
     // An added cue opens its editor once the layer shows it.
-    if PENDING.with(|p| std::mem::take(&mut *p.borrow_mut())) {
-        if let Some(cue) = v.captions.selection.cues.iter().next().cloned()
-            && layer.cues.iter().any(|c| c.id == cue)
-        {
-            v.begin_edit(&layer, &cue, window, cx);
-        } else {
-            PENDING.with(|p| *p.borrow_mut() = true);
-        }
+    if v.captions.pending_edit
+        && let Some(cue) = v.captions.selection.cues.iter().next().cloned()
+        && layer.cues.iter().any(|c| c.id == cue)
+    {
+        v.captions.pending_edit = false;
+        v.begin_edit(&layer, &cue, window, cx);
     }
     let time = v.time();
     let playing = v.viewer.as_ref().is_some_and(|viewer| {
@@ -1025,15 +1061,16 @@ fn render(
         v.captions.editing.is_some(),
         v.captions.list_focused && focus.is_focused(window),
     );
-    if follow.is_some() && follow != v.captions.followed {
+    if let Some(index) = follow.filter(|_| follow != v.captions.followed) {
         v.captions
             .scroll
-            .scroll_to_item(follow.unwrap(), ScrollStrategy::Nearest);
+            .scroll_to_item(index, ScrollStrategy::Nearest);
     }
     v.captions.followed = follow;
-    if playing {
-        // Redraw while playing so the mark follows the playhead.
-        window.request_animation_frame();
+    v.captions.drawn_cue = under;
+    if playing && !v.captions.watching {
+        v.captions.watching = true;
+        watch(cx);
     }
     let search = v
         .captions
@@ -1360,7 +1397,10 @@ fn render(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        CaptionCue, CaptionFormat, Doc, Layer, add_span, decode_text, file_info, is_caption_file,
+        sidecars, slug, timecode,
+    };
     fn layer() -> Layer {
         Layer {
             id: "L".into(),
