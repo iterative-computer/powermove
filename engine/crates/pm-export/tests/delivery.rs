@@ -814,3 +814,81 @@ fn exports_after_preview_renders_equal_empty_cache_exports() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// What an agent export would hear decides whether it may go without
+/// offline clips: audio layers and unmuted embedded video audio in the range,
+/// through precomps; silent, disabled or out-of-range clips don't count.
+#[test]
+fn offline_audible_media_is_what_the_export_would_hear() {
+    let (mut doc, media) = project_with(0.5, false);
+    let mut off = audio("off", "muted-off", 0.0, 0.5);
+    off["on"] = json!(false);
+    let mut camera = layer(
+        "camera",
+        "video",
+        json!({ "asset": "cam", "w": 64, "h": 36, "embeddedAudio": true }),
+        32.0,
+        18.0,
+        0.5,
+    );
+    camera["name"] = json!("Camera A");
+    let silent = layer(
+        "silent",
+        "video",
+        json!({ "asset": "far", "w": 64, "h": 36 }),
+        32.0,
+        18.0,
+        0.5,
+    );
+    let late = audio("late", "late-voice", 3.0, 0.5);
+    composition(
+        &mut doc,
+        "inner",
+        64,
+        36,
+        0.5,
+        vec![camera, silent, off, audio("voice", "voice", 0.0, 0.5), late],
+    );
+    doc["layers"].as_array_mut().unwrap().push(layer(
+        "pre",
+        "precomp",
+        json!({ "comp": "inner", "w": 64, "h": 36 }),
+        32.0,
+        18.0,
+        0.5,
+    ));
+    for (id, kind) in [
+        ("cam", "video"),
+        ("far", "video"),
+        ("voice", "audio"),
+        ("muted-off", "audio"),
+        ("late-voice", "audio"),
+    ] {
+        asset(
+            &mut doc,
+            id,
+            kind,
+            if kind == "video" { "mov" } else { "wav" },
+            64,
+            36,
+            1.0,
+        );
+    }
+    let document = load(&doc);
+    let heard = |media: &MediaPaths, range| {
+        let mut names: Vec<_> = offline_audible_media(&document, "Ptest-root", media, range)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(heard(&media, (0., 0.5)), ["Camera A", "voice"]);
+    assert!(heard(&media, (10., 20.)).is_empty());
+    let mut without_tone = media.clone();
+    without_tone.paths.remove("tone");
+    assert_eq!(
+        heard(&without_tone, (0., 0.5)),
+        ["Camera A", "tone", "voice"]
+    );
+}

@@ -40,9 +40,9 @@ pub struct ExportRequest {
     /// instead of refusing the job.
     #[serde(default)]
     pub bypass_missing_effects: bool,
-    /// Offline clips draw nothing and their audio is silent instead of
-    /// refusing the job (the shipped app's "Export Without Them"; its agent
-    /// exports never asked).
+    /// Offline clips draw nothing instead of refusing the job (the shipped
+    /// app's agent exports never asked). A clip the export would hear still
+    /// refuses it by name.
     #[serde(default)]
     pub without_offline: bool,
 }
@@ -579,6 +579,23 @@ pub fn run_child() -> Result<()> {
             &media,
             settings.audio,
         );
+        // Going without offline clips never drops sound: a clip the export
+        // would hear still stops it by name, as the shipped app's exports did.
+        let tick = |t: pm_protocol::common::Ticks| {
+            t.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64
+        };
+        if request.without_offline && settings.audio && !settings.format.is_image() {
+            let range = (tick(settings.range.start), tick(settings.range.end));
+            if let Some(clip) =
+                pm_export::render::offline_audible_media(&doc, composition.as_str(), &media, range)
+                    .first()
+            {
+                anyhow::bail!(
+                    "Audio media is missing for “{}”. Relink or import it again before exporting.",
+                    clip.name
+                );
+            }
+        }
         if !offline.is_empty() && !request.without_offline {
             let names: Vec<_> = offline.iter().take(3).map(|c| c.name.as_str()).collect();
             let more = match offline.len().saturating_sub(3) {

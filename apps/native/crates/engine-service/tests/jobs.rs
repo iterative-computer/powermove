@@ -355,3 +355,45 @@ fn an_offline_clip_refuses_by_name_unless_the_export_goes_without_it() {
         30
     );
 }
+/// The fixture plus an audio clip whose original is gone.
+fn with_offline_audio() -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Lvoice".into();
+    layer["type"] = "audio".into();
+    layer["name"] = "Voiceover".into();
+    layer["d"] = serde_json::json!({"asset":"Avoice","gain":1,"trim":0,"fadeIn":0,"fadeOut":0});
+    project["layers"].as_array_mut().unwrap().push(layer);
+    project["assets"] =
+        serde_json::json!({"Avoice":{"name":"voice.wav","type":"audio","format":"wav","dur":3}});
+    project.to_string()
+}
+#[test]
+fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_offline_audio();
+    let mut request = request_for(&project, dir.path().join("talk.mov"), 1);
+    request.without_offline = true;
+    let JobSpec::Export { settings, .. } = &mut request.spec else {
+        unreachable!()
+    };
+    settings.format = ExportFormat::ProRes {
+        profile: pm_protocol::priority::ProResProfile::Hq,
+    };
+    settings.color = OutputColor::Rec709QuickTime {
+        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+    };
+    settings.alpha = AlphaOutput::None;
+    settings.audio = true;
+    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    assert!(
+        message.contains("Audio media is missing for “Voiceover”"),
+        "{message}"
+    );
+}
