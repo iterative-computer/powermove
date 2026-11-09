@@ -158,19 +158,11 @@ Run with Rust 1.96.1 from the repository root:
 
 ```sh
 source /workspace/.tools/activate.sh
-cargo test --locked --manifest-path apps/native/crates/recorder/isolated/Cargo.toml
-cargo clippy --locked --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --all-targets --no-deps -- -D warnings
-cargo fmt --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --check
-cargo run --release --locked --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --example ext_raster_1
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-recorder
+cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-recorder --all-targets --no-deps -- -D warnings
+cargo fmt --manifest-path apps/native/Cargo.toml -p pm-recorder --check
+cargo run --release --locked --manifest-path apps/native/Cargo.toml -p pm-recorder --example ext_raster_1
 ```
-
-The isolated manifest points to the same production sources and tests. Its
-lockfile starts from the engine lockfile to keep shared dependency pins. The
-native-workspace `crates/*` glob already discovers the production manifest.
-The requested `cd apps/native && cargo test --locked -p pm-recorder` was
-attempted and correctly refuses to change the shared native lockfile. The
-integrator must regenerate `apps/native/Cargo.lock` to add this package and its
-engine dependencies. This lane does not own that file.
 
 The synthetic benchmark runs 30 warmups and 100 frame samples: four changed
 16×16 layers with a cubic path, versioned nested source snapshots, an exact

@@ -16,7 +16,7 @@ cargo clippy --locked --manifest-path apps/native/Cargo.toml \
   -p pm-runtime-v8 -p pm-recorder \
   --all-targets --no-deps -- -D warnings
 cargo fmt --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --check
-cargo fmt --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --check
+cargo fmt --manifest-path apps/native/Cargo.toml -p pm-recorder --check
 bash -n apps/native/crates/runtime-v8/scripts/verify-macos.sh
 ```
 
@@ -184,7 +184,7 @@ nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 test --locked --manifest-path 
 nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 test --locked --no-fail-fast --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder --features pm-runtime-v8/macos-sandbox -- --test-threads=1
 nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder --features pm-runtime-v8/macos-sandbox --all-targets --no-deps -- -D warnings
 nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --check
-nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --check
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/Cargo.toml -p pm-recorder --check
 nice -n 20 flock /tmp/pm-build.lock bash -n apps/native/crates/runtime-v8/scripts/verify-macos.sh
 ```
 

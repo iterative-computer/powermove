@@ -1493,9 +1493,6 @@ cd /workspace/powermove
 cargo +1.96.1 test --locked --manifest-path apps/native/Cargo.toml -p pm-services --quiet
 cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets -- -D warnings
 cargo +1.96.1 fmt --manifest-path apps/native/Cargo.toml -p pm-services --check
-cargo +1.96.1 test --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --quiet
-cargo +1.96.1 clippy --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --all-targets -- -D warnings
-cargo +1.96.1 fmt --manifest-path apps/native/crates/services/isolated/Cargo.toml --check
 cargo +1.96.1 test --locked --manifest-path engine/Cargo.toml -p pm-captions --quiet
 cargo +1.96.1 check --locked --manifest-path apps/native/Cargo.toml -p pm-services --target aarch64-apple-darwin
 cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --target aarch64-apple-darwin -- -D warnings
@@ -1656,17 +1653,13 @@ cargo +1.96.1 test --locked --manifest-path apps/native/Cargo.toml -p pm-service
 # pm-first-launch: 17 passed; pm-promedia: 94 passed; total: 288 passed
 cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --no-deps -- -D warnings
 cargo +1.96.1 fmt --manifest-path apps/native/Cargo.toml -p pm-services --check
-CARGO_TARGET_DIR="$PWD/apps/native/target" cargo +1.96.1 check --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml
 git diff --check
 gitleaks git --pre-commit --staged --redact
 gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow
 ```
 
-The isolated lock’s only existing-package version change is `smallvec` 1.16.4 →
-1.16.3, required by the existing pm-expr exact `=1.16.3` dependency newly reached
-through first-launch/kernel. The workspace lock changes only the two local
-pm-services dependency names. No bulk upgrade, engine lock change or new crate.
-All checks above pass; staged secret scans are repeated before each commit.
+The workspace lock changes only the two local pm-services dependency names.
+No bulk upgrade, engine lock change or new crate. All checks above pass; staged secret scans are repeated before each commit.
 
 Mac verification remains exactly the application/OS/physical/Opus checks above,
 including the actual new Studio port and automatic old-project upgrade. No Linux
