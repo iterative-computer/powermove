@@ -1305,8 +1305,11 @@ fn global_effect_paste_targets_all_raw_selected_layers_once() {
     let mut f = Fixture::new();
     f.model.copy_effects("a", "f1").unwrap();
     f.select(&["a", "b"]);
-    let r = f.model.paste_selected_effects(Caller::native()).unwrap();
+    let (r, per_layer) = f.model.paste_selected_effects(Caller::native()).unwrap();
+    // One snapshot: a copy that lands after it can't change what's pasted.
+    f.model.copy_effects("a", "f3").unwrap();
     f.run(r);
+    assert_eq!(per_layer, 1);
     assert_eq!(f.model.effect_ids("a").unwrap().len(), 4);
     assert_eq!(f.model.effect_ids("b").unwrap().len(), 2);
     f.undo();
