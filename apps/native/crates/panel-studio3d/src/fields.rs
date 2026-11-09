@@ -1,6 +1,7 @@
 //! Opus 3d-studio.md §8. Stored keys are never renamed to match visible copy.
 use serde::Serialize;
 use serde_json::Value;
+/// One keyframeable 3D field: stored channel, visible label and range.
 #[derive(Clone, Debug, Serialize)]
 pub struct Field {
     pub id: String,

@@ -72,6 +72,7 @@ pub struct Controller {
     pub project_hdr: bool,
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
+    pub mixer: crate::mixer_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -172,6 +173,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| v.extension_panel(id, bounds, cx))
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
+                .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -417,6 +419,7 @@ impl Controller {
             project_hdr: false,
             scopes: Default::default(),
             perf: Default::default(),
+            mixer: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -854,6 +857,10 @@ impl Controller {
     }
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::layer_commands::Clipboard;
+        // Figma's layers claim the paste ahead of the app's own clipboard.
+        if self.paste_figma(cx) {
+            return true;
+        }
         let time = self.time();
         match self.clipboard.clone() {
             Clipboard::Empty => false,
@@ -879,7 +886,11 @@ impl Controller {
         );
     }
     /// One Undo step, then the selection it leads to.
-    fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
+    pub(crate) fn run_layer_plan(
+        &mut self,
+        plan: crate::layer_commands::Plan,
+        cx: &mut Context<Self>,
+    ) {
         let revision = self.published.as_ref().map(|p| p.revision());
         let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
             if let Some(ids) = plan.select {
@@ -1541,11 +1552,7 @@ impl Controller {
             }
             "import" => self.pick_media(None, true, cx),
             "importFolder" => self.pick_media_folder(None, cx),
-            // The engine draws no sequence yet; say so rather than do nothing.
-            "importSequence" => {
-                self.message = "Image sequences can't be imported yet".into();
-                cx.notify();
-            }
+            "importSequence" => self.pick_sequence(cx),
             "open" => {
                 let rx = platform::paths(&self.host.borrow().window, false);
                 cx.spawn(async move |this, cx| {

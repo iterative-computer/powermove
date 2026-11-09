@@ -284,6 +284,14 @@ impl Properties {
             if let Some(section) = self.type_settings(model, &layer, time)? {
                 sections.push(section);
             }
+            // One 3D section after content, single selection only.
+            if model.selected_layers().len() == 1 {
+                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                if let Some((role, fields)) = pm_panel_studio3d::properties::fields(&record) {
+                    sections
+                        .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
+                }
+            }
             if !audio {
                 let mut rows = vec![];
                 for (id, label, paths, unit, step) in [
@@ -400,6 +408,271 @@ impl Properties {
             );
         }
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
+    }
+    /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
+    /// names the row, and `write` hands it to the Studio's typed edits.
+    fn control_lease(&mut self, id: &str) -> Value {
+        let handle = self
+            .handles
+            .entry(id.into())
+            .or_insert_with(|| format!("{}#{id}", self.key))
+            .clone();
+        json!({"handle":handle,"channels":[id]})
+    }
+    /// 3d-studio.md §8: Model, Material and its groups, Light, Camera, Shot
+    /// and Environment, in the inspector's row grammar.
+    fn scene_sections(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        record: &Value,
+        role: pm_panel_studio3d::properties::Role,
+        fields: Vec<pm_panel_studio3d::properties::Field>,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        use pm_panel_studio3d::properties::Role;
+        let data = &record["d"]["data"];
+        let locked = !model.editable(layer);
+        let mut groups: Vec<(&'static str, Vec<Value>)> = vec![];
+        fn push(groups: &mut Vec<(&'static str, Vec<Value>)>, group: &'static str, row: Value) {
+            match groups.iter_mut().find(|g| g.0 == group) {
+                Some(g) => g.1.push(row),
+                None => groups.push((group, vec![row])),
+            }
+        }
+        let row = |id: &str, label: &str, control: Value| json!({"id":id,"label":label,"locked":locked,"animation":null,"control":control});
+        let toggle = |this: &mut Self, id: &str, label: &str, value: bool| {
+            let lease = this.control_lease(id);
+            row(
+                id,
+                label,
+                json!({"kind":"toggle","binding":lease,"value":value}),
+            )
+        };
+        match role {
+            Role::Object => {
+                let object = &data["object"];
+                let source = &object["source"];
+                let name = if let Some(asset) = source["assetId"].as_str() {
+                    model
+                        .published()
+                        .snapshot
+                        .root()
+                        .and_then(|r| {
+                            r.get("assets")?
+                                .get(asset)?
+                                .get("name")?
+                                .to_value()
+                                .as_str()
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| "Model".into())
+                } else if let Some(primitive) = source["primitive"].as_str() {
+                    match primitive {
+                        "box" => "Cube",
+                        "roundedBox" => "Rounded Cube",
+                        "sphere" => "Sphere",
+                        "plane" => "Plane",
+                        "cylinder" => "Cylinder",
+                        "cone" => "Cone",
+                        "torus" => "Torus",
+                        "capsule" => "Capsule",
+                        "icosahedron" => "Icosphere",
+                        _ => "Mesh",
+                    }
+                    .into()
+                } else {
+                    "Mesh".into()
+                };
+                let lease = self.control_lease("3d.source");
+                push(
+                    &mut groups,
+                    "Model",
+                    row(
+                        "3d.source",
+                        "Source",
+                        json!({"kind":"text","binding":lease,"value":name,"disabled":true}),
+                    ),
+                );
+                if source.get("assetId").is_some() {
+                    let on = object["useSourceMaterials"] == true;
+                    push(
+                        &mut groups,
+                        "Model",
+                        toggle(self, "3d.useSourceMaterials", "Model Materials", on),
+                    );
+                }
+                if object["useSourceMaterials"] != true {
+                    let options = pm_panel_studio3d::properties::screens(model.published(), layer)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|o| json!({"v":o["v"],"label":o["label"],"disabled":o["disabled"]}))
+                        .collect::<Vec<_>>();
+                    let lease = self.control_lease("3d.screen");
+                    push(
+                        &mut groups,
+                        "Material",
+                        row(
+                            "3d.screen",
+                            "Screen",
+                            json!({"kind":"choice","binding":lease,"value":object["material"]["screen"],"options":options}),
+                        ),
+                    );
+                }
+            }
+            Role::Light => {
+                let lease = self.control_lease("3d.type");
+                let options = json!([{"v":"area","label":"Softbox"},{"v":"spot","label":"Spotlight"},{"v":"point","label":"Bulb"},{"v":"sun","label":"Sun"}]);
+                push(
+                    &mut groups,
+                    "Light",
+                    row(
+                        "3d.type",
+                        "Type",
+                        json!({"kind":"choice","binding":lease,"value":data["light"]["type"],"options":options}),
+                    ),
+                );
+            }
+            Role::Camera => {
+                let lease = self.control_lease("3d.projection");
+                let options = json!([{"v":"perspective","label":"Perspective"},{"v":"orthographic","label":"Orthographic"}]);
+                push(
+                    &mut groups,
+                    "Camera",
+                    row(
+                        "3d.projection",
+                        "Projection",
+                        json!({"kind":"choice","binding":lease,"value":data["camera"]["projection"],"options":options}),
+                    ),
+                );
+            }
+        }
+        for field in fields {
+            let binding = Binding::Property(PropertyId::new(layer, &field.id));
+            let state = match model.binding_state(&binding, time) {
+                Ok(state) => state,
+                Err(pm_panel_inspector::InspectorError::MissingProperty(_)) => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            let value = super::data::wire(&state.value);
+            let lease = self.lease(model, &field.id, binding)?;
+            let control = match (field.kind, &value) {
+                ("color", Value::String(_)) => {
+                    json!({"kind":"colour","binding":lease,"value":value})
+                }
+                ("number", Value::Number(_)) => {
+                    let fine = field.max.is_some_and(|max| max <= 2.);
+                    let mut axis = json!({"binding":lease,"value":value,"unit":field.unit,"step":if fine {0.01} else {1.},"precision":if field.min.is_some_and(|m| m > 0. && m < 0.01) {3} else {2}});
+                    if let Some(min) = field.min {
+                        axis["min"] = json!(min);
+                    }
+                    if let Some(max) = field.max {
+                        axis["max"] = json!(max);
+                    }
+                    json!({"kind":"number","axes":[axis]})
+                }
+                _ => continue,
+            };
+            let animation = if state.key_at_playhead {
+                "key-at-playhead"
+            } else if state.animated {
+                "animated"
+            } else {
+                "static"
+            };
+            push(
+                &mut groups,
+                field.group,
+                json!({"id":field.id,"label":field.label,"locked":locked,"animation":animation,"control":control}),
+            );
+        }
+        match role {
+            Role::Object => {
+                let object = &data["object"];
+                push(
+                    &mut groups,
+                    "Model",
+                    toggle(
+                        self,
+                        "3d.castShadow",
+                        "Cast Shadows",
+                        object["castShadow"] != false,
+                    ),
+                );
+                push(
+                    &mut groups,
+                    "Model",
+                    toggle(
+                        self,
+                        "3d.receiveShadow",
+                        "Receive Shadows",
+                        object["receiveShadow"] != false,
+                    ),
+                );
+            }
+            Role::Light => {
+                let on = data["light"]["castShadow"] != false;
+                push(
+                    &mut groups,
+                    "Light",
+                    toggle(self, "3d.castShadow", "Cast Shadows", on),
+                );
+            }
+            Role::Camera => {
+                let environment = &data["environment"];
+                let lease = self.control_lease("3d.samples");
+                let options = json!([{"v":16,"label":"Draft · 16"},{"v":64,"label":"Standard · 64"},{"v":256,"label":"High · 256"},{"v":1024,"label":"Best · 1024"}]);
+                let orthographic = data["camera"]["projection"] == "orthographic";
+                let mut quality = row(
+                    "3d.samples",
+                    "Final Quality",
+                    json!({"kind":"choice","binding":lease,"value":environment["samples"].as_f64().unwrap_or(64.),"options":options,"disabled":orthographic}),
+                );
+                quality["disabled"] = json!(orthographic);
+                push(&mut groups, "Shot", quality);
+                push(
+                    &mut groups,
+                    "Environment",
+                    toggle(
+                        self,
+                        "3d.shadows",
+                        "Shadows",
+                        environment["shadows"] != false,
+                    ),
+                );
+                let background = environment["background"].as_str();
+                push(
+                    &mut groups,
+                    "Environment",
+                    toggle(self, "3d.background", "Background", background.is_some()),
+                );
+                if let Some(colour) = background {
+                    let lease = self.control_lease("3d.background.color");
+                    push(
+                        &mut groups,
+                        "Environment",
+                        row(
+                            "3d.background.color",
+                            "Background Color",
+                            json!({"kind":"colour","binding":lease,"value":colour}),
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(groups
+            .into_iter()
+            .map(|(title, rows)| {
+                let id = format!("3d.{}", title.to_ascii_lowercase().replace(' ', "-"));
+                // Disclosure groups start closed unless a row inside is animated.
+                let closed = matches!(title, "Coat and Glass" | "Surface" | "Emission")
+                    && rows.iter().all(|r| {
+                        r["animation"] != "animated" && r["animation"] != "key-at-playhead"
+                    });
+                let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
+                json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows})
+            })
+            .collect())
     }
     /// Each mask's rows (MasksSection.svelte): Enabled, Shape, Mode and its
     /// animatable box and feather.
@@ -600,6 +873,34 @@ impl Properties {
                     time,
                 )
                 .map_err(|e| e.to_string());
+        }
+        if let Some(control) = self
+            .handles
+            .iter()
+            .find(|(_, h)| *h == handle)
+            .and_then(|(path, _)| path.strip_prefix("3d."))
+        {
+            let published = model.published().clone();
+            if model.selected_layers().len() != 1
+                || published.selection.layers() != model.selected_layers()
+            {
+                return Err("The selection changed".into());
+            }
+            let (label, commands) = pm_panel_studio3d::properties::command(
+                &published,
+                time,
+                control,
+                super::data::wire(&value),
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some(label),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(commands),
+                },
+            ));
         }
         self.adapter
             .set(model, caller, handle, &[value], time)

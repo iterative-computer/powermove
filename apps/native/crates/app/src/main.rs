@@ -12,6 +12,7 @@ mod error_log;
 mod export_coordinator;
 mod extension_authoring;
 mod extensions;
+mod figma_paste;
 mod first_run;
 mod gizmo;
 mod keyframe_sheets;
@@ -27,7 +28,9 @@ mod mcp_services;
 mod media;
 mod media_import;
 mod media_refresh;
+mod media_sequence;
 mod migration_report;
+mod mixer_panel;
 mod notifications;
 mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]

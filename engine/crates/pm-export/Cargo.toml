@@ -19,7 +19,7 @@ test-sinks = []
 pm-color = { path = "../pm-color" }
 pm-time = { path = "../pm-time" }
 png = "0.18"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 serde_json.workspace = true
 thiserror.workspace = true
 libm.workspace = true

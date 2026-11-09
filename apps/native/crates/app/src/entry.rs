@@ -48,6 +48,11 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             review_library_row(rest, cx);
             continue;
         }
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/files/") {
+            review_files(rest, cx);
+            continue;
+        }
         let failure = admit(&mut cx.default_global::<Entries>().queue, &raw);
         if let Some(text) = failure {
             crate::error_log::shared(cx).borrow_mut().push("Open", text);
@@ -75,6 +80,40 @@ fn review_library_row(rest: &str, cx: &mut App) {
             library.update(cx, |v, cx| v.review_row_menu(&name, &label, cx));
             return;
         }
+    }
+}
+
+/// `<drop|sequence|figma>/<paths>`, percent-encoded and newline-separated, on the
+/// first editor: what a Finder drop on the window, or the open panel of
+/// File ▸ Import Image Sequence…, hands over. The system open panel takes no
+/// background input, so reviews choose files here.
+#[cfg(debug_assertions)]
+fn review_files(rest: &str, cx: &mut App) {
+    let Some((route, paths)) = rest.split_once('/') else {
+        return;
+    };
+    let paths: Vec<PathBuf> = url::form_urlencoded::parse(format!("x={paths}").as_bytes())
+        .next()
+        .map(|(_, v)| v.lines().map(PathBuf::from).collect())
+        .unwrap_or_default();
+    let route = route.to_owned();
+    let editors = cx.default_global::<Entries>().editors.clone();
+    if let Some(editor) = editors.into_iter().find_map(|(e, _)| e.upgrade()) {
+        editor.update(cx, |v, cx| match route.as_str() {
+            "drop" => v.import_dropped(paths, cx),
+            "sequence" => {
+                let at = Some(v.time());
+                v.choose_sequence(paths, true, at, None, cx)
+            }
+            // What Paste reads from the pasteboard, from a file: reviews
+            // never overwrite the person's clipboard.
+            "figma" => {
+                if let Some(html) = paths.first().and_then(|p| std::fs::read_to_string(p).ok()) {
+                    v.paste_figma_html(html, None, cx);
+                }
+            }
+            _ => {}
+        });
     }
 }
 
