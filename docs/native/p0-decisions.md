@@ -194,7 +194,6 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Disk render cache (wave 18 perf): whole-composition fingerprint (document, definitions, sampled media content, fonts, output tone, binary digest, override session); frames render in an `--engine-job` child as the paused viewer draws them (RGBA16F at the composition size, uncompressed) into Storage › Renders under Settings › Media › Render Files Limit (default 25 GB); Render Selection = the selected layer's span, else the work area; playback and scrubbing read ahead on a reader thread; paused frames render; not offered while the viewer tone-maps HDR.
 - Playing frames retry a transient refusal every tick (no backoff); paused frames keep the 16 ms doubling backoff.
 - Background Tasks ▸ Cancel routes one way for every non-media row, by kind and task id: Render Selection asks its task to stop, an export (the person's or an agent's) cancels exactly that export.
-- Render-cache fills draw the viewer's picture (`preview`: offline media as the Media Offline card, failing layers isolated, missing effects bypassed), never an export's "without offline" picture.
 ## Extension backends (compat lane, wave 16)
 
 - Realm images decode natively on the realm worker: ImageIO for rasters (embedded profile to sRGB, EXIF orientation, as WebKit shows them), resvg for SVG, rasterized at the scale it is drawn (×2 for Retina) instead of stretched. An SVG's intrinsic size is usvg's (`viewBox` when width/height are missing), not Chromium's 300×150 fallback.

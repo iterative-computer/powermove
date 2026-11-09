@@ -711,11 +711,9 @@ fn fill_request(
             ..Default::default()
         },
         disk_reserve: crate::jobs::DISK_RESERVE,
-        // The viewer's picture: missing effects bypassed, offline media drawn
-        // as the Media Offline card with failing layers isolated.
         bypass_missing_effects: true,
-        without_offline: false,
-        preview: true,
+        without_offline: true,
+        preview: false,
         cache: Some(fill),
     })
 }
@@ -1049,7 +1047,10 @@ mod tests {
     use super::*;
 
     fn scene() -> Scene {
-        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        scene_from(include_str!("../tests/fixtures/shapes.json"))
+    }
+    fn scene_from(source: &str) -> Scene {
+        let project = pm_model::json::parse(source).unwrap();
         let doc = pm_model::Document::new(Some(pm_model::canonical::canonical_project(project)), 1);
         Scene {
             doc: Arc::new(doc),
@@ -1210,6 +1211,50 @@ mod tests {
         // Nothing is left to render.
         let again = disk.start_fill(1., 1.2, &exe, crate::jobs::Activity::default());
         assert_eq!(again, Ok(0));
+    }
+
+    /// One frame filled through the real child at 1 s.
+    fn filled_frame(scene: &Scene) -> Arc<Vec<u8>> {
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pm-engine-service");
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        disk.observe(scene, &[], None, None, 1);
+        ready(&disk);
+        disk.start_fill(1., 1.03, &exe, crate::jobs::Activity::default())
+            .unwrap();
+        let bars = settle(&disk, |b| !b.running);
+        assert_eq!(bars.error.as_deref(), None, "{bars:?}");
+        let time = Ticks::new(pm_time::Rate::FPS_30.frame_start(30).unwrap()).unwrap();
+        read_eventually(&disk, scene, time).expect("rendered frame")
+    }
+
+    /// Cached playback shows what the viewer shows: an offline clip fills as
+    /// the Media Offline card, never left out as an export without it would.
+    #[test]
+    fn a_fill_draws_offline_media_as_the_viewer_does() {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        let mut layer = project["layers"][0].clone();
+        layer["id"] = "Limage".into();
+        layer["type"] = "image".into();
+        layer["name"] = "Gone".into();
+        layer["d"] = serde_json::json!({"asset": "Aimage", "w": 200, "h": 120});
+        project["layers"].as_array_mut().unwrap().push(layer);
+        project["assets"] = serde_json::json!({"Aimage": {"name": "gone.png", "type": "image", "w": 200, "h": 120}});
+        let offline = filled_frame(&scene_from(&project.to_string()));
+        assert_ne!(
+            offline,
+            filled_frame(&scene()),
+            "the offline clip's card is drawn"
+        );
     }
 
     /// Delete Rendered Frames while a fill runs: the fill stops first, so no
