@@ -322,6 +322,9 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Admission {
     used: Arc<AtomicUsize>,
+    /// The most `used` has been, and how many isolates hold a reservation.
+    peak: Arc<AtomicUsize>,
+    isolates: Arc<AtomicUsize>,
     budget: usize,
 }
 /// In-process isolates share one 4 GB pointer-compression cage (plan §3.5.1);
@@ -332,6 +335,8 @@ impl Admission {
     pub fn new(budget: usize) -> Self {
         Self {
             used: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            isolates: Arc::new(AtomicUsize::new(0)),
             budget,
         }
     }
@@ -347,17 +352,28 @@ impl Admission {
     pub fn budget(&self) -> usize {
         self.budget
     }
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::Acquire)
+    }
+    pub fn isolates(&self) -> usize {
+        self.isolates.load(Ordering::Acquire)
+    }
     fn take(&self, bytes: usize) -> bool {
-        self.used
+        let taken = self
+            .used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes).filter(|n| *n <= self.budget)
-            })
-            .is_ok()
+            });
+        if let Ok(before) = taken {
+            self.peak.fetch_max(before + bytes, Ordering::AcqRel);
+        }
+        taken.is_ok()
     }
     pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation> {
         if !self.take(bytes) {
             return Err(Error::Quota("isolate admission"));
         }
+        self.isolates.fetch_add(1, Ordering::AcqRel);
         Ok(Reservation {
             account: self.clone(),
             bytes: AtomicUsize::new(bytes),
@@ -384,7 +400,10 @@ impl Reservation {
     /// The grace a terminating isolate unwinds in: taken even past the
     /// budget (the cage keeps room for it), and given back at disposal.
     pub(crate) fn grace(&self, bytes: usize) {
-        self.account.used.fetch_add(bytes, Ordering::AcqRel);
+        let before = self.account.used.fetch_add(bytes, Ordering::AcqRel);
+        self.account
+            .peak
+            .fetch_max(before + bytes, Ordering::AcqRel);
         self.bytes.fetch_add(bytes, Ordering::AcqRel);
     }
     pub(crate) fn shrink(&self, bytes: usize) {
@@ -395,6 +414,7 @@ impl Reservation {
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
+        self.account.isolates.fetch_sub(1, Ordering::AcqRel);
         self.account
             .used
             .fetch_sub(*self.bytes.get_mut(), Ordering::AcqRel);
@@ -732,12 +752,17 @@ impl Live {
                 }
             }
         }
+        let mut bodies = Vec::new();
         self.requests.retain_mut(|request|{
             let result=if aborted.contains(&request.id)||Instant::now()>=request.deadline {request.cancel.cancel();request.job.cancel();Some(Err(Error::Host("Aborted or timed out".into())))}else{request.job.poll()};
             if let Some(result)=result {
                 retired+=1;
                 let data=match result {
-                    Ok(response) if response.body.len()<=config.limits.max_response_bytes && response.headers.iter().map(|(a,b)|a.len()+b.len()).sum::<usize>()<=config.limits.max_op_bytes =>json!({"status":response.status,"url":response.url,"headers":response.headers,"body":response.body}),
+                    Ok(response) if response.body.len()<=config.limits.max_response_bytes && response.headers.iter().map(|(a,b)|a.len()+b.len()).sum::<usize>()<=config.limits.max_op_bytes =>{
+                        // The body goes over as bytes (`__body`), not JSON.
+                        bodies.push((request.id,response.body));
+                        json!({"status":response.status,"url":response.url,"headers":response.headers,"body":request.id})
+                    },
                     Ok(_)=>{request.cancel.cancel();request.job.cancel();json!({"error":"Host response quota"})},
                     Err(error)=>json!({"error":error.to_string()})
                 };completed.push(json!([request.id,data]));false
@@ -751,8 +776,12 @@ impl Live {
                 .saturating_sub(retired * config.limits.max_response_bytes);
             // Room that just came free goes to waiting fetches; the next pump starts them.
             n.admit_deferred();
+            n.bodies.extend(bodies);
         }
-        self.vm.pump(json!(completed))
+        let pumped = self.vm.pump(json!(completed));
+        // A body JS didn't take (its request was gone) is dropped here.
+        self.vm.native.lock().unwrap().bodies.clear();
+        pumped
     }
     fn run(
         &mut self,

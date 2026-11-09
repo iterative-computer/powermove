@@ -353,7 +353,7 @@
         const req=requests.get(id); if(!req) continue;
         requests.delete(id); req.signal?.removeEventListener('abort',req.abort);
         if(result.error) req.reject(new TypeError(result.error));
-        else req.resolve(new Response(result.body,{status:result.status,url:result.url,headers:result.headers}));
+        else req.resolve(new Response(new Uint8Array(__body(result.body)),{status:result.status,url:result.url,headers:result.headers}));
       }
       for(const [id,t] of [...timers]) if(t.due<=now && timers.has(id)) {
         if(t.interval) t.due=now+t.delay; else timers.delete(id);

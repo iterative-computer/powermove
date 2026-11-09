@@ -106,6 +106,9 @@ pub(crate) struct NativeState {
     engine: Option<Arc<dyn EngineProxy>>,
     cancellation: Cancellation,
     sync_calls: usize,
+    /// Fetch response bodies the next `pump` hands to JS by request id; JS
+    /// takes each once with `__body(id)` as one ArrayBuffer.
+    pub bodies: HashMap<u64, Vec<u8>>,
 }
 impl NativeState {
     /// Room a fetch leaves for a synchronous engine reply.
@@ -403,6 +406,25 @@ fn read_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::R
         (Err(error), _) => throw(s, &error),
         _ => throw(s, "Host read failed"),
     }
+}
+/// A fetch response body, once, as an ArrayBuffer the isolate allocated and
+/// Rust filled (as `__read`): a JSON number array costs dozens of bytes per byte.
+fn body_op(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let id = a.get(0).number_value(s).unwrap_or(-1.);
+    let state = s.get_slot::<Native>().unwrap().0.clone();
+    let Some(bytes) = (id >= 0.)
+        .then(|| state.lock().unwrap().bodies.remove(&(id as u64)))
+        .flatten()
+    else {
+        throw(s, "No response body");
+        return;
+    };
+    let buffer = v8::ArrayBuffer::new(s, bytes.len());
+    if let Some(data) = buffer.get_backing_store().data() {
+        // SAFETY: a fresh buffer of exactly `bytes.len()` bytes no one else sees yet.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.as_ptr().cast(), bytes.len()) };
+    }
+    rv.set(buffer.into());
 }
 /// The reply as JSON text, serialized once.
 fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<String, String> {
@@ -754,6 +776,7 @@ impl Vm {
             engine,
             cancellation: Cancellation::default(),
             sync_calls: 0,
+            bodies: HashMap::new(),
         }));
         isolate.set_slot(Native(native_state.clone()));
         crate::modules::install(&mut isolate);
@@ -767,6 +790,7 @@ impl Vm {
                 ("__clone", v8::Function::new(cs, clone_value).unwrap()),
                 ("__bytes", v8::Function::new(cs, bytes_op).unwrap()),
                 ("__read", v8::Function::new(cs, read_op).unwrap()),
+                ("__body", v8::Function::new(cs, body_op).unwrap()),
                 (
                     "__linkModules",
                     v8::Function::new(cs, crate::modules::link).unwrap(),

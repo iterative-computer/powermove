@@ -111,6 +111,8 @@ impl HostRequest for Request {
             headers: vec![("content-type".into(), "application/json".into())],
             body: if self.mode == 2 {
                 vec![0; 10000]
+            } else if self.mode == 3 {
+                (0..6 * 1024 * 1024).map(|i| (i % 251) as u8).collect()
             } else {
                 b"{\"ok\":true}".to_vec()
             },
@@ -472,6 +474,25 @@ fn structured_clone_preserves_cycles_maps_typed_arrays_and_transfers() {
         eval(
             &r,
             "(()=>{try{structuredClone(()=>0);return false}catch(e){return e.name==='DataCloneError'}})()"
+        ),
+        "true"
+    );
+    close(&r);
+}
+/// A binary body reaches JS as its bytes: 6 MiB fits a 64 MiB isolate, where
+/// a JSON number array of it would not.
+#[test]
+fn large_binary_bodies_arrive_as_bytes() {
+    let f = fixture();
+    f.host.mode.store(3, Ordering::Relaxed);
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("bytes".into()))
+        .unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(async()=>{const b=new Uint8Array(await (await fetch('https://example.test/big')).arrayBuffer());let ok=b.length===6*1024*1024;for(let i=0;i<b.length;i+=4099)ok=ok&&b[i]===i%251;return ok})()"
         ),
         "true"
     );
@@ -992,6 +1013,7 @@ fn heaps_grow_from_their_slice_while_the_account_has_room_and_trim_when_idle() {
         .unwrap();
     eval(&r, "1");
     assert_eq!(f.admission.used(), slice());
+    assert_eq!(f.admission.isolates(), 1);
     // 40 MiB that stays alive: past the 16 MiB slice, under the 64 MiB ceiling.
     eval(
         &r,
@@ -1027,8 +1049,10 @@ fn heaps_grow_from_their_slice_while_the_account_has_room_and_trim_when_idle() {
         "globalThis.kept=[];for(let i=0;i<40;i++)kept.push(new Array(131072).fill(i))",
     );
     assert!(f.admission.used() > trimmed);
+    assert!(f.admission.peak() >= grown);
     close(&r);
     assert_eq!(f.admission.used(), 0);
+    assert_eq!(f.admission.isolates(), 0);
 }
 const IDLE_WAIT: Duration = Duration::from_secs(20);
 #[test]
