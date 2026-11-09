@@ -71,6 +71,9 @@ impl Connection {
     }
 }
 impl ToolConnection for Connection {
+    fn bind_agent_run(&mut self, run: &str) {
+        self.session.set_agent_run(run);
+    }
     fn list(&mut self) -> Result<Value> {
         Ok(self.session.tools())
     }

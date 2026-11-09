@@ -201,7 +201,8 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
         | "task_cancel"
         | "thread_watch"
         | "thread_unwatch"
-        | "thread_acknowledge" => {
+        | "thread_acknowledge"
+        | "publish_visual_reply" => {
             let runtime = target.with(cx, |c, _, _, cx| {
                 c.read(cx).builtins.runtime.clone().ok_or_else(|| {
                     Error::invalid("Open the Agent panel in this project's window before controlling its threads.")
@@ -218,9 +219,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                         let thread = args["threadId"].as_str().unwrap_or_default();
                         return Ok(runtime.agent_thread_live(thread).unwrap_or(Value::Null));
                     }
-                    if tool.starts_with("thread_launch")
-                        || ["thread_send", "thread_cancel"].contains(&tool.as_str())
-                    {
+                    if ["thread_launch", "thread_send", "thread_cancel"].contains(&tool.as_str()) {
                         return runtime
                             .agent_thread_control(&tool, &args)
                             .map_err(Error::invalid);

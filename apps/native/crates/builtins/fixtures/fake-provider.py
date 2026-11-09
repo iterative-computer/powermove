@@ -112,6 +112,8 @@ def codex():
             elif mode != 'hold' and not request['params']['input'][0]['text'].split('\n')[-1].startswith('Hold:'):
                 if mode == 'slow':
                     time.sleep(float(os.environ.get('PM_FAKE_DELAY', '0.4')))
+                elif request['params']['input'][0]['text'].split('\n')[-1].startswith('Slow:'):
+                    time.sleep(12)
                 text = 'Saw: ' + request['params']['input'][0]['text'].split('\n')[-1]
                 emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})
                 emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'answer', 'type': 'agentMessage', 'text': text}}})
