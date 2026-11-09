@@ -2350,16 +2350,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-bridge"
-version = "0.1.0"
-dependencies = [
- "libc",
- "objc2-core-foundation",
- "objc2-io-surface",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "pm-captions"
 version = "0.1.0"
 dependencies = [
@@ -2388,17 +2378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-engine"
-version = "0.1.0"
-dependencies = [
- "libc",
- "pm-model",
- "pm-protocol",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "pm-engine-service"
 version = "0.1.0"
 dependencies = [
@@ -2409,6 +2388,7 @@ dependencies = [
  "core-graphics-types",
  "foreign-types",
  "half",
+ "libc",
  "metal",
  "objc2",
  "objc2-app-kit",
@@ -2416,14 +2396,12 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "pm-audio",
- "pm-engine",
  "pm-eval",
  "pm-export",
  "pm-gpu",
  "pm-kernel",
  "pm-media",
  "pm-model",
- "pm-node",
  "pm-promedia",
  "pm-protocol",
  "pm-render",
@@ -2575,6 +2553,7 @@ dependencies = [
 name = "pm-kernel"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "flate2",
  "libc",
  "pm-captions",
@@ -2651,7 +2630,6 @@ dependencies = [
  "pm-mcp",
  "pm-media",
  "pm-model",
- "pm-node",
  "pm-protocol",
  "pm-render",
  "pm-text",
@@ -2675,32 +2653,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "snap",
-]
-
-[[package]]
-name = "pm-node"
-version = "0.1.0"
-dependencies = [
- "libc",
- "objc2",
- "pm-audio",
- "pm-bridge",
- "pm-color",
- "pm-engine",
- "pm-eval",
- "pm-export",
- "pm-gpu",
- "pm-media",
- "pm-model",
- "pm-perf",
- "pm-protocol",
- "pm-render",
- "pm-text",
- "pm-wasm",
- "serde",
- "serde_json",
- "sha2",
- "wgpu",
 ]
 
 [[package]]
