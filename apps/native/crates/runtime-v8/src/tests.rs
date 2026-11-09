@@ -190,19 +190,10 @@ fn fixture() -> Fixture {
 fn slice() -> usize {
     crate::vm::HeapPlan::new(&Limits::default()).initial()
 }
-fn wait<T>(ticket: Ticket<T>) -> Result<T> {
+fn wait<T>(mut ticket: Ticket<T>) -> Result<T> {
     let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Ticket {} timed out",
-            ticket.execution
-        );
-        thread::sleep(Duration::from_millis(2));
-    }
+    wait_until(&mut ticket, deadline)
+        .unwrap_or_else(|| panic!("Ticket {} timed out", ticket.execution))
 }
 fn eval(realm: &Realm, source: &str) -> String {
     wait(realm.eval(source).unwrap()).unwrap().value
@@ -1681,14 +1672,7 @@ fn clone_transfer_errors_keep_buffers_attached_and_url_prefixes_are_exact() {
 }
 
 fn compile_wait(mut ticket: SvelteTicket) -> Result<SvelteOutput> {
-    let end = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result;
-        }
-        assert!(Instant::now() < end);
-        thread::sleep(Duration::from_millis(2));
-    }
+    wait_until(&mut ticket, Instant::now() + Duration::from_secs(15)).expect("compile timed out")
 }
 #[test]
 fn svelte_snapshot_compiles_real_components_css_modules_and_reports_errors() {

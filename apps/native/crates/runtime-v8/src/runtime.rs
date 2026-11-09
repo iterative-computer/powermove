@@ -22,7 +22,8 @@ pub(crate) struct Completion<T> {
     waker: Option<Waker>,
 }
 pub(crate) type SharedCompletion<T> = Arc<Mutex<Completion<T>>>;
-/// Nonblocking result: poll as a Future or inspect with try_take. No wait/join API.
+/// Nonblocking result: poll as a Future or inspect with try_take; worker
+/// threads may block on it with `wait_until`.
 pub struct Ticket<T> {
     pub execution: u64,
     shared: SharedCompletion<T>,
@@ -42,6 +43,26 @@ impl<T> Future for Ticket<T> {
             c.waker = Some(cx.waker().clone());
             Poll::Pending
         }
+    }
+}
+/// Blocks a worker thread until `future` completes or `deadline` passes, and
+/// leaves the future with the caller on timeout. Never call this on AppKit's
+/// main thread: it must keep polling.
+pub fn wait_until<F: Future + Unpin>(future: &mut F, deadline: Instant) -> Option<F::Output> {
+    struct Unpark(thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(Unpark(thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        if let Poll::Ready(value) = Pin::new(&mut *future).poll(&mut cx) {
+            return Some(value);
+        }
+        let left = deadline.checked_duration_since(Instant::now())?;
+        thread::park_timeout(left);
     }
 }
 pub(crate) fn ticket<T>(id: u64) -> (Ticket<T>, SharedCompletion<T>) {

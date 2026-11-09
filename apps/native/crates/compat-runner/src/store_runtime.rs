@@ -14,7 +14,6 @@ use std::{
     collections::BTreeSet,
     path::Path,
     sync::{Arc, Mutex},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -478,18 +477,11 @@ impl StoreCompatRunner {
         Ok(runner)
     }
     pub fn eval(&self, source: &str) -> Result<Evaluation> {
-        let ticket = self.helper.eval(source)?;
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            if let Some(result) = ticket.try_take() {
-                return result;
-            }
-            if Instant::now() > deadline {
-                self.helper.close();
-                return Err(Error::Host("Store evaluation timeout".into()));
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        let mut ticket = self.helper.eval(source)?;
+        wait_until(&mut ticket, Instant::now() + Duration::from_secs(20)).unwrap_or_else(|| {
+            self.helper.close();
+            Err(Error::Host("Store evaluation timeout".into()))
+        })
     }
     pub fn json(&self, expression: &str) -> Result<Value> {
         let result = self.eval(&format!(

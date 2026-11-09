@@ -57,17 +57,9 @@ impl WatchdogHooks for Host {
         WatchdogDecision::Wait
     }
 }
-fn wait<T>(ticket: Ticket<T>) -> Result<T> {
-    let end = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(result) = ticket.try_take() {
-            return result;
-        }
-        if Instant::now() > end {
-            return Err(Error::Host("acceptance execution timeout".into()));
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
+fn wait<T>(mut ticket: Ticket<T>) -> Result<T> {
+    wait_until(&mut ticket, Instant::now() + Duration::from_secs(10))
+        .unwrap_or_else(|| Err(Error::Host("acceptance execution timeout".into())))
 }
 fn eval(realm: &Realm, source: impl Into<String>) -> Result<Evaluation> {
     wait(realm.eval(source)?)

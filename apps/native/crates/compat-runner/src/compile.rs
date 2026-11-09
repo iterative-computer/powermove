@@ -2,14 +2,13 @@
 //! transformed on its own; V8 then links the graph with real ES module semantics,
 //! so nothing here reimplements scope hoisting. Source text never executes here.
 use crate::manifest;
-use pm_runtime_v8::{SvelteCompiler, SvelteUnit, module_imports, strip_typescript};
+use pm_runtime_v8::{SvelteCompiler, SvelteUnit, module_imports, strip_typescript, wait_until};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -154,16 +153,9 @@ impl Sources<'_> {
             .svelte
             .compile(source, &filename, unit)
             .map_err(|e| e.to_string())?;
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if let Some(result) = ticket.try_take() {
-                return result.map(|o| o.javascript).map_err(|e| e.to_string());
-            }
-            if Instant::now() > deadline {
-                return Err("Svelte compiler timed out".into());
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        let result = wait_until(&mut ticket, Instant::now() + Duration::from_secs(60))
+            .ok_or("Svelte compiler timed out")?;
+        result.map(|o| o.javascript).map_err(|e| e.to_string())
     }
     fn transform(&self, source: &str, file: &Path) -> Result<String, String> {
         let name = file.to_string_lossy();
