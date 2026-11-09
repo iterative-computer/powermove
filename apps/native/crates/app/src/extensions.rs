@@ -300,16 +300,26 @@ impl Controller {
         shell.native_accessibility = vec![];
         drop(shell);
         // Dropping the host closes the realm off the main thread.
-        self.extensions = Extensions::default();
+        self.reset_extensions();
         self.extensions.stopped_for_quit = true;
         true
+    }
+    /// A fresh extension state for this window. Resource generations keep
+    /// counting up, so the viewer takes the next definitions as newer.
+    fn reset_extensions(&mut self) {
+        let generation = self.extensions.resources.generation;
+        self.extensions = Extensions::default();
+        self.extensions.resources = Arc::new(ResourceSnapshot {
+            generation,
+            ..Default::default()
+        });
     }
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
         let mut shell = self.host.borrow_mut();
         shell.native_present = None;
         shell.native_accessibility = vec![];
         drop(shell);
-        self.extensions = Extensions::default();
+        self.reset_extensions();
         let Some(session) = &self.session else {
             return;
         };

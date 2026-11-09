@@ -38,9 +38,14 @@ struct QuitCoordinator {
 }
 impl gpui::Global for QuitCoordinator {}
 pub fn allow_quit(cx: &App) {
-    cx.global::<QuitCoordinator>()._delegate.allow();
+    let delegate = &cx.global::<QuitCoordinator>()._delegate;
+    delegate.allow();
+    delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    cx.global::<QuitCoordinator>()
+        ._delegate
+        .resolve_quit_events(true);
     let controllers = {
         let q = cx.global_mut::<QuitCoordinator>();
         q.quitting = false;
@@ -49,14 +54,18 @@ fn cancel_quit(cx: &mut App) {
         q.host.closing.store(false, Ordering::Release);
         q.controllers.clone()
     };
-    // Extensions a hung one made the quit stop come back with the window.
-    for weak in controllers {
-        let _ = weak.update(cx, |v, cx| {
-            if v.extensions.stopped_for_quit {
-                v.start_extensions(cx);
-            }
-        });
-    }
+    // Extensions a hung one made the quit stop come back with the window,
+    // once the update that cancelled (a close sheet's answer, inside one
+    // controller) has ended: a controller can't be updated within itself.
+    cx.defer(move |cx| {
+        for weak in controllers {
+            let _ = weak.update(cx, |v, cx| {
+                if v.extensions.stopped_for_quit {
+                    v.start_extensions(cx);
+                }
+            });
+        }
+    });
 }
 pub fn begin_quit(cx: &mut App) {
     let q = cx.global_mut::<QuitCoordinator>();
