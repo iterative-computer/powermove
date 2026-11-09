@@ -93,7 +93,7 @@ it.each(['composition','image'])('shares %s textures across imported meshes and 
     model.add(new THREE.Mesh(geometry,material));
   }
   const frame={pixels:new Uint8Array(16).fill(255),width:2,height:2,key:'first'};
-  const capture=vi.fn(()=>frame),image={kind:'image',el:{width:2,height:2}},asset={object3d:model};
+  const capture=vi.fn((_id?:string,_map?:any,minimum?:{width:number;height:number})=>minimum?{...frame,...minimum}:frame),image={kind:'image',el:{width:2,height:2}},asset={object3d:model};
   const map=kind==='composition'?{compositionId:'source'}:'image';
   const raw=parseScene({objects:[{id:'model',source:{assetId:'model'},useSourceMaterials:true,material:{maps:{color:map,emissive:map}}}]});
   const runtime=new SceneRuntime(),sync=()=>runtime.sync(raw,id=>id==='model'?asset:image,p=>p.v,0,true,undefined,capture);
@@ -109,7 +109,14 @@ it.each(['composition','image'])('shares %s textures across imported meshes and 
   expect(textures[0]!.repeat.toArray()).toEqual([1,1]);
   if(kind==='composition')expect(capture).toHaveBeenCalledOnce();
   const version=textures[0]!.version;sync();expect(textures[0]!.version).toBe(version);
-  const disposals=[...new Set(textures)].map(texture=>vi.spyOn(texture,'dispose'));
+  if(kind==='composition'){
+    const object=runtime.objects.get('model')!;
+    object.traverse((child:any)=>{if(child.isMesh){child.material.normalMap=child.material.map;child.material.roughnessMap=child.material.map;}});
+    const camera=new THREE.OrthographicCamera(-1,1,1,-1,.1,100);camera.position.z=3;camera.updateMatrixWorld(true);
+    runtime.prepareMaterialTextures(512,512,camera,4096);
+    object.traverse((child:any)=>{if(child.isMesh){expect(child.material.map.image.width).toBeGreaterThan(2);expect(child.material.normalMap).toBe(child.material.map);expect(child.material.roughnessMap).toBe(child.material.map);}});
+  }
+  const disposals=[...new Set(maps())].map(texture=>vi.spyOn(texture,'dispose'));
   raw.objects[0]!.material.maps={};sync();for(const dispose of disposals)expect(dispose).toHaveBeenCalledOnce();
   runtime.dispose();geometry.dispose();model.traverse((child:any)=>{child.material?.map?.dispose();child.material?.dispose();});
 });

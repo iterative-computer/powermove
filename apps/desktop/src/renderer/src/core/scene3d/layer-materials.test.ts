@@ -218,4 +218,9 @@ it('prepares visible videos inside hidden group sources with their composition c
   nested.on=false;PM.touch();expect(videoClipsAt(PM,1).filter(c=>c.id.startsWith('material-layer:'))).toHaveLength(0);
 });
 
-it('rejects groups with nested 3D sources',()=>{const {PM,add}=editor();const group=add('g','group'),nested=add('nested','group');nested.group=group.id;const camera=add('camera','extension');camera.group=nested.id;camera.d.data={camera:{}};expect(materialLayerStatus(PM.proj,'model','g')).toBe('ineligible');});
+it('rejects groups with nested 3D sources during both assignment and sampling',()=>{
+  const {PM,add}=editor(),group=add('g','group'),nested=add('nested','group');nested.group=group.id;
+  const camera=add('camera','extension');camera.group=nested.id;camera.d.definition=LAYER3D_DEFINITIONS.camera;
+  expect(materialLayerStatus(PM.proj,'model','g')).toBe('ineligible');
+  expect(editScene(PM,{operation:'set_material_map',target:'model',slot:'color',map:{layerId:'g'},materialIndex:0})).toMatchObject({ok:false});
+});
