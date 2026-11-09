@@ -1829,7 +1829,7 @@ fn project_rows_follow_a_media_observation_that_lands_without_an_edit() {
         ),
     );
     assert!(
-        shows(&panels, "Media offline"),
+        shows(&panels, "Missing") && !shows(&panels, "Loading"),
         "the row shows the observation instead of staying Loading"
     );
     panels.close();
