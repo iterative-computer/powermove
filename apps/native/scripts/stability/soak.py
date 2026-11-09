@@ -313,20 +313,24 @@ def main():
                 samples.append(s)
                 print(json.dumps(s), flush=True)
                 last_sample = time.monotonic()
-    except (TimeoutError, RuntimeError, BrokenPipeError) as e:
+    except (TimeoutError, RuntimeError, BrokenPipeError, ValueError) as e:
         failures.append(f'{type(e).__name__}: {e}')
+        print('FAILURE', failures[-1], flush=True)
     finally:
         try:
             mcp.close()
         except Exception:
             pass
         if pids(app):
-            subprocess.run(['osascript', '-e', f'tell application id "com.powermove.native.dev.{a.lane}" to quit'],
-                           capture_output=True, timeout=30)
+            # The soak's edits leave the project dirty: answer its save question.
+            quit = subprocess.Popen(['osascript', '-e', f'tell application id "com.powermove.native.dev.{a.lane}" to quit'],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             for _ in range(60):
                 if not pids(app):
                     break
-                time.sleep(.5)
+                press_button(pid, 'Don\u2019t Save')
+                time.sleep(1)
+            quit.kill()
             for p_ in pids(app):
                 os.kill(p_, 9)
                 failures.append('needed a kill to quit')
