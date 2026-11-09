@@ -53,6 +53,12 @@ with a proxy plays the proxy in Automatic and is not offline there.
 
 ## Agent stills
 
-`render_frames` runs as a one-frame preview job: it skips the export's offline
-refusal and isolates failing layers, so stills show the card. Exports (the
-Export panel, `export_video`) never set it.
+Only an agent's `render_frames` runs as a one-frame preview job: it skips the
+export's offline refusal and isolates failing layers, so stills show the card
+(never cached). Extension snapshots (`renderFrameTo`, `PM.Export.snapshot`),
+composition sheets and exports (the Export panel, `export_video`) keep
+refusing offline media.
+
+The engine keeps at most 32 cards per process, reused per file, box and tier;
+an evicted card's file is deleted and earlier runs' files are pruned after a
+day.
