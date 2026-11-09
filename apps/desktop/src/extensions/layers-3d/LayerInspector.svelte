@@ -103,11 +103,13 @@
     <Row {api} label="Projection"><SelectField {api} get={()=>camera.projection} options={[{v:'perspective',label:'Perspective'},{v:'orthographic',label:'Orthographic'}]} edit={structural('set_camera','projection','Camera projection')} label="Projection" /></Row>
     {#each cameraFields(camera.projection).filter(f=>!['x','y','z'].includes(f.key) && value(camera,f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`camera.${field.key}`} channel={value(camera,field.key)} />{/each}
     <Section {api} title="Lens" />
+    <div class="wrap-labels">
     {#each IRIS_FIELDS as field (field.key)}
       {#if value(camera,field.key)}<SceneField {api} {ui} {layer} {field} path={`camera.${field.key}`} channel={value(camera,field.key)} />
       {:else if field.kind==='select'}<Row {api} label={field.label}><SelectField {api} get={()=>String(IRIS_DEFAULTS[field.key])} options={(field.options ?? []).map(o=>({v:String(o.v),label:o.label}))} edit={{mode:'set',label:field.label,set:(v:unknown)=>installIris(field.key,v,field.label)}} label={field.label} /></Row>
       {:else}<Row {api} label={field.label}><div class="well"><NumField {api} angle={field.unit==='°'} get={()=>IRIS_DEFAULTS[field.key]} edit={{mode:'set',label:field.label,set:(v:unknown)=>installIris(field.key,v,field.label)}} label={field.label} ariaLabel={field.label} step={field.step ?? 1} min={field.min} max={field.max} unit={field.unit} /></div></Row>{/if}
     {/each}
+    </div>
     {#if world}
       <WorldSection {api} {ui} layer={world} world={world.d.data.object.world} edit={(patch,label)=>{const r=api.scene3d.edit({operation:'set_world',patch},{label,origin:'inspector'});if(!r.ok)api.ui.toast(r.message,{error:true});api.transport.invalidate();}} />
     {:else}
@@ -131,5 +133,7 @@
   .finish{aspect-ratio:1;width:100%;padding:0;border:0;border-radius:var(--r-sm,6px);background:var(--swatch);cursor:pointer}
   .finish:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .from-file { display: contents; }
+  /* After Effects' long names wrap rather than lose their ends. */
+  .wrap-labels :global(.row .k){white-space:normal;overflow:visible;text-overflow:clip;line-height:1.15}
   .note{margin:0;padding:2px var(--panel-edge-inset,10px) 8px;font-size:var(--fs-xs,11px);color:var(--tx-3);line-height:1.35}
 </style>
