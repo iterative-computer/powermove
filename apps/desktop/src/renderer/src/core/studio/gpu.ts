@@ -22,6 +22,8 @@ export type StudioCamera = {
   aspect: number;
   lensRadius: number;
   focus: number;
+  orthographic?: boolean;
+  near?: number; far?: number;
 };
 
 export type StudioView = {
@@ -256,7 +258,7 @@ export class StudioTarget {
     // Caustics only where something can focus light: glass or polished metal.
     const m = scene.materials;
     this.caustics = false;
-    for (let i = 0; i + 24 <= m.length; i += 24) {
+    for (let i = 0; i + 32 <= m.length; i += 32) {
       if (m[i + 7]! * (1 - m[i + 3]!) > 0.5 || (m[i + 3]! > 0.5 && m[i + 4]! < 0.25)) { this.caustics = true; break; }
     }
     if (!scene.bounds.isEmpty()) {
@@ -341,7 +343,7 @@ export class StudioTarget {
       const u = new Uint32Array(this.base);
       u.set([this.width, this.height, this.frame, n], 28);
       u.set([this.lightCount, bounces, reset && first ? 1 : 0, clamp], 32);
-      u.set([this.live ? 1 : 0, this.view.shadows === false ? 1 : 0, this.instanceCount, 0], 36);
+      u.set([this.live ? 1 : 0, this.view.shadows === false ? 1 : 0, this.instanceCount, this.view.camera.orthographic ? 1 : 0], 36);
       const f = new Float32Array(this.base);
       f.set([this.bounds[3] / 160, this.photonsEmitted, 0, 0], 44);
       f.set(this.bounds, 48);

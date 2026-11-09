@@ -153,8 +153,9 @@ fn pack(@builtin(global_invocation_id) g: vec3u) {
   // Optional native output mask. The shared trace still includes every layer's
   // occlusion/reflections; only presentation is separated for the compositor.
   if (Q.k.z > 0.0 && u32(gbuf[i].z + 0.5) != u32(Q.k.z)) {
-    if (gbuf[i].z > 0.5 || Q.k.w < 0.5) { c = vec4f(0.0); }
+    if (gbuf[i].z > 0.5 || (u32(Q.k.w) & 1u) == 0u) { c = vec4f(0.0); }
   }
+  if ((u32(Q.k.w) & 2u) != 0u && c.w > 0.0) { c = vec4f(clamp(c.xyz / c.w, vec3f(0.0), vec3f(1.0)), c.w); }
   let q = vec4u(c * 255.0 + 0.5);
   packed[i] = q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);
 }

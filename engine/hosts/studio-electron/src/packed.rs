@@ -11,7 +11,7 @@ use pm_studio::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraBasis {
     pub position: [f32; 3],
@@ -22,14 +22,18 @@ pub struct CameraBasis {
     pub aspect: f32,
     pub lens_radius: f32,
     pub focus: f32,
+    #[serde(default)]
+    pub orthographic: bool,
+    pub near: Option<f32>,
+    pub far: Option<f32>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Environment {
     pub zenith: [f32; 3],
     pub horizon: [f32; 3],
     pub ground: [f32; 3],
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct View {
     pub camera: CameraBasis,
@@ -158,14 +162,13 @@ impl PackedScene {
         if positions
             .iter()
             .flatten()
-            .chain(bytemuck::cast_slice::<GpuTri, f32>(&tris))
             .chain(bytemuck::cast_slice::<GpuMaterial, f32>(&materials))
             .chain(sdata.iter().flatten())
             .any(|x| !x.is_finite())
         {
             return Err("prepared scene contains non-finite data".into());
         }
-        for t in &tris {
+        for t in tris.iter().filter(|_| u.instance_count > 0) {
             if t.uv2m[2] < 0.
                 || t.uv2m[2] as usize >= materials.len()
                 || t.uv2m[3] < 0.
@@ -202,7 +205,7 @@ impl PackedScene {
             objects: u.objects,
         })
     }
-    pub fn patch(&mut self, p: Patch, binary: &[u8]) -> Result<(), String> {
+    pub fn patch(&mut self, p: Patch, binary: &[u8]) -> Result<bool, String> {
         if self.key != p.key {
             return Err("native geometry key is stale; upload scene again".into());
         }
@@ -224,6 +227,12 @@ impl PackedScene {
         {
             return Err("patch contains non-finite data".into());
         }
+        let mut old_view = self.view.clone();
+        old_view.camera = p.view.camera.clone();
+        let content_changed = old_view != p.view
+            || sdata != self.prepared.sdata
+            || bytemuck::cast_slice::<GpuMaterial, u8>(&materials)
+                != bytemuck::cast_slice::<GpuMaterial, u8>(&self.prepared.materials);
         let old = std::mem::replace(&mut self.prepared.sdata, sdata);
         let count = self.placements.len();
         let (_, placements) = match placements(&self.prepared, count) {
@@ -245,15 +254,22 @@ impl PackedScene {
             l.v = s[2];
             l.radiance = s[3];
         }
-        Ok(())
+        Ok(content_changed)
     }
     pub fn pick(&self, x: f32, y: f32, w: u32, h: u32) -> Option<serde_json::Value> {
         let c = &self.view.camera;
-        let eye = Vec3::from(c.position);
+        let mut eye = Vec3::from(c.position);
         let direction = (Vec3::from(c.forward)
             + Vec3::from(c.right) * ((x + 0.5) / w as f32 * 2. - 1.) * c.tan_y * c.aspect
             - Vec3::from(c.up) * ((y + 0.5) / h as f32 * 2. - 1.) * c.tan_y)
             .normalize();
+        let direction = if c.orthographic {
+            eye += Vec3::from(c.right) * ((x + 0.5) / w as f32 * 2. - 1.) * c.tan_y * c.aspect
+                - Vec3::from(c.up) * ((y + 0.5) / h as f32 * 2. - 1.) * c.tan_y;
+            Vec3::from(c.forward)
+        } else {
+            direction
+        };
         let mut best = f32::MAX;
         let mut found = None;
         for placement in &self.placements {

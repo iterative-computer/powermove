@@ -181,6 +181,8 @@ pub struct GpuMaterial {
     pub extra: [f32; 4], // ior, specular, opacity
     pub maps: [f32; 4],  // texture layers: color, emissive, orm, normal (-1: none)
     pub layers: [f32; 4], // sheen, thin-film thickness (nm), dispersion, droplets
+    pub policy: [f32; 4], // ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16), alpha test
+    pub maps2: [f32; 4], // roughness, metalness, AO texture indices, normal scale
 }
 
 #[repr(C)]
@@ -203,13 +205,13 @@ impl GpuLight {
     }
     /// A small sphere: `radiance` is per unit area of its surface.
     pub fn sphere(center: Vec3, radius: f32, radiance: Vec3) -> GpuLight {
-        GpuLight { pos: center.to4(1.0), u: [radius, 0.0, 0.0, 0.0], v: [0.0; 4], radiance: radiance.to4(0.0) }
+        GpuLight { pos: center.to4(1.0), u: [radius, 0.0, 2.0, 0.0], v: [0.0; 4], radiance: radiance.to4(0.0) }
     }
     /// A spot: `axis` points where it shines; cosines of the outer and inner cone.
     pub fn spot(center: Vec3, radius: f32, axis: Vec3, cos_outer: f32, cos_inner: f32, radiance: Vec3) -> GpuLight {
         // trace.wgsl compares the ray toward the light with the axis, so it is stored flipped.
         let a = axis.normalize() * -1.0;
-        GpuLight { pos: center.to4(2.0), u: [radius, 0.0, 0.0, 0.0], v: a.to4(cos_outer), radiance: radiance.to4(cos_inner.max(cos_outer + 1e-4)) }
+        GpuLight { pos: center.to4(2.0), u: [radius, 0.0, 2.0, 0.0], v: a.to4(cos_outer), radiance: radiance.to4(cos_inner.max(cos_outer + 1e-4)) }
     }
 }
 
@@ -260,6 +262,8 @@ impl Scene {
                 // The display's composition is texture layer 0.
                 maps: [-1.0, if m.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
                 layers: [m.sheen, m.film_nm, m.dispersion, m.droplets],
+                policy: [1.0, 7.0, 0.0, 0.0],
+                maps2: [-1.0, -1.0, -1.0, 1.0],
             })
             .collect();
         let lights: Vec<GpuLight> = self
@@ -510,4 +514,70 @@ mod tests {
             assert!(facing.dot((target - l.center).normalize()) > 0.99);
         }
     }
+}
+
+
+/// Evaluated renderer input shared by Electron WebGPU and the native process.
+/// The project document stays on the host. Meshes contain world-space poses;
+/// layer/part identity and texture/material policies travel beside the Rust scene.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SceneDocument {
+    pub version: u32,
+    pub scene: Scene,
+    pub layer_ids: Vec<String>,
+    pub object_ids: Vec<ObjectIdentity>,
+    pub textures: Vec<Texture>,
+    pub material_options: Vec<MaterialOptions>,
+    pub camera_options: CameraOptions,
+    pub environment_options: EnvironmentOptions,
+    pub light_options: Vec<LightOptions>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ObjectIdentity {
+    pub layer: String,
+    pub part: Option<String>,
+    pub cast_shadow: bool,
+    pub receive_shadow: bool,
+    #[serde(default)]
+    pub vertex_colors: Option<Vec<[f32; 4]>>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Texture {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    /// Straight RGBA8, first row at UV v=0. Color/emission are sRGB.
+    pub rgba: Vec<u8>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MaterialOptions {
+    pub opacity: f32,
+    pub ambient_response: f32,
+    pub double_sided: bool,
+    pub alpha_test: f32,
+    #[serde(default)]
+    pub unlit: bool,
+    /// color, emissive, roughness, metalness, normal, AO; -1 = no map.
+    pub maps: [i32; 6],
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CameraOptions {
+    pub projection: String,
+    pub up: Vec3,
+    pub ortho_height: f32,
+    pub near: f32,
+    pub far: f32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentOptions {
+    pub backdrop_opaque: bool,
+    pub shadows: bool,
+    pub floor_y: f32,
+    pub ground: Vec3,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LightOptions {
+    pub cast_shadow: bool,
+    pub distance: f32,
+    pub decay: f32,
 }

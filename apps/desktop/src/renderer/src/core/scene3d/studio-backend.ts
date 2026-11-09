@@ -25,9 +25,10 @@ export type StudioSoftbox = { center: StudioVec3; u: StudioVec3; v: StudioVec3; 
 export type StudioAnalyticLight = { pos: number[]; u: number[]; v: number[]; radiance: number[] };
 export type StudioObjectIdentity = {
   layer: string; part: string | null; cast_shadow: boolean; receive_shadow: boolean;
+  vertex_colors?: [number,number,number,number][];
 };
 export type StudioMaterialOptions = {
-  opacity: number; ambient_response: number; double_sided: boolean; alpha_test: number;
+  opacity: number; ambient_response: number; double_sided: boolean; alpha_test: number; unlit?: boolean;
   /** Texture indices: color, emissive, roughness, metalness, normal, AO. -1 = none. */
   maps: [number, number, number, number, number, number];
 };

@@ -14,5 +14,6 @@ glam = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
 
 [features]
-default = []
+default = ["metalfx"]
 oidn = ["pm-studio/oidn"]
+metalfx = ["pm-studio/metalfx"]

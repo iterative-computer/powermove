@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { finishBlas, finishBlasInWorker, WORKER_TRIANGLES, type BlasData } from './blas';
+import { partKeyOf, partsRoot } from '../scene3d/model-parts';
 import { buildBvh } from './bvh';
 
 /*
@@ -11,6 +12,7 @@ import { buildBvh } from './bvh';
  */
 
 export const MAP_SIZE = 1024;
+export const STUDIO_MATERIAL_FLOATS = 32;
 
 /** An image map, or a live screen: a composition rendered each frame. */
 export type StudioMap = { source: TexImageSource; flipY: boolean } | { screen: string };
@@ -26,12 +28,15 @@ export type StudioScene = {
   /** Lights (16 floats each) then instances (36 floats each), as trace.wgsl's scene data. */
   sdata: Float32Array;
   instanceCount: number;
-  materials: Float32Array;   // 24 floats per material
+  materials: Float32Array;   // 32 floats per material (8 vec4)
   lightCount: number;
   maps: StudioMap[];         // texture-array layers
   /** Scene object id (layer id) of each object index the tracer reports. */
   objects: string[];
   triangles: number;
+  instancePolicies?: { part: string | null; castShadow: boolean; receiveShadow: boolean }[];
+  materialPolicies?: { ambientResponse: number; doubleSided: boolean; alphaTest: number }[];
+  lightPolicies?: { castShadow: boolean; distance: number; decay: number }[];
   /** World-space bounds, for the shadow catcher and epsilon scale. */
   bounds: THREE.Box3;
 };
@@ -44,8 +49,8 @@ export const isPending = (s: StudioScene | StudioPending): s is StudioPending =>
 
 const tmp = new THREE.Vector3();
 
-function materialKey(m: any): string {
-  return m.uuid;
+function materialKey(m: any, mesh:THREE.Mesh): string {
+  return `${m.uuid}:${mesh.castShadow}:${mesh.receiveShadow}`;
 }
 
 /** Collects the meshes of `objects` (ids) under `scene`, skipping hidden ones. */
@@ -95,8 +100,8 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     return i;
   };
 
-  const material = (m: any): number => {
-    const key = materialKey(m);
+  const material = (m: any, mesh:THREE.Mesh): number => {
+    const key = materialKey(m,mesh);
     let i = materialIndex.get(key);
     if (i !== undefined) return i;
     i = materialIndex.size;
@@ -111,7 +116,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       screenLayer = mapIndex.get(key) ?? -1;
       if (screenLayer < 0) { screenLayer = maps.length; maps.push({ screen }); mapIndex.set(key, screenLayer); }
     }
-    const basic = m.isMeshBasicMaterial;
+    const basic = m.isMeshBasicMaterial || m.userData?.studioUnlit;
     const metallic = basic ? 0 : m.metalness ?? 0;
     const roughness = basic ? 1 : m.roughness ?? 1;
     const transmission = m.transmission ?? 0;
@@ -123,9 +128,12 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       // emit.w: subsurface radius; extra.w: anisotropy.
       basic ? color.r : emissive.r, basic ? color.g : emissive.g, basic ? color.b : emissive.b, m.userData?.subsurface ?? 0,
       m.ior ?? 1.5, m.specularIntensity ?? 1, opacity, m.userData?.anisotropy ?? 0,
-      basic ? -1 : layer(m.map), screen ? screenLayer : layer(basic ? m.map : m.emissiveMap), layer(m.roughnessMap || m.metalnessMap), layer(m.normalMap),
+      layer(m.map), screen ? screenLayer : layer(basic ? m.map : m.emissiveMap), layer(m.roughnessMap || m.metalnessMap), layer(m.normalMap),
       // Studio's material layers: sheen, thin film (nm), dispersion, droplets.
       m.sheen ?? 0, m.iridescence > 0 ? (m.iridescenceThicknessRange?.[1] ?? 400) : 0, m.userData?.studioDispersion ?? 0, m.userData?.droplets ?? 0,
+      m.userData?.materialAmbientUniform?.value ?? 1,
+      (mesh.castShadow?1:0) | (mesh.receiveShadow?2:0) | (m.side===THREE.DoubleSide?4:0) | (basic?8:0) | (m.vertexColors?16:0), m.alphaTest ?? 0, 0,
+      layer(m.roughnessMap), layer(m.metalnessMap), layer(m.aoMap), m.normalScale?.x ?? 1,
     );
     return i;
   };
@@ -133,7 +141,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   // One BVH per mesh, in its own space, reused until its geometry or material
   // assignment changes; only the top level is rebuilt when things move.
   const blases: Blas[] = [];
-  const instances: { blas: Blas; world: THREE.Matrix4 }[] = [];
+  const instances: { blas: Blas; world: THREE.Matrix4; part:string|null; castShadow:boolean; receiveShadow:boolean }[] = [];
   let pending = 0, total = 0;
   for (const { mesh, id } of meshes) {
     const g = mesh.geometry as THREE.BufferGeometry;
@@ -142,8 +150,12 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     let oi = objectIndex.get(id);
     if (oi === undefined) { oi = objects.length; objects.push(id); objectIndex.set(id, oi); }
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    const mi = mats.map((m: any) => (!m || m.visible === false || (m.opacity ?? 1) <= 0 ? -1 : material(m)));
-    const key = blasKey(g, mi, oi);
+    const mi = mats.map((m: any) => (!m || m.visible === false || (m.opacity ?? 1) <= 0 ? -1 : material(m,mesh)));
+    const skinned=mesh as THREE.SkinnedMesh;
+    if(skinned.isSkinnedMesh)skinned.skeleton.update();
+    const deformation=skinned.isSkinnedMesh?Array.from(skinned.skeleton.boneMatrices).join(','):'';
+    const morph=mesh.morphTargetInfluences?.join(',') ?? '';
+    const key = `${blasKey(g, mi, oi)}:${deformation}:${morph}:${mats.map((m:any)=>!!m?.vertexColors).join(',')}`;
     let blas = blasCache.get(mesh);
     if (!blas || blas.key !== key) {
       const building = buildingFor.get(mesh);
@@ -174,7 +186,8 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     total += blas.triangles;
     if (!blas.triangles) continue;
     blases.push(blas);
-    instances.push({ blas, world: mesh.matrixWorld.clone() });
+    let root:THREE.Object3D=mesh;while(root.parent && root.parent!==scene && root.parent.userData.sceneId===id)root=root.parent;
+    instances.push({ blas, world: mesh.matrixWorld.clone(), part:mesh.userData.studioPart ?? partKeyOf(partsRoot(root),mesh), castShadow:mesh.castShadow, receiveShadow:mesh.receiveShadow });
     bounds.union(blas.bounds.clone().applyMatrix4(mesh.matrixWorld));
   }
   if (pending) return { pending, total };
@@ -224,9 +237,11 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
 
   // Lights.
   const lights: number[] = [];
+  const lightPolicies:NonNullable<StudioScene['lightPolicies']>=[];
   const size = bounds.isEmpty() ? 1 : bounds.getSize(tmp).length();
   scene.traverseVisible((o: any) => {
     if (!o.isLight || o.isHemisphereLight || o.isAmbientLight) return;
+    const lightStart=lights.length;
     const c = o.color.clone().multiplyScalar(o.intensity);
     const position = new THREE.Vector3().setFromMatrixPosition(o.matrixWorld);
     if (o.isDirectionalLight) {
@@ -254,6 +269,11 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
         lights.push(position.x, position.y, position.z, 1, r, 0, 0, 0, 0, 0, 0, 0, radiance.r, radiance.g, radiance.b, 0);
       }
     }
+    if(lights.length>lightStart){
+      lightPolicies.push({castShadow:o.castShadow!==false,distance:o.distance ?? 0,decay:o.decay ?? 2});
+      if(!o.castShadow)lights[lightStart+7]=-Math.max(1e-10,Math.abs(lights[lightStart+7]!));
+      if(o.isPointLight || o.isSpotLight){lights[lightStart+5]=o.distance ?? 0;lights[lightStart+6]=o.decay ?? 2;}
+    }
   });
 
   // Scene data: lights, then instances in top-level order (9 vec4 each).
@@ -275,7 +295,10 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   return {
     positions: geometry.positions, tris: geometry.tris, blasNodes: geometry.blasNodes, tlasNodes, geometryKey,
     sdata, instanceCount: instances.length,
-    materials: new Float32Array(materials.length ? materials : new Array(24).fill(0)),
+    materials: new Float32Array(materials.length ? materials : [0,0,0,0,1,0,.03,0,0,0,0,0,1.5,1,1,0,-1,-1,-1,-1,0,0,0,0,1,7,0,0,-1,-1,-1,1]),
+    instancePolicies: Array.from(top.order,k=>{const m=instances[k]!;return {part:m.part,castShadow:m.castShadow,receiveShadow:m.receiveShadow};}),
+    materialPolicies: Array.from({length:materials.length/32},(_,i)=>({ambientResponse:materials[i*32+24]!,doubleSided:(materials[i*32+25]!&4)!==0,alphaTest:materials[i*32+26]!})),
+    lightPolicies,
     lightCount: lights.length / 16,
     maps, objects, triangles: geometry.triangles, bounds,
   };
@@ -297,7 +320,7 @@ function idOf(o: any): string {
   return `${v}.${o.version ?? 0}`;
 }
 function blasKey(g: THREE.BufferGeometry, materials: number[], object: number): string {
-  return [g.uuid, idOf(g.getAttribute('position')), idOf(g.getAttribute('normal')), idOf(g.getAttribute('uv')), idOf(g.getIndex()), materials.join(','), object, g.groups.map(x => `${x.start}:${x.count}:${x.materialIndex}`).join(';')].join('/');
+  return [g.uuid, idOf(g.getAttribute('position')), idOf(g.getAttribute('normal')), idOf(g.getAttribute('uv')), idOf(g.getAttribute('color')), idOf(g.getIndex()), materials.join(','), object, g.groups.map(x => `${x.start}:${x.count}:${x.materialIndex}`).join(';')].join('/');
 }
 
 /**
@@ -327,7 +350,9 @@ function gather(mesh: THREE.Mesh, g: THREE.BufferGeometry, mi: number[], oi: num
       const c = t * 9, s = t * 24;
       for (let j = 0; j < 3; j++) {
         const v = index ? index.getX(k + j) : k + j;
-        const x = posAttr.getX(v), y = posAttr.getY(v), z = posAttr.getZ(v);
+        const deformed=(mesh as THREE.SkinnedMesh).isSkinnedMesh || mesh.morphTargetInfluences?.some(v=>v!==0);
+        const point=deformed?mesh.getVertexPosition(v,new THREE.Vector3()):null;
+        const x = point?.x ?? posAttr.getX(v), y = point?.y ?? posAttr.getY(v), z = point?.z ?? posAttr.getZ(v);
         p[j * 3] = x; p[j * 3 + 1] = y; p[j * 3 + 2] = z;
         corners[c + j * 3] = x; corners[c + j * 3 + 1] = y; corners[c + j * 3 + 2] = z;
         if (x < lx) lx = x; if (y < ly) ly = y; if (z < lz) lz = z;
@@ -344,6 +369,12 @@ function gather(mesh: THREE.Mesh, g: THREE.BufferGeometry, mi: number[], oi: num
         const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx, l = Math.hypot(nx, ny, nz) || 1;
         for (let j = 0; j < 3; j++) { shading[s + j * 4] = nx / l; shading[s + j * 4 + 1] = ny / l; shading[s + j * 4 + 2] = nz / l; }
       }
+      const color=g.getAttribute('color');
+      if(color){const words=new Uint32Array(shading.buffer);for(let j=0;j<3;j++){
+        const v=index?index.getX(k+j):k+j;
+        const byte=(n:number)=>Math.round(Math.max(0,Math.min(1,n))*255);
+        words[s+j*4+3]=(byte(color.getX(v)) | byte(color.getY(v))<<8 | byte(color.getZ(v))<<16 | byte(color.itemSize>3?color.getW(v):1)<<24)>>>0;
+      }}
       shading.set([uv[0]!, uv[1]!, uv[2]!, uv[3]!, uv[4]!, uv[5]!, m, oi], s + 12);
       // Tangents drive normal maps and brushed (anisotropic) highlights.
       if (uvA) {

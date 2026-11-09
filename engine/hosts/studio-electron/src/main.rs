@@ -22,6 +22,10 @@ struct Request {
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Command {
     Hello,
+    ReleaseFrame {
+        frame: u64,
+    },
+
     Prepared {
         #[serde(flatten)]
         upload: packed::Upload,
@@ -75,6 +79,12 @@ enum Command {
         samples: u32,
         #[serde(default)]
         reset: bool,
+        #[serde(default)]
+        goal: bool,
+        #[serde(default = "yes")]
+        denoise: bool,
+        #[serde(rename = "sharedTexture", default)]
+        shared_texture: bool,
         layer: Option<u32>,
         #[serde(default = "yes")]
         background: bool,
@@ -106,7 +116,12 @@ struct Target {
     renderer: Renderer,
     revision: u64,
     geometry: u64,
+    history_revision: u64,
     live: bool,
+    denoiser: &'static str,
+    quality_denoise: bool,
+    tier: String,
+    time: f64,
 }
 struct Host {
     packed: Option<packed::PackedScene>,
@@ -115,8 +130,10 @@ struct Host {
     full: Option<Target>,
     revision: u64,
     geometry: u64,
+    history_revision: u64,
     screen: Option<(u32, u32, u32, Vec<u8>)>,
     start: Instant,
+    frame_counter: u64,
     #[cfg(feature = "oidn")]
     oidn: Option<pm_studio::oidn::Denoiser>,
 }
@@ -129,8 +146,10 @@ impl Host {
             full: None,
             revision: 0,
             geometry: 0,
+            history_revision: 0,
             screen: None,
             start: Instant::now(),
+            frame_counter: u64::from(std::process::id()) << 32,
             #[cfg(feature = "oidn")]
             oidn: None,
         }
@@ -140,6 +159,7 @@ impl Host {
         self.resident = Some(r);
         self.revision += 1;
         self.geometry += 1;
+        self.history_revision += 1;
     }
     fn snapshot(&self) -> Result<(Value, Vec<u8>), String> {
         let r = self
@@ -158,6 +178,7 @@ impl Host {
         let nodes = append(bytemuck::cast_slice(&p.nodes));
         let materials = append(bytemuck::cast_slice(&p.materials));
         let sdata = append(bytemuck::cast_slice(&p.sdata));
+        let texture=self.screen.as_ref().map(|(w,h,layers,data)|json!({"width":w,"height":h,"layers":layers,"bytes":append(data)}));
         let camera = r.scene.camera;
         let forward = (camera.target - camera.position).normalize();
         let right = forward.cross(pm_studio::math::Vec3::Y).normalize();
@@ -167,7 +188,7 @@ impl Host {
         let center = (lo + hi) * 0.5;
         let view = json!({"camera":{"position":camera.position.to_array(),"forward":forward.to_array(),"right":right.to_array(),"up":up.to_array(),"tanY":tan_y,"aspect":16.0/9.0,"lensRadius":if camera.f_stop>0.{camera.focal_mm/(2.*camera.f_stop)}else{0.},"focus":camera.focus.map(|f|(f-camera.position).dot(forward)).unwrap_or((camera.target-camera.position).length())},"exposure":r.scene.exposure,"backdrop":r.scene.backdrop.to_array(),"backdropOpaque":true,"shadowCatcher":r.scene.shadow_catcher,"shadows":true,"floorY":0.,"environment":{"zenith":r.scene.environment.0.to_array(),"horizon":r.scene.environment.1.to_array(),"ground":(r.scene.environment.1*0.5).to_array()},"bounds":[center.x,center.y,center.z,(hi-lo).length()*0.5]});
         Ok((
-            json!({"positions":positions,"tris":tris,"nodes":nodes,"materials":materials,"sdata":sdata,"topNodes":r.top_nodes,"instanceCount":r.placements.len(),"lightCount":p.lights.len(),"objects":r.identities,"view":view}),
+            json!({"positions":positions,"tris":tris,"nodes":nodes,"materials":materials,"sdata":sdata,"topNodes":r.top_nodes,"instanceCount":r.placements.len(),"lightCount":p.lights.len(),"objects":r.identities,"view":view,"bounds":{"min":lo.to_array(),"max":hi.to_array()},"texture":texture}),
             binary,
         ))
     }
@@ -179,21 +200,33 @@ impl Host {
                 self.resident = None;
                 self.revision += 1;
                 self.geometry += 1;
+                self.history_revision += 1;
                 json!({"revision":self.revision})
             }
             Command::PreparedPatch { patch } => {
-                self.packed
+                if self
+                    .packed
                     .as_mut()
                     .ok_or("no prepared scene")?
-                    .patch(patch, binary)?;
+                    .patch(patch, binary)?
+                {
+                    self.history_revision += 1;
+                }
                 self.revision += 1;
                 json!({"revision":self.revision})
             }
             Command::Snapshot => {
                 return self.snapshot();
             }
+            Command::ReleaseFrame { frame } => {
+                #[cfg(all(feature = "metalfx", target_os = "macos"))]
+                if let Some(target) = &mut self.live {
+                    target.renderer.release_surface(frame);
+                }
+                json!({"released":frame})
+            }
             Command::Hello => {
-                json!({"protocol":VERSION,"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries"],"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
+                json!({"protocol":VERSION,"layout":{"materialBytes":std::mem::size_of::<pm_studio::scene::GpuMaterial>(),"triangleBytes":std::mem::size_of::<pm_studio::scene::GpuTri>(),"nodeBytes":64,"instanceFloats":36},"renderer":"Powermove Studio","transport":"rgba-pipe","pid":std::process::id(),"oidn":cfg!(feature="oidn"),"capabilities":["scene","binaryMeshes","transformPatches","camera","time","pick","bounds","hardwareRayQueries"],"uptimeMs":self.start.elapsed().as_secs_f64()*1000.})
             }
             Command::Scene {
                 scene,
@@ -224,6 +257,8 @@ impl Host {
                 if !time.is_finite() {
                     return Err("time must be finite".into());
                 }
+                let content_changed =
+                    !transforms.is_empty() || materials.is_some() || lights.is_some();
                 let r = self.resident.as_mut().ok_or("no scene")?;
                 if materials
                     .as_ref()
@@ -238,6 +273,9 @@ impl Host {
                     scene::validate_camera(&c)?;
                 }
                 r.patch_transforms(&transforms)?;
+                if content_changed {
+                    self.history_revision += 1;
+                }
                 if let Some(c) = camera {
                     r.scene.camera = c;
                 }
@@ -275,6 +313,7 @@ impl Host {
                 layer,
             } => {
                 dimensions(width, height)?;
+                self.history_revision += 1;
                 if layers == 0 || layers > 64 {
                     return Err("texture layer budget exceeded".into());
                 }
@@ -310,6 +349,7 @@ impl Host {
                 if binary.len() != width as usize * height as usize * 4 {
                     return Err("screen RGBA byte count mismatch".into());
                 }
+                self.history_revision += 1;
                 self.screen = Some((width, height, 1, binary.to_vec()));
                 for target in [&mut self.live, &mut self.full].into_iter().flatten() {
                     target.renderer.set_screen(binary, width, height);
@@ -354,6 +394,9 @@ impl Host {
                 tier,
                 samples,
                 reset,
+                goal,
+                denoise,
+                shared_texture,
                 layer,
                 background,
                 time,
@@ -377,6 +420,8 @@ impl Host {
                 if self.resident.is_none() && self.packed.is_none() {
                     return Err("no scene".into());
                 }
+                self.frame_counter = self.frame_counter.wrapping_add(1);
+                let frame_id = self.frame_counter;
                 let slot = if is_live {
                     &mut self.live
                 } else {
@@ -395,12 +440,20 @@ impl Host {
                         renderer,
                         revision: u64::MAX,
                         geometry: u64::MAX,
+                        history_revision: u64::MAX,
                         live: is_live,
+                        denoiser: "none",
+                        quality_denoise: false,
+                        tier: String::new(),
+                        time: f64::NAN,
                     });
                 }
                 let init_ms = init.elapsed().as_secs_f64() * 1000.;
                 let target = slot.as_mut().unwrap();
-                let changed = target.revision != self.revision;
+                let changed = target.revision != self.revision
+                    || target.time != time
+                    || target.tier != tier
+                    || target.quality_denoise != denoise;
                 if changed {
                     if let Some(r) = &self.resident {
                         target.renderer.set_instanced_scene(
@@ -426,6 +479,10 @@ impl Host {
                             p.view.shadows,
                             p.view.bounds,
                         );
+                        target.renderer.set_projection(p.view.camera.orthographic);
+                        target
+                            .renderer
+                            .set_clip_planes(p.view.camera.near, p.view.camera.far);
                         target.renderer.set_void(if p.view.backdrop_opaque {
                             Some(p.view.backdrop)
                         } else {
@@ -437,17 +494,63 @@ impl Host {
                 }
                 let renderer = &mut target.renderer;
                 renderer.live = target.live;
+                if target.history_revision != self.history_revision {
+                    renderer.invalidate_history();
+                    target.history_revision = self.history_revision;
+                }
                 renderer.set_output_mask(layer, background);
-                let spp = if is_live { 1 } else { samples };
-                let trace_ms = renderer.trace(
-                    spp,
-                    if is_live { 3 } else { 8 },
-                    reset || changed || is_live,
-                    if is_live { 12 } else { 64 },
-                );
-                let mut denoiser = "atrous";
+                renderer.set_straight_output(true);
+                renderer.set_time_seed((time * 9600.).round() as u32);
+                let spp = if goal && !changed && !reset {
+                    samples.saturating_sub(renderer.samples)
+                } else if is_live {
+                    1
+                } else {
+                    samples
+                };
+                let trace_ms = if spp == 0 {
+                    0.
+                } else {
+                    renderer.trace(
+                        spp,
+                        if is_live { 3 } else { 8 },
+                        reset || changed || is_live,
+                        if is_live { 12 } else { 64 },
+                    )
+                };
+                renderer.last_surface = None;
+                let mut denoiser = target.denoiser;
+                let mut frame_size = (w, h);
+                #[cfg(all(feature = "metalfx", target_os = "macos"))]
+                let metal_result = if is_live && denoise && renderer.metalfx_enabled {
+                    match renderer.finish_metalfx(
+                        width,
+                        height,
+                        spp == 0,
+                        if shared_texture { Some(frame_id) } else { None },
+                    ) {
+                        Ok(frame) => {
+                            denoiser = "metalfx";
+                            frame_size = (width, height);
+                            Some(frame)
+                        }
+                        Err(error) => {
+                            eprintln!("Studio MetalFX fallback: {error}");
+                            renderer.metalfx_enabled = false;
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                #[cfg(not(all(feature = "metalfx", target_os = "macos")))]
+                let metal_result: Option<(Vec<u8>, f64)> = None;
                 #[cfg(feature = "oidn")]
-                let (pixels, post_ms) = if !is_live && renderer.samples >= 16 {
+                let (pixels, post_ms) = if let Some(frame) = metal_result {
+                    frame
+                } else if spp == 0 && denoiser != "metalfx" {
+                    renderer.frame_pixels()
+                } else if denoise && !is_live && renderer.samples >= 16 {
                     if self.oidn.is_none() {
                         self.oidn = Some(pm_studio::oidn::Denoiser::new()?);
                     }
@@ -455,15 +558,24 @@ impl Host {
                     let d = self.oidn.as_ref().unwrap();
                     renderer.finish_with(&|c, a, n| d.run(c, a, n, 4, w as usize, h as usize))
                 } else {
-                    renderer.finish(if is_live { 3 } else { 0 })
+                    denoiser = if is_live && denoise { "atrous" } else { "none" };
+                    renderer.finish(if is_live && denoise { 3 } else { 0 })
                 };
                 #[cfg(not(feature = "oidn"))]
-                let (pixels, post_ms) = {
-                    denoiser = if is_live { "atrous" } else { "none" };
-                    renderer.finish(if is_live { 3 } else { 0 })
+                let (pixels, post_ms) = if let Some(frame) = metal_result {
+                    frame
+                } else if spp == 0 && denoiser != "metalfx" {
+                    renderer.frame_pixels()
+                } else {
+                    denoiser = if is_live && denoise { "atrous" } else { "none" };
+                    renderer.finish(if is_live && denoise { 3 } else { 0 })
                 };
+                target.denoiser = denoiser;
+                target.quality_denoise = denoise;
+                target.time = time;
+                target.tier = tier.clone();
                 return Ok((
-                    json!({"width":w,"height":h,"outputWidth":width,"outputHeight":height,"format":"rgba8","premultiplied":true,"tier":tier,"samples":renderer.samples,"revision":self.revision,"time":time,"hardwareRt":renderer.uses_hardware_rt(),"adapter":renderer.adapter,"denoiser":denoiser,"timings":{"initMs":init_ms,"traceMs":trace_ms,"postMs":post_ms,"hostMs":begin.elapsed().as_secs_f64()*1000.}}),
+                    json!({"width":frame_size.0,"height":frame_size.1,"outputWidth":width,"outputHeight":height,"format":"rgba8","premultiplied":false,"surface":renderer.last_surface,"tier":tier,"samples":renderer.samples,"revision":self.revision,"time":time,"hardwareRt":renderer.uses_hardware_rt(),"adapter":renderer.adapter,"denoiser":denoiser,"timings":{"initMs":init_ms,"traceMs":trace_ms,"postMs":post_ms,"hostMs":begin.elapsed().as_secs_f64()*1000.}}),
                     pixels,
                 ));
             }
@@ -548,6 +660,28 @@ mod tests {
         );
         assert!(h.handle(Command::Bounds, &[]).is_ok());
     }
+    #[test]
+    fn metal_instances_keep_the_glass_sphere() {
+        let scene = pm_studio::scene::preset("chrome", "blue", 0.).unwrap();
+        let r = ResidentScene::new(scene, vec![], &[], vec![]).unwrap();
+        let mut gpu = Renderer::new(960, 540).expect("native Studio test needs a GPU");
+        gpu.set_instanced_scene(
+            &r.scene,
+            &r.prepared,
+            &r.geometries,
+            &r.placements,
+            r.top_nodes,
+            true,
+        );
+        let hit = gpu.probe(635., 320.);
+        assert_eq!(
+            hit[1], hit[5],
+            "hardware and BVH must see the same glass triangle"
+        );
+        assert!((hit[0] - hit[4]).abs() < 0.001);
+        assert_eq!(hit[11], 1.0, "the frontmost material is glass");
+    }
+
     #[test]
     fn rejects_bad_render_sizes() {
         assert!(dimensions(0, 10).is_err());
