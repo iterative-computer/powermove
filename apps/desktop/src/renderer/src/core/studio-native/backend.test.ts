@@ -10,6 +10,26 @@ const view: StudioView = { camera: { position: [0, 0, 5], forward: [0, 0, -1], r
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 
 describe('native Studio adapter', () => {
+  it('does not reopen a released session when an in-flight upload finishes after disposal',async()=>{
+    let complete!:()=>void;
+    const held=new Promise<void>(resolve=>{complete=resolve;});
+    const calls:string[]=[];
+    const release=vi.fn(async()=>{calls.push('release');});
+    const bridge:StudioNativeBridge={request:async(_session,command)=>{
+      calls.push(command.op);
+      if(command.op==='prepared')await held;
+      return {result:command.op==='hello'?{layout:{materialBytes:128,triangleBytes:96}}:null,binary:new Uint8Array(),generation:1,roundTripMs:0};
+    },release,status:async()=>({available:true,running:true,generation:1,failure:null})};
+    const graph=new THREE.Scene(),mesh=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshStandardMaterial());mesh.userData.sceneId='box';graph.add(mesh);
+    const backend=new NativeStudioBackend(bridge);await backend.initialize();
+    backend.setPreparedScene(extractScene(graph,()=>true,{sky:new THREE.Color(),ground:new THREE.Color(),intensity:0}),[],()=>{throw new Error('binary path');});backend.setView(view);
+    const pending=backend.pick(.5,.5);
+    await vi.waitFor(()=>expect(calls).toContain('prepared'));
+    backend.dispose();complete();
+    await expect(pending).rejects.toThrow('closed');
+    expect(calls.at(-1)).toBe('release');expect(release).toHaveBeenCalledOnce();
+    mesh.geometry.dispose();(mesh.material as THREE.Material).dispose();
+  });
   it('reuses a finished trace across layer images and resets it when the camera changes',async()=>{
     const renders:any[]=[];vi.stubGlobal('VideoFrame',class{close(){}});
     vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({drawImage:vi.fn()} as any);

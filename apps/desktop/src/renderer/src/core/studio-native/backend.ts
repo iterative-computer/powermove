@@ -51,6 +51,7 @@ export class NativeStudioBackend implements StudioBackend {
   constructor(private readonly bridge: StudioNativeBridge) {}
 
   async initialize(): Promise<void> {
+    if(this.closed)throw new Error('Studio backend is closed');
     this.textureUnsubscribe=this.bridge.onTexture?.((info,texture)=>{
       if(info.session!==this.session)return;
       const start=performance.now(), frame=texture.getVideoFrame() as VideoFrame;
@@ -62,7 +63,7 @@ export class NativeStudioBackend implements StudioBackend {
       if(waiter){this.textureWaiters.delete(info.frame);clearTimeout(waiter.timer);waiter.resolve(source);}else{this.textureFrames.set(info.frame,source);}
       for(const [key,old] of this.textureFrames){if(this.textureFrames.size<=3)break;old.width=0;old.height=0;this.textureFrames.delete(key);}
     })??null;
-    const hello = await this.bridge.request(this.session, { op: 'hello' }); this.generation = hello.generation;this.supportsViewPatch=hello.result?.capabilities?.includes('preparedView')??false;
+    const hello = await this.send({ op: 'hello' }); this.generation = hello.generation;this.supportsViewPatch=hello.result?.capabilities?.includes('preparedView')??false;
     if(hello.result?.layout?.materialBytes!==STUDIO_MATERIAL_FLOATS*4 || hello.result?.layout?.triangleBytes!==96)throw new Error('Native Studio needs a matching renderer build');
   }
   setPreparedScene(scene: StudioScene, maps: StudioTextureSource[], description: () => StudioSceneDescription): void {
@@ -97,7 +98,11 @@ export class NativeStudioBackend implements StudioBackend {
     this.queue = result.catch(() => {}); return result;
   }
   private async send(command: StudioNativeCommand, binary?: Uint8Array): Promise<StudioNativeReply> {
+    // A cut can dispose the job while its upload/render is awaiting IPC.
+    // Never let its continuation recreate the released native session.
+    if(this.closed)throw new Error('Studio backend is closed');
     const reply = await this.bridge.request(this.session, command, binary);
+    if(this.closed)throw new Error('Studio backend is closed');
     if (this.generation && reply.generation !== this.generation) {
       this.uploaded = -1; this.uploadedSceneRevision=-1;this.geometryKey = null; this.uploadedMaps = []; this.uploadedMapsRevision=-1;
       this.generation = reply.generation;
