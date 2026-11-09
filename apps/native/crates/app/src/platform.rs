@@ -229,6 +229,12 @@ pub fn choose_paths(
     rx
 }
 
+/// This process's bundle identifier; none for a bare binary.
+pub fn bundle_id() -> Option<String> {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+}
 /// Selects `path` in Finder.
 pub fn reveal(path: &std::path::Path) {
     use objc2_app_kit::NSWorkspace;

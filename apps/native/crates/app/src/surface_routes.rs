@@ -40,7 +40,18 @@ impl Controller {
         let this = cx.entity().downgrade();
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
-                Outbound::Opened { reply, name, file } => v.adopt_reply(*reply, name, file, cx),
+                Outbound::Opened {
+                    reply,
+                    name,
+                    file,
+                    new_window: true,
+                } => crate::entry::open_in_new_window(
+                    crate::entry::Pending::Adopt { reply, name, file },
+                    cx,
+                ),
+                Outbound::Opened {
+                    reply, name, file, ..
+                } => v.adopt_reply(*reply, name, file, cx),
                 Outbound::FocusProject(id) => v.focus_project(&id, cx),
                 Outbound::Message(text) => {
                     v.message = text;

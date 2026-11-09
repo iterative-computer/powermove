@@ -5126,6 +5126,7 @@ dependencies = [
  "pm-surface",
  "pm-text",
  "pm-time",
+ "pm-update-policy",
  "png",
  "raw-window-handle",
  "serde",

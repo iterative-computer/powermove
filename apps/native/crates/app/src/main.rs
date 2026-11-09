@@ -7,6 +7,7 @@ mod colour_panel;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 mod dialogs;
+mod entry;
 mod error_log;
 mod export_coordinator;
 mod extension_authoring;
@@ -242,6 +243,8 @@ fn main() -> Result<()> {
     let started = Rc::new(Cell::new(false));
     let electron = plan.electron();
     let gate = first_run::gate(plan, handle.clone(), tools, server.clone());
+    // The command-line project opens in the first window only.
+    let launch = Cell::new(launch);
     let result = pm_shell::run_gated(
         device,
         Rc::new({
@@ -299,12 +302,16 @@ fn main() -> Result<()> {
                 })
                 .detach();
                 playback::install(&entity, cx);
-                entity.update(cx, |v, cx| v.initialize(launch.clone(), cx));
+                let opening = entry::take_for_new_window(cx)
+                    .or_else(|| launch.take().map(entry::Pending::File));
+                entity.update(cx, |v, cx| v.initialize(opening, cx));
+                entry::register(&entity, window.window_handle(), cx);
                 perf_gate::install(&entity, cx);
                 Rc::new(session::Bridge(entity))
             }
         }),
         gate,
+        Rc::new(entry::receive),
     );
     broker.close();
     std::thread::spawn(move || {

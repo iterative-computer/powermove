@@ -76,6 +76,8 @@ pub enum HostEffect {
         /// For the alerts that open may need.
         name: String,
         file: Option<std::path::PathBuf>,
+        /// Open in New Window: the project gets a window of its own.
+        new_window: bool,
     },
     /// Standard medium announcement; errors are high priority.
     Announce(String),
@@ -109,6 +111,8 @@ pub struct LibraryController<P> {
     failed: bool,
     mutation: Option<Request>,
     pending_duplicate: Option<String>,
+    /// The in-flight Open came from Open in New Window.
+    open_new_window: bool,
     prompts: VecDeque<Prompt>,
     effects: VecDeque<HostEffect>,
 }
@@ -132,6 +136,7 @@ impl<P: LibraryPort> LibraryController<P> {
             failed: false,
             mutation: None,
             pending_duplicate: None,
+            open_new_window: false,
             prompts: VecDeque::new(),
             effects: VecDeque::new(),
         }
@@ -232,7 +237,10 @@ impl<P: LibraryPort> LibraryController<P> {
             return Err(Failure::Stale);
         }
         match action {
-            MenuAction::Open | MenuAction::OpenNewWindow => self.send(Command::Open(id.into()))?,
+            MenuAction::Open | MenuAction::OpenNewWindow => {
+                self.send(Command::Open(id.into()))?;
+                self.open_new_window = action == MenuAction::OpenNewWindow;
+            }
             MenuAction::Reveal => self
                 .effects
                 .push_back(HostEffect::Reveal(row.file.ok_or(Failure::Stale)?)),
@@ -453,8 +461,12 @@ impl<P: LibraryPort> LibraryController<P> {
                                 || ("Untitled".into(), None),
                                 |r| (r.name.clone(), r.file.clone()),
                             );
-                            self.effects
-                                .push_back(HostEffect::OpenEditor { reply, name, file });
+                            self.effects.push_back(HostEffect::OpenEditor {
+                                reply,
+                                name,
+                                file,
+                                new_window: std::mem::take(&mut self.open_new_window),
+                            });
                         }
                         Outcome::Focus(id) => self.effects.push_back(HostEffect::FocusProject(id)),
                         _ => {}

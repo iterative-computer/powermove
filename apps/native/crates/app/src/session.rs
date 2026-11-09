@@ -433,7 +433,7 @@ impl Controller {
             nudge_idle: None,
         }
     }
-    pub fn initialize(&mut self, launch: Option<PathBuf>, cx: &mut Context<Self>) {
+    pub fn initialize(&mut self, opening: Option<crate::entry::Pending>, cx: &mut Context<Self>) {
         self.load_recent(cx);
         let cache = crate::media::cache_root(&self.profile);
         cx.background_executor()
@@ -443,10 +443,12 @@ impl Controller {
                 }
             })
             .detach();
-        if let Some(path) = launch {
-            self.open_file(path, cx);
-        } else {
-            self.reopen_restored(cx);
+        match opening {
+            Some(crate::entry::Pending::File(path)) => self.open_file(path, cx),
+            Some(crate::entry::Pending::Adopt { reply, name, file }) => {
+                self.adopt_reply(*reply, name, file, cx)
+            }
+            None => self.reopen_restored(cx),
         }
     }
     /// A window restored at launch reopens its project when that project has
