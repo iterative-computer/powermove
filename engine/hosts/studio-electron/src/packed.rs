@@ -98,6 +98,7 @@ impl View {
         let c = &self.camera;
         let pos = v(c.position);
         Scene {
+            world: Default::default(),
             objects: vec![],
             materials: vec![],
             lights: vec![],
@@ -163,13 +164,15 @@ impl PackedScene {
             || materials.is_empty()
             || u.top_nodes == 0
             || u.top_nodes > nodes.len()
-            || u.instance_count > 65535
+            || u.instance_count > 1_000_000
             || u.light_count > 65535
-            || (sdata.len() != u.light_count * 4 + u.instance_count * 9
+            || (sdata.len() < u.light_count * 4 + u.instance_count * 9
                 && !(u.light_count == 0 && u.instance_count == 0 && sdata.len() == 1))
         {
             return Err("invalid prepared scene buffer sizes".into());
         }
+        let trailer_start=u.light_count*4+u.instance_count*9;
+        if sdata.len()>trailer_start && !(u.light_count==0 && u.instance_count==0 && sdata.len()==1) {pm_studio::environment::validate_packed(&sdata[trailer_start..],u.light_count)?;}
         if positions
             .iter()
             .flatten()

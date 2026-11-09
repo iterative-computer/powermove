@@ -130,6 +130,8 @@ pub struct Object {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Scene {
+    #[serde(default)]
+    pub world: crate::environment::World,
     pub objects: Vec<Object>,
     pub materials: Vec<Material>,
     pub lights: Vec<Softbox>,
@@ -271,12 +273,14 @@ impl Scene {
             .iter()
             .map(|l| GpuLight { pos: l.center.to4(0.0), u: l.u.to4(4.0 * l.u.cross(l.v).length()), v: l.v.to4(0.0), radiance: l.radiance.to4(0.0) })
             .chain(self.extra_lights.iter().copied())
+            .chain(self.world.sun())
             .collect();
         let mut sdata: Vec<[f32; 4]> = lights.iter().flat_map(|l: &GpuLight| [l.pos, l.u, l.v, l.radiance]).collect();
         // The identity instance: world→object, normal matrix (n0.w: BVH root 1), object→world.
         sdata.extend([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
         sdata.extend([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
         sdata.extend([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
+        sdata.extend(self.world.pack(&lights));
         Prepared { positions, tris, nodes, materials, lights, sdata }
     }
 
@@ -439,7 +443,7 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         let up = v3(0.0, 1.0, 0.0);
         lights.push(Softbox::for_highlight(target + v3(-30.0, 0.0, 20.0), up, camera.position, 600.0, 700.0, 380.0, Vec3::splat(3.0)));
     }
-    Some(Scene { objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
+    Some(Scene { world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
 }
 
 /// An original abstract wallpaper for the display: soft ribbons of blue and

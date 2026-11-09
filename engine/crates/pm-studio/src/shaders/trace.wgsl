@@ -235,7 +235,7 @@ fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
   return Hit(tmax,-1,vec2f(0.0),0u);
 }
 
-fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
+fn surface_transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   var o = ro;
   var left = dist - 2.0 * EPS;
   var t = vec3f(1.0);
@@ -265,6 +265,73 @@ fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   return t;
 }
 
+struct Medium { sigma:f32, albedo:vec3f, g:f32 }
+fn medium_at(p:vec3f)->Medium {
+  var sigma=0.;var albedo=vec3f(0.);var g=0.;
+  if(!world_on()){return Medium(0.,vec3f(0.),0.);}
+  let fog=world_row(2u);let h=world_row(3u);
+  let global=fog.w*exp(-max(p.y-h.y,0.)*h.z);
+  sigma=global;albedo=fog.xyz*global;g=h.x*global;
+  let config=world_row(4u);
+  for(var i=0u;i<u32(config.y);i++){
+    let at=u32(config.x)+3u*i;let center=world_row(at);let size=world_row(at+1u);let color=world_row(at+2u);
+    let q=p-center.xyz;
+    var inside=all(abs(q)<=size.xyz);
+    if(center.w>0.5){inside=dot(q,q)<=size.x*size.x;}
+    if(inside){sigma+=size.w;albedo+=color.xyz*size.w;g+=color.w*size.w;}
+  }
+  if(sigma<=0.){return Medium(0.,vec3f(0.),0.);}
+  return Medium(sigma,albedo/sigma,g/sigma);
+}
+fn medium_majorant()->f32 {
+  if(!world_on()){return 0.;}
+  var m=world_row(2u).w;let c=world_row(4u);
+  for(var i=0u;i<u32(c.y);i++){m+=world_row(u32(c.x)+3u*i+1u).w;}
+  return m;
+}
+fn medium_distance(dist:f32)->f32 {if(!world_on()){return 0.;}return min(dist,world_row(3u).w);}
+fn medium_transmittance(ro:vec3f,rd:vec3f,dist:f32)->f32 {
+  let majorant=medium_majorant();if(majorant<=0.){return 1.;}
+  let end=medium_distance(dist);
+  if(P.opts.x!=0u){
+    var optical=0.;for(var i=0u;i<8u;i++){optical+=medium_at(ro+rd*((f32(i)+0.5)*end/8.)).sigma;}
+    return exp(-optical*end/8.);
+  }
+  var t=0.;var tr=1.;
+  loop {
+    t+=-log(max(1.-rnd(),1e-7))/majorant;
+    if(t>=end){break;}
+    tr*=max(0.,1.-medium_at(ro+rd*t).sigma/majorant);
+    if(tr<0.05){if(rnd()>0.1){return 0.;}tr/=0.1;}
+  }
+  return tr;
+}
+fn transmittance(ro:vec3f,rd:vec3f,dist:f32)->vec3f {
+  return surface_transmittance(ro,rd,dist)*medium_transmittance(ro,rd,dist);
+}
+fn phase_hg(mu:f32,g:f32)->f32 {let q=max(1.+g*g-2.*g*mu,1e-8);return (1.-g*g)/(4.*PI*q*sqrt(q));}
+fn sample_hg(axis:vec3f,g:f32)->vec3f {
+  let u=rnd();var mu=1.-2.*u;
+  if(abs(g)>0.001){let q=(1.-g*g)/(1.-g+2.*g*u);mu=clamp((1.+g*g-q*q)/(2.*g),-1.,1.);}
+  let phi=2.*PI*rnd();let st=sqrt(max(0.,1.-mu*mu));return basis(axis)*vec3f(st*cos(phi),st*sin(phi),mu);
+}
+fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
+  var e=vec3f(0.);
+  if(P.counts.x>0u){let li=choose_light();let l=sample_light(light_at(li),p);
+    if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li));}}
+  if(map_count()>0u){let d=sample_environment_direction();let pdf=environment_pdf(d);
+    if(pdf>0.){e+=environment(d)*transmittance(p,d,BIG)*phase_hg(dot(rd,d),g)/pdf;}}
+  return e;
+}
+// Delta-tracked real event; w=distance, negative means no event before the surface.
+fn medium_event(ro:vec3f,rd:vec3f,dist:f32)->f32 {
+  let majorant=medium_majorant();if(majorant<=0.){return -1.;}
+  let end=medium_distance(dist);var t=0.;
+  loop{t+=-log(max(1.-rnd(),1e-7))/majorant;if(t>=end){return -1.;}
+    if(rnd()*majorant<medium_at(ro+rd*t).sigma){return t;}}
+  return -1.;
+}
+
 // Contact occlusion measures coverage, while the direct-light estimate above
 // follows transmission. Glass still occludes the dome: focused transmitted
 // light is supplied by photons, rather than an unbent ambient shortcut.
@@ -285,10 +352,52 @@ fn floor_t(ro: vec3f, rd: vec3f) -> f32 {
   return -y / rd.y;
 }
 
+// Optional environment trailer. Legacy app uploads end before this header.
+fn world_base() -> u32 { return 4u*P.counts.x+9u*P.opts.z; }
+fn world_on() -> bool {
+  let o=world_base();
+  if(arrayLength(&sdata)<o+6u){return false;}
+  return sdata[o].x==735031. && sdata[o].y==1.;
+}
+fn world_row(i:u32)->vec4f {return sdata[world_base()+i];}
+fn map_count()->u32 {if(!world_on()){return 0u;}return u32(world_row(0u).z)*u32(world_row(0u).w);}
+fn environment_uv(d:vec3f)->vec2f {
+  let rotation=world_row(1u).x;
+  return vec2f(fract((atan2(d.x,d.z)-rotation)/(2.*PI)+1.),acos(clamp(d.y,-1.,1.))/PI);
+}
+fn environment_index(d:vec3f)->u32 {
+  let wh=vec2u(world_row(0u).zw);let xy=min(vec2u(environment_uv(d)*vec2f(wh)),wh-1u);
+  return xy.y*wh.x+xy.x;
+}
+fn environment_pdf(d:vec3f)->f32 {
+  let count=map_count();if(count==0u){return 0.;}
+  return world_row(u32(world_row(1u).w)+count+environment_index(d)).y;
+}
 fn environment(d: vec3f) -> vec3f {
+  if(map_count()>0u){return world_row(u32(world_row(1u).w)+environment_index(d)).xyz*world_row(1u).y;}
   if (d.y < 0.0) { return mix(P.env_horizon.xyz, P.ground.xyz, clamp(-d.y * 4.0, 0.0, 1.0)); }
-  let k = clamp(d.y, 0.0, 1.0);
-  return mix(P.env_horizon.xyz, P.env_zenith.xyz, k);
+  return mix(P.env_horizon.xyz, P.env_zenith.xyz, clamp(d.y,0.,1.));
+}
+fn cdf_search(base:u32,count:u32,u:f32)->u32 {
+  var lo=0u;var hi=count-1u;
+  while(lo<hi){let mid=(lo+hi)/2u;if(world_row(base+mid).x<u){lo=mid+1u;}else{hi=mid;}}
+  return lo;
+}
+fn light_selection_pdf(i:u32)->f32 {
+  if(!world_on()){return 1./max(f32(P.counts.x),1.);}
+  return world_row(u32(world_row(4u).z)+i).y;
+}
+fn choose_light()->u32 {
+  if(!world_on()){return min(u32(rnd()*f32(P.counts.x)),P.counts.x-1u);}
+  return cdf_search(u32(world_row(4u).z),P.counts.x,rnd());
+}
+fn sample_environment_direction()->vec3f {
+  let wh=vec2u(world_row(0u).zw);let count=wh.x*wh.y;
+  let i=cdf_search(u32(world_row(1u).w)+count,count,rnd());
+  let y=i/wh.x;let x=i%wh.x;
+  let mu=mix(cos(PI*f32(y)/f32(wh.y)),cos(PI*f32(y+1u)/f32(wh.y)),rnd());
+  let phi=2.*PI*(f32(x)+rnd())/f32(wh.x)+world_row(1u).x;
+  let st=sqrt(max(0.,1.-mu*mu));return vec3f(st*sin(phi),mu,st*cos(phi));
 }
 
 // ── Lights ──────────────────────────────────────────────
@@ -622,7 +731,7 @@ fn cosine_dir(n: vec3f, u: vec2f) -> vec3f {
 fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit: bool) -> vec3f {
   let count = P.counts.x;
   if (count == 0u) { return vec3f(0.0); }
-  let li = min(u32(rnd() * f32(count)), count - 1u);
+  let li = choose_light();
   let l = light_at(li);
   let s = sample_light(l, p);
   if (s.pdf <= 0.0 || all(s.radiance <= vec3f(0.0))) { return vec3f(0.0); }
@@ -642,9 +751,19 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   var t = vec3f(1.0);
   if (P.opts.y == 0u && l.u.w >= 0.0 && (floor_hit || (u32(m.policy.y) & 2u) != 0u)) { t = transmittance(p, s.dir, s.dist); }
   if (all(t <= vec3f(0.0))) { return vec3f(0.0); }
-  let pl = s.pdf / f32(count);
+  let pl = s.pdf * light_selection_pdf(li);
   let mis = pl * pl / (pl * pl + pb * pb);
   return f * t * s.radiance * mis / pl;
+}
+
+fn sample_environment(p:vec3f,n:vec3f,v:vec3f,m:Material,w:Lobes)->vec3f {
+  if(map_count()==0u){return vec3f(0.);}
+  let d=sample_environment_direction();let pe=environment_pdf(d);
+  let f=eval_reflect(m,n,v,d);let pb=pdf_reflect(m,w,n,v,d);
+  if(pe<=0. || all(f<=vec3f(0.))){return vec3f(0.);}
+  var tr=vec3f(1.);
+  if(P.opts.y==0u && (u32(m.policy.y)&2u)!=0u){tr=transmittance(p,d,BIG);}
+  return f*tr*environment(d)*(pe/(pe*pe+pb*pb));
 }
 
 // Shadow catcher: how much of the floor's light at `p` the objects leave.
@@ -860,17 +979,38 @@ fn path(px: vec2f) -> Sample {
     var h:Hit;
     if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}else{h=intersect(ro,rd,BIG,false);}
     let tf = floor_t(ro, rd);
+    let segment=min(h.t,tf);
+    if(medium_majorant()>0.){
+      if(P.opts.x!=0u){
+        let end=medium_distance(segment);let dt=end/4.;
+        for(var step=0u;step<4u;step++){
+          let point=ro+rd*((f32(step)+rnd())*dt);let med=medium_at(point);
+          let tr=exp(-med.sigma*dt);s.radiance+=tp*med.albedo*(1.-tr)*medium_direct(point,rd,med.g);tp*=tr;
+        }
+      }else{
+        let event=medium_event(ro,rd,segment);
+        if(event>=0.){
+          let point=ro+rd*event;let med=medium_at(point);tp*=med.albedo;
+          s.radiance+=tp*medium_direct(point,rd,med.g);
+          // Phase-sampled direct emitters are not added again: NEE above handles
+          // those, while following segments still carry indirect surface light.
+          ro=point;rd=sample_hg(rd,med.g);primary=false;last_pdf=0.;chain=3;
+          if(b>=3u){let q=clamp(max(tp.x,max(tp.y,tp.z)),0.05,0.95);if(rnd()>q){return s;}tp/=q;}
+          continue;
+        }
+      }
+    }
     // Lights: invisible to the camera, visible in reflections.
     if (!primary) {
       for (var i = 0u; i < P.counts.x; i++) {
         let l = light_at(i);
         let tl = hit_light(ro, rd, l);
         if (tl < h.t && tl < tf) {
-          if (chain == 2) { return s; }
+          if (chain == 2 || chain == 3) { return s; }
           let e = light_emit(l, ro + rd * tl, rd);
           var mis = 1.0;
           if (last_pdf > 0.0) {
-            let pl = light_pdf(l, ro, rd, tl) / f32(P.counts.x);
+            let pl = light_pdf(l, ro, rd, tl) * light_selection_pdf(i);
             mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
           }
           s.radiance += tp * e * mis;
@@ -880,17 +1020,19 @@ fn path(px: vec2f) -> Sample {
     }
     if (h.tri < 0 && tf >= BIG) {
       if (primary) {
-        s.bg = P.backdrop.xyz;
-        s.void_hit = 1.0;
+        if(map_count()>0u && world_row(1u).z>0.5){s.radiance+=tp*(environment(rd)+sun_seen(rd));}
+        else{s.bg = P.backdrop.xyz;s.void_hit = 1.0;}
       } else {
-        s.radiance += tp * environment(rd) * ambient_response;
+        let pe=environment_pdf(rd);
+        var mis=1.;if(last_pdf>0. && pe>0.){mis=last_pdf*last_pdf/(last_pdf*last_pdf+pe*pe);}
+        if(chain!=3){s.radiance += tp * environment(rd) * ambient_response * mis;}
         // The sun disc, weighted against light sampling.
         for (var i = 0u; i < P.counts.x; i++) {
           let l = light_at(i);
-          if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x && chain != 2) {
+          if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x && chain != 2 && chain != 3) {
             var mis = 1.0;
             if (last_pdf > 0.0) {
-              let pl = light_pdf(l, ro, rd, BIG) / f32(P.counts.x);
+              let pl = light_pdf(l, ro, rd, BIG) * light_selection_pdf(i);
               mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
             }
             s.radiance += tp * l.radiance.xyz * mis;
@@ -936,7 +1078,7 @@ fn path(px: vec2f) -> Sample {
     let v = -rd;
     // Emission (a product's screen, or a glowing part).
     if (any(m.emit.xyz > vec3f(0.0)) && (front || (u32(m.policy.y) & 4u) != 0u)) {
-      if (primary) { s.emit += m.emit.xyz; } else { s.radiance += tp * m.emit.xyz; }
+      if (primary) { s.emit += tp*m.emit.xyz; } else { s.radiance += tp * m.emit.xyz; }
     }
     if ((u32(m.policy.y) & 8u) != 0u) { return s; }
     var nv = max(dot(n, v), 1e-4);
@@ -953,7 +1095,7 @@ fn path(px: vec2f) -> Sample {
     primary = false;
     let w = lobe_probs(m, nv);
     // Direct light.
-    if (w.trans < 0.999) { s.radiance += tp * sample_lights(p, n, v, m, w, false); }
+    if (w.trans < 0.999) { s.radiance += tp * (sample_lights(p, n, v, m, w, false)+sample_environment(p,n,v,m,w)); }
     // Caustics: light focused onto this surface by glass or mirrors.
     if (photons_on && w.diff > 0.0) {
       s.radiance += tp * m.base.xyz * (1.0 - m.base.w) * (1.0 - m.spec.w) / PI * caustic_at(sf.p);
@@ -1048,6 +1190,15 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let h = P.dims.y;
   if (gid.x >= w || gid.y >= h) { return; }
   let idx = gid.y * w + gid.x;
+  if(P.opts.x==0u && P.counts.z==0u && world_on()){
+    let settings=world_row(5u);let a=accum[idx];
+    if(settings.x>0.5 && a.w>=settings.y){
+      let mean=dot(a.xyz+ebuf[idx].xyz,vec3f(0.2126,0.7152,0.0722))/a.w;
+      let variance=max(0.,(ebuf[idx].w-a.w*mean*mean)/max(a.w-1.,1.));
+      let error=sqrt(variance/a.w);let limit=max(settings.w,abs(mean)*settings.z);
+      if(error<limit){return;}
+    }
+  }
   seed = pcg(idx ^ pcg(P.dims.z * 9781u + 1u));
   var rad = vec3f(0.0);
   var bg = vec3f(0.0);

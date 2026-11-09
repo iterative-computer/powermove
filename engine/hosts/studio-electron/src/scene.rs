@@ -237,6 +237,7 @@ impl ResidentScene {
                 ],
             });
         }
+        self.prepared.sdata.extend(self.scene.world.pack(&self.prepared.lights));
     }
     pub fn object_bounds(&self, i: usize) -> (Vec3, Vec3) {
         let (a, b) = self.local_bounds[i];
@@ -330,6 +331,7 @@ trait Metadata {
 impl Metadata for Scene {
     fn clone_without_objects(&self) -> Scene {
         Scene {
+            world: self.world.clone(),
             objects: vec![],
             materials: self.materials.clone(),
             lights: self.lights.clone(),
@@ -344,6 +346,7 @@ impl Metadata for Scene {
     }
 }
 pub fn validate(s: &Scene) -> Result<(), String> {
+    s.world.validate()?;
     if s.objects.is_empty() || s.objects.len() > 65535 {
         return Err("scene needs 1–65535 objects".into());
     }

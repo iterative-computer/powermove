@@ -295,6 +295,7 @@ impl Host {
                 }
                 // Small material/light arrays can be rebuilt without touching meshes or BLAS.
                 let metadata = Scene {
+                    world: r.scene.world.clone(),
                     objects: vec![],
                     materials: r.scene.materials.clone(),
                     lights: r.scene.lights.clone(),

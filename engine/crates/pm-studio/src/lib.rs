@@ -6,6 +6,7 @@
 //! - **Final**: a fixed sample count per frame (export, agent frames).
 
 pub mod bvh;
+pub mod environment;
 pub mod gpu;
 pub mod math;
 pub mod mesh;
