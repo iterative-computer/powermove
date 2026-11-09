@@ -983,9 +983,7 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
   if (e && e.bytes > maxSourceBytes) return null;
   if (!e) {
-    const strokeReach = Math.max(1,d.strokeStyle?.join==='miter'?Math.min(100,d.strokeStyle.miterLimit??4):1,
-      [d.strokeStyle?.cap,d.strokeStyle?.startCap,d.strokeStyle?.endCap,...(paths??[]).flatMap((r:any)=>[r.values.startCap,r.values.endCap])].some(c=>/ARROW|TRIANGLE|DIAMOND|CIRCLE/.test(c??''))?4:1);
-    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:advanced?{...record.values,strokeWidth:Math.max(record.values.strokeWidth,(d.stroke??0)*strokeReach)}:record.values,matrix:record.matrix})))
+    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:advanced?{...record.values,...d.strokeStyle,strokeWidth:Math.max(record.values.strokeWidth,(d.stroke??0))}:record.values,matrix:record.matrix})))
       : L.type === 'text' ? textRasterGeometry(d,scale) : shapeRasterGeometry(d,scale);
     if ((crop?.width ?? geometry.width) * (crop?.height ?? geometry.height) * 4 > maxSourceBytes) return null;
     // Animated text can paint beyond the ordinary text geometry; leave that
@@ -1829,16 +1827,16 @@ PM.assets = {
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
     });
     // Old SVG imports discarded author CSS and compound fill membership.
-    // Only exact, untouched legacy paths are upgraded, in one undoable edit.
+    // Hydrate migrations in place, without a user edit or undo entry.
     const svgRepairs:Array<{layer:any;patch:Record<string,unknown>}>=[];
     for(const asset of restored.filter((a:any)=>a.format==='svg'&&a.svg)){
-      const layers=[project.layers,...Object.values<any>(project.comps || {}).map(comp=>comp.layers)].flat().filter((layer:any)=>layer?.d?.svgSourceAsset===asset.id&&!layer.d.svgImportVersion);
+      const layers=[project.layers,...Object.values<any>(project.comps || {}).map(comp=>comp.layers)].flat().filter((layer:any)=>layer?.d?.svgSourceAsset===asset.id&&!layer.d.svgImportVersion&&!layer.d.svgImportCheckedVersion);
       if(!layers.length)continue;
       const source=await asset.persistBlob.text();
       if(epoch!==assetEpoch||PM.proj!==project)return {restored:[],missing:[],stale:true};
-      for(const layer of layers){const patch=svgImportRepair(layer,source,asset.svg);if(patch)svgRepairs.push({layer,patch});}
+      for(const layer of layers){const patch=svgImportRepair(layer,source,asset.svg);svgRepairs.push({layer,patch:{...patch,svgImportCheckedVersion:2}});}
     }
-    if(svgRepairs.length)PM.Edit?.mutate('Repair SVG import',()=>{for(const {layer,patch} of svgRepairs)Object.assign(layer.d,patch);PM.touch();},{origin:'migration'});
+    if(svgRepairs.length){for(const {layer,patch} of svgRepairs)Object.assign(layer.d,patch);checkpointAssetMetadata(project);}
     const backfill = results.filter((result: any) => result.asset && !result.posterBlob && !result.kept);
     if (backfill.length) setTimeout(() => {
       void (async () => {
