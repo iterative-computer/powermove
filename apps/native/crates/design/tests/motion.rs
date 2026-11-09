@@ -36,7 +36,8 @@ fn settles_to_rest_and_stops_ticking() {
 
 #[test]
 fn same_curve_at_60_and_120_hz() {
-    let spring = Preset::Layout.spring(&Tokens::new(Scheme::Light, Accessibility::default()).motion);
+    let spring =
+        Preset::Layout.spring(&Tokens::new(Scheme::Light, Accessibility::default()).motion);
     let sample = |hz: f32| {
         let mut a = Animated::new([0.], spring, 0.05);
         a.animate_to([100.], spring);
@@ -45,7 +46,12 @@ fn same_curve_at_60_and_120_hz() {
         }
         a.value[0]
     };
-    assert!((sample(60.) - sample(120.)).abs() < 1.5, "{} vs {}", sample(60.), sample(120.));
+    assert!(
+        (sample(60.) - sample(120.)).abs() < 1.5,
+        "{} vs {}",
+        sample(60.),
+        sample(120.)
+    );
 }
 
 #[test]
@@ -61,7 +67,10 @@ fn retarget_keeps_value_and_velocity() {
     a.animate_to([-50.], spring);
     assert_eq!((a.value[0], a.velocity[0]), (value, velocity));
     a.step(1. / 120.);
-    assert!(a.value[0] > value, "momentum carries through the interruption");
+    assert!(
+        a.value[0] > value,
+        "momentum carries through the interruption"
+    );
 }
 
 #[test]
@@ -101,7 +110,10 @@ fn reduce_motion_snaps_places_and_cross_fades_opacity() {
         }
     }
     let arrived = arrived.unwrap();
-    assert!((arrived - t.motion.reduced).abs() < 0.02, "cross-fade arrived after {arrived}s");
+    assert!(
+        (arrived - t.motion.reduced).abs() < 0.02,
+        "cross-fade arrived after {arrived}s"
+    );
     assert!(!fade.moving());
 }
 

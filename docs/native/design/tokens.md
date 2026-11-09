@@ -94,9 +94,10 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
 | `colors.field` | Value wells, text fields, segmented control track | `#F3F3F6` | `#262626` | `#F3F3F6` | `#262626` |
 | `colors.fill` | Soft neutral fill: segmented tracks, search fields (derived) | `#F3F3F4` | `#272727` | `#EBEBEC` | `#303030` |
-| `colors.fill_strong` | Selected tab or segment, never the accent (derived) | `#EDEDEF` | `#303030` | `#E2E2E4` | `#3D3D3D` |
+| `colors.fill_strong` | Selected tab or segment over a raised track, never the accent (derived) | `#EFEFF0` | `#404040` | `#E4E4E5` | `#4C4C4C` |
 | `colors.floating` | Solid fallback for floating surfaces; lifted above panel | `#FFFFFF` | `#2C2C2C` | `#FFFFFF` | `#2C2C2C` |
 | `colors.focus` | Keyboard focus ring | `#76767C` | `#9A9A9A` | `#3C3C42` | `#E0E0E0` |
+| `colors.hairline` | Opaque control and card edge (derived) | `#EBEBEC` | `#272727` | `#686868` | `#888888` |
 | `colors.hover` | Pointer hover fill on rows and borderless buttons | `#EBEBEF` | `#232323` | `#EBEBEF` | `#232323` |
 | `colors.labels.blue` | Label: default for text and shape layers | `#C9D4E8` | `#3B4250` | `#C9D4E8` | `#3B4250` |
 | `colors.labels.gray` | Label: guides, nulls, cameras | `#DCDCE0` | `#3A3A3A` | `#DCDCE0` | `#3A3A3A` |
@@ -176,6 +177,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.row` | Inspector and list row height | 28 | 28 | 28 | 28 |
 | `metrics.ruler` | Timeline ruler height | 24 | 24 | 24 | 24 |
 | `metrics.section_gap` | Space above each Settings section after the first | 40 | 40 | 40 | 40 |
+| `metrics.segment_radius` | Segment and tab corner inside a pill (concentric) | 7 | 7 | 7 | 7 |
 | `metrics.settings_height` | Settings window height | 520 | 520 | 520 | 520 |
 | `metrics.settings_sidebar` | Settings sidebar width | 180 | 180 | 180 | 180 |
 | `metrics.settings_width` | Settings window width | 760 | 760 | 760 | 760 |

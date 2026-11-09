@@ -40,6 +40,9 @@ pub struct Colors {
     /// Neutral on state: the selected tab or segment, a pressed toggle
     /// (`text` ink at `translucency.selected` over `panel`). Never the accent.
     pub fill_strong: u32,
+    /// Opaque hairline for control and card edges (`text` ink at
+    /// `translucency.edge` over `panel`; `separator` under Increase Contrast).
+    pub hairline: u32,
     /// Metadata on a selected row (`selected_fill`): ≥ 4.5:1 where `muted` is not.
     pub selected_secondary: u32,
     /// `danger` words on a selected row (`Missing`): ≥ 4.5:1 on `selected_fill`.
@@ -159,6 +162,8 @@ pub struct Metrics {
     pub pill_radius: f32,
     /// Padding between a pill track and its segments, and between segments.
     pub pill_inset: f32,
+    /// Segment and tab corner inside a pill: `pill_radius − pill_inset`.
+    pub segment_radius: f32,
     /// Inspector value wells: height inside a `row`, and the shared column width.
     pub field: f32,
     pub value_column: f32,
@@ -407,6 +412,7 @@ impl Tokens {
                 selected_fill: 0x3a3a3a,
                 fill: 0,
                 fill_strong: 0,
+                hairline: 0,
                 selected_secondary: 0xb4b4b4,
                 selected_danger: 0xff8a80,
                 focus: 0x9a9a9a,
@@ -447,6 +453,7 @@ impl Tokens {
                 selected_fill: 0xd5d5da,
                 fill: 0,
                 fill_strong: 0,
+                hairline: 0,
                 selected_secondary: 0x52545a,
                 selected_danger: 0xa82319,
                 focus: 0x76767c,
@@ -511,6 +518,7 @@ impl Tokens {
                 tab: 28.,
                 pill_radius: 9.,
                 pill_inset: 2.,
+                segment_radius: 7.,
                 field: 22.,
                 value_column: 128.,
                 keyframe: 9.,
@@ -655,12 +663,18 @@ impl Tokens {
         tokens.derive_fills();
         tokens
     }
-    /// `fill` and `fill_strong` are `text` ink over `panel` at the hover and
-    /// selected alphas; they follow a theme that patches either colour.
+    /// `fill`, `fill_strong` and `hairline` are `text` ink over the panel (or
+    /// a raised track) at their alphas; they follow a theme's colour patch.
     fn derive_fills(&mut self) {
         let (ink, ground, t) = (self.colors.text, self.colors.panel, self.translucency);
         self.colors.fill = mix(ground, ink, t.hover);
-        self.colors.fill_strong = mix(ground, ink, t.selected);
+        // The on state sits on raised tracks as well as panels.
+        self.colors.fill_strong = mix(self.colors.floating, ink, t.selected);
+        self.colors.hairline = if self.accessibility.increase_contrast {
+            self.colors.separator
+        } else {
+            mix(ground, ink, t.edge)
+        };
     }
     /// Increase Contrast always wins, including over a theme patch.
     fn enforce_accessibility(&mut self) {
@@ -708,6 +722,7 @@ impl Tokens {
         metrics.gap: size, metrics.inset: size, metrics.panel_radius: size,
         metrics.control_radius: size, metrics.inner_radius: size, metrics.header: size,
         metrics.tab: size, metrics.pill_radius: size, metrics.pill_inset: size,
+        metrics.segment_radius: size,
         metrics.row: size, metrics.control: size, metrics.field: size,
         metrics.value_column: size, metrics.border: size, metrics.track_row: size,
         typography.minimum: size, typography.body: size, typography.label: size,

@@ -380,10 +380,18 @@ const ROLES: &[(&str, &str)] = &[
     ),
     (
         "colors.fill_strong",
-        "Selected tab or segment, never the accent (derived)",
+        "Selected tab or segment over a raised track, never the accent (derived)",
     ),
     ("metrics.tab", "Text tab and full-height segmented control"),
-    ("metrics.pill_radius", "Segmented track and tab-strip corner"),
+    (
+        "metrics.segment_radius",
+        "Segment and tab corner inside a pill (concentric)",
+    ),
+    ("colors.hairline", "Opaque control and card edge (derived)"),
+    (
+        "metrics.pill_radius",
+        "Segmented track and tab-strip corner",
+    ),
     (
         "metrics.pill_inset",
         "Track-to-segment padding and segment gap",
@@ -615,6 +623,12 @@ fn concentric_radii_and_grid() {
         assert!(m.inset >= m.panel_radius, "controls clear the panel corner");
         assert!(m.control_radius <= m.panel_radius, "control nests in panel");
         assert!(m.inner_radius <= m.control_radius - 2.);
+        assert_eq!(
+            m.segment_radius,
+            m.pill_radius - m.pill_inset,
+            "segments are concentric"
+        );
+        assert_eq!(m.tab, m.control, "a tab strip lines up with push buttons");
         assert_eq!(
             m.capsule_radius * 2.,
             34.,
