@@ -1089,6 +1089,92 @@ fn full_account_child() {
     close(&quiet);
     assert_eq!(f.admission.used(), 0);
 }
+/// Large single allocations: V8 admits one large young object whatever the
+/// limit, so each case must still fail only its realm, never the process.
+#[test]
+fn large_allocation_child() {
+    let Some(case) = std::env::var_os("PM_RUNTIME_SYNTHETIC_LARGE_CHILD") else {
+        return;
+    };
+    let case = case.to_string_lossy().into_owned();
+    let budget = if case == "account" {
+        2 * slice() + 24 * 1024 * 1024
+    } else {
+        1024 * 1024 * 1024
+    };
+    let f = fixture_with(|c| {
+        if case == "one" || case == "two" {
+            c.limits.heap_bytes = 16 * 1024 * 1024;
+            c.limits.initial_heap_bytes = 16 * 1024 * 1024;
+        }
+        c.admission = Admission::new(budget);
+        c.watchdog.prompt = Duration::from_secs(2);
+    });
+    let at_rest = |f: &Fixture| f.admission.used();
+    let quiet = f
+        .pool
+        .realm(RealmKind::V4Extension("quiet".into()))
+        .unwrap();
+    let big = f.pool.realm(RealmKind::V4Extension("big".into())).unwrap();
+    eval(&quiet, "storage.n=3");
+    eval(&big, "storage.n=5");
+    let rest = at_rest(&f);
+    let source = match case.as_str() {
+        // 128 MiB in one array, far past a 16 MiB heap.
+        "one" => "globalThis.a=new Array(32*1024*1024).fill(123);a.length",
+        // Two of them retained.
+        "two" => {
+            "globalThis.a=new Array(32*1024*1024).fill(123);globalThis.b=new Array(32*1024*1024).fill(7);a.length+b.length"
+        }
+        // 32 MiB under a 64 MiB ceiling: past what a full account holds,
+        // or within one with room.
+        _ => "globalThis.a=new Array(8*1024*1024).fill(123);a.length",
+    };
+    let result = wait(big.eval(source).unwrap());
+    if case == "fits" {
+        // Room in its ceiling and the account: it grows to hold the array.
+        assert_eq!(result.unwrap().value, "8388608");
+        let m = &wait(big.measure().unwrap()).unwrap()[0].memory;
+        assert!(m.used_heap_bytes >= 32 * 1024 * 1024);
+        assert!(m.reserved_heap_bytes >= m.used_heap_bytes, "{m:?}");
+        assert_eq!(f.admission.used() - rest, m.reserved_heap_bytes - slice());
+        close(&big);
+        close(&quiet);
+        assert_eq!(f.admission.used(), 0);
+        return;
+    }
+    let want = if case == "account" { HEAP_FULL } else { "heap" };
+    assert!(
+        matches!(result, Err(Error::Quota(q)) if q == want),
+        "{case}: {result:?}"
+    );
+    assert_eq!(eval(&big, "storage.n"), "5");
+    assert_eq!(eval(&quiet, "storage.n"), "3");
+    assert_eq!(
+        f.admission.used(),
+        rest,
+        "{case}: the failed generation's charge returns"
+    );
+    close(&big);
+    close(&quiet);
+    assert_eq!(f.admission.used(), 0);
+}
+#[test]
+fn large_allocations_fail_their_realm_not_the_process() {
+    for case in ["one", "two", "account", "fits"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::large_allocation_child", "--nocapture"])
+            .env("PM_RUNTIME_SYNTHETIC_LARGE_CHILD", case)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{case}: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
 #[test]
 fn a_full_account_fails_one_isolate_not_the_process() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())

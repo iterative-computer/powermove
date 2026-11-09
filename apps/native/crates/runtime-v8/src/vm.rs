@@ -17,27 +17,34 @@ use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 pub(crate) const SVELTE: &str = include_str!("../compiler/svelte-5.56.10.js");
 const WEB: &str = include_str!("web.js");
 const MIB: usize = 1024 * 1024;
+/// Every V8 flag the runtime sets, in one place; the code cache keys on it.
+///
+/// - Every kind has its own custom snapshot, but isolates share V8's read-only
+///   heap. Extending it independently per snapshot gives those snapshots
+///   incompatible root offsets when another kind is restored.
+/// - Heaps grow from a slice through the near-heap-limit callback, which only
+///   the isolate's owner thread can run. A background thread that allocates at
+///   the limit while the owner waits for work can't reach it, and V8 then
+///   aborts the whole process. So nothing allocates on the JS heap off the
+///   owner: Sparkplug compiles there, and Maglev builds its code and deopt data
+///   there. (Turbofan allocates its code when it finalizes on the owner;
+///   marking and sweeping never allocate; lazy-compile dispatch and turbolev
+///   are off by default.)
+macro_rules! v8_flags {
+    () => {
+        "--no-extensible-ro-snapshot --no-concurrent-sparkplug \
+         --no-maglev-build-code-on-background --no-maglev-deopt-data-on-background"
+    };
+}
 pub(crate) const FLAGS: &str = if cfg!(feature = "macos-sandbox") {
-    "no-extensible-ro-snapshot;no-maglev-build-code-on-background;no-maglev-deopt-data-on-background;sandbox=true"
+    concat!(v8_flags!(), ";sandbox=true")
 } else {
-    "no-extensible-ro-snapshot;no-maglev-build-code-on-background;no-maglev-deopt-data-on-background;sandbox=false"
+    concat!(v8_flags!(), ";sandbox=false")
 };
 pub(crate) fn initialize() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // Every kind has its own custom snapshot, but isolates share V8's
-        // read-only heap. Extending it independently per snapshot gives those
-        // snapshots incompatible root offsets when another kind is restored.
-        v8::V8::set_flags_from_string("--no-extensible-ro-snapshot");
-        // Heaps grow from a slice through the near-heap-limit callback, which
-        // only the isolate's owner thread can run. A background thread that
-        // allocates at the limit while the owner waits for work can't reach
-        // it, and V8 then aborts the process. Maglev's code and deopt data,
-        // the background heap allocations on this platform, are built on the
-        // owner instead.
-        v8::V8::set_flags_from_string(
-            "--no-maglev-build-code-on-background --no-maglev-deopt-data-on-background",
-        );
+        v8::V8::set_flags_from_string(v8_flags!());
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -154,14 +161,21 @@ impl Drop for EngineReservation {
 struct Native(Arc<Mutex<NativeState>>);
 struct Quota {
     handle: v8::IsolateHandle,
+    /// For heap statistics inside the near-limit callback, on the owner.
+    isolate: IsolatePtr,
+    guard: Arc<HeapGuard>,
+    plan: HeapPlan,
+}
+/// An isolate's admission state, shared by the near-limit callback and the
+/// isolate's slot (interrupt and post-task checks).
+struct HeapGuard {
     exceeded: AtomicBool,
     /// The heap couldn't grow because the shared account was full, not
     /// because the isolate reached its own ceiling.
     account_full: AtomicBool,
     reservation: Reservation,
-    plan: HeapPlan,
 }
-impl Quota {
+impl HeapGuard {
     /// Its own ceiling is the extension's limit; a full account is the app's
     /// memory for extensions running out, and names itself so.
     fn error(&self) -> Error {
@@ -171,11 +185,38 @@ impl Quota {
             Error::Quota("heap")
         }
     }
+    /// V8 admits one large young object whatever the limit and only meets
+    /// the limit when a collection promotes it. A live heap past the
+    /// reservation gets that collection now, which grows the reservation
+    /// through the near-limit callback or fails the isolate; whatever still
+    /// lies past it after that fails the isolate, charged to the account
+    /// until disposal.
+    fn check(&self, isolate: &mut v8::Isolate) {
+        if self.exceeded.load(Ordering::Acquire)
+            || isolate.get_heap_statistics().used_heap_size() <= self.reservation.bytes()
+        {
+            return;
+        }
+        isolate.memory_pressure_notification(v8::MemoryPressureLevel::Critical);
+        let used = isolate.get_heap_statistics().used_heap_size();
+        let held = self.reservation.bytes();
+        if used > held && !self.exceeded.swap(true, Ordering::AcqRel) {
+            self.reservation.grace(used - held);
+            isolate.terminate_execution();
+        }
+    }
 }
+struct Guarded(Arc<HeapGuard>);
 /// The quota an isolate fails with when the shared account had no room left.
 pub const HEAP_FULL: &str = "extension memory is full";
-/// What a terminating isolate may still allocate while it unwinds.
+/// What a terminating isolate may still allocate while it unwinds, above
+/// what its heap already holds.
 const GRACE: usize = 8 * MIB;
+struct IsolatePtr(v8::UnsafeRawIsolatePtr);
+// SAFETY: only dereferenced in the near-limit callback, which V8 runs on the
+// isolate's locked owner thread while the isolate is alive.
+unsafe impl Send for IsolatePtr {}
+unsafe impl Sync for IsolatePtr {}
 /// An isolate's heap in V8's terms. Admission counts the whole heap limit:
 /// the young generation, fixed from the ceiling, plus the old generation's
 /// current limit, which starts at the initial slice and grows on demand.
@@ -203,8 +244,9 @@ impl HeapPlan {
     pub fn initial(&self) -> usize {
         self.young + self.initial_old
     }
-    /// The next old-generation limit to ask the account for: doubling, at
-    /// least 8 MiB and at most 256 MiB at a time, never past the ceiling.
+    /// The next old-generation limits to ask the account for, largest
+    /// first: doubling (8 to 256 MiB at a time), then 8 MiB, never past the
+    /// ceiling.
     fn steps(&self, current: usize) -> [usize; 2] {
         let step = current.clamp(8 * MIB, 256 * MIB);
         [
@@ -216,26 +258,43 @@ impl HeapPlan {
 unsafe extern "C" fn near_limit(data: *mut c_void, current: usize, _initial: usize) -> usize {
     // Box lives until callback removal, on the same owner thread as this callback.
     let quota = unsafe { &*(data as *const Quota) };
-    if quota.exceeded.load(Ordering::Acquire) {
-        return current;
-    }
-    if current < quota.plan.ceiling_old {
+    let guard = &quota.guard;
+    // One allocation can land far past the limit (a large young object is
+    // admitted whatever the limit, then promoted), so a new limit must cover
+    // what the heap holds now: V8 aborts the process if the limit it gets
+    // back is still below the heap.
+    let mut raw = quota.isolate.0;
+    let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw) };
+    let held = isolate.get_heap_statistics().total_heap_size();
+    if !guard.exceeded.load(Ordering::Acquire) {
+        let floor = held.saturating_add(GRACE);
+        let mut refused = false;
         for next in quota.plan.steps(current) {
-            if next > current && quota.reservation.grow(next - current) {
-                return next;
+            let next = next.max(floor);
+            if next <= quota.plan.ceiling_old && next > current {
+                if guard.reservation.grow(next - current) {
+                    return next;
+                }
+                refused = true;
             }
         }
-        quota.account_full.store(true, Ordering::Release);
+        guard.account_full.store(refused, Ordering::Release);
     }
-    quota.exceeded.store(true, Ordering::Release);
+    // Past its ceiling or the account: the isolate fails. The grace covers
+    // the heap as it stands while it unwinds, charged until disposal.
+    guard.exceeded.store(true, Ordering::Release);
     quota.handle.terminate_execution();
-    quota.reservation.grace(GRACE);
-    current.saturating_add(GRACE)
+    let next = current.max(held).saturating_add(GRACE);
+    guard.reservation.grace(next - current);
+    next
 }
 /// Interrupts never reenter JS. Only read heap statistics and terminate.
 pub(crate) unsafe extern "C" fn check_external(mut raw: v8::UnsafeRawIsolatePtr, _: *mut c_void) {
     // V8 invokes this with the isolate entered, on its currently locked owner.
     let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw) };
+    if let Some(guard) = isolate.get_slot::<Guarded>().map(|g| g.0.clone()) {
+        guard.check(isolate);
+    }
     if let Some(native) = isolate.get_slot::<Native>().cloned() {
         let native = native.0.lock().unwrap();
         if isolate
@@ -754,11 +813,16 @@ impl Vm {
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         let quota = Box::new(Quota {
             handle: isolate.thread_safe_handle(),
-            exceeded: AtomicBool::new(false),
-            account_full: AtomicBool::new(false),
-            reservation,
+            // SAFETY: kept only while the isolate lives (see `IsolatePtr`).
+            isolate: IsolatePtr(unsafe { isolate.as_raw_isolate_ptr() }),
+            guard: Arc::new(HeapGuard {
+                exceeded: AtomicBool::new(false),
+                account_full: AtomicBool::new(false),
+                reservation,
+            }),
             plan,
         });
+        isolate.set_slot(Guarded(quota.guard.clone()));
         isolate.add_near_heap_limit_callback(near_limit, &*quota as *const Quota as *mut c_void);
         let native_state = Arc::new(Mutex::new(NativeState {
             limits: limits.clone(),
@@ -850,19 +914,19 @@ impl Vm {
             fetch_reserved_bytes: native.reserved,
             engine_reserved_bytes: native.engine_reserved,
             snapshot_bytes: self.blob.len(),
-            reserved_heap_bytes: self.quota.reservation.bytes(),
+            reserved_heap_bytes: self.quota.guard.reservation.bytes(),
         }
     }
     /// True once the isolate holds more than its initial slice.
     pub fn grown(&self) -> bool {
-        self.quota.reservation.bytes() > self.quota.plan.initial()
+        self.quota.guard.reservation.bytes() > self.quota.plan.initial()
     }
     /// An idle isolate gives back what it grew past its live size: a full
     /// collection, then the old-generation limit comes down to half again
     /// above what lives (never under the initial slice). V8 keeps any limit
     /// it can't honour, so the account follows V8's own limit, not the ask.
     pub fn trim(&mut self) {
-        if !self.grown() || self.quota.exceeded.load(Ordering::Acquire) {
+        if !self.grown() || self.quota.guard.exceeded.load(Ordering::Acquire) {
             return;
         }
         let quota = &*self.quota as *const Quota as *mut c_void;
@@ -877,6 +941,7 @@ impl Vm {
         isolate.add_near_heap_limit_callback(near_limit, quota);
         let after = isolate.get_heap_statistics().heap_size_limit();
         self.quota
+            .guard
             .reservation
             .shrink(before.heap_size_limit().saturating_sub(after));
     }
@@ -950,8 +1015,8 @@ impl Vm {
                 return Ok(v8::Global::new(s, value));
             }
         }
-        Err(if self.quota.exceeded.load(Ordering::Acquire) {
-            self.quota.error()
+        Err(if self.quota.guard.exceeded.load(Ordering::Acquire) {
+            self.quota.guard.error()
         } else {
             exception(s)
         })
@@ -964,9 +1029,10 @@ impl Vm {
         let tc = std::pin::pin!(v8::TryCatch::new(cs));
         let s = &mut tc.init();
         s.perform_microtask_checkpoint();
-        if s.is_execution_terminating() {
-            return Err(if self.quota.exceeded.load(Ordering::Acquire) {
-                self.quota.error()
+        self.quota.guard.check(s);
+        if s.is_execution_terminating() || self.quota.guard.exceeded.load(Ordering::Acquire) {
+            return Err(if self.quota.guard.exceeded.load(Ordering::Acquire) {
+                self.quota.guard.error()
             } else {
                 Error::Terminated
             });
