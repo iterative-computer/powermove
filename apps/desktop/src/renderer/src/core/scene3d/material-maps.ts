@@ -9,7 +9,10 @@ export type MaterialSourceGroup = 'Comps'|'Groups'|'Footage'|'Solids'|'Text & Sh
 export interface MaterialSourceLayer {id:string;name:string;type:string;group:MaterialSourceGroup}
 export interface MaterialLayerLink {surface?:ExtrusionSurface;materialIndex:number|null;slot:MaterialSlot;layerId:string;status:'ready'|'missing'|'ineligible'|'cycle'}
 const sourceGroups:Record<string,MaterialSourceGroup>={precomp:'Comps',group:'Groups',image:'Footage',video:'Footage',solid:'Solids',text:'Text & Shapes',shape:'Text & Shapes'};
-export function materialSourceEligible(layer:any):boolean {return !!sourceGroups[layer?.type] && !layer?.d?.data?.object;}
+export function materialSourceEligible(layer:any,comp?:any):boolean {
+  const is3D=(layer:any)=>layer.threeD || layer.d?.definition?.startsWith('powermove.3d.') || layer.d?.data?.object || layer.d?.data?.camera || layer.d?.data?.scene || isExtrudedLayer(layer);
+  return !!sourceGroups[layer?.type] && !is3D(layer) && !(comp && materialSourceLayers(comp,layer.id).some(is3D));
+}
 /** Group sources own their complete subtree; membership is independent of stack order. */
 export function materialSourceLayers(comp:any,sourceId:string):any[] {
   const source=comp.layers.find((layer:any)=>layer.id===sourceId);
@@ -109,7 +112,7 @@ export function materialLayerStatus(project:any,receiverId:string,sourceId:strin
   const owner=materialOwner(project,receiverId),source=owner?.layers?.find((l:any)=>l.id===sourceId);
   if(!source)return 'missing';
   if(sourceId===receiverId)return 'cycle';
-  if(!materialSourceEligible(source) || materialSourceLayers(owner,sourceId).some(layer=>layer.threeD || layer.d?.definition?.startsWith('powermove.3d.') || layer.d?.data?.object || layer.d?.data?.camera || layer.d?.data?.scene || isExtrudedLayer(layer)))return 'ineligible';
+  if(!materialSourceEligible(source,owner))return 'ineligible';
   const key=(id:string)=>JSON.stringify(['layer',owner.id,id]);
   return reaches(materialGraph(project),key(sourceId),key(receiverId))?'cycle':'ready';
 }
@@ -151,7 +154,7 @@ export function validateCompositionMaps(project:any):void {
     if(reaches(graph,source,receiver))throw new Error('Composition or layer material reference would create a cycle');
   }
   for(const comp of projectCompositions(project))for(const layer of comp.layers || [])for(const map of layerMaterialMaps(layer))
-    if(typeof map==='object' && 'layerId' in map){const source=comp.layers.find((l:any)=>l.id===map.layerId);if(source && !materialSourceEligible(source))throw new Error('Layer material source must be a group, precomp, solid, image, video, text or shape');}
+    if(typeof map==='object' && 'layerId' in map){const source=comp.layers.find((l:any)=>l.id===map.layerId);if(source && !materialSourceEligible(source,comp))throw new Error('Layer material source must be a group, precomp, solid, image, video, text or shape');}
 }
 export function listModelMaterials(PM:any,layerId:string):SourceMaterialInfo[] {
   const layer=PM.L?.(layerId),object=layer?.d?.data?.object;

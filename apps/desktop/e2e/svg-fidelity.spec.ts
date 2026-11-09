@@ -77,7 +77,7 @@ test('line shapes expose round caps without changing their direction or color',a
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('untouched old SVG imports repair from their source in one undoable edit',async({session})=>{
+test('untouched old SVG imports migrate without a user edit or repeated parsing',async({session})=>{
   await session.openEditor();
   const result=await session.page.evaluate(async()=>{
     const PM=(window as any).PM;PM.pause();PM.AutomaticPreview?.cancel?.();
@@ -89,11 +89,12 @@ test('untouched old SVG imports repair from their source in one undoable edit',a
     PM.ev(layer,'rotation',.5);PM.touch();
     const ids=layer.d.paths.map((p:any)=>[p.id,p.vertices.map((v:any)=>v.id)]),animation=JSON.stringify(layer.p),count=PM.hist.list().length;
     PM.assets.clear();await PM.assets.restoreProject(PM.proj);
-    const repaired=PM.L(layer.id),color=repaired.d.paths[0].p.fill.v,oneUndo=PM.hist.list().length===count+1;
+    const repaired=PM.L(layer.id),color=repaired.d.paths[0].p.fill.v,noUndo=PM.hist.list().length===count;
     const sameIds=JSON.stringify(ids)===JSON.stringify(repaired.d.paths.map((p:any)=>[p.id,p.vertices.map((v:any)=>v.id)])),sameAnimation=JSON.stringify(repaired.p)===animation;
-    PM.hist.undo();const undo=PM.L(layer.id).d.paths[0].p.fill.v;PM.hist.redo();
-    return {color,oneUndo,sameIds,sameAnimation,undo,redo:PM.L(layer.id).d.paths[0].p.fill.v};
+    const checked=repaired.d.svgImportCheckedVersion;
+    PM.assets.clear();await PM.assets.restoreProject(PM.proj);
+    return {color,noUndo,sameIds,sameAnimation,checked,stillNoUndo:PM.hist.list().length===count};
   });
-  expect(result).toEqual({color:'#E60012',oneUndo:true,sameIds:true,sameAnimation:true,undo:'#000000',redo:'#E60012'});
+  expect(result).toEqual({color:'#E60012',noUndo:true,sameIds:true,sameAnimation:true,checked:2,stillNoUndo:true});
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
